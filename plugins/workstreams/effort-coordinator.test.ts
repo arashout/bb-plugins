@@ -17,6 +17,25 @@ function setup() {
   return { store, sdk, service: createCoordinatorService(store, sdk) };
 }
 describe("coordinator identity and launch safety", () => {
+  it("launches once for a coordinator-free promoted effort and preserves its identity", async () => {
+    const { store, sdk, service } = setup();
+    const promoted = store.establish({ ...input, sourceKey: input.groupKey, goal: "", projectId: "", coordinatorState: "none" });
+    expect(await service.coordinate(input, { ...plan, effort: promoted })).toMatchObject({ ok: true,
+      effort: { id: promoted.id, coordinatorState: "ready", coordinatorThreadId: "spawned", goal: input.goal, projectId: input.projectId } });
+    expect(sdk.spawn).toHaveBeenCalledTimes(1);
+    expect(await service.coordinate(input, plan)).toMatchObject({ ok: true, effort: { id: promoted.id } });
+    expect(sdk.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not launch twice after an ambiguous coordinator-free promotion launch", async () => {
+    const { store, sdk, service } = setup();
+    store.establish({ ...input, sourceKey: input.groupKey, goal: "", projectId: "", coordinatorState: "none" });
+    vi.mocked(sdk.spawn).mockRejectedValue(new Error("transport lost"));
+    expect(await service.coordinate(input, plan)).toMatchObject({ ok: false });
+    expect(await service.coordinate(input, plan)).toMatchObject({ ok: false });
+    expect(sdk.spawn).toHaveBeenCalledTimes(1);
+    expect(store.source(input.groupKey)?.coordinatorState).toBe("creating");
+  });
   it("deduplicates a double click after the durable record exists but before spawn returns", async () => {
     const { store, sdk, service } = setup();
     let finish!: (thread: { id: string }) => void;

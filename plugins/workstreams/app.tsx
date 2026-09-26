@@ -28,6 +28,7 @@ import { Tip } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
 import { readLastView, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
+import { ThreadEffortControl } from "./thread-effort-control";
 
 export type Group = WireGroup;
 export type Cluster = Group["clusters"][number];
@@ -508,6 +509,11 @@ function RunsBadge() {
 }
 
 export default definePluginApp((app) => {
+  app.composer.customize({
+    id: "thread-effort",
+    scopes: ["thread"],
+    banners: [{ id: "thread-effort-control", chrome: "bare", component: ThreadEffortControl }],
+  });
   app.slots.navPanel({
     id: "board",
     title: "Workstreams",

@@ -55,4 +55,44 @@ describe("established effort storage", () => {
     expect(store.workers("another-effort", url)).toEqual([]);
     expect(store.workers(effort.id, `${url}0`)).toEqual([]);
   });
+
+  it("promotes an ordinary group and transfers a ticket with its PRs atomically", () => {
+    const { store, db } = setup();
+    const source = store.establish(input);
+    store.recordWorker(source.id, "worker", url, "pr");
+    const other = "https://github.com/inkwell/folio/pull/43";
+    const destination = store.transfer("ordinary-group", { tickets: ["ABC-101"], prUrls: [url] },
+      { name: "Editorial workflow", members: { tickets: ["ABC-202"], prUrls: [other] } });
+    expect(destination).toMatchObject({ name: "Editorial workflow", coordinatorState: "none",
+      members: { tickets: ["ABC-101", "ABC-202"], prUrls: [url, other] } });
+    expect(store.source("ordinary-group")?.id).toBe(destination.id);
+    expect(store.owner("ticket", "ABC-101")?.id).toBe(destination.id);
+    expect(store.owner("prUrl", url)?.id).toBe(destination.id);
+    expect(store.get(source.id)?.members).toEqual({ tickets: [], prUrls: [] });
+    expect(store.workers(source.id, url)).toEqual([{ threadId: "worker", role: "pr" }]);
+    const reloaded = createEffortStore(db);
+    expect(reloaded.owner("ticket", "ABC-202")?.id).toBe(destination.id);
+    expect(reloaded.owner("prUrl", other)?.id).toBe(destination.id);
+  });
+
+  it("rolls back promotion when one inherited member is already owned", () => {
+    const { store } = setup();
+    const source = store.establish(input);
+    expect(() => store.transfer("ordinary-group", { tickets: ["ABC-101"], prUrls: [url] },
+      { name: "Editorial workflow", members: { tickets: ["ABC-202"], prUrls: [url] } })).toThrow("Destination membership changed");
+    expect(store.source("ordinary-group")).toBeNull();
+    expect(store.owner("ticket", "ABC-202")).toBeNull();
+    expect(store.owner("ticket", "ABC-101")?.id).toBe(source.id);
+  });
+
+  it("does not restore stale membership during an unrelated coordinator state save", () => {
+    const { store } = setup();
+    const captured = store.establish(input);
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: ["ABC-202"], prUrls: [] } });
+    store.transfer(destination.key, input.members);
+    store.save({ ...captured, coordinatorState: "ready" });
+    expect(store.get(captured.id)?.members).toEqual({ tickets: [], prUrls: [] });
+    expect(store.owner("ticket", "ABC-101")?.id).toBe(destination.id);
+    expect(store.owner("prUrl", url)?.id).toBe(destination.id);
+  });
 });

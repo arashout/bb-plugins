@@ -25,6 +25,7 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, establishedEffortSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
+import { threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
@@ -318,6 +319,9 @@ export const rpcContract = defineRpcContract({
   pr_hold_set: { input: z.object({ prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null, "Choose a valid GitHub PR URL"), held: z.boolean(), reason: z.string().max(1_000).optional() }).strict(), output: prHoldsSchema },
   effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
+  thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: threadEffortContextSchema },
+  thread_effort_move: { input: z.object({ threadId: z.string().min(1).max(200), sourceIds: z.array(z.string().min(1).max(600)).min(1).max(100), destinationKey: z.string().min(1).max(500), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
+  thread_effort_link_pr: { input: z.object({ threadId: z.string().min(1).max(200), prUrl: z.string().min(1).max(500) }).strict(), output: threadEffortContextSchema },
   advance_preview: { input: z.object({ prUrls: z.array(z.string().max(500)).min(1).max(100) }).strict(), output: advancePreviewSchema },
   advance_start: { input: z.object({ token: z.string().uuid() }).strict(), output: advanceBatchSchema },
   advance_get: { input: z.null(), output: z.array(advanceBatchSchema) },
@@ -2501,8 +2505,10 @@ export default async function plugin(bb: BbPluginApi) {
     const memberRepos = new Set(current.prInventory.entries.filter((entry) => memberUrls.has(entry.pr.url.toLowerCase())).map((entry) => entry.repo.toLowerCase()));
     const paths = [...clusters.flatMap((cluster) => cluster.units.map((unit) => unit.path)),
       ...readUnits().filter((unit) => unit.githubRepo && memberRepos.has(unit.githubRepo.toLowerCase())).map((unit) => unit.path)];
-    const projects = allProjects.filter((project) => project.id === established?.projectId || project.sources.some((source) => paths.some((path) => withinPath(path, source.path))))
+    let projects = allProjects.filter((project) => project.id === established?.projectId || project.sources.some((source) => paths.some((path) => withinPath(path, source.path))))
       .map((project) => ({ id: project.id, name: project.name }));
+    if (projects.length === 0 && established?.coordinatorState === "none") projects = allProjects
+      .filter((project) => project.sources.length > 0).map((project) => ({ id: project.id, name: project.name }));
     const choices = (await bb.sdk.threads.list({ archived: false, limit: 100 })).filter((thread) =>
       thread.status === "idle" && thread.deletedAt === null && projects.some((project) => project.id === thread.projectId));
     const eligible = (await Promise.all(choices.slice(0, 50).map(async (thread) => {
@@ -2517,6 +2523,112 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return { ok: true, name: effort?.name ?? group!.name, goal: effort?.goal ?? "", members, projects,
       threads: eligible.map((thread) => ({ id: thread.id, title: thread.title ?? thread.titleFallback ?? thread.id, projectId: thread.projectId })), effort };
+  }
+
+  async function threadEffortContext(threadId: string): Promise<z.infer<typeof threadEffortContextSchema>> {
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      if (thread.deletedAt !== null) return { ok: false, error: "That thread no longer exists." };
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
+      const linkedPrUrl = typeof metadata.linkedPrUrl === "string" ? canonicalPrUrl(metadata.linkedPrUrl) : null;
+      const current = await board();
+      const pattern = compilePattern((await settings.get()).ticketPattern);
+      const units = readUnits();
+      const known = new Map<string, { url: string; label: string; paths: string[]; tickets: string[] }>();
+      const addPr = (url: string, label: string, path: string | null, tickets: string[]) => {
+        const canonical = canonicalPrUrl(url);
+        if (!canonical) return;
+        const prior = known.get(canonical);
+        known.set(canonical, { url: canonical, label: prior?.label ?? label, paths: [...new Set([...(prior?.paths ?? []), ...(path ? [path] : [])])].sort(),
+          tickets: [...new Set([...(prior?.tickets ?? []), ...tickets])].sort() });
+      };
+      for (const entry of current.prInventory.entries) addPr(entry.pr.url, entry.pr.title, null,
+        ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern));
+      for (const group of current.groups) for (const cluster of group.clusters) for (const unit of cluster.units) {
+        if (unit.pr) addPr(unit.pr.url, unit.pr.title, unit.path, [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])]);
+      }
+      for (const unit of units) if (unit.pr) addPr(unit.pr.url, unit.pr.title, unit.path, []);
+      if (known.size > 1000) return { ok: false, error: "Too many tracked PRs to choose safely. Narrow the workstream inventory." };
+      const linked = new Set<string>();
+      for (const candidate of [linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null]) if (candidate && known.has(candidate)) linked.add(candidate);
+      const threadRuns = db.prepare(`SELECT pr_url FROM action_runs WHERE thread_id = ? AND pr_url IS NOT NULL ORDER BY id DESC LIMIT 100`)
+        .all(threadId) as { pr_url: string }[];
+      for (const run of threadRuns) {
+        const canonical = canonicalPrUrl(run.pr_url);
+        if (canonical && known.has(canonical)) linked.add(canonical);
+      }
+      for (const batch of advance.list()) for (const job of batch.jobs) {
+        if (job.threadId !== threadId && !job.previousAttempts.some((attempt) => attempt.threadId === threadId)) continue;
+        const canonical = canonicalPrUrl(job.prUrl);
+        if (canonical && known.has(canonical)) linked.add(canonical);
+      }
+      const ticketClusters = new Map<string, { label: string; paths: string[]; threadLinked: boolean }>();
+      for (const group of current.groups) for (const cluster of group.clusters) {
+        const linkedHere = cluster.threads.some((link) => link.id === threadId);
+        for (const unit of cluster.units) {
+          if (!unit.ticket) { if (linkedHere && unit.pr) { const url = canonicalPrUrl(unit.pr.url); if (url) linked.add(url); } continue; }
+          const prior = ticketClusters.get(unit.ticket);
+          ticketClusters.set(unit.ticket, { label: cluster.summary || unit.ticket,
+            paths: [...new Set([...(prior?.paths ?? []), unit.path])].sort(),
+            threadLinked: Boolean(prior?.threadLinked || linkedHere) });
+        }
+      }
+      const ticketIds = new Set([...ticketClusters].filter(([, cluster]) => cluster.threadLinked).map(([ticket]) => ticket));
+      for (const url of linked) for (const ticket of known.get(url)?.tickets ?? []) ticketIds.add(ticket);
+      // A PR may name two tickets even when its checkout resolves to only one.
+      // Keep the whole connected ticket/PR cohort selectable before transferring it.
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const pr of known.values()) if (pr.tickets.some((ticket) => ticketIds.has(ticket))) for (const ticket of pr.tickets) {
+          if (!ticketIds.has(ticket)) { ticketIds.add(ticket); expanded = true; }
+        }
+      }
+      const sources: ThreadEffortReady["sources"] = [];
+      const usedPrs = new Set<string>();
+      for (const ticket of [...ticketIds].sort()) {
+        const matches = [...known.values()].filter((pr) => pr.tickets.includes(ticket));
+        const prUrls = matches.map((pr) => pr.url).sort();
+        prUrls.forEach((url) => usedPrs.add(url));
+        const ticketOwner = effortStore.owner("ticket", ticket);
+        const prOwners = matches.map((pr) => effortStore.owner("prUrl", pr.url));
+        const owner = ticketOwner ?? prOwners.find(Boolean) ?? null;
+        const group = current.groups.find((entry) => entry.level === "effort" && entry.clusters.some((cluster) => cluster.units.some((unit) => unit.ticket === ticket)));
+        const inferredKeys = [...new Set(current.prInventory.entries.filter((entry) => prUrls.includes(canonicalPrUrl(entry.pr.url) ?? ""))
+          .flatMap((entry) => entry.effortKey ? [entry.effortKey] : []))];
+        const inferred = inferredKeys.length === 1 ? current.groups.find((entry) => entry.key === inferredKeys[0]) : null;
+        const effortKey = owner?.key ?? group?.key ?? inferred?.key ?? null;
+        const effortName = owner?.name ?? group?.name ?? inferred?.name ?? null;
+        const checkoutPaths = [...new Set([...(ticketClusters.get(ticket)?.paths ?? []), ...matches.flatMap((pr) => pr.paths)])].sort();
+        sources.push({ id: `ticket:${ticket}`, kind: "ticket", label: ticketClusters.get(ticket)?.label ?? ticket, ticket, prUrls, checkoutPaths,
+          effortKey, effortName, explicit: Boolean(ticketOwner && prOwners.every((item) => item?.id === ticketOwner.id)),
+          scope: JSON.stringify({ ticket, prUrls, checkoutPaths, effortKey, effortName,
+            owners: [ticketOwner?.key ?? null, ...prOwners.map((item) => item?.key ?? null)] }) });
+      }
+      for (const url of [...linked].sort()) if (!usedPrs.has(url)) {
+        const pr = known.get(url)!;
+        const owner = effortStore.owner("prUrl", url);
+        const assigned = current.prInventory.entries.find((entry) => canonicalPrUrl(entry.pr.url) === url);
+        sources.push({ id: `pr:${url}`, kind: "pr", label: pr.label, ticket: null, prUrls: [url], checkoutPaths: pr.paths,
+          effortKey: owner?.key ?? assigned?.effortKey ?? null, effortName: owner?.name ?? assigned?.effortName ?? null, explicit: owner !== null,
+          scope: JSON.stringify({ url, paths: pr.paths, effortKey: owner?.key ?? assigned?.effortKey ?? null,
+            effortName: owner?.name ?? assigned?.effortName ?? null, owner: owner?.key ?? null }) });
+      }
+      const efforts: ThreadEffortReady["efforts"] = [];
+      const seen = new Set<string>();
+      for (const group of current.groups) {
+        if (group.level !== "effort" || outsideGrouping(group.key) || seen.has(group.key)) continue;
+        seen.add(group.key);
+        const established = effortStore.source(group.key);
+        const members = established?.members ?? normalizeMembers({ tickets: [...group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.ticket ? [unit.ticket] : [])),
+          ...(group.key.startsWith("ticket:") && group.clusters.length === 0 ? [group.key.slice(7)] : [])],
+          prUrls: [...group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [unit.pr.url] : [])),
+            ...current.prInventory.entries.filter((entry) => entry.effortKey === group.key).map((entry) => entry.pr.url)] });
+        efforts.push({ key: group.key, name: group.name, scope: JSON.stringify({ name: group.name, members, established: established?.id ?? null }) });
+      }
+      return { ok: true, sources, efforts, linkablePrs: [...known.values()].sort((a, b) => a.label.localeCompare(b.label))
+        .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl };
+    } catch (error) { return { ok: false, error: `Thread work could not be read: ${String(error).slice(0, 300)}` }; }
   }
 
   const coordinators = createCoordinatorService(effortStore, {
@@ -2953,6 +3065,44 @@ export default async function plugin(bb: BbPluginApi) {
       if (result.ok && dispatch.policy().effort_key === input.groupKey) dispatch.setPolicy(dispatch.policy().mode, result.effort.key);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       return result;
+    },
+    thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
+    thread_effort_move: async ({ threadId, sourceIds, destinationKey, expectedScope }) => {
+      const context = await threadEffortContext(threadId);
+      if (!context.ok) return context;
+      if (sourceIds.length !== new Set(sourceIds).size || threadEffortMoveScope(context, sourceIds, destinationKey) !== expectedScope) {
+        return { ok: false as const, error: "The selected work or destination changed. Reopen the effort picker." };
+      }
+      const selected = context.sources.filter((source) => sourceIds.includes(source.id));
+      const destination = context.efforts.find((effort) => effort.key === destinationKey)!;
+      const affected = new Set<string | null>([destinationKey, ...selected.map((source) => source.effortKey)]);
+      for (const source of selected) {
+        if (source.ticket) affected.add(effortStore.owner("ticket", source.ticket)?.key ?? null);
+        for (const url of source.prUrls) affected.add(effortStore.owner("prUrl", url)?.key ?? null);
+      }
+      if (dispatch.policy().mode === "auto" && affected.has(dispatch.policy().effort_key)) {
+        return { ok: false as const, error: "Turn off automatic dispatch for the affected effort before moving work." };
+      }
+      const movingTickets = new Set(selected.flatMap((source) => source.ticket ? [source.ticket] : []));
+      const movingPrs = new Set(selected.flatMap((source) => source.prUrls));
+      if (context.sources.some((source) => source.ticket && !movingTickets.has(source.ticket) && source.prUrls.some((url) => movingPrs.has(url)))) {
+        return { ok: false as const, error: "That PR links to another ticket in this thread. Select both tickets before moving them." };
+      }
+      const established = effortStore.source(destinationKey);
+      const initial = JSON.parse(destination.scope) as { members: EffortMembers };
+      try { effortStore.transfer(destinationKey, { tickets: [...movingTickets], prUrls: [...movingPrs] },
+        established ? undefined : { name: destination.name, members: initial.members }); }
+      catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return threadEffortContext(threadId);
+    },
+    thread_effort_link_pr: async ({ threadId, prUrl }) => {
+      const context = await threadEffortContext(threadId);
+      if (!context.ok) return context;
+      const canonical = canonicalPrUrl(prUrl);
+      if (!canonical || !context.linkablePrs.some((pr) => pr.url === canonical)) return { ok: false as const, error: "Choose a tracked PR from the picker." };
+      await bb.sdk.threads.updatePluginMetadata({ threadId, set: { linkedPrUrl: canonical } });
+      return threadEffortContext(threadId);
     },
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };

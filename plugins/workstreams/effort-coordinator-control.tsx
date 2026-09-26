@@ -53,8 +53,9 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
       setPlan(result);
       setEffortName(result.name);
       setGoal(result.goal);
-      setProjectId(result.effort?.projectId ?? (result.projects.length === 1 ? result.projects[0]!.id : ""));
-      setMode(result.effort === null ? "new" : "existing");
+      const configured = result.effort !== null && result.effort.coordinatorState !== "none";
+      setProjectId(configured ? result.effort!.projectId : result.projects.length === 1 ? result.projects[0]!.id : "");
+      setMode(configured ? "existing" : "new");
     }, (cause: unknown) => {
       if (live) setError(cause instanceof Error ? cause.message : String(cause));
     });
@@ -62,8 +63,9 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
   }, [open, groupKey, rpc]);
 
   const threads = plan?.threads.filter((thread) => thread.projectId === projectId) ?? [];
+  const configured = plan?.effort !== null && plan?.effort !== undefined && plan.effort.coordinatorState !== "none";
   const ready = plan !== null && effortName.trim() !== "" && goal.trim() !== "" && plan.projects.some((project) => project.id === projectId) &&
-    (mode === "new" ? plan.effort === null : threads.some((thread) => thread.id === threadId));
+    (mode === "new" ? !configured : threads.some((thread) => thread.id === threadId));
   const coordinate = async () => {
     if (!ready || plan === null || busy) return;
     setBusy(true);
@@ -88,7 +90,7 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
       aria-label={`${current === null ? "Coordinate" : "Open effort thread for"} ${name}`}
       title={current === null ? "Keep the effort's goal, decisions, and next actions in one planning thread" : effort?.goal}
       className="shrink-0 rounded-md px-2 py-1 text-[11px] text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
-      <span aria-hidden="true">🧭 </span>{creating ? "Reconnect…" : current !== null ? "Effort thread" : effort === null ? "Coordinate" : "Reconnect"}
+      <span aria-hidden="true">🧭 </span>{creating ? "Reconnect…" : current !== null ? "Effort thread" : effort === null || effort.coordinatorState === "none" ? "Coordinate" : "Reconnect"}
     </button>
     <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
       <DialogContent className={cn("max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto", POINTER_CURSORS)}>
@@ -99,11 +101,11 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
         {plan === null ? error === null ? <p className="text-[12.5px] text-muted-foreground">Reading linked work and available projects…</p> : null : <>
           <p className="text-[12px] text-muted-foreground">A planning thread holds this effort's goal and next steps. PR repairs keep their own checkouts and result cards.</p>
           <label className="grid gap-1.5 text-[12.5px] font-medium">Effort name
-            <input value={effortName} onChange={(event) => setEffortName(event.target.value)} readOnly={plan.effort !== null} disabled={busy} maxLength={160}
+            <input value={effortName} onChange={(event) => setEffortName(event.target.value)} readOnly={configured} disabled={busy} maxLength={160}
               className="h-8 w-full rounded-md border border-input bg-background px-2.5 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" />
           </label>
           <label className="grid gap-1.5 text-[12.5px] font-medium">Goal
-            <textarea value={goal} onChange={(event) => setGoal(event.target.value)} readOnly={plan.effort !== null} disabled={busy} maxLength={4000} rows={3}
+            <textarea value={goal} onChange={(event) => setGoal(event.target.value)} readOnly={configured} disabled={busy} maxLength={4000} rows={3}
               className="w-full resize-y rounded-md border border-input bg-background px-2.5 py-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" />
           </label>
           <details className="rounded-md border border-border px-3 py-2 text-[12px]">
@@ -114,7 +116,7 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
             </div>
           </details>
           <label className="grid gap-1.5 text-[12.5px] font-medium">BB project
-            <select value={projectId} onChange={(event) => { setProjectId(event.target.value); setThreadId(""); }} disabled={busy || plan.effort !== null}
+            <select value={projectId} onChange={(event) => { setProjectId(event.target.value); setThreadId(""); }} disabled={busy || configured}
               className="h-8 w-full rounded-md border border-border bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
               <option value="">Choose a project</option>
               {plan.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
@@ -123,7 +125,7 @@ export function EffortCoordinatorControl({ groupKey, name, effort, board, onOpen
           {plan.projects.length === 0 ? <p className="text-[12px] text-muted-foreground">No available BB project matches this effort. Add its checkout to a project, then reopen this dialog.</p> : null}
           <div role="radiogroup" aria-label="Effort thread" className="flex flex-wrap gap-1.5">
             {(["new", "existing"] as const).map((option) => <button key={option} type="button" role="radio" aria-checked={mode === option}
-              disabled={busy || (option === "new" && plan.effort !== null)} onClick={() => setMode(option)}
+              disabled={busy || (option === "new" && configured)} onClick={() => setMode(option)}
               className={cn("rounded-md border px-2.5 py-1 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40", mode === option ? "border-foreground/60 bg-foreground/[0.07] font-medium" : "border-border")}>
               {option === "new" ? "Create effort thread" : "Use existing thread"}
             </button>)}

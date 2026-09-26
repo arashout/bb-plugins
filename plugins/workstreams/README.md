@@ -55,6 +55,20 @@ context needed to name a group. Model calls happen when semantic inputs change;
 an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
 via agent** action starts a BB thread only when you confirm it.
 
+## Organize work from a thread
+
+Use **Effort** above the thread composer to add or move linked work. The
+picker shows the affected ticket, PRs, and checkouts. Select the work when a
+thread has several links. Ticket work moves together; a standalone PR moves
+on its own. If the thread has no recognized work, use **Link a PR** to choose
+a tracked pull request as its context.
+
+Explicit assignments use the same ticket and PR membership as the board.
+Assigning work preserves existing thread parents and worker history and does
+not create a coordinator or start an agent. You can set up a coordinator
+separately. Turn off automatic dispatch for an affected effort before moving
+its work.
+
 ## Use the views
 
 - **Pipeline:** Track each open pull request once across **Build**, **Review**,
@@ -67,7 +81,9 @@ via agent** action starts a BB thread only when you confirm it.
   and offer **Release**; bulk actions and agent counts exclude them. Pipeline
   shows the five most recent merged cards and three most recent release-tagged
   cards until you choose **Show all**. Closed PRs that did not merge remain
-  omitted by the current scan.
+  omitted by the current scan. A brief arrival cue marks changes to a card's
+  stage, blocker, activity, or hold state. Unchanged refreshes stay still, and
+  reduced-motion preferences disable the cue.
 - **Pipeline actions:** Use a card to merge, advance, fix, nudge, or open a
   parent PR. **Feedback → Advance** selects approved open PRs only; the
   preview reports any PR that the service skips. **Review → Nudge** selects

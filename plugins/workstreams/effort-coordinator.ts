@@ -35,7 +35,7 @@ export function createCoordinatorService(store: EffortStore, sdk: CoordinatorSdk
     if (!sameMembers(input.members, plan.members)) return { ok: false, error: "Effort membership changed. Reopen the preview before coordinating." };
     if (!plan.projects.some((project) => project.id === input.projectId)) return { ok: false, error: "Choose a project represented by this effort." };
     let effort = store.source(input.groupKey);
-    if (effort && (effort.projectId !== input.projectId || effort.goal !== input.goal || effort.name !== input.name)) {
+    if (effort && effort.coordinatorState !== "none" && (effort.projectId !== input.projectId || effort.goal !== input.goal || effort.name !== input.name)) {
       return { ok: false, error: "This effort was already established with different details. Reopen its coordinator." };
     }
     if (effort?.coordinatorThreadId) {
@@ -53,8 +53,9 @@ export function createCoordinatorService(store: EffortStore, sdk: CoordinatorSdk
         return { ok: false, error: "Choose an idle, unarchived thread that can own child threads." };
       }
     }
-    const existed = effort !== null;
+    const existed = effort !== null && effort.coordinatorState !== "none";
     effort ??= store.establish({ sourceKey: input.groupKey, name: input.name, goal: input.goal, projectId: input.projectId, members: input.members });
+    if (effort.coordinatorState === "none") effort = store.save({ ...effort, name: input.name, goal: input.goal, projectId: input.projectId, coordinatorState: "creating" });
     if (association) {
       await sdk.rename(association.id, effortTitle(effort.name));
       await sdk.associate(association.id, effort.id);
