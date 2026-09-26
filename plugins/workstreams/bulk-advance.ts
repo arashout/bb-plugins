@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Recommendation, ThreadCandidate } from "./actions.js";
+import { effortMembersSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
 import type { RunDb } from "./runstore.js";
 
 export const advancePreviewJobSchema = z.object({
@@ -32,11 +33,14 @@ export type AdvanceRepairRun = z.infer<typeof advanceRepairRunSchema>;
 export type AdvanceRepairResult = z.infer<typeof advanceRepairResultSchema>;
 export type AdvanceFacts = AdvancePreviewJob & {
   baseOid: string; projectId: string | null; hostId: string; sourcePath: string | null; path: string | null;
+  effortId: string | null; effortKey: string | null; effortMembers: EffortMembers | null;
   readiness: "ready" | "waiting-checks" | "waiting-review" | "needs-attention" | "merged" | "closed";
   blockedBy: string | null;
 };
 const advanceRoutingSchema = advancePreviewJobSchema.extend({
   baseOid: z.string(), projectId: z.string().nullable(), hostId: z.string(), sourcePath: z.string().nullable(), path: z.string().nullable(),
+  effortId: z.string().nullable().default(null),
+  effortKey: z.string().nullable().default(null), effortMembers: effortMembersSchema.nullable().default(null),
   readiness: z.enum(["ready", "waiting-checks", "waiting-review", "needs-attention", "merged", "closed"]), blockedBy: z.string().nullable(),
 });
 const savedSchema = advanceBatchSchema.extend({ facts: z.record(z.string(), advanceRoutingSchema), token: z.string().uuid(), pollUntil: z.number(), prepared: z.record(z.string(), z.boolean()).default({}), repairs: z.record(z.string(), z.object({ jobId: z.string(), attemptId: z.string(), threadId: z.string().nullable() })).default({}) });
@@ -46,7 +50,8 @@ export const ADVANCE_MIGRATIONS = ["CREATE TABLE IF NOT EXISTS advance_batches (
 const ACTIVE = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 const needsWorker = (job: Pick<AdvancePreviewJob, "needsPreparation" | "needsFeedback">) => job.needsPreparation || job.needsFeedback;
 const workLabel = (job: AdvancePreviewJob) => job.needsFeedback ? job.needsPreparation ? "branch preparation and review feedback" : "review feedback" : "branch preparation";
-const fingerprint = (facts: AdvanceFacts) => JSON.stringify([facts.headOid, facts.baseOid, facts.needsPreparation, facts.needsFeedback ?? false, facts.baseRefName, facts.headRefName, facts.projectId, facts.hostId, facts.sourcePath, facts.path, facts.eligible]);
+const fingerprint = (facts: AdvanceFacts) => JSON.stringify([facts.headOid, facts.baseOid, facts.needsPreparation, facts.needsFeedback ?? false, facts.baseRefName, facts.headRefName, facts.projectId, facts.hostId, facts.sourcePath, facts.path, facts.eligible, facts.effortKey,
+  facts.effortMembers === null ? null : normalizeMembers(facts.effortMembers)]);
 const publicBatch = ({ facts: _facts, token: _token, pollUntil: _poll, prepared: _prepared, repairs: _repairs, ...batch }: Saved): AdvanceBatch => batch;
 
 export function createAdvanceService(db: RunDb, deps: {
@@ -57,6 +62,7 @@ export function createAdvanceService(db: RunDb, deps: {
   assertAdvanceAllowed?(prUrl: string): void;
   busyNow(prUrl: string, path: string | null): boolean;
   busy(prUrl: string, path: string | null, ownThreadId?: string): Promise<boolean>;
+  controller(facts: AdvanceFacts): Promise<string | null>;
   spawn(facts: AdvanceFacts, path: string, prompt: string, jobId: string): Promise<string>;
   send(threadId: string, prompt: string): Promise<void>;
   thread(threadId: string): Promise<{ status: string; archivedAt: number | null; deletedAt: number | null; output: string }>;
@@ -156,7 +162,7 @@ export function createAdvanceService(db: RunDb, deps: {
               update(batch, job, { status: "needs-attention", detail: completedParent && !batch.facts[job.id]!.needsPreparation && facts.needsPreparation ? "Selected parent advanced; preview this PR again for branch preparation" : "PR head, approval, feedback, base, or workspace changed since preview. Preview it again." }); continue;
             }
             if (!needsWorker(facts)) { batch.prepared[job.id] = true; await verify(batch, job); continue; }
-            const previous = [...batch.jobs].reverse().find((entry) => entry.repo === repo && entry.threadId !== null && !entry.dedicated && !ACTIVE.has(entry.status));
+            const previous = facts.effortKey === null ? [...batch.jobs].reverse().find((entry) => entry.repo === repo && batch.facts[entry.id]!.effortKey === null && entry.threadId !== null && !entry.dedicated && !ACTIVE.has(entry.status)) : undefined;
             if (previous && (batch.facts[previous.id]!.projectId !== facts.projectId || batch.facts[previous.id]!.hostId !== facts.hostId)) throw new Error("This PR maps to a different BB project than the repository worker. Prepare it in a separate batch.");
             let threadId = previous?.threadId ?? null;
             if (threadId) {
@@ -170,9 +176,12 @@ export function createAdvanceService(db: RunDb, deps: {
             if (interrupted(batch, job)) continue;
             const { path, workerPath } = await deps.workspace(facts, batch.id, job.id);
             if (interrupted(batch, job)) continue;
+            deps.assertAdvanceAllowed?.(job.prUrl);
+            if (facts.effortKey !== null) threadId = await deps.controller(facts);
+            if (facts.effortKey !== null && threadId === null) throw new Error("The effort's repository controller could not be resolved. Refresh the preview.");
             if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) throw new Error("Another writer started before launch");
             if (interrupted(batch, job)) continue;
-            if (threadId) {
+            if (threadId && facts.effortKey === null) {
               const thread = await deps.thread(threadId);
               if (thread.status !== "idle" || thread.archivedAt !== null || thread.deletedAt !== null) throw new Error("Repository worker changed while preparing the workspace. Inspect it before continuing this queue.");
             }
@@ -182,10 +191,10 @@ export function createAdvanceService(db: RunDb, deps: {
             update(batch, job, { status: "launching", path, threadId, detail: `Starting ${workLabel(job)}` });
             if (threadId) {
               await deps.send(threadId, prompt);
-              if (job.status === "launching") update(batch, job, { status: "running", detail: `Working on ${workLabel(job)} in Rebasing...` });
+              if (job.status === "launching") update(batch, job, { status: "running", detail: `Working on ${workLabel(job)} in the repository controller` });
             } else {
               const id = await deps.spawn(facts, workerPath, prompt, job.id);
-              update(batch, job, job.status === "launching" ? { threadId: id, status: "running", detail: `Working on ${workLabel(job)} in Rebasing...` } : { threadId: id });
+              update(batch, job, job.status === "launching" ? { threadId: id, status: "running", detail: `Working on ${workLabel(job)} in the repository thread` } : { threadId: id });
             }
           } catch (error) {
             update(batch, job, { status: "needs-attention", uncertain: job.status === "launching", detail: `${job.status === "launching" ? "Launch outcome is uncertain; inspect the worker before retrying. " : ""}${String(error).slice(0, 300)}` });
@@ -454,7 +463,13 @@ export function createAdvanceService(db: RunDb, deps: {
         if (recoverableResult && job.hiddenFromProgress) update(batch, job, { hiddenFromProgress: false });
         if (signal === "idle") {
           if (finalLine(text ?? "") === blockedMarker(job)) { update(batch, job, { status: "needs-attention", detail: "Worker reported incomplete work or failed validation; inspect its result", uncertain: false }); continue; }
-          if (finalLine(text ?? "") !== marker(job)) { update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker stopped without this job's completion marker; recheck after inspecting its thread" }); continue; }
+          if (finalLine(text ?? "") !== marker(job)) {
+            // A newly created controller may finish its introductory turn before
+            // the queued PR instruction starts. A later exact marker or the
+            // stopped-worker timeout resolves this attempt.
+            if (batch.facts[job.id]!.effortKey !== null) continue;
+            update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker stopped without this job's completion marker; recheck after inspecting its thread" }); continue;
+          }
           batch.prepared[job.id] = true;
           await verify(batch, job);
         } else if (signal === "pending") update(batch, job, { status: "running", detail: "Worker needs your input; open its thread" });
@@ -478,7 +493,7 @@ export function createAdvanceService(db: RunDb, deps: {
             if (thread.archivedAt !== null || thread.deletedAt !== null || thread.status === "error") update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker unavailable; inspect its thread" });
             else if (thread.status === "idle" && finalLine(thread.output) === blockedMarker(job)) update(batch, job, { status: "needs-attention", detail: "Worker reported incomplete work or failed validation", uncertain: false });
             else if (thread.status === "idle" && finalLine(thread.output) === marker(job)) { batch.prepared[job.id] = true; await verify(batch, job); }
-            else if (thread.status === "idle" && now() - job.updatedAt > 120_000) update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker stopped without this job's completion marker; inspect and recheck" });
+            else if (thread.status === "idle" && now() - job.updatedAt > (batch.facts[job.id]!.effortKey === null ? 120_000 : 600_000)) update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker stopped without this job's completion marker; inspect and recheck" });
           } catch { update(batch, job, { status: "needs-attention", uncertain: true, detail: "Worker could not be inspected" }); }
         } else if ((job.status === "waiting-checks" && now() <= batch.pollUntil) || (recover && job.status === "verifying")) await verify(batch, job);
       }

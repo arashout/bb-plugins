@@ -109,6 +109,14 @@ automatic dispatch enabled.
   instructions come from the service and are fixed; single-row agent prompts
   and repair direction are editable. Progress appears on each card. Use
   **Advance history** in the Pipeline options menu for saved batch details.
+- **Message agents:** On an open, unheld PR card, choose **Message agent** to
+  send an instruction without leaving Pipeline. The details drawer lists linked
+  effort coordinators, repository controllers, PR threads, and other threads,
+  including links for PRs without a checkout. Workstreams selects the current
+  repository controller when one is available. If several other threads qualify,
+  choose the target. **Rebase and PTAL** fills an editable draft; only **Send
+  message** delivers it. The composer reports whether BB sent or queued the
+  message, and the board shows agent activity.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
 - **Approved filter:** Keep approved open PRs in view across Map, Pipeline,
@@ -137,8 +145,13 @@ automatic dispatch enabled.
   changes requested. Workstreams does not send another PTAL or reviewer nudge.
 - **Bulk advance:** In **PR backlog**, select approved PRs and choose
   **Advance selected**. Review the exact selection, planned feedback and branch
-  work, and skips before starting. Each repository uses one **Rebasing...**
-  thread, with a separate turn and isolated worktree for each PR. The worker
+  work, and skips before starting. For a PR in an effort, Workstreams routes
+  each instruction through one persistent repository controller under the
+  effort coordinator. The controller handles PRs in sequence and can delegate
+  bounded PR work to child threads. Each PR keeps its own result and isolated
+  worktree. If the effort has no coordinator, the confirmed action creates one
+  before creating its repository controller. An unassigned PR uses a
+  descriptively titled repository thread for the batch. The agent
   reads reviews and current code, verifies fixes already made, addresses
   remaining feedback, and integrates the base where needed. It tests changes,
   pushes with an exact commit lease when rewriting history, replies with
@@ -160,7 +173,7 @@ automatic dispatch enabled.
   which you can restore without requeueing it. Running items cannot be removed,
   and removal never deletes the PR, thread, or history. The batch never
   merges PRs. Worktrees remain available for inspection. One batch runs at a
-  time, with up to two repository workers. Saved batches keep their original
+  time, with up to two active repositories. Saved batches keep their original
   scope; start a new preview to authorize feedback work on an earlier result.
   If a parent update makes a verification-only child need edits, preview that
   child again to authorize the added work. Fork writes and mixed BB project
@@ -173,8 +186,9 @@ automatic dispatch enabled.
   titles use a relevant emoji or a stable, varied fallback, preserving an
   existing leading emoji. Creating a coordinator establishes a stable effort identity
   that later grouping passes preserve. **Effort thread** opens it from the
-  heading. New PR repairs can run beneath the coordinator; later repairs can
-  run beneath that PR's earlier worker. The action preview shows the parent.
+  heading. Authorized PR work uses a repository controller as its parent or
+  destination. Repair previews retain earlier PR workers and result links for
+  context. Assigning work or opening an effort does not launch a controller.
   Linking a coordinator does not move existing PR threads or replace PR result
   cards. Generic team containers and Unsorted are not coordinator scopes.
 - **Automatic agent actions:** Choose an effort, then use **Off**,

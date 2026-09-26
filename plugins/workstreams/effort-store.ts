@@ -11,11 +11,17 @@ export const establishedEffortSchema = z.object({
 });
 export type EffortMembers = z.infer<typeof effortMembersSchema>;
 export type EstablishedEffort = z.infer<typeof establishedEffortSchema>;
+export const repoControllerSchema = z.object({ effortId: z.string(), repo: z.string(), projectId: z.string(), hostId: z.string(),
+  threadId: z.string().nullable(), previousThreadIds: z.array(z.string()).max(5).default([]),
+  state: z.enum(["creating", "ready", "unavailable"]), createdAt: z.number(), updatedAt: z.number() });
+export type RepoController = z.infer<typeof repoControllerSchema>;
 export const EFFORT_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS established_efforts (id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS effort_members (kind TEXT NOT NULL, ref TEXT NOT NULL, effort_id TEXT NOT NULL, PRIMARY KEY(kind, ref))`,
   `CREATE TABLE IF NOT EXISTS effort_workers (thread_id TEXT PRIMARY KEY, effort_id TEXT NOT NULL, pr_url TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL)`,
 ];
+export const REPO_CONTROLLER_MIGRATION =
+  `CREATE TABLE IF NOT EXISTS effort_repo_controllers (effort_id TEXT NOT NULL, repo TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(effort_id, repo))`;
 type EffortDb = RunDb & { transaction<T>(fn: () => T): () => T };
 export function normalizeMembers(members: EffortMembers): EffortMembers {
   return { tickets: [...new Set(members.tickets)].sort(), prUrls: [...new Set(members.prUrls.map((url) => url.toLowerCase()))].sort() };
@@ -44,6 +50,47 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
   }
   return {
     get,
+    sourceKey(effortId: string): string | null {
+      const row = db.prepare(`SELECT source_key AS sourceKey FROM established_efforts WHERE id = ?`).get(effortId.replace(/^effort:/u, "")) as { sourceKey: string } | undefined;
+      return row?.sourceKey ?? null;
+    },
+    repoController(effortId: string, repo: string): RepoController | null {
+      const row = db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? AND repo = ?`).get(effortId, repo.toLowerCase()) as { value: string } | undefined;
+      return row ? repoControllerSchema.parse(JSON.parse(row.value)) : null;
+    },
+    claimRepoController(input: { effortId: string; repo: string; projectId: string; hostId: string }): { record: RepoController; created: boolean } {
+      return db.transaction(() => {
+        const repo = input.repo.toLowerCase();
+        const existing = this.repoController(input.effortId, repo);
+        if (existing) {
+          if (existing.projectId !== input.projectId || existing.hostId !== input.hostId) throw new Error("The repository controller belongs to a different project or host. Inspect its thread before advancing this PR.");
+          return { record: existing, created: false };
+        }
+        if (!get(input.effortId)) throw new Error("The effort no longer exists. Refresh the preview.");
+        const record: RepoController = { ...input, repo, threadId: null, previousThreadIds: [], state: "creating", createdAt: now(), updatedAt: now() };
+        db.prepare(`INSERT INTO effort_repo_controllers (effort_id, repo, value) VALUES (?, ?, ?)`).run(input.effortId, repo, JSON.stringify(record));
+        return { record, created: true };
+      })();
+    },
+    saveRepoController(record: RepoController): RepoController {
+      return db.transaction(() => {
+        const current = this.repoController(record.effortId, record.repo);
+        if (!current || current.projectId !== record.projectId || current.hostId !== record.hostId) throw new Error("The repository controller binding changed. Inspect its thread before continuing.");
+        const updated = repoControllerSchema.parse({ ...record, repo: record.repo.toLowerCase(), createdAt: current.createdAt, updatedAt: now() });
+        db.prepare(`UPDATE effort_repo_controllers SET value = ? WHERE effort_id = ? AND repo = ?`).run(JSON.stringify(updated), updated.effortId, updated.repo);
+        return updated;
+      })();
+    },
+    beginDeletedRepoReplacement(effortId: string, repo: string, deletedThreadId: string): { record: RepoController; created: boolean } {
+      return db.transaction(() => {
+        const current = this.repoController(effortId, repo);
+        if (!current) throw new Error("The repository controller record changed. Refresh the preview.");
+        if (current.threadId !== deletedThreadId) return { record: current, created: false };
+        const record = repoControllerSchema.parse({ ...current, threadId: null, state: "creating", previousThreadIds: [...current.previousThreadIds, deletedThreadId].slice(-5), updatedAt: now() });
+        db.prepare(`UPDATE effort_repo_controllers SET value = ? WHERE effort_id = ? AND repo = ?`).run(JSON.stringify(record), effortId, repo.toLowerCase());
+        return { record, created: true };
+      })();
+    },
     list: () => (db.prepare(`SELECT value FROM established_efforts ORDER BY id`).all()).map((row) => read(row)!),
     source: (sourceKey: string) => get(sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(sourceKey)),
     owner,

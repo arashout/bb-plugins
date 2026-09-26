@@ -84,7 +84,6 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
   const eligible = plan?.jobs.filter((job) => job.eligible) ?? [];
   const summary = advancePreviewSummary(plan?.jobs ?? []);
   const repositories = [...new Set(plan?.jobs.map((job) => job.repo) ?? [])];
-  const workers = summary.workers;
   const expired = plan !== null && plan.expiresAt <= clock;
   return <>
     <Button size="sm" disabled={disabled || prUrls.length === 0} onClick={() => {
@@ -103,7 +102,7 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
         {plan === null ? null : <>
           <div className="space-y-1 text-[12px]">
             <p className="font-medium">{summary.agentJobs} with agent · {summary.verifyJobs} verify only · {summary.skipped} skipped</p>
-            <p className="text-muted-foreground">{workers === 0 ? "Verification runs without an agent worker." : workers === 1 ? "One repository worker named Rebasing... processes PRs sequentially in separate checkouts." : `${workers} repository workers, each named Rebasing..., process PRs sequentially in separate checkouts.`}</p>
+            <p className="text-muted-foreground">{summary.agentJobs === 0 ? "Verification runs without an agent." : "Each effort reuses one controller per repository. PRs run sequentially in separate checkouts."}</p>
           </div>
           <div className="space-y-3">
             {repositories.map((repo) => <section key={repo} className="rounded-md border border-border px-3 py-2">

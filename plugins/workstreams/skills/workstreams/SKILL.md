@@ -511,9 +511,14 @@ PR row menus include **Put on hold** with an optional reason; held PRs remain un
 In **PR backlog**, select approved open PRs and choose **Advance selected** to
 preview a finite batch. The preview distinguishes feedback work, branch
 preparation, both, and verification only. Confirmation authorizes the listed
-work. Each repository uses one **Rebasing...** worker, with a separate turn and
-isolated worktree per PR; remote PRs can use a worktree from an exactly matched
-scanned repository. For feedback, the worker reads reviews and current code,
+work. A PR in an effort uses one persistent repository controller under the
+effort coordinator. The controller handles PR instructions in sequence and can
+delegate bounded PR work to child threads. Confirmed Advance can establish the
+effort and create its coordinator and repository controller; preview and other
+reads do not launch them. An unassigned PR uses a descriptively titled
+repository thread for the batch. Each PR keeps a separate result and isolated
+worktree; remote PRs can use a worktree from an exactly matched scanned
+repository. For feedback, the agent reads reviews and current code,
 verifies fixes already made, addresses remaining changes, and integrates the
 current base as needed. It tests changes, pushes when needed, replies with
 evidence, and resolves only feedback verified as addressed. History rewrites
@@ -539,7 +544,7 @@ row offers details, repair, threads, and readiness recheck; removing a queued
 item cancels only that item, while removing a finished item hides a record you
 can restore without requeueing it. Running items cannot be removed, and removal
 never deletes the PR, thread, or history.
-One batch runs at a time, with up to two repository workers and 100 selected PRs.
+One batch runs at a time, with up to two active repositories and 100 selected PRs.
 CI polling runs for up to 30 minutes after a job enters **Waiting for checks**;
 use **Recheck readiness** afterward. If a selected parent update makes a
 verification-only child need branch edits, preview the child again before
@@ -562,11 +567,12 @@ effort ID preserves the chosen identity and membership across later grouping.
 The heading then opens the effort thread. Team containers and Unsorted do not
 offer this control.
 
-Manual repair planning prefers a previous idle PR worker as parent for a
-follow-up, then the effort coordinator. The dialog shows that recommendation
-before launch. Repairs keep the PR's real checkout; coordinator presence does
-not satisfy a merge gate or replace a PR's latest result. Archived or missing
-coordinators require an explicit eligible replacement or restoration.
+Authorized PR work routes through the repository controller under the effort
+coordinator. Existing PR workers remain linked as history and repair context;
+repair previews show the available parent before launch. Repairs keep the PR's
+real checkout. A coordinator or repository controller does not satisfy a merge
+gate or replace a PR's latest result. Unarchive an archived controller before
+resuming its repository. An uncertain controller launch never starts a duplicate.
 
 Archive an idle leaf thread from its thread menu. **Archived threads** shows
 archive history and lets you undo it. Threads with children must be archived

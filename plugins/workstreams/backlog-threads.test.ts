@@ -9,7 +9,7 @@ const liveThread = (patch: Partial<Parameters<typeof backlogThreads>[4][number]>
 });
 describe("backlog thread access", () => {
   it("keeps remote worker links without a checkout or a usable readiness result", () => {
-    expect(backlogThreads(url, [], [], [{ prUrl: `${url.toUpperCase()}/`, threadId: "worker", status: "needs-attention" }], [])).toEqual([{ id: "worker", title: "Rebasing...", tier: "started", active: false }]);
+    expect(backlogThreads(url, [], [], [{ prUrl: `${url.toUpperCase()}/`, threadId: "worker", status: "needs-attention" }], [])).toEqual([{ id: "worker", title: "Linked agent thread", tier: "started", active: false }]);
   });
   it("combines author, action, and worker links once without borrowing sibling PR threads", () => {
     const local = [{ id: "author", title: "Author", tier: "environment" as const, active: false }];

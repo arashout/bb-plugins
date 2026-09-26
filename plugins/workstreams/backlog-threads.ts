@@ -10,7 +10,7 @@ const ACTIVE_INDICATORS = new Set<LiveThread["indicator"]>(["runtime", "workflow
 export function backlogThreads(prUrl: string, local: readonly MenuThread[], runs: readonly ThreadRecord[], jobs: readonly ThreadRecord[], live: readonly LiveThread[]): MenuThread[] {
   const result = new Map(local.map((thread) => [thread.id, thread]));
   const key = advancePrKey(prUrl);
-  for (const [records, fallback] of [[runs, "PR action"], [jobs, "Rebasing..."]] as const) {
+  for (const [records, fallback] of [[runs, "PR action"], [jobs, "Linked agent thread"]] as const) {
     for (const record of records.flatMap((item) => [item, ...(item.previousAttempts ?? []).map((attempt) => ({ ...attempt, prUrl: item.prUrl, action: item.action }))])) {
       if (!record.threadId || !record.prUrl || advancePrKey(record.prUrl) !== key || result.has(record.threadId)) continue;
       result.set(record.threadId, { id: record.threadId, title: record.action ? `${fallback} · ${record.action}` : fallback, tier: "started", active: ["running", "launching", "needs-you"].includes(record.status) });

@@ -208,7 +208,7 @@ export function createRunStore(db: RunDb, now: () => number = Date.now) {
       const at = now();
       const changed: Run[] = [];
       const open = openIn(threadId);
-      const ambiguous = open.length > 1 || open.some((run) => run.mode === "continue");
+      const ambiguous = open.length > 1;
       if (ambiguous && (signal.kind === "idle" || signal.kind === "failed")) {
         for (const run of open) {
           db.prepare(

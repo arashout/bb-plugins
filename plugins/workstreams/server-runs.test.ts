@@ -47,8 +47,10 @@ function unit(mergeStateStatus: "DIRTY" | "CLEAN"): RawUnit {
 
 const thread = (id: string, status: "active" | "idle" | "error" = "active") => makeThreadResponse({ id, status });
 
-async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) => unknown; rebasing?: boolean; liveRebasing?: boolean; liveBranch?: string | null } = {}) {
+async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) => unknown; rebasing?: boolean; liveRebasing?: boolean; liveBranch?: string | null;
+  remoteOnly?: boolean; metadata?: Record<string, unknown>; delivery?: "sent" | "queued"; threadStatus?: "active" | "idle" | "error" } = {}) {
   const rpcCalls: { method: string; input: unknown }[] = [];
+  const spawned = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const { bb, harness } = createFakePluginHost({
     pluginId: "workstreams",
     settings: { scanRoots: "/p" },
@@ -56,20 +58,30 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
       system: { config: async () => ({ primaryHostId: HOST }) as never },
       projects: { list: async () => [{ id: "proj-inkwell", sources: [{ hostId: HOST, path: "/p" }] }] as never },
       threads: {
-        list: async () => (options.threads ?? []) as never,
-        spawn: async () => thread("thr-quill-new"),
-        get: async ({ threadId }: { threadId: string }) => ({ ...thread(threadId, "idle"), canSpawnChild: true }) as never,
+        list: async () => [...(options.threads ?? []), ...spawned.values()] as never,
+        spawn: async (args: Record<string, any>) => {
+          const role = args.pluginMetadata?.role;
+          const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" : "thr-quill-new";
+          const result = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
+            status: role === "coordinator" ? "idle" : "active" }), parentThreadId: args.parentThreadId ?? null,
+            environment: { hostId: HOST } };
+          spawned.set(id, result);
+          return result as never;
+        },
+        get: async ({ threadId }: { threadId: string }) => ({ ...(spawned.get(threadId) ?? thread(threadId, options.threadStatus ?? "idle")), canSpawnChild: true }) as never,
         context: async () => ({ usage: null }) as never,
-        send: async () => ({ ok: true, delivery: "sent" }) as never,
+        send: async () => ({ ok: true, delivery: options.delivery ?? "sent" }) as never,
         output: async () => ({ output: "Rebased.\nResult: Resolved 2 conflicts and pushed" }),
-        getPluginMetadata: async () => ({}) as never,
+        getPluginMetadata: async () => (options.metadata ?? {}) as never,
         events: { list: async () => [] },
         interactions: { list: async () => [] as never },
       },
     },
     experimental_callHostRpc: (call) => {
       rpcCalls.push({ method: call.method, input: call.input });
-      if (call.method === "scan") return { units: [{ ...unit("DIRTY"), rebasing: options.rebasing ?? false }], warnings: [] };
+      if (call.method === "scan") return { units: [{ ...unit("DIRTY"), pr: options.remoteOnly ? null : unit("DIRTY").pr, rebasing: options.rebasing ?? false }], warnings: [] };
+      if (call.method === "authoredPrs") return { owners: ["inkwell"], entries: [{ repo: "inkwell/quill", pr: unit("DIRTY").pr }], discoveryComplete: true,
+        repositories: [{ repo: "inkwell/quill", complete: true }], complete: true, warnings: [] };
       if (call.method === "inspectPaths") return { units: [unit("CLEAN")], warnings: [] };
       if (call.method === "checkoutState") return { ok: true, branch: options.liveBranch === undefined ? unit("DIRTY").branch : options.liveBranch, rebasing: options.liveRebasing ?? false };
       if (call.method === "prReviewers") return { ok: true, reviewers: unit("DIRTY").pr!.reviewRequests };
@@ -88,7 +100,7 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
 afterEach(() => vi.useRealTimers());
 
 describe("agent runs through the server", () => {
-  it("messages only a thread still linked to the PR row, without creating a synthetic run", async () => {
+  it("messages only a thread still linked to the PR row and tracks a delivered turn", async () => {
     const linked = {
       ...thread("thr-quill-author", "idle"),
       environmentPath: PATH,
@@ -102,6 +114,27 @@ describe("agent runs through the server", () => {
     expect(harness.sdk.callsTo("threads.send")).toEqual([]);
     expect(await harness.callRpc("thread_message", { path: PATH, prUrl: PR_URL, threadId: "thr-quill-author", message: "Rebase, then post PTAL" })).toEqual({ ok: true, delivery: "sent" });
     expect(harness.sdk.callsTo("threads.send")).toEqual([[expect.objectContaining({ threadId: "thr-quill-author", mode: "auto" })]]);
+    expect(await open()).toEqual([expect.objectContaining({ action: "message", status: "running", threadId: "thr-quill-author", prUrl: PR_URL })]);
+  });
+
+  it("links a remote-only PR to its explicitly linked thread and sends without a checkout path", async () => {
+    const linked = thread("thr-remote-author", "idle");
+    const { harness, open } = await load({ remoteOnly: true, threads: [linked], metadata: { linkedPrUrl: PR_URL } });
+    const context = await harness.callRpc("pr_thread_context", { prUrl: PR_URL }) as { threads: { id: string }[]; recommendedThreadId: string | null };
+    expect(context.threads.map((item) => item.id)).toContain("thr-remote-author");
+    expect(context.recommendedThreadId).toBe("thr-remote-author");
+    expect(await harness.callRpc("thread_message", { prUrl: PR_URL, threadId: "thr-remote-author", message: "Check the branch" }))
+      .toEqual({ ok: true, delivery: "sent" });
+    expect(await open()).toEqual([expect.objectContaining({ action: "message", path: "", prUrl: PR_URL })]);
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
+  it("does not report a queued instruction as completed by the current turn", async () => {
+    const linked = { ...thread("thr-quill-author", "active"), environmentPath: PATH,
+      environmentBranchName: "dev/abc-101-gift-card-balance", hasPendingInteraction: false };
+    const { harness, open } = await load({ threads: [linked], delivery: "queued", threadStatus: "active" });
+    expect(await harness.callRpc("thread_message", { prUrl: PR_URL, threadId: linked.id, message: "Continue after this task" }))
+      .toEqual({ ok: true, delivery: "queued" });
     expect(await open()).toEqual([]);
   });
 

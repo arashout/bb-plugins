@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createEffortStore, EFFORT_MIGRATIONS } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { createCoordinatorService, type CoordinatorSdk, type EffortPlan } from "./effort-coordinator.js";
 import { inventoryEffort } from "./effort-membership.js";
 
@@ -10,13 +10,20 @@ const members = { tickets: ["ABC-101"], prUrls: ["https://github.com/inkwell/fol
 const input = { groupKey: "suggested", name: "Improve review", goal: "Review manuscripts reliably", projectId: "proj-1", members };
 const plan: EffortPlan = { ok: true, name: input.name, goal: "", members, projects: [{ id: "proj-1", name: "Folio" }], threads: [{ id: "existing", title: "Prior planning", projectId: "proj-1" }], effort: null };
 function setup() {
-  const db = new Database(":memory:"); dbs.push(db); EFFORT_MIGRATIONS.forEach((sql) => db.exec(sql));
+  const db = new Database(":memory:"); dbs.push(db); EFFORT_MIGRATIONS.forEach((sql) => db.exec(sql)); db.exec(REPO_CONTROLLER_MIGRATION);
   const store = createEffortStore(db);
   const sdk: CoordinatorSdk = { get: vi.fn(async (id) => ({ id, projectId: "proj-1", title: null, status: "idle", archivedAt: null, deletedAt: null, canSpawnChild: true })),
     rename: vi.fn(async () => undefined), associate: vi.fn(async () => undefined), recover: vi.fn(async () => []), spawn: vi.fn(async () => ({ id: "spawned" })) };
   return { store, sdk, service: createCoordinatorService(store, sdk) };
 }
 describe("coordinator identity and launch safety", () => {
+  it("lazily creates a coordinator for an established effort in its saved project", async () => {
+    const { store, sdk, service } = setup();
+    const existing = store.establish({ ...input, sourceKey: "group-a", coordinatorState: "none" });
+    const ready = await service.ensureExisting(existing.id, "another-repository-project");
+    expect(ready).toMatchObject({ id: existing.id, coordinatorThreadId: "spawned", coordinatorState: "ready", projectId: input.projectId });
+    expect(sdk.spawn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ projectId: input.projectId }));
+  });
   it("launches once for a coordinator-free promoted effort and preserves its identity", async () => {
     const { store, sdk, service } = setup();
     const promoted = store.establish({ ...input, sourceKey: input.groupKey, goal: "", projectId: "", coordinatorState: "none" });

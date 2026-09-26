@@ -71,6 +71,16 @@ export function createCoordinatorService(store: EffortStore, sdk: CoordinatorSdk
     return { ok: true, effort: store.save({ ...effort, coordinatorThreadId: thread.id, coordinatorState: "ready" }) };
   }
   return {
+    async ensureExisting(effortId: string, projectId: string): Promise<EstablishedEffort> {
+      const effort = store.get(effortId);
+      if (!effort) throw new Error("The effort no longer exists. Refresh the preview.");
+      const coordinatorProjectId = effort.projectId || projectId;
+      const result = await this.coordinate({ groupKey: effort.key, name: effort.name, goal: effort.goal, projectId: coordinatorProjectId,
+        members: effort.members }, { ok: true, name: effort.name, goal: effort.goal, members: effort.members,
+        projects: [{ id: coordinatorProjectId, name: coordinatorProjectId }], threads: [], effort });
+      if (!result.ok) throw new Error(result.error);
+      return result.effort;
+    },
     coordinate(input: z.infer<typeof coordinateInputSchema>, plan: EffortPlan): Promise<z.infer<typeof coordinateResultSchema>> {
       const key = input.groupKey;
       const establishedKey = store.source(key)?.key;

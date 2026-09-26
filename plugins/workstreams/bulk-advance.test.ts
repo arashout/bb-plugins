@@ -7,7 +7,8 @@ const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts =
   prUrl: `https://github.com/acme/app/pull/${number}`, number, repo: "acme/app", title: `Fix ${number}`,
   headOid: `${number}`.repeat(40), baseOid: "a".repeat(40), headRefName: `fix-${number}`, baseRefName: "main",
   needsPreparation: true, needsFeedback: false, eligible: true, detail: "Needs rebase", workspace: "create", projectId: "project",
-  hostId: "host", sourcePath: "/source", path: `/checkout/${number}`, readiness: "needs-attention", blockedBy: null, ...overrides,
+  hostId: "host", sourcePath: "/source", path: `/checkout/${number}`, effortId: null, effortKey: null, effortMembers: null,
+  readiness: "needs-attention", blockedBy: null, ...overrides,
 });
 const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 function setup(facts = [fact()]) {
@@ -23,6 +24,7 @@ function setup(facts = [fact()]) {
     })),
     repairSpawn: vi.fn(async (_facts: AdvanceFacts, _path: string, _prompt: string, _id: string, _mode: "new" | "subthread", _parent: string | null) => "repair-thread"),
     busyNow: vi.fn(() => false), busy: vi.fn(async () => false),
+    controller: vi.fn(async (_facts: AdvanceFacts): Promise<string | null> => null),
     workspace: vi.fn(async (_: AdvanceFacts, _batch: string, id: string) => ({ path: `/isolated/${id}`, workerPath: "/isolated" })),
     spawn: vi.fn(async (_facts: AdvanceFacts, _path: string, _prompt: string, _jobId: string) => "thread"), send: vi.fn(async (_threadId: string, _prompt: string) => {}),
     thread: vi.fn(async () => ({ status: "idle", archivedAt: null, deletedAt: null, output: "" })),
@@ -34,6 +36,61 @@ function setup(facts = [fact()]) {
 }
 
 describe("finite Advance preparation", () => {
+  it("routes sequential PR attempts in one effort and repository through the same controller", async () => {
+    const t = setup([fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl, fact(2).prUrl] } }),
+      fact(2, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl, fact(2).prUrl] } })]);
+    t.deps.controller.mockResolvedValue("repo-controller");
+    const batch = await t.start();
+    expect(t.deps.controller).toHaveBeenCalledTimes(1);
+    expect(t.deps.send).toHaveBeenCalledExactlyOnceWith("repo-controller", expect.stringContaining(`Workstreams job ${batch.jobs[0]!.id} complete: prepared`));
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+    await t.service.signal("repo-controller", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: prepared`); await drain();
+    expect(t.deps.controller).toHaveBeenCalledTimes(2);
+    expect(t.deps.send).toHaveBeenCalledTimes(2);
+    expect(t.deps.send.mock.calls[1]![1]).toContain(`Workstreams job ${batch.jobs[1]!.id} complete: prepared`);
+    expect(t.service.list()[0]!.jobs.map((job) => job.threadId)).toEqual(["repo-controller", "repo-controller"]);
+  });
+
+  it("waits past a controller's markerless introductory turn without attributing it to the PR", async () => {
+    const t = setup([fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl] } })]);
+    t.deps.controller.mockResolvedValue("repo-controller");
+    const batch = await t.start(); const job = batch.jobs[0]!;
+    await t.service.signal("repo-controller", "idle", "Repository scope reviewed");
+    expect(job.status).toBe("running");
+    expect(job.uncertain).toBe(false);
+    await t.service.signal("repo-controller", "idle", `Workstreams job ${job.id} complete: prepared`);
+    expect(job.status).not.toBe("running");
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PR moved to a different effort after its preview", async () => {
+    const t = setup([fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl] } })]);
+    const preview = await t.service.preview([fact().prUrl]);
+    t.current.set(fact().prUrl, fact(1, { effortKey: "group-b", effortMembers: { tickets: [], prUrls: [fact().prUrl] } }));
+    await expect(t.service.start(preview.token)).rejects.toThrow("changed since preview");
+    expect(t.deps.controller).not.toHaveBeenCalled();
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a queued PR bound to its effort after that effort gains a persisted ID", async () => {
+    const members = { tickets: [], prUrls: [fact().prUrl] };
+    const t = setup([fact(1, { effortKey: "group-a", effortMembers: members })]);
+    t.deps.controller.mockResolvedValue("repo-controller");
+    const preview = await t.service.preview([fact().prUrl]);
+    t.current.set(fact().prUrl, fact(1, { effortKey: "group-a", effortId: "saved-effort", effortMembers: members }));
+    const batch = await t.service.start(preview.token); await drain();
+    expect(batch.jobs[0]).toMatchObject({ status: "running", threadId: "repo-controller" });
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expanded effort cohort after preview", async () => {
+    const t = setup([fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl] } })]);
+    const preview = await t.service.preview([fact().prUrl]);
+    t.current.set(fact().prUrl, fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl, fact(2).prUrl] } }));
+    await expect(t.service.start(preview.token)).rejects.toThrow("changed since preview");
+    expect(t.deps.controller).not.toHaveBeenCalled();
+  });
+
   it.each(["merged", "closed"] as const)("removes %s failed work without requiring a success marker, retaining durable history", async (readiness) => {
     const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
     await t.service.signal("thread", "idle", "Worker stopped without a prepared marker");
@@ -481,7 +538,7 @@ describe("finite Advance preparation", () => {
   it("continues only the exclusive stopped worker and preserves its failed checkout", async () => {
     const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
     await t.service.signal("thread", "idle", `Workstreams job ${job.id} complete: blocked`);
-    t.deps.repairCandidates.mockResolvedValue({ candidates: [{ id: "thread", title: "Rebasing...", tier: "started", running: false, updatedAt: 0, contextUsed: null, canSpawnChild: true }], recommendation: { mode: "continue", threadId: "thread", reason: "Continue stopped work" } });
+    t.deps.repairCandidates.mockResolvedValue({ candidates: [{ id: "thread", title: "Repository controller", tier: "started", running: false, updatedAt: 0, contextUsed: null, canSpawnChild: true }], recommendation: { mode: "continue", threadId: "thread", reason: "Continue stopped work" } });
     const plan = await t.service.repairPlan(batch.id, job.id);
     expect(plan.candidates[0]!.canContinue).toBe(true);
     const workspaces = t.deps.workspace.mock.calls.length;

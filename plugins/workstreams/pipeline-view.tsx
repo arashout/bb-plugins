@@ -23,10 +23,10 @@ import {
 } from "./pipeline-agent-sheet";
 import {
   ActionDialogs,
-  ThreadMessageDialog,
   type ActionRequest,
   type DirectRow,
 } from "./rowactions";
+import { PipelinePrComposer, PrThreadLinks } from "./pipeline-pr-threads";
 import { PrHoldDialog, usePrHoldControls } from "./pr-hold-dialog";
 import { ArchivedThreadsButton } from "./archivedthreads";
 import { backlogThreads } from "./backlog-threads";
@@ -118,7 +118,7 @@ export function PipelineView({
   const [showHistory, setShowHistory] = useState<Record<string, boolean>>({});
   const [direct, setDirect] = useState<ActionRequest | null>(null);
   const [agent, setAgent] = useState<PipelineAgentRequest | null>(null);
-  const [messaging, setMessaging] = useState<PipelineCard | null>(null);
+  const [messaging, setMessaging] = useState<{ key: string; location: "card" | "drawer" } | null>(null);
   const [starting, setStarting] = useState<Row | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dispatchBusy, setDispatchBusy] = useState(false);
@@ -200,6 +200,12 @@ export function PipelineView({
       : String(counts[stage]);
   const selectedCard = cards.find((card) => card.key === selected) ?? null;
   useEffect(() => {
+    if (messaging && (
+      !cards.some((card) => card.key === messaging.key && card.pr?.state === "OPEN" && !card.hold) ||
+      (messaging.location === "drawer" && selected !== messaging.key)
+    )) setMessaging(null);
+  }, [cards, messaging, selected]);
+  useEffect(() => {
     if (
       selected !== null &&
       (search || prefs.approvedOnly) &&
@@ -208,15 +214,6 @@ export function PipelineView({
       setSelected(null);
   }, [selected, search, prefs.approvedOnly, visible]);
   const sidebarThreads = experimental_useSidebarThreads().threads;
-  const selectedThreads = selectedCard?.pr
-    ? backlogThreads(
-        selectedCard.pr.url,
-        selectedCard.local?.cluster.threads ?? [],
-        board.runs,
-        advance.batches.flatMap((batch) => batch.jobs),
-        sidebarThreads,
-      )
-    : (selectedCard?.local?.cluster.threads ?? []);
 
   useEffect(() => {
     if (focusTicket === null || arrivedFocus.current === focusTicket) return;
@@ -453,6 +450,10 @@ export function PipelineView({
           ),
         );
   useEffect(() => {
+    if (messaging?.location === "card" && !navCards.some((card) => card.key === messaging.key))
+      setMessaging(null);
+  }, [messaging, navCards]);
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
@@ -600,6 +601,27 @@ export function PipelineView({
             </button>
           ) : null}
         </div>
+        {card.pr?.state === "OPEN" && !card.hold ? (
+          <div className="relative z-10 mt-2 border-t border-border/70 pt-1.5">
+            {messaging?.key === card.key && messaging.location === "card" ? (
+              <PipelinePrComposer
+                key={card.key}
+                card={card}
+                sidebarThreads={sidebarThreads}
+                onClose={() => setMessaging(null)}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setMessaging({ key: card.key, location: "card" })}
+                aria-label={`Message agent for ${card.repo} #${card.pr.number}`}
+                className="rounded px-1 py-0.5 text-[10.5px] font-medium text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Message agent
+              </button>
+            )}
+          </div>
+        ) : null}
         {card.activity.state !== "none" ? (
           <button
             type="button"
@@ -1190,23 +1212,28 @@ export function PipelineView({
                   ? "No recent agent activity"
                   : `${selectedCard.activity.state.replace("-", " ")} · ${selectedCard.activity.detail}`}
               </p>
-              {selectedThreads.length ? (
+              {selectedCard.pr ? (
+                <PrThreadLinks
+                  prUrl={selectedCard.pr.url}
+                  sidebarThreads={sidebarThreads}
+                  onOpenThread={(id) => navigate.toThread(id)}
+                />
+              ) : selectedCard.local?.cluster.threads.length ? (
                 <ul className="mt-1 space-y-1">
-                  {selectedThreads.map((thread) => (
+                  {selectedCard.local.cluster.threads.map((thread) => (
                     <li key={thread.id}>
                       <button
                         type="button"
                         onClick={() => navigate.toThread(thread.id)}
-                        className="max-w-full truncate rounded text-left text-[11px] underline"
+                        className="max-w-full rounded text-left text-[11px] underline"
                         title={thread.title}
                       >
-                        {thread.active ? "● " : ""}
-                        {thread.title}
+                        {thread.active ? "● " : ""}{thread.title}
                       </button>
                     </li>
                   ))}
                 </ul>
-              ) : null}
+              ) : <p className="mt-1 text-muted-foreground">No linked threads.</p>}
             </section>
             <section className="mt-4">
               <h3 className="mb-1 font-semibold">Review</h3>
@@ -1258,14 +1285,6 @@ export function PipelineView({
                 <>
                   <button
                     type="button"
-                    onClick={() => openThread(selectedCard)}
-                    disabled={!selectedThreads.length}
-                    className="rounded border px-2 py-1 disabled:opacity-50"
-                  >
-                    Thread
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => openCheckout(selectedCard)}
                     className="rounded border px-2 py-1"
                   >
@@ -1282,16 +1301,14 @@ export function PipelineView({
                   ) : null}
                 </>
               ) : null}
-              {selectedCard.local &&
-              !selectedCard.hold &&
-              selectedThreads.length &&
-              selectedCard.pr ? (
+              {selectedCard.pr?.state === "OPEN" && !selectedCard.hold ? (
                 <button
                   type="button"
-                  onClick={() => setMessaging(selectedCard)}
+                  onClick={() => setMessaging({ key: selectedCard.key, location: "drawer" })}
+                  aria-label={`Message agent in details for ${selectedCard.repo} #${selectedCard.pr.number}`}
                   className="rounded border px-2 py-1"
                 >
-                  Message
+                  Message agent
                 </button>
               ) : null}
               {selectedCard.pr && !selectedCard.hold ? (
@@ -1310,6 +1327,16 @@ export function PipelineView({
                 </button>
               ) : null}
             </div>
+            {messaging?.key === selectedCard.key && messaging.location === "drawer" ? (
+              <div className="mt-3 rounded border border-border p-2">
+                <PipelinePrComposer
+                  key={selectedCard.key}
+                  card={selectedCard}
+                  sidebarThreads={sidebarThreads}
+                  onClose={() => setMessaging(null)}
+                />
+              </div>
+            ) : null}
           </aside>
         ) : null}
       </div>
@@ -1341,11 +1368,6 @@ export function PipelineView({
         onClose={() => setAgent(null)}
         onStarted={advance.refresh}
         onOpenThread={(id) => navigate.toThread(id)}
-      />
-      <ThreadMessageDialog
-        row={messaging?.local ?? null}
-        threads={messaging?.local?.cluster.threads ?? []}
-        onClose={() => setMessaging(null)}
       />
       <StartThreadDialog row={starting} onClose={() => setStarting(null)} />
       <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>

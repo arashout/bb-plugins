@@ -23,13 +23,14 @@ import {
   type RawUnit,
   type Pr,
 } from "./contract.js";
-import { createEffortStore, EFFORT_MIGRATIONS, establishedEffortSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
 import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 import { suggestThreadEfforts } from "./thread-effort-suggestions.js";
 import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
+import { createRepoControllerService } from "./repo-controller.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
@@ -452,9 +453,17 @@ export const rpcContract = defineRpcContract({
   thread_archive: { input: z.object({ threadId: z.string().max(200) }).strict(), output: writeResult },
   thread_restore: { input: z.object({ threadId: z.string().max(200) }).strict(), output: writeResult },
   thread_archived: { input: z.object({}).strict(), output: z.array(archiveRecordSchema) },
+  /** Current, server-verified threads associated with one known open PR. */
+  pr_thread_context: {
+    input: prUrlInput,
+    output: z.object({
+      threads: z.array(threadLinkSchema.extend({ role: z.enum(["coordinator", "repo", "pr", "linked"]) })),
+      recommendedThreadId: z.string().nullable(),
+    }),
+  },
   /** Send one user-authored instruction to one thread currently linked to this PR row. */
   thread_message: {
-    input: z.object({ path: z.string().max(1_000), prUrl: z.string().max(500), threadId: z.string().max(200), message: z.string().max(4_000) }).strict(),
+    input: z.object({ path: z.string().max(1_000).optional(), prUrl: z.string().max(500), threadId: z.string().max(200), message: z.string().max(4_000) }).strict(),
     output: z.discriminatedUnion("ok", [
       z.object({ ok: z.literal(true), delivery: z.enum(["sent", "queued"]) }),
       z.object({ ok: z.literal(false), error: z.string() }),
@@ -618,6 +627,8 @@ export default async function plugin(bb: BbPluginApi) {
     ...PR_HOLD_MIGRATIONS,
     // Index only: the thread's plugin metadata is the sole source of effort intent.
     `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
+    REPO_CONTROLLER_MIGRATION,
+    `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
   ]);
   const runs = createRunStore(db);
   const dispatch = createDispatchStore(db);
@@ -1568,11 +1579,24 @@ export default async function plugin(bb: BbPluginApi) {
       const urlsByCluster = new Map(clusters.map((cluster) => [cluster.ticket,
         cluster.units.flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : [])]));
       const savedJobs = pendingAdvanceJobs().map(({ job }) => job);
-      const linkedIds = new Set([...threadFacts.keys(), ...savedJobs.flatMap((job) => job.threadId ? [job.threadId] : [])]);
+      const recentRuns = runs.recent(0, 1_000);
+      const attempts = dispatch.attempts();
+      const controllers = effortStore.list().flatMap((effort) => [...new Set(effort.members.prUrls.map((url) => prTarget(url)?.slug).filter((repo): repo is string => !!repo))]
+        .flatMap((repo) => {
+          const controller = effortStore.repoController(effort.id, repo);
+          return controller?.threadId ? [{ threadId: controller.threadId, urls: effort.members.prUrls.filter((url) => prTarget(url)?.slug === repo) }] : [];
+        }));
+      const linkedIds = new Set([...threadFacts.keys(), ...savedJobs.flatMap((job) => job.threadId ? [job.threadId] : []),
+        ...controllers.map((controller) => controller.threadId)]);
       prFreshness.setLinks([...linkedIds].map((threadId) => ({
         threadId, environmentId: threadEnvironments.get(threadId) ?? null,
         urls: [...new Set([...[...(links.get(threadId)?.keys() ?? [])].flatMap((ticket) => urlsByCluster.get(ticket) ?? []),
-          ...savedJobs.filter((job) => job.threadId === threadId).map((job) => job.prUrl)])],
+          ...savedJobs.filter((job) => job.threadId === threadId).map((job) => job.prUrl),
+          ...recentRuns.filter((run) => run.threadId === threadId && run.prUrl).map((run) => run.prUrl!),
+          ...attempts.filter((attempt) => attempt.threadId === threadId).map((attempt) => attempt.prUrl),
+          ...controllers.filter((controller) => controller.threadId === threadId).flatMap((controller) => controller.urls),
+          ...[...pendingPrThreads].filter(([, pending]) => pending.id === threadId).map(([url]) => url),
+          ...(threadPrUrls.get(threadId) ?? [])])],
       })));
       for (const threadId of idleIds) if (threadId !== "") prFreshness.threadIdle(threadId);
       return true;
@@ -1664,19 +1688,54 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  /**
-   * Threads this plugin started, and the cluster each was started for, read
-   * from this plugin's own thread metadata. Only threads attributed to this
-   * plugin are ever read, so a relist costs one metadata read per thread the
-   * Board started, not one per thread in BB.
-   */
+  /** Plugin-origin, intent-bearing and explicitly linked threads get one cached metadata read. */
   const startedFor = new Map<string, string>();
+  const threadPrUrls = new Map<string, string[]>();
+  const metadataRead = new Set<string>();
+  let linkBackfill: Promise<void> | null = null;
+
+  function backfillPrLinks(rows: readonly { id: string }[]): void {
+    if (linkBackfill) return;
+    linkBackfill = (async () => {
+      if (await bb.storage.kv.get<boolean>("threadPrLinksBackfilled")) return;
+      let failed = false;
+      for (let offset = 0; offset < rows.length && !disposal.signal.aborted; offset += 8) {
+        await Promise.all(rows.slice(offset, offset + 8).map(async (row) => {
+          if (metadataRead.has(row.id)) return;
+          try {
+            const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: row.id });
+            const urls = [metadata.linkedPrUrl, metadata.prUrl].flatMap((value) =>
+              typeof value === "string" && canonicalPrUrl(value) ? [canonicalPrUrl(value)!] : []);
+            if (urls.length) {
+              db.prepare(`INSERT OR IGNORE INTO thread_pr_link_ids (thread_id) VALUES (?)`).run(row.id);
+              threadPrUrls.set(row.id, [...new Set(urls)]);
+              metadataRead.add(row.id);
+            }
+          } catch { failed = true; }
+        }));
+      }
+      if (disposal.signal.aborted) return;
+      if (!failed) await bb.storage.kv.set("threadPrLinksBackfilled", true);
+      prFreshnessLinks.add("");
+      announceThreads();
+    })().catch((error) => { if (!disposal.signal.aborted) bb.log.warn(`thread PR link backfill failed: ${String(error).slice(0, 200)}`); })
+      .finally(() => { linkBackfill = null; });
+  }
 
   async function readStartedFor(row: { id: string; originPluginId: string | null }): Promise<void> {
-    if (row.originPluginId !== bb.pluginId || startedFor.has(row.id)) return;
+    if (metadataRead.has(row.id)) return;
+    if (row.originPluginId !== bb.pluginId && !hasIntent(row.id) &&
+      db.prepare(`SELECT 1 FROM thread_pr_link_ids WHERE thread_id = ?`).get(row.id) === undefined) return;
     try {
-      const ticket = startedForOf(await bb.sdk.threads.getPluginMetadata({ threadId: row.id }));
-      if (ticket !== null) startedFor.set(row.id, ticket);
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: row.id });
+      if (row.originPluginId === bb.pluginId) {
+        const ticket = startedForOf(metadata);
+        if (ticket !== null) startedFor.set(row.id, ticket);
+      }
+      const urls = [metadata.linkedPrUrl, metadata.prUrl].flatMap((url) =>
+        typeof url === "string" && canonicalPrUrl(url) ? [canonicalPrUrl(url)!] : []);
+      threadPrUrls.set(row.id, [...new Set(urls)]);
+      metadataRead.add(row.id);
     } catch (error) {
       bb.log.warn(`thread ${row.id}: metadata read failed: ${String(error).slice(0, 200)}`);
     }
@@ -1755,6 +1814,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadsSynced = true;
       reconcileRuns(rows);
       announceThreads();
+      backfillPrLinks(rows);
     } catch (error) {
       bb.log.warn(`thread sync failed: ${String(error).slice(0, 300)}`);
     }
@@ -2536,6 +2596,95 @@ export default async function plugin(bb: BbPluginApi) {
     return [];
   }
 
+  function knownPr(prUrl: string): { pr: Pr; repo: string; path: string | null } | null {
+    const canonical = canonicalPrUrl(prUrl);
+    if (canonical === null) return null;
+    const local = readUnits().find((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonical);
+    if (local?.pr) return { pr: local.pr, repo: prTarget(canonical)!.slug, path: local.path };
+    const remote = inventory.get(canonical);
+    return remote ? { pr: remote.pr, repo: remote.repo, path: null } : null;
+  }
+
+  async function effortScope(prUrl: string): Promise<{ key: string; name: string; goal: string; members: EffortMembers; establishedId: string | null } | null> {
+    const canonical = canonicalPrUrl(prUrl);
+    if (!canonical) return null;
+    const current = await board();
+    const local = current.groups.find((group) => group.level === "effort" && group.clusters.some((cluster) =>
+      cluster.units.some((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonical)));
+    const ticket = local?.clusters.find((cluster) => cluster.units.some((unit) =>
+      unit.pr && canonicalPrUrl(unit.pr.url) === canonical))?.ticket;
+    const owner = effortStore.owner("prUrl", canonical) ?? (ticket ? effortStore.owner("ticket", ticket) : null);
+    if (owner) return { key: effortStore.sourceKey(owner.id) ?? owner.key, name: owner.name, goal: owner.goal,
+      members: owner.members, establishedId: owner.id };
+    const remoteKey = current.prInventory.entries.find((entry) => canonicalPrUrl(entry.pr.url) === canonical)?.effortKey;
+    const key = local?.key ?? remoteKey;
+    if (!key) return null;
+    const group = current.groups.find((entry) => entry.key === key);
+    if (!group || group.level !== "effort" || outsideGrouping(group.key)) return null;
+    const keys = new Set([group.key]);
+    for (let pass = 0; pass < 3; pass++) for (const entry of current.groups) if (entry.parentKey && keys.has(entry.parentKey)) keys.add(entry.key);
+    const clusters = current.groups.filter((entry) => keys.has(entry.key)).flatMap((entry) => entry.clusters);
+    const members = normalizeMembers({
+      tickets: [...clusters.map((cluster) => cluster.ticket), ...(group.key.startsWith("ticket:") && clusters.length === 0 ? [group.key.slice(7)] : [])],
+      prUrls: [...clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [unit.pr.url] : [])),
+        ...current.prInventory.entries.filter((entry) => entry.effortKey && keys.has(entry.effortKey)).map((entry) => entry.pr.url)],
+    });
+    return members.tickets.length + members.prUrls.length > 0
+      ? { key, name: group.name, goal: "", members, establishedId: null } : null;
+  }
+
+  async function prThreadContext(prUrl: string) {
+    const known = knownPr(prUrl);
+    if (known === null) return { threads: [], recommendedThreadId: null };
+    const canonical = canonicalPrUrl(known.pr.url)!;
+    type Role = "coordinator" | "repo" | "pr" | "linked";
+    const links = new Map<string, { id: string; title: string; tier: ThreadTier; role: Role }>();
+    const offer = (id: string | null, title: string, role: Role, tier: ThreadTier = "started") => {
+      if (!id) return;
+      const old = links.get(id);
+      if (!old || ({ repo: 0, coordinator: 1, pr: 2, linked: 3 })[role] < ({ repo: 0, coordinator: 1, pr: 2, linked: 3 })[old.role]) {
+        links.set(id, { id, title, tier, role });
+      }
+    };
+    for (const unit of readUnits()) if (unit.pr && canonicalPrUrl(unit.pr.url) === canonical) {
+      for (const link of await linkedThreads(unit.path)) offer(link.id, link.title, "linked", link.tier);
+    }
+    for (const [threadId, urls] of threadPrUrls) if (urls.includes(canonical)) offer(threadId, "Linked PR thread", "pr");
+    const current = await board();
+    const ticket = current.groups.flatMap((group) => group.clusters).find((cluster) =>
+      cluster.units.some((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonical))?.ticket;
+    const effort = effortStore.owner("prUrl", canonical) ?? (ticket ? effortStore.owner("ticket", ticket) : null);
+    const repoRecord = effort ? effortStore.repoController(effort.id, known.repo) : null;
+    let invalidRepoId: string | null = null;
+    if (effort) {
+      offer(effort.coordinatorThreadId, "Effort coordinator", "coordinator");
+      offer(repoRecord?.threadId ?? null, "Repository controller", "repo");
+      for (const worker of effortStore.workers(effort.id, canonical)) offer(worker.threadId, "PR worker", "pr");
+    }
+    for (const run of runs.recent(0, 1_000)) if (run.prUrl && canonicalPrUrl(run.prUrl) === canonical) offer(run.threadId, "Previous PR action", "pr");
+    for (const batch of advance.list()) for (const job of batch.jobs) if (canonicalPrUrl(job.prUrl) === canonical) {
+      offer(job.threadId, "Advance worker", "pr");
+      for (const previous of job.previousAttempts) offer(previous.threadId, "Previous Advance worker", "pr");
+    }
+    for (const attempt of dispatch.attempts()) if (canonicalPrUrl(attempt.prUrl) === canonical) offer(attempt.threadId, "Review worker", "pr");
+    const threads = (await Promise.all([...links.values()].map(async (link) => {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId: link.id, include: "environment" });
+        if (thread.archivedAt !== null || thread.deletedAt !== null || thread.visibility !== "visible") return null;
+        const environmentHostId = "environment" in thread ? thread.environment?.hostId : undefined;
+        const validRepo = link.role !== "repo" || (repoRecord?.state === "ready" && thread.projectId === repoRecord.projectId &&
+          thread.parentThreadId === effort?.coordinatorThreadId &&
+          environmentHostId === repoRecord.hostId && thread.canSpawnChild);
+        if (!validRepo) invalidRepoId = link.id;
+        return { ...link, role: validRepo ? link.role : "linked" as const,
+          title: (thread.title ?? thread.titleFallback ?? link.title).slice(0, 200), active: thread.status === "active" };
+      } catch { return null; }
+    }))).filter((thread): thread is NonNullable<typeof thread> => thread !== null);
+    const repo = threads.find((thread) => thread.role === "repo");
+    const recommendedThreadId = repo?.id ?? (threads.length === 1 && threads[0]!.id !== invalidRepoId ? threads[0]!.id : null);
+    return { threads, recommendedThreadId };
+  }
+
   async function effortPlan(groupKey: string): Promise<EffortPlan> {
     const current = await board();
     const established = effortStore.source(groupKey);
@@ -2772,6 +2921,42 @@ export default async function plugin(bb: BbPluginApi) {
       return matches;
     },
   });
+  const repoControllers = createRepoControllerService(effortStore, {
+    get: async (threadId) => {
+      const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
+      return { ...thread, environmentHostId: "environment" in thread ? thread.environment?.hostId ?? null : null };
+    },
+    recover: async (effortId, repo, projectId) => {
+      const matches: string[] = [];
+      for (let offset = 0; offset < 2_000; offset += 100) {
+        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+        for (const thread of rows) {
+          const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
+          if (metadata.effortId === effortId && metadata.repo === repo && metadata.role === "repo" &&
+            thread.archivedAt === null && thread.deletedAt === null) matches.push(thread.id);
+        }
+        if (rows.length < 100) break;
+      }
+      return matches;
+    },
+    spawn: async (args) => {
+      const projects = await bb.sdk.projects.list();
+      const project = projects.find((entry) => entry.id === args.projectId);
+      const source = project?.sources.find((entry) => entry.hostId === (effortStore.repoController(args.pluginMetadata.effortId, args.pluginMetadata.repo)?.hostId));
+      if (!source) throw new Error("The repository controller needs a source on its selected host.");
+      return bb.sdk.threads.spawn({ ...args, environment: { type: "provider", environmentProviderId: "git-worktree",
+        machine: { type: "existing", hostId: source.hostId }, inputs: { branch: { kind: "default" } } } });
+    },
+  });
+
+  async function ensureRepoController(effort: NonNullable<ReturnType<typeof effortStore.get>>, repo: string, projectId: string, hostId: string) {
+    const coordinated = await coordinators.ensureExisting(effort.id, projectId);
+    if (!coordinated.coordinatorThreadId) throw new Error("The effort coordinator has no thread. Inspect it before launching PR work.");
+    const controller = await repoControllers.ensure({ effort: coordinated, repo, projectId, hostId,
+      coordinatorThreadId: coordinated.coordinatorThreadId });
+    announceThreads();
+    return controller;
+  }
 
   const manualPrWrites = new Set<string>();
   // SDK spawn/send can return before thread events reach the board cache.
@@ -2802,11 +2987,14 @@ export default async function plugin(bb: BbPluginApi) {
       .sort((a, b) => Number(b.pr?.url === prUrl) - Number(a.pr?.url === prUrl) || a.path.localeCompare(b.path));
     const source = candidates.map((unit) => ({ unit, project: projectForPath(projects, unit.path) }))
       .find((entry) => entry.project?.hostId === hostId);
+    const localPath = units.find((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonicalPrUrl(prUrl))?.path ?? null;
+    const scope = await effortScope(prUrl);
     const fallback: AdvanceFacts = { prUrl, repo: target.slug, number: tracked.number, title: tracked.title,
       headOid: "", baseOid: "", baseRefName: tracked.baseRefName ?? "", headRefName: tracked.headRefName ?? "",
       needsPreparation: false, needsFeedback: false, eligible: false, detail: "GitHub inspection failed", workspace: source ? "create" : "unavailable",
       projectId: source?.project?.projectId ?? null, hostId, sourcePath: source?.unit.path ?? null,
-      path: units.find((unit) => unit.pr?.url.toLowerCase() === prUrl.toLowerCase())?.path ?? null, readiness: "needs-attention", blockedBy: null };
+      path: localPath, effortId: scope?.establishedId ?? null, effortKey: scope?.key ?? null,
+      effortMembers: scope?.members ?? null, readiness: "needs-attention", blockedBy: null };
     try {
       const result = await host.call("advanceInspect", { prUrl }, { hostId, timeoutMs: 60_000, signal: disposal.signal });
       if (!result.ok) return { ...fallback, detail: result.error };
@@ -2834,22 +3022,44 @@ export default async function plugin(bb: BbPluginApi) {
     return [...links.values()];
   }
   async function advanceRepairCandidates(facts: AdvanceFacts, job: AdvanceJob) {
-    const links = await advanceRepairLinks(facts, job.threadId);
+    const controller = facts.effortKey ? effortStore.source(facts.effortKey) : null;
+    const repo = controller ? effortStore.repoController(controller.id, facts.repo) : null;
+    const links = facts.effortKey ? (repo?.threadId && repo.state === "ready"
+      ? [{ id: repo.threadId, title: "Repository controller", tier: "started" as const }] : [])
+      : await advanceRepairLinks(facts, job.threadId);
     const selected = links.filter((link) => link.id !== job.threadId).slice(0, 7);
     const previous = links.find((link) => link.id === job.threadId);
     if (previous) selected.push(previous);
     const candidates = (await Promise.all(selected.map(async (link): Promise<ThreadCandidate | null> => {
       try {
-        const thread = await bb.sdk.threads.get({ threadId: link.id });
+        const thread = await bb.sdk.threads.get({ threadId: link.id, include: "environment" });
         if (thread.archivedAt !== null || thread.deletedAt !== null || thread.projectId !== facts.projectId) return null;
+        if (facts.effortKey && (!controller || !repo || repo.state !== "ready" ||
+          thread.parentThreadId !== controller.coordinatorThreadId ||
+          !("environment" in thread) || thread.environment?.hostId !== repo.hostId)) return null;
         return { ...link, title: (thread.title ?? thread.titleFallback ?? link.title).slice(0, 200), updatedAt: thread.updatedAt,
           running: thread.status !== "idle" && thread.status !== "error", contextUsed: null, canSpawnChild: thread.canSpawnChild };
       } catch { return null; }
     }))).filter((candidate): candidate is ThreadCandidate => candidate !== null);
-    return { candidates, recommendation: recommendThread(facts.needsFeedback ? "address-review" : "resolve-conflicts", candidates, { send: false, subthread: true, contextUsage: false }) };
+    return { candidates, recommendation: facts.effortKey && candidates.length === 0
+      ? { mode: "new" as const, threadId: null, reason: "Create the repository controller, then start a bounded PR repair beneath it." }
+      : recommendThread(facts.needsFeedback ? "address-review" : "resolve-conflicts", candidates, { send: false, subthread: true, contextUsage: false }) };
+  }
+  async function resolveRepoController(facts: AdvanceFacts): Promise<string | null> {
+      if (!facts.effortKey || !facts.effortMembers) return null;
+      if (!facts.projectId) throw new Error("The repository project changed. Preview this PR again.");
+      const current = await effortScope(facts.prUrl);
+      if (!current || current.key !== facts.effortKey || !sameMembers(current.members, facts.effortMembers)) {
+        throw new Error("This PR's effort or cohort changed. Preview it again before launching.");
+      }
+      const effort = effortStore.source(facts.effortKey) ?? effortStore.establish({ sourceKey: facts.effortKey,
+        name: current.name, goal: current.goal, projectId: facts.projectId, members: current.members, coordinatorState: "none" });
+      if (facts.effortId && facts.effortId !== effort.id) throw new Error("This PR moved to another effort. Preview it again.");
+      return (await ensureRepoController(effort, facts.repo, facts.projectId, facts.hostId)).threadId;
   }
   const advance = createAdvanceService(db, {
     inspect: advanceInspect,
+    controller: resolveRepoController,
     assertAdvanceAllowed: (prUrl) => {
       const held = holdMessage(prUrl);
       if (held) throw new Error(held);
@@ -2859,11 +3069,17 @@ export default async function plugin(bb: BbPluginApi) {
       if (!facts.projectId) throw new Error("No project is available for this PR repair");
       if (mode === "subthread" && parentThreadId === null) throw new Error("A repair subthread needs its validated parent.");
       if (mode === "new" && parentThreadId !== null) throw new Error("A new repair thread cannot specify a parent.");
+      const controllerId = await resolveRepoController(facts);
+      if (facts.effortKey && !controllerId) throw new Error("The repository controller could not be resolved for this effort.");
+      if (controllerId && parentThreadId && parentThreadId !== controllerId) {
+        throw new Error("The selected repair parent is not this effort's repository controller. Reopen the repair preview.");
+      }
+      const actualParentId = controllerId ?? parentThreadId;
       const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId,
         title: `${facts.repo.split("/").at(-1)} #${facts.number}: repair ${facts.needsFeedback ? "review feedback" : facts.needsPreparation ? "branch preparation" : "validation"}`,
-        prompt: parentThreadId ? `${prompt}\nAuthor context reference: @thread:${parentThreadId}. Consult its relevant PR decisions only if the live PR description, review discussion, and code do not establish the intended behavior.` : prompt,
+        prompt: actualParentId ? `${prompt}\nParent context reference: @thread:${actualParentId}. Consult its relevant PR decisions only if the live PR description, review discussion, and code do not establish the intended behavior.` : prompt,
         environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
-        ...(mode === "subthread" ? { parentThreadId: parentThreadId! } : {}),
+        ...(actualParentId ? { parentThreadId: actualParentId } : {}),
         pluginMetadata: { advanceJobId: attemptId, role: "advance-repair", prUrl: facts.prUrl } });
       return thread.id;
     },
@@ -2898,12 +3114,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
     spawn: async (facts, workerPath, prompt, jobId) => {
       if (!facts.projectId) throw new Error("No project is available for the repository worker");
-      const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId, title: "Rebasing...", prompt,
+      const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId, title: `📦 ${facts.repo} PR #${facts.number}`, prompt,
         environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
         pluginMetadata: { advanceJobId: jobId, role: "rebase-worker" } });
       return thread.id;
     },
-    send: async (threadId, prompt) => { await bb.sdk.threads.send({ threadId, mode: "auto", input: [{ type: "text", text: prompt, mentions: [] }] }); },
+    send: async (threadId, prompt) => { await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text: prompt, mentions: [] }] }); },
     thread: async (threadId) => {
       const thread = await bb.sdk.threads.get({ threadId });
       return { ...thread, output: thread.status === "idle" ? (await bb.sdk.threads.output({ threadId })).output ?? "" : "" };
@@ -2941,10 +3157,24 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const active = await activeCheckoutThread(path, args.environment.hostId, (offset) => bb.sdk.threads.list({ archived: false, includeHidden: true, limit: 100, offset }));
           if (active) throw new Error(`Thread ${active} is already working in this checkout. Wait for it or stop it before starting another writer.`);
+          beforeSpawn?.();
           const raw = readUnits().find((unit) => unit.path === path);
-          const effort = (raw?.pr ? effortStore.owner("prUrl", raw.pr.url) : null) ?? effortStore.owner("ticket", args.pluginMetadata.ticket);
+          let effort = (raw?.pr ? effortStore.owner("prUrl", raw.pr.url) : null) ?? effortStore.owner("ticket", args.pluginMetadata.ticket);
+          if (!effort && raw?.pr) {
+            const scope = await effortScope(raw.pr.url);
+            if (scope) effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
+              name: scope.name, goal: scope.goal, projectId: args.projectId, members: scope.members, coordinatorState: "none" });
+          }
+          if (effort && raw?.pr) {
+            const repo = prTarget(raw.pr.url)?.slug;
+            if (!repo) throw new Error("The tracked PR URL is invalid. Refresh before launching work.");
+            await ensureRepoController(effort, repo, args.projectId, args.environment.hostId);
+          }
           const route = effort && raw?.pr ? await effortParent(effortStore, effort, raw.pr.url, (id) => bb.sdk.threads.get({ threadId: id })) : null;
-          let parentThreadId = args.parentThreadId ?? route?.thread.id;
+          if (args.parentThreadId && route && args.parentThreadId !== route.thread.id) {
+            throw new Error("The selected parent is not this effort's repository controller. Reopen the action preview.");
+          }
+          const parentThreadId = route?.thread.id ?? args.parentThreadId;
           if (parentThreadId) {
             const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
             if (!parent.canSpawnChild || parent.archivedAt !== null || parent.deletedAt !== null) throw new Error("The selected parent can no longer own a child thread. Reopen the action preview.");
@@ -3068,7 +3298,7 @@ export default async function plugin(bb: BbPluginApi) {
         dispatch.update(id, "needs-you", "A linked thread or row action became active before launch");
         return;
       }
-      const recommendation = plan.recommendation;
+      const recommendation = await effortScope(candidate.prUrl) ? { mode: "new" as const, threadId: null } : plan.recommendation;
       const mode = recommendation.mode === "subthread" ? "subthread" : "new";
       const prompt = `Work on ${candidate.prUrl} in checkout ${candidate.path}. ${candidate.reason}. Inspect the relevant failure or review feedback, make a focused local repair, and run relevant tests. Do not push, reply to GitHub, update the branch remotely, merge, or deploy. Before any remote write, pause for the user's approval; if an approval interaction is unavailable, stop with a local proposal and report what remains. Do not claim the PR gate cleared until a fresh remote scan confirms it.`;
       const runId = runs.begin({ ...(await runTarget(candidate.path)), action: candidate.action, mode, threadId: null });
@@ -3321,6 +3551,10 @@ export default async function plugin(bb: BbPluginApi) {
       const canonical = canonicalPrUrl(prUrl);
       if (!canonical || !context.linkablePrs.some((pr) => pr.url === canonical)) return { ok: false as const, error: "Choose a tracked PR from the picker." };
       await bb.sdk.threads.updatePluginMetadata({ threadId, set: { linkedPrUrl: canonical } });
+      db.prepare(`INSERT OR IGNORE INTO thread_pr_link_ids (thread_id) VALUES (?)`).run(threadId);
+      threadPrUrls.set(threadId, [...new Set([...(threadPrUrls.get(threadId) ?? []), canonical])]);
+      prFreshnessLinks.add("");
+      announceThreads();
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return threadEffortContext(threadId);
     },
@@ -3383,29 +3617,92 @@ export default async function plugin(bb: BbPluginApi) {
     },
     thread_restore: ({ threadId }) => restoreArchivedThread(bb.sdk.threads, archiveStore, threadId),
     thread_archived: async () => (await archiveStore.list()).sort((a, b) => b.archivedAt - a.archivedAt).slice(0, ARCHIVE_HISTORY_LIMIT),
-    thread_message: async ({ path, prUrl, threadId, message }) => withPrWriter(path, readUnits().find((unit) => unit.path === path)?.pr?.url, async () => {
-      const found = await scannedUnit(path);
-      if (found === undefined) return { ok: false as const, error: "That checkout is no longer on the board. Refresh and try again." };
-      const pr = found.raw.pr;
-      if (pr === null || pr.state !== "OPEN") return { ok: false as const, error: "This row no longer has an open pull request." };
-      if (pr.url !== prUrl) return { ok: false as const, error: "This checkout now points to a different pull request. Refresh the board before sending." };
-      return sendRowMessage(
-        {
-          get: ({ threadId: id }) => bb.sdk.threads.get({ threadId: id }),
-          send: async (args) => {
-            const result = await bb.sdk.threads.send(args);
-            pendingPrThreads.set(prUrl.toLowerCase(), { id: args.threadId, startedAt: Date.now() });
-            return result;
-          },
-        },
-        {
-          threadId,
-          message,
-          links: await linkedThreads(path),
-          pr: { repo: found.raw.repo ?? found.raw.dirName, number: pr.number, title: pr.title, url: pr.url, checkout: path },
-        },
-      );
-    }),
+    pr_thread_context: ({ prUrl }) => prThreadContext(prUrl),
+    thread_message: async ({ path, prUrl, threadId, message }) => {
+      const canonical = canonicalPrUrl(prUrl);
+      const known = knownPr(prUrl);
+      if (canonical === null || known?.pr.state !== "OPEN") return { ok: false as const, error: "That open PR is no longer on the board. Refresh before sending." };
+      if (path !== undefined && (known.path !== path ||
+        !readUnits().some((unit) => unit.path === path && unit.pr && canonicalPrUrl(unit.pr.url) === canonical))) {
+        return { ok: false as const, error: "This checkout now points to a different pull request. Refresh before sending." };
+      }
+      const held = holdMessage(canonical);
+      if (held) return { ok: false as const, error: held };
+      if (manualPrWrites.has(canonical)) return { ok: false as const, error: "Another action owns this PR." };
+      manualPrWrites.add(canonical);
+      try {
+      const context = await prThreadContext(canonical);
+      if (!context.threads.some((thread) => thread.id === threadId)) {
+        return { ok: false as const, error: "That agent thread is no longer linked to this PR. Refresh and choose another." };
+      }
+      if (known.path && launchingCheckouts.has(known.path)) return { ok: false as const, error: "Another action is launching in this checkout." };
+      const activeOwnerIds = new Set<string>();
+      for (const run of runs.recent(0, 1_000)) if (run.prUrl && canonicalPrUrl(run.prUrl) === canonical &&
+        (run.status === "running" || run.status === "needs-you") && run.threadId) activeOwnerIds.add(run.threadId);
+      for (const batch of advance.list()) for (const job of batch.jobs) if (canonicalPrUrl(job.prUrl) === canonical &&
+        (["queued", "launching", "running", "verifying"].includes(job.status) || job.uncertain)) {
+        if (job.status === "queued") return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
+        if (!job.threadId) return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
+        activeOwnerIds.add(job.threadId);
+      }
+      for (const attempt of dispatch.attempts()) if (canonicalPrUrl(attempt.prUrl) === canonical &&
+        ["launching", "running", "verifying", "needs-you"].includes(attempt.status)) {
+        if (!attempt.threadId) return { ok: false as const, error: "Automatic dispatch is launching a worker for this PR." };
+        activeOwnerIds.add(attempt.threadId);
+      }
+      const pending = pendingPrThreads.get(canonical);
+      if (pending && pending.id !== threadId) {
+        try {
+          const thread = await bb.sdk.threads.get({ threadId: pending.id });
+          if ((thread.status !== "idle" && thread.status !== "error") || Date.now() - pending.startedAt < 120_000) activeOwnerIds.add(pending.id);
+          else pendingPrThreads.delete(canonical);
+        } catch { activeOwnerIds.add(pending.id); }
+      }
+      if (known.path) {
+        const hostId = (await bb.sdk.system.config()).primaryHostId;
+        if (hostId) {
+          const writer = await activeCheckoutThread(known.path, hostId, (offset) =>
+            bb.sdk.threads.list({ archived: false, includeHidden: true, limit: 100, offset }));
+          if (writer && writer !== threadId) activeOwnerIds.add(writer);
+        }
+      }
+      let sendMode: "auto" | "queue-if-active" = "auto";
+      if (context.threads.find((thread) => thread.id === threadId)?.role === "repo") {
+        const anotherPr = runs.recent(0, 1_000).some((run) => run.threadId === threadId && run.prUrl &&
+          canonicalPrUrl(run.prUrl) !== canonical && (run.status === "running" || run.status === "needs-you")) ||
+          advance.list().some((batch) => batch.jobs.some((job) => job.threadId === threadId && canonicalPrUrl(job.prUrl) !== canonical &&
+            ["launching", "running", "verifying"].includes(job.status)));
+        if (anotherPr) sendMode = "queue-if-active";
+      }
+      if ([...activeOwnerIds].some((id) => id !== threadId)) {
+        return { ok: false as const, error: "Another agent thread is working on this PR. Open its thread before sending." };
+      }
+        const selected = await bb.sdk.threads.get({ threadId });
+        const runId = selected.status === "idle" && runs.openIn(threadId).length === 0
+          ? runs.begin({ path: known.path ?? "", ticket: null, prUrl: canonical, prNumber: known.pr.number,
+            action: "message", mode: "continue", threadId }) : null;
+        try {
+          const result = await sendRowMessage(
+            { get: ({ threadId: id }) => bb.sdk.threads.get({ threadId: id }), send: (args) => {
+              if (knownPr(canonical)?.pr.state !== "OPEN" || holdMessage(canonical)) throw new Error("This PR changed or is on hold. Refresh before sending.");
+              return bb.sdk.threads.send(args);
+            } },
+            { threadId, message, mode: sendMode, links: context.threads, pr: { repo: known.repo, number: known.pr.number,
+              title: known.pr.title, url: canonical, checkout: known.path } },
+          );
+          if (result.ok) {
+            pendingPrThreads.set(canonical, { id: threadId, startedAt: Date.now() });
+            prFreshnessLinks.add("");
+            if (result.delivery === "queued" && runId !== null) runs.discard(runId);
+            if (runId !== null && result.delivery === "sent") announceThreads();
+          } else if (runId !== null) runs.discard(runId);
+          return result;
+        } catch (error) {
+          if (runId !== null) runs.discard(runId);
+          return { ok: false as const, error: String(error).slice(0, 400) };
+        }
+      } finally { manualPrWrites.delete(canonical); }
+    },
     action_merge_preview: async (input) => {
       const target = await actionable(input);
       if (!target.ok) return target;
@@ -3464,9 +3761,14 @@ export default async function plugin(bb: BbPluginApi) {
       const found = await scannedUnit(path);
       const effort = (found?.raw.pr ? effortStore.owner("prUrl", found.raw.pr.url) : null) ?? (found ? effortStore.owner("ticket", found.ticket) : null);
       const parent = effort && found?.raw.pr ? await effortParent(effortStore, effort, found.raw.pr.url, (id) => bb.sdk.threads.get({ threadId: id })) : null;
-      if (parent) plan.recommendation = { mode: "subthread", threadId: parent.thread.id, reason: parent.role === "followup"
-        ? `A bounded follow-up under this PR's worker will report its result there.`
-        : `A PR worker under ${effort!.name} will report its result to the effort coordinator.` };
+      if (found?.raw.pr && await effortScope(found.raw.pr.url)) {
+        plan.candidates = parent ? (await planAgent(agentSdk, action,
+          [{ id: parent.thread.id, title: parent.thread.title ?? "Repository controller", tier: "started" }])).candidates : [];
+        if (parent) plan.recommendation = { mode: "subthread", threadId: parent.thread.id,
+          reason: `A PR worker under ${effort!.name}'s repository controller will report its result there.` };
+        else plan.recommendation = { mode: "new", threadId: null,
+          reason: `Launch this effort's repository controller, then start a bounded PR worker beneath it.` };
+      }
       return { ok: true as const, ...plan };
     },
     agent_run: async ({ path, action, mode, threadId, prompt }) => withPrWriter(path, readUnits().find((unit) => unit.path === path)?.pr?.url, async () => {
@@ -3474,10 +3776,16 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
       }
       const found = await scannedUnit(path);
+      const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : null;
+      const controller = scope?.establishedId && found?.raw.pr
+        ? effortStore.repoController(scope.establishedId, prTarget(found.raw.pr.url)?.slug ?? "") : null;
+      if (scope && mode === "subthread" && (!controller?.threadId || threadId !== controller.threadId)) {
+        return { ok: false as const, error: "Choose this effort's repository controller as the parent, or reopen the action preview." };
+      }
       if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
         return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
       }
-      const linked = (await linkedThreads(path)).map((thread) => thread.id);
+      const linked = [...new Set([...(await linkedThreads(path)).map((thread) => thread.id), ...(controller?.threadId ? [controller.threadId] : [])])];
       if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
         return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
       }

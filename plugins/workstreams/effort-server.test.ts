@@ -25,7 +25,8 @@ async function setup() {
       spawn: async (args: Record<string, any>) => {
         spawns.push(args);
         const id = `thr-${spawns.length}`;
-        const row = makeThreadResponse({ id, projectId: args.projectId, title: args.title ?? "PR worker", status: "idle", environmentPath: args.environment.workspace?.path ?? "/planning/worktree" } as never);
+        const row = makeThreadResponse({ id, projectId: args.projectId, parentThreadId: args.parentThreadId ?? null,
+          title: args.title ?? "PR worker", status: "idle", environmentPath: args.environment.workspace?.path ?? "/planning/worktree" } as never);
         threads.set(id, row); metadata.set(id, args.pluginMetadata);
         return row;
       },
@@ -70,16 +71,20 @@ describe("established effort coordination through the server", () => {
     expect(spawns).toHaveLength(0);
   });
 
-  it("routes the first PR worker to the coordinator and a bounded follow-up to that worker", async () => {
+  it("routes manual PR workers through one persistent repository controller", async () => {
     const { harness, input, spawns } = await setup();
     await harness.callRpc("effort_coordinate", input);
-    expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { mode: "subthread", threadId: "thr-1" } });
-    const action = { path: PATH, action: "resolve-conflicts", mode: "subthread", threadId: "thr-1", prompt: "Inspect and repair this PR." };
-    expect(await harness.callRpc("agent_run", action)).toMatchObject({ ok: true, threadId: "thr-2" });
-    expect(spawns[1]).toMatchObject({ parentThreadId: "thr-1", environment: { workspace: { path: PATH } }, pluginMetadata: { role: "pr", prUrl: URL, ticket: "ABC-101" } });
-    expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { threadId: "thr-2" } });
-    expect(await harness.callRpc("agent_run", { ...action, threadId: "thr-2" })).toMatchObject({ ok: true });
-    expect(spawns[2]).toMatchObject({ parentThreadId: "thr-2", pluginMetadata: { role: "followup" } });
+    expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { mode: "new", threadId: null } });
+    const action = { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Inspect and repair this PR." };
+    expect(await harness.callRpc("agent_run", action)).toMatchObject({ ok: true, threadId: "thr-3" });
+    expect(spawns[1]).toMatchObject({ projectId: "proj-inkwell", parentThreadId: "thr-1", title: "📦 inkwell/folio",
+      environment: { type: "provider", environmentProviderId: "git-worktree" }, pluginMetadata: { role: "repo", repo: "inkwell/folio" } });
+    expect(spawns[2]).toMatchObject({ parentThreadId: "thr-2", environment: { workspace: { path: PATH } },
+      pluginMetadata: { role: "pr", prUrl: URL, ticket: "ABC-101" } });
+    expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { mode: "subthread", threadId: "thr-2" } });
+    expect(await harness.callRpc("agent_run", { ...action, mode: "subthread", threadId: "thr-2" })).toMatchObject({ ok: true, threadId: "thr-4" });
+    expect(spawns[3]).toMatchObject({ parentThreadId: "thr-2", pluginMetadata: { role: "pr", prUrl: URL } });
+    expect(spawns.filter((spawn) => spawn.pluginMetadata?.role === "repo")).toHaveLength(1);
   });
 
   it("refuses an active writer from another thread before launching a repair", async () => {

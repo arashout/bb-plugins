@@ -49,14 +49,16 @@ describe("agent runs", () => {
     expect(await store.signal("thr-folio-2", { kind: "active" }, read)).toEqual([]);
   });
 
-  it("does not attribute an earlier turn's Result to a legacy continue run", async () => {
+  it("waits for a continue run's own active signal before an idle turn can finish it", async () => {
     const { store, tick } = setup();
-    store.begin({ ...TARGET, action: "address-comments", mode: "continue", threadId: "thr-margin-3" });
+    const id = store.begin({ ...TARGET, action: "address-comments", mode: "continue", threadId: "thr-margin-3" });
     tick(500);
     const none = async () => "Result: the earlier task";
-    expect(await store.signal("thr-margin-3", { kind: "active" }, none)).toEqual([]);
-    const [done] = await store.signal("thr-margin-3", { kind: "idle", text: "Result: the earlier task" }, none);
-    expect(done).toMatchObject({ status: "done", result: null });
+    expect(await store.signal("thr-margin-3", { kind: "idle", text: "Result: the earlier task" }, none)).toEqual([]);
+    expect(store.recent(0).find((run) => run.id === id)?.status).toBe("running");
+    expect(await store.signal("thr-margin-3", { kind: "active" }, none)).toEqual([expect.objectContaining({ id, status: "running" })]);
+    const [done] = await store.signal("thr-margin-3", { kind: "idle", text: "Result: the requested task" }, none);
+    expect(done).toMatchObject({ status: "done", result: "the requested task" });
   });
 
   it("does not give one queued turn's Result to two open actions in the same legacy thread", async () => {
@@ -153,11 +155,9 @@ describe("stranded continue runs", () => {
     expect(store.recent(0)[0]?.status).toBe("running");
   });
 
-  it("leaves a new-thread run alone, while a legacy continue run remains ambiguous", async () => {
+  it("leaves a new-thread run alone while closing an unarmed continue run after six hours", async () => {
     const { store, tick } = setup();
     store.begin({ ...TARGET, action: "address-review", mode: "continue", threadId: "thr-colophon-5" });
-    tick(1_000);
-    expect(await store.signal("thr-colophon-5", { kind: "active" }, async () => null)).toEqual([]);
     const fresh = store.begin({ ...TARGET, action: "investigate-ci", mode: "new", threadId: null });
     store.attach(fresh, "thr-colophon-6");
     tick(7 * HOUR);

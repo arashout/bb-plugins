@@ -23,7 +23,15 @@ function unit(mergeStateStatus: "DIRTY" | "CLEAN"): RawUnit {
 
 async function setup(second = false) {
   const beforeProjects = vi.fn(async () => {});
-  const spawn = vi.fn(async () => makeThreadResponse({ id: "thr-dispatch", status: "active" }));
+  const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
+  const spawn = vi.fn(async (args: { projectId: string; parentThreadId?: string; title?: string; pluginMetadata?: { role?: string; repo?: string } }) => {
+    const role = args.pluginMetadata?.role;
+    const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? `thr-repo-${args.pluginMetadata?.repo?.replaceAll("/", "-")}` : "thr-dispatch";
+    const row = makeThreadResponse({ id, projectId: args.projectId, parentThreadId: args.parentThreadId ?? null,
+      title: args.title ?? "PR worker", status: role === "pr" ? "active" : "idle" } as never);
+    threads.set(id, row);
+    return row;
+  });
   const another = { ...unit("DIRTY"), path: "/p/web-abc-101", dirName: "web-abc-101", repo: "acme/web",
     pr: { ...unit("DIRTY").pr!, number: 43, url: "https://github.com/acme/web/pull/43" } };
   const inspected = new Map([[PATH, unit("DIRTY")], ...(second ? [[another.path, another] as const] : [])]);
@@ -37,7 +45,11 @@ async function setup(second = false) {
       projects: { list: async () => { await beforeProjects(); return [{ id: "proj-a", sources: [{ hostId: HOST, path: "/p" }] }] as never; } },
       threads: {
         list: async () => [] as never, spawn,
-        get: async ({ threadId }: { threadId: string }) => ({ ...makeThreadResponse({ id: threadId, status: "idle" }), canSpawnChild: true }) as never,
+        get: async ({ threadId }: { threadId: string }) => {
+          const thread = threads.get(threadId);
+          if (!thread) throw new Error("missing thread");
+          return { ...thread, canSpawnChild: true } as never;
+        },
         context: async () => ({ usage: null }) as never,
         output: async () => ({ output: "Result: Local repair proposed" }),
         getPluginMetadata: async () => ({}) as never,
@@ -60,7 +72,18 @@ async function setup(second = false) {
   const current = await board();
   const leaf = current.groups.find((group) => !current.groups.some((child) => child.parentKey === group.key));
   expect(leaf).toBeDefined();
-  return { harness, board, leafKey: leaf!.key, spawn, beforeProjects, inspectCount: () => inspectCount,
+  const prSpawns = () => spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "pr");
+  const expectGraph = () => {
+    const coordinator = spawn.mock.calls.find(([args]) => args.pluginMetadata?.role === "coordinator")?.[0];
+    const repo = spawn.mock.calls.find(([args]) => args.pluginMetadata?.role === "repo")?.[0];
+    const worker = prSpawns()[0]?.[0];
+    expect(coordinator).toMatchObject({ projectId: "proj-a", pluginMetadata: { role: "coordinator" } });
+    expect(coordinator).not.toHaveProperty("parentThreadId");
+    expect(repo).toMatchObject({ projectId: "proj-a", parentThreadId: "thr-coordinator", pluginMetadata: { repo: expect.stringMatching(/^acme\//u) } });
+    expect(worker).toMatchObject({ projectId: "proj-a", parentThreadId: expect.stringMatching(/^thr-repo-acme-/u),
+      environment: { workspace: { path: expect.any(String) } } });
+  };
+  return { harness, board, leafKey: leaf!.key, spawn, prSpawns, expectGraph, beforeProjects, inspectCount: () => inspectCount,
     setInspection: (next: RawUnit) => { inspected.set(next.path, next); },
     setFullScan: (next: RawUnit) => { fullScan = [next]; } };
 }
@@ -73,7 +96,8 @@ describe("dispatcher server wiring", () => {
     expect((await env.board()).dispatch.candidate).toBeNull();
     expect(env.spawn).not.toHaveBeenCalled();
     expect(await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Fix the conflict without merging" })).toMatchObject({ ok: true });
-    expect(env.spawn).toHaveBeenCalledOnce();
+    expect(env.prSpawns()).toHaveLength(1);
+    env.expectGraph();
   });
   it("refuses Auto when a hold arrives during the final project lookup", async () => {
     const env = await setup();
@@ -90,19 +114,21 @@ describe("dispatcher server wiring", () => {
     expect((await env.board()).dispatch.candidate).toMatchObject({ action: "resolve-conflicts", path: PATH });
     expect(env.spawn).not.toHaveBeenCalled();
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     expect(env.inspectCount()).toBe(1);
     expect((await env.board()).dispatch).toMatchObject({ candidate: null, attempts: [expect.objectContaining({ status: "running", threadId: "thr-dispatch" })] });
     expect(await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Fix it" })).toMatchObject({ ok: false });
     await env.harness.callRpc("board_get", null);
-    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.prSpawns()).toHaveLength(1);
   });
 
   it("makes one more selection pass when preflight clears the first candidate", async () => {
     const env = await setup(true);
     env.setInspection(unit("CLEAN"));
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     expect(env.inspectCount()).toBe(2);
     expect((await env.board()).dispatch.attempts[0]).toMatchObject({ path: "/p/web-abc-101", status: "running" });
   });
@@ -110,7 +136,8 @@ describe("dispatcher server wiring", () => {
   it("marks a completed agent verified only after a fresh inspection clears its gate", async () => {
     const env = await setup();
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     env.setInspection(unit("CLEAN"));
     await env.harness.emitThreadEvent("thread.idle", {
       thread: makeThreadResponse({ id: "thr-dispatch", status: "idle" }),
@@ -123,7 +150,8 @@ describe("dispatcher server wiring", () => {
   it("recognizes a merged PR as the endpoint when the fresh inspection reports it", async () => {
     const env = await setup();
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     const merged = unit("CLEAN");
     merged.pr = { ...merged.pr!, state: "MERGED" };
     env.setInspection(merged);
@@ -137,14 +165,15 @@ describe("dispatcher server wiring", () => {
   it("pauses when a fresh inspection still shows the gate", async () => {
     const env = await setup();
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     await env.harness.emitThreadEvent("thread.idle", {
       thread: makeThreadResponse({ id: "thr-dispatch", status: "idle" }),
       lastAssistantText: "Result: Local repair proposed",
     });
     await vi.waitFor(async () => expect((await env.board()).dispatch.attempts[0]?.status).toBe("needs-you"));
     expect((await env.board()).dispatch.candidate).toBeNull();
-    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.prSpawns()).toHaveLength(1);
     expect(await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Fix it" })).toMatchObject({ ok: false });
     env.setFullScan(unit("CLEAN"));
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
@@ -154,7 +183,8 @@ describe("dispatcher server wiring", () => {
   it("keeps the effort paused when a full scan clears the gate while the agent awaits a decision", async () => {
     const env = await setup();
     await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: env.leafKey });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.prSpawns()).toHaveLength(1));
+    env.expectGraph();
     await env.harness.emitThreadEvent("interaction.pending", {
       thread: makeThreadResponse({ id: "thr-dispatch", status: "active" }), interaction: {} as never,
     });
@@ -162,6 +192,6 @@ describe("dispatcher server wiring", () => {
     env.setFullScan(unit("CLEAN"));
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     expect((await env.board()).dispatch).toMatchObject({ candidate: null, attempts: [expect.objectContaining({ status: "needs-you" })] });
-    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.prSpawns()).toHaveLength(1);
   });
 });

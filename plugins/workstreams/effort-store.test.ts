@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { createEffortStore, EFFORT_MIGRATIONS, normalizeMembers, sameMembers } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, normalizeMembers, sameMembers } from "./effort-store.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
@@ -9,6 +9,7 @@ const input = { sourceKey: "suggested", name: "Improve review", goal: "Review ma
 function setup() {
   const db = new Database(":memory:"); databases.push(db);
   EFFORT_MIGRATIONS.forEach((sql) => db.exec(sql));
+  db.exec(REPO_CONTROLLER_MIGRATION);
   return { db, store: createEffortStore(db, () => 1000) };
 }
 
