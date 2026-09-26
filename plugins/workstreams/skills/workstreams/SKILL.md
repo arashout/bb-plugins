@@ -454,6 +454,10 @@ git facts; a draft remains in Build even when CI fails. **Released** means a
 merge commit appears in a local release tag, not that production received a
 deployment. Current scans omit closed pull requests that did not merge.
 
+Within each stage, cards show the latest PR updates first, or the latest
+commit for work without a PR. Merged and released cards use their merge date.
+Missing dates sort last.
+
 Switch between stage columns and effort swimlanes. Existing effort keys,
 including ticket cohorts of remote-only PRs, provide swimlane membership;
 items without a key appear in **One-offs**. A held PR stays in its stage with

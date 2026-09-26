@@ -90,7 +90,9 @@ automatic dispatch enabled.
   even when its checks fail. Switch between stage columns and effort swimlanes;
   inventory-only PRs join their saved effort or ticket cohort, and unmatched
   PRs appear in **One-offs**. Cards show one blocker, agent activity, and a
-  primary action. Open a card for merge gates, stack order, linked threads,
+  primary action. Each stage lists the most recently updated PRs first, with
+  checkout-only work ordered by its latest commit. Merged and released cards
+  use their merge date. Open a card for merge gates, stack order, linked threads,
   checkout actions, and holds. Held PRs stay in their stage, show **On hold**,
   and offer **Release**; bulk actions and agent counts exclude them. Pipeline
   shows the five most recent merged cards and three most recent release-tagged

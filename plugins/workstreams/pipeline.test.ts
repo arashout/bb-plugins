@@ -116,6 +116,36 @@ describe("pipeline position and gates", () => {
     expect(pipelineCards([entry(pr(16, { createdAt: null }))], [], now)[0]?.ageSince).toBeNull();
   });
 
+  it("puts recently updated cards first within a stage, even when the older card has a stronger blocker", () => {
+    const oldFailure = pr(30, { createdAt: "2026-09-23T00:00:00Z", updatedAt: "2026-09-23T00:00:00Z", checkConclusions: ["FAILURE"] });
+    const newHeld = pr(31, { createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-24T00:00:00Z", unresolvedReviewThreads: 2 });
+    const cards = pipelineCards([entry(oldFailure), entry(newHeld)], [], now, { holds: { [newHeld.url]: { reason: "Waiting for copy review", heldAt: now } } });
+    expect(cards.map((card) => card.pr?.number)).toEqual([31, 30]);
+    expect(cards.map((card) => card.stage)).toEqual(["feedback", "feedback"]);
+    expect(cards[0]?.ageSince).toBe(Date.parse("2026-09-01T00:00:00Z"));
+    expect(pipelineColumns([...cards].reverse()).find((column) => column.stage === "feedback")?.cards.map((card) => card.pr?.number)).toEqual([31, 30]);
+    expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([30]);
+  });
+
+  it("falls back through valid PR dates, then places undated cards last by key", () => {
+    const cards = pipelineCards([
+      entry(pr(32, { updatedAt: "unreadable", createdAt: "2026-09-22T00:00:00Z" })),
+      entry(pr(33, { updatedAt: null, createdAt: "2026-09-23T00:00:00Z" })),
+      entry(pr(35, { updatedAt: "unreadable", createdAt: "unreadable" })),
+      entry(pr(34, { updatedAt: null, createdAt: null })),
+    ], [], now);
+    expect(cards.map((card) => card.pr?.number)).toEqual([33, 32, 34, 35]);
+  });
+
+  it("uses checkout commits for work without a PR and merge time for history cards", () => {
+    const oldCheckout = local(null, { key: "/work/a", unit: { ...local(null).unit, lastCommitAt: "2026-09-20T00:00:00Z" } });
+    const newCheckout = local(null, { key: "/work/b", unit: { ...local(null).unit, lastCommitAt: "2026-09-24T00:00:00Z" } });
+    const oldMerge = local(pr(36, { state: "MERGED", mergedAt: "2026-09-20T00:00:00Z", updatedAt: "2026-09-25T00:00:00Z" }));
+    const newMerge = local(pr(37, { state: "MERGED", mergedAt: "2026-09-24T00:00:00Z", updatedAt: "2026-09-21T00:00:00Z" }));
+    const cards = pipelineCards([], [oldCheckout, newCheckout, oldMerge, newMerge], now);
+    expect(cards.map((card) => card.key)).toEqual(["/work/b", "/work/a", newMerge.unit.pr!.url, oldMerge.unit.pr!.url]);
+  });
+
   it("uses current ready facts over an old failed Advance attempt", () => {
     const current = pr(17);
     const sources = { batches: [{ id: "batch", createdAt: now - 1000, cancelled: false, jobs: [{ id: "job", prUrl: current.url,

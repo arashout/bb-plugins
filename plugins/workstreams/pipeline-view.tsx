@@ -11,6 +11,7 @@ import { inboxRows } from "./inbox-rows";
 import {
   pipelineCards,
   pipelineBulkCards,
+  byPipelineOrder,
   PIPELINE_STAGES,
   type PipelineCard,
   type PipelineStage,
@@ -72,21 +73,6 @@ function age(card: PipelineCard, now: number): string {
     : days < 30
       ? `${days}d`
       : `${Math.floor(days / 30)}mo`;
-}
-
-function cardSort(a: PipelineCard, b: PipelineCard): number {
-  const severity = { bad: 0, warn: 1, wait: 2, clear: 3 };
-  return (
-    Number(Boolean(a.hold)) - Number(Boolean(b.hold)) ||
-    severity[a.blocker.tone] - severity[b.blocker.tone] ||
-    (a.ageSince ?? Infinity) - (b.ageSince ?? Infinity)
-  );
-}
-
-function recentSort(a: PipelineCard, b: PipelineCard): number {
-  const aAt = a.pr?.mergedAt ? Date.parse(a.pr.mergedAt) : (a.ageSince ?? 0);
-  const bAt = b.pr?.mergedAt ? Date.parse(b.pr.mergedAt) : (b.ageSince ?? 0);
-  return bAt - aAt;
 }
 
 function canTypeKey(target: EventTarget | null): boolean {
@@ -451,7 +437,7 @@ export function PipelineView({
   ) => {
     const sorted = source
       .filter((card) => card.stage === stage)
-      .sort(stage === "merged" || stage === "released" ? recentSort : cardSort);
+      .sort(byPipelineOrder);
     const limit = HISTORY_LIMIT[stage];
     return limit && !showHistory[stage] ? sorted.slice(0, limit) : sorted;
   };
@@ -645,7 +631,7 @@ export function PipelineView({
   const columnCards = (stage: PipelineStage, source = visible) => {
     const all = source
       .filter((card) => card.stage === stage)
-      .sort(stage === "merged" || stage === "released" ? recentSort : cardSort);
+      .sort(byPipelineOrder);
     const limit = HISTORY_LIMIT[stage];
     const shown = displayedStageCards(stage, source);
     return (

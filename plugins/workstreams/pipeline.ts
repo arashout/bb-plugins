@@ -151,10 +151,24 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
   return cards.sort(byPipelineOrder);
 }
 
-const severity = (card: PipelineCard): number => card.blocker.tone === "bad" ? 0 : card.blocker.tone === "warn" ? 1 : card.blocker.tone === "wait" ? 2 : 3;
+function recentAt(card: PipelineCard): number | null {
+  const sources = card.pr === null
+    ? [card.local?.unit.lastCommitAt]
+    : card.stage === "merged" || card.stage === "released"
+      ? [card.pr.mergedAt, card.pr.updatedAt, card.pr.createdAt]
+      : [card.pr.updatedAt, card.pr.createdAt];
+  for (const source of sources) {
+    const at = source ? Date.parse(source) : NaN;
+    if (Number.isFinite(at)) return at;
+  }
+  return null;
+}
+
 export function byPipelineOrder(a: PipelineCard, b: PipelineCard): number {
-  return PIPELINE_STAGES.indexOf(a.stage) - PIPELINE_STAGES.indexOf(b.stage) || Number(a.hold !== null) - Number(b.hold !== null) ||
-    severity(a) - severity(b) || (a.ageSince ?? Number.MAX_SAFE_INTEGER) - (b.ageSince ?? Number.MAX_SAFE_INTEGER) || a.key.localeCompare(b.key);
+  const aAt = recentAt(a) ?? Number.NEGATIVE_INFINITY;
+  const bAt = recentAt(b) ?? Number.NEGATIVE_INFINITY;
+  return PIPELINE_STAGES.indexOf(a.stage) - PIPELINE_STAGES.indexOf(b.stage) ||
+    (aAt === bAt ? a.key.localeCompare(b.key) : bAt - aAt);
 }
 
 export type PipelineColumn = { stage: PipelineStage; cards: PipelineCard[]; bulk: "nudge" | "advance" | "merge" | null; bulkCount: number };

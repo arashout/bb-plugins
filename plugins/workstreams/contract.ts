@@ -48,6 +48,8 @@ export const prSchema = z
     latestReviewStates: z.array(z.string().max(40)).max(50),
     /** GitHub's PR open time. Optional so older persisted scans still load. */
     createdAt: z.string().max(40).nullable().optional(),
+    /** GitHub's latest PR update time. Optional so older persisted scans still load. */
+    updatedAt: z.string().max(40).nullable().optional(),
     /**
      * When the PR merged, from the same `gh pr list` call. It dates the Board's
      * Recently merged section. Defaulted so a unit cached before the field

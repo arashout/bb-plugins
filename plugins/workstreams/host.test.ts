@@ -190,6 +190,14 @@ describe("parsePrList", () => {
     expect(prSchema.parse(older).createdAt).toBeUndefined();
   });
 
+  it("carries the latest PR update time and accepts older scans without it", () => {
+    expect(parsePrList(row({ updatedAt: "2030-01-02T10:00:00Z" }))?.pr.updatedAt).toBe("2030-01-02T10:00:00Z");
+    expect(parsePrList(row({ updatedAt: "yesterday-ish" }))?.pr.updatedAt).toBeNull();
+    const parsed = parsePrList(row())!.pr;
+    const { updatedAt: _oldField, ...older } = parsed;
+    expect(prSchema.parse(older).updatedAt).toBeUndefined();
+  });
+
   it("reads unparseable output as no pull request rather than throwing", () => {
     expect(parsePrList("not json")).toBeNull();
     expect(parsePrList('{"not":"an array"}')).toBeNull();

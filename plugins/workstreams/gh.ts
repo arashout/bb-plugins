@@ -10,7 +10,7 @@ const KNOWN_MERGE_STATE_STATUSES = new Set<string>(MERGE_STATE_STATUSES);
 
 /** Shared by checkout scans and the authored PR inventory. */
 export const PR_FIELDS =
-  "number,state,isDraft,reviewDecision,latestReviews,statusCheckRollup,url,title,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,baseRefOid,mergeCommit,mergedAt,createdAt,reviewRequests,body";
+  "number,state,isDraft,reviewDecision,latestReviews,statusCheckRollup,url,title,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,baseRefOid,mergeCommit,mergedAt,createdAt,updatedAt,reviewRequests,body";
 
 /**
  * GitHub's authoritative "can this merge right now" signal, from
@@ -177,6 +177,10 @@ export function parsePrList(raw: string): { pr: Pr; mergeCommit: string | null }
     createdAt:
       typeof view.createdAt === "string" && !Number.isNaN(Date.parse(view.createdAt))
         ? view.createdAt.slice(0, 40)
+        : null,
+    updatedAt:
+      typeof view.updatedAt === "string" && !Number.isNaN(Date.parse(view.updatedAt))
+        ? view.updatedAt.slice(0, 40)
         : null,
     // The description is reduced to the ticket IDs it states, here, and dropped.
     ticketRefs: ticketRefsOf(view.body),
