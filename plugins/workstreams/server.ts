@@ -26,6 +26,7 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, establishedEffortSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
 import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
+import { suggestThreadEfforts } from "./thread-effort-suggestions.js";
 import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
@@ -323,6 +324,11 @@ export const rpcContract = defineRpcContract({
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
   thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: threadEffortContextSchema },
   thread_effort_set: { input: z.object({ threadId: z.string().min(1).max(200), destinationKey: z.string().min(1).max(500).nullable(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
+  thread_effort_create: { input: z.object({ threadId: z.string().min(1).max(200), name: z.string().max(500), requestId: z.string().uuid(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
+  thread_effort_suggest: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(false), error: z.string() }),
+    z.object({ ok: z.literal(true), suggestions: z.array(z.object({ key: z.string(), reason: z.string() })), suggestedName: z.string().nullable(), notice: z.string().nullable() }),
+  ]) },
   thread_effort_move: { input: z.object({ threadId: z.string().min(1).max(200), sourceIds: z.array(z.string().min(1).max(600)).min(1).max(100), destinationKey: z.string().min(1).max(500), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_link_pr: { input: z.object({ threadId: z.string().min(1).max(200), prUrl: z.string().min(1).max(500) }).strict(), output: threadEffortContextSchema },
   advance_preview: { input: z.object({ prUrls: z.array(z.string().max(500)).min(1).max(100) }).strict(), output: advancePreviewSchema },
@@ -2013,7 +2019,7 @@ export default async function plugin(bb: BbPluginApi) {
     runsChanged(closed);
   }
 
-  // ---- enrichment: the only place model calls happen --------------------
+  // ---- automatic board enrichment ---------------------------------------
 
   type LevelEntry = {
     member: Assignable & { hash: string };
@@ -2211,7 +2217,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * The only place model calls happen, and only for what actually changed.
+   * Automatic board model calls happen here, and only for what changed.
    * A rescan whose clusters are semantically identical reaches none of the
    * `await`s below at ANY level, which is what makes an unchanged refresh free.
    */
@@ -3176,6 +3182,75 @@ export default async function plugin(bb: BbPluginApi) {
       return result;
     },
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
+    thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {
+      intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+      const trimmed = name.trim();
+      if (trimmed.length < 1 || trimmed.length > 120) {
+        return { ok: false as const, error: "Enter an effort name between 1 and 120 characters." };
+      }
+      const normalized = (value: string) => value.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+      const sourceKey = `thread-created:${threadId}:${requestId}`;
+      const existing = effortStore.source(sourceKey);
+      if (existing && existing.name !== trimmed) {
+        return { ok: false as const, error: "That create request already used a different name. Start a new effort request." };
+      }
+      let thread;
+      try {
+        thread = await bb.sdk.threads.get({ threadId });
+      } catch { return { ok: false as const, error: "That thread no longer exists." }; }
+      const context = await threadEffortContext(threadId);
+      if (!context.ok) return context;
+      if (existing && context.threadEffort?.key === existing.key) {
+        db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
+        await reconcileThreadIntent(threadId, true);
+        return threadEffortContext(threadId);
+      }
+      if (existing) return { ok: false as const,
+        error: "That create request already made an effort, but the thread assignment changed or failed. Choose the existing effort from the picker." };
+      if (threadEffortAssignmentScope(context, null) !== expectedScope) {
+        return { ok: false as const, error: "The thread effort changed. Reopen the effort picker." };
+      }
+      if (context.efforts.some((effort) => normalized(effort.name) === normalized(trimmed)) ||
+        effortStore.list().some((effort) => normalized(effort.name) === normalized(trimmed))) {
+        return { ok: false as const, error: "An effort with that name already exists. Choose it from the list or enter another name." };
+      }
+      const effort = effortStore.establish({ sourceKey, name: trimmed, goal: "", projectId: thread.projectId,
+        coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+      try {
+        await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
+      } catch (error) {
+        return { ok: false as const, error: `The effort was created, but the thread assignment failed. Choose it from the picker: ${String(error).slice(0, 200)}` };
+      }
+      intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+      db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      await reconcileThreadIntent(threadId, true);
+      return threadEffortContext(threadId);
+    }),
+    thread_effort_suggest: async ({ threadId }) => {
+      const context = await threadEffortContext(threadId);
+      if (!context.ok) return context;
+      const { typesafeApiKey } = await settings.get();
+      if (typeof typesafeApiKey !== "string" || !typesafeApiKey.trim()) return { ok: true as const,
+        suggestions: [], suggestedName: null, notice: "Jev suggestions need a TypeSafe API key. You can still create an effort manually." };
+      try {
+        const thread = await bb.sdk.threads.get({ threadId });
+        const current = await board();
+        const groups = new Map(current.groups.filter((group) => group.level === "effort").map((group) => [group.key, group]));
+        const linkedKeys = new Set(context.sources.flatMap((source) => source.effortKey ? [source.effortKey] : []));
+        const efforts = [...context.efforts].sort((a, b) => Number(linkedKeys.has(b.key)) - Number(linkedKeys.has(a.key)) ||
+          a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+        return { ok: true as const, ...await suggestThreadEfforts({
+          threadTitle: thread.title ?? thread.titleFallback ?? "",
+          work: context.sources.map((source) => ({ label: source.label, ticket: source.ticket })),
+          efforts: efforts.map((effort) => ({ key: effort.key, name: effort.name,
+            labels: [...(groups.get(effort.key)?.clusters.map((cluster) => cluster.summary) ?? []),
+              ...current.prInventory.entries.filter((entry) => entry.effortKey === effort.key).map((entry) => entry.pr.title)] })),
+          jev: jevClient(typesafeApiKey, disposal.signal),
+        }) };
+      } catch (error) { return { ok: true as const, suggestions: [], suggestedName: null,
+        notice: `Jev suggestions are unavailable: ${String(error).slice(0, 200)}. You can still create an effort manually.` }; }
+    },
     thread_effort_set: ({ threadId, destinationKey, expectedScope }) => serialIntent(threadId, async () => {
       intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
       const context = await threadEffortContext(threadId);

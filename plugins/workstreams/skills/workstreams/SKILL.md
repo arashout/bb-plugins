@@ -432,6 +432,12 @@ discussion mentions do not authorize automatic assignment. Existing explicit
 ticket and PR ownership stays intact, and clearing thread intent does not
 remove inherited membership.
 
+**Create effort** creates a named effort and assigns the thread. It does not
+start a coordinator. **Suggest efforts** uses Jev on demand to recommend
+existing efforts and an editable name drawn from thread and linked-work
+titles. The user selects and saves a destination; suggestions never assign
+work automatically. Manual creation remains available without Jev.
+
 **Move linked work** changes existing membership explicitly. A ticket move
 includes its related PRs and checkouts; a standalone PR can move independently.
 The picker shows this scope and requires a choice when several work items are

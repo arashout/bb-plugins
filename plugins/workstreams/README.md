@@ -51,8 +51,8 @@ select summaries and groups. Bounded Jev reviews can revisit uncertain
 singletons and mixed groups using shared outcome evidence; saved effort
 membership stays fixed. Anthropic receives the member keys, summaries,
 repository names, candidate phrases, and available Linear or thread-title
-context needed to name a group. Model calls happen when semantic inputs change;
-an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
+context needed to name a group. Automatic grouping calls happen when semantic
+inputs change; an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
 via agent** action starts a BB thread only when you confirm it.
 
 ## Organize work from a thread
@@ -64,6 +64,12 @@ Workstreams discovers PRs through the thread's exact checkout, recorded
 actions, or explicit PR links. A PR mentioned only in a title or discussion
 does not inherit automatically. Existing explicit assignments stay intact.
 Clearing the thread effort leaves previously assigned work where it is.
+
+If no effort fits, choose **Create effort**, enter a name, and select **Create
+and assign**. **Suggest efforts** asks Jev to compare the thread title and
+linked work with available efforts. Select a suggestion, then save your
+choice. Jev can also select an editable name from the thread and work titles.
+Suggestions do not change membership. Manual creation works without Jev.
 
 Use **Move linked work** to change existing ticket or PR membership. The
 picker shows the affected ticket, PRs, and checkouts. Select the work when a

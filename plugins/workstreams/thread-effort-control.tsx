@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useComposerView, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { threadEffortAssignmentScope, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort";
+import type { ThreadEffortSuggestions } from "./thread-effort-suggestions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -22,7 +23,7 @@ function effortLabel(context: ThreadEffortReady): string {
   return unassigned ? `${name} + unassigned work` : name;
 }
 
-type PickerMode = "thread" | "move" | "link";
+type PickerMode = "thread" | "create" | "move" | "link";
 
 function SourceScope({ source }: { source: ThreadEffortReady["sources"][number] }) {
   const detail = <div className="space-y-1 break-all text-[11px] text-muted-foreground">
@@ -56,11 +57,17 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   const [effortSearch, setEffortSearch] = useState("");
   const [prSearch, setPrSearch] = useState("");
   const [prUrl, setPrUrl] = useState("");
+  const [createName, setCreateName] = useState("");
+  const [suggestions, setSuggestions] = useState<ThreadEffortSuggestions | null>(null);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   const [mode, setMode] = useState<PickerMode>("thread");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewNeeded, setReviewNeeded] = useState(false);
   const requestId = useRef(0);
+  const suggestionRequestId = useRef(0);
+  const createRequest = useRef<{ name: string; id: string } | null>(null);
   const checkboxPrefix = useId();
 
   const refetch = useCallback(() => {
@@ -80,12 +87,13 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
 
   useEffect(() => {
     refetch();
-    return () => { requestId.current++; };
+    return () => { requestId.current++; suggestionRequestId.current++; };
   }, [refetch]);
   useRealtime("board-changed", refetch);
 
   const openPicker = () => {
     if (context === null) return;
+    suggestionRequestId.current++;
     setPicker(context);
     setSelectedIds(context.sources.length === 1 ? [context.sources[0]!.id] : []);
     setThreadDestinationKey(context.threadEffort?.key ?? "");
@@ -93,6 +101,11 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     setEffortSearch("");
     setPrSearch("");
     setPrUrl("");
+    setCreateName("");
+    createRequest.current = null;
+    setSuggestions(null);
+    setSuggestionError(null);
+    setSuggesting(false);
     setMode("thread");
     setError(null);
     setReviewNeeded(false);
@@ -122,11 +135,38 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   const canClearThread = picker !== null && picker.threadEffort !== null && !busy && !reviewNeeded;
   const canMove = picker !== null && picker.sources.length > 0 && selectedIds.length > 0 && !invalidSelection && moveDestination !== undefined && changed && !busy && !reviewNeeded;
   const canLink = picker !== null && mode === "link" && picker.linkablePrs.some((pr) => pr.url === prUrl) && !busy && !reviewNeeded;
+  const validCreateName = createName.trim().length > 0 && createName.trim().length <= 120;
+  const canCreate = picker !== null && validCreateName && !busy && !reviewNeeded;
+  const availableSuggestions = suggestions?.suggestions.filter((suggestion) => picker?.efforts.some((effort) => effort.key === suggestion.key)).slice(0, 3) ?? [];
 
   const switchMode = (next: PickerMode) => {
     setMode(next);
     setEffortSearch("");
     if (!reviewNeeded) setError(null);
+  };
+
+  const openCreate = (name = "") => {
+    setCreateName(name);
+    createRequest.current = null;
+    switchMode("create");
+  };
+
+  const suggestEfforts = async () => {
+    if (picker === null || suggesting || busy) return;
+    const request = ++suggestionRequestId.current;
+    setSuggesting(true);
+    setSuggestionError(null);
+    setSuggestions(null);
+    try {
+      const result = await rpc.call("thread_effort_suggest", { threadId });
+      if (request !== suggestionRequestId.current) return;
+      if (result.ok) setSuggestions(result);
+      else setSuggestionError(result.error);
+    } catch (cause) {
+      if (request === suggestionRequestId.current) setSuggestionError(errorMessage(cause));
+    } finally {
+      if (request === suggestionRequestId.current) setSuggesting(false);
+    }
   };
 
   const acceptResult = (result: Awaited<ReturnType<typeof rpc.call<"thread_effort_context">>>) => {
@@ -136,6 +176,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
       return;
     }
     requestId.current++;
+    suggestionRequestId.current++;
     setContext(result);
     setReadError(null);
     setOpen(false);
@@ -173,6 +214,24 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     }
   };
 
+  const createEffort = async () => {
+    if (!canCreate || picker === null) return;
+    const name = createName.trim();
+    const expectedScope = threadEffortAssignmentScope(picker, null);
+    if (expectedScope === "") return;
+    if (createRequest.current?.name !== name) createRequest.current = { name, id: crypto.randomUUID() };
+    setBusy(true);
+    setError(null);
+    try {
+      acceptResult(await rpc.call("thread_effort_create", { threadId, name, requestId: createRequest.current.id, expectedScope }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setReviewNeeded(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const linkPr = async () => {
     if (!canLink) return;
     setBusy(true);
@@ -195,6 +254,10 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
       requestId.current++;
       setContext(result);
       setPicker(result);
+      suggestionRequestId.current++;
+      setSuggestions(null);
+      setSuggestionError(null);
+      setSuggesting(false);
       setThreadDestinationKey((current) => result.efforts.some((effort) => effort.key === current) ? current : (result.threadEffort?.key ?? ""));
       setReadError(null);
       setError(null);
@@ -208,7 +271,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
 
   if (context === null) return <div className="px-1 pb-1 text-[11px] text-muted-foreground" role="status">{readError === null ? "Reading thread effort…" : <button type="button" onClick={refetch} className="text-destructive underline underline-offset-2">Could not read thread effort. Retry</button>}</div>;
 
-  return <Dialog open={open} onOpenChange={(next) => { if (busy) return; if (next) openPicker(); else setOpen(false); }}>
+  return <Dialog open={open} onOpenChange={(next) => { if (busy) return; if (next) openPicker(); else { suggestionRequestId.current++; setOpen(false); } }}>
     <div className="flex min-w-0 items-center gap-1 px-1 pb-1 text-[11px] text-muted-foreground">
       <DialogTrigger asChild>
         <button type="button" aria-label={`Effort: ${context.threadEffort?.name ?? "No thread effort"}. Change thread effort`}
@@ -220,13 +283,21 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     </div>
     <DialogContent className={cn("max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto", POINTER_CURSORS)}>
       <DialogHeader>
-        <DialogTitle>{mode === "thread" ? "Thread effort" : mode === "move" ? "Move linked work" : "Link a PR"}</DialogTitle>
+        <DialogTitle>{mode === "thread" ? "Thread effort" : mode === "create" ? "Create effort" : mode === "move" ? "Move linked work" : "Link a PR"}</DialogTitle>
         <DialogDescription>{mode === "thread"
           ? "Confirmed, unassigned work in this thread inherits this effort. Existing assignments stay intact."
+          : mode === "create" ? "Creates an effort and assigns this thread. Confirmed, unassigned work inherits it."
           : mode === "move" ? "Choose the linked work and the effort that should contain it."
           : "Choose a scanned or inventoried pull request to link to this thread."}</DialogDescription>
       </DialogHeader>
-      {picker === null ? null : mode === "link" ? <div className="space-y-3 text-[12.5px]">
+      {picker === null ? null : mode === "create" ? <div className="space-y-3 text-[12.5px]">
+        <label className="grid gap-1.5 font-medium">Effort name
+          <input type="text" value={createName} maxLength={120} required autoFocus disabled={busy}
+            onChange={(event) => { setCreateName(event.target.value); createRequest.current = null; }}
+            className="h-9 w-full rounded-md border border-input bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+        </label>
+        <button type="button" onClick={() => switchMode("thread")} disabled={busy} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Back to thread effort</button>
+      </div> : mode === "link" ? <div className="space-y-3 text-[12.5px]">
         {picker.linkedPrUrl === null ? null : <p className="break-all text-muted-foreground">Current linked PR: {picker.linkedPrUrl}</p>}
         {picker.linkablePrs.length === 0 ? <p className="text-muted-foreground">No scanned or inventoried PR is available. Refresh the workstreams scan, then reopen this picker.</p> : <label className="grid gap-1.5 font-medium">Known pull request
           {picker.linkablePrs.length > 8 ? <input type="search" value={prSearch} onChange={(event) => setPrSearch(event.target.value)} placeholder="Find a PR by title or URL" disabled={busy}
@@ -249,6 +320,28 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
           </select>
         </label>
         {picker.efforts.length === 0 ? <p className="text-muted-foreground">No efforts are available for this thread.</p> : null}
+        <div className="space-y-2 text-[11.5px]">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <button type="button" onClick={() => void suggestEfforts()} disabled={busy || suggesting || reviewNeeded}
+              className="text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50">{suggesting ? "Suggesting…" : "Suggest efforts"}</button>
+            <button type="button" onClick={() => openCreate()} disabled={busy}
+              className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Create effort</button>
+          </div>
+          {suggestionError === null ? null : <p role="status" className="text-muted-foreground">Could not suggest efforts: {suggestionError}</p>}
+          {suggestions === null ? null : <div className="space-y-1.5" aria-label="Suggested efforts">
+            {availableSuggestions.map((suggestion) => {
+              const effort = picker.efforts.find((candidate) => candidate.key === suggestion.key)!;
+              return <button key={suggestion.key} type="button" onClick={() => setThreadDestinationKey(suggestion.key)} disabled={busy}
+                className="block w-full break-all rounded-md border border-border px-2.5 py-2 text-left hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <span className="block font-medium text-foreground">{effort.name}</span>
+                <span className="block text-muted-foreground">{suggestion.reason}</span>
+              </button>;
+            })}
+            {suggestions.suggestedName === null ? null : <button type="button" onClick={() => openCreate(suggestions.suggestedName!)} disabled={busy}
+              className="break-all text-left text-muted-foreground underline underline-offset-2 hover:text-foreground">Create “{suggestions.suggestedName}”</button>}
+            {suggestions.notice === null ? null : <p role="status" className="text-muted-foreground">{suggestions.notice}</p>}
+          </div>}
+        </div>
         {picker.threadEffort !== null && threadDestinationKey === picker.threadEffort.key ? <p className="text-muted-foreground">This thread is already assigned to {picker.threadEffort.name}.</p> : null}
         {picker.inheritanceNotice === null ? null : <p role="status" className="text-muted-foreground">{picker.inheritanceNotice}</p>}
         <section aria-label="Linked work details" className="space-y-1.5">
@@ -306,9 +399,10 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
       {error === null ? null : <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}
       {reviewNeeded ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void refreshPicker()}>Refresh details</Button> : null}
       <DialogFooter className="gap-2">
-        <Button variant="ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
+        <Button variant="ghost" disabled={busy} onClick={() => { suggestionRequestId.current++; setOpen(false); }}>Cancel</Button>
         {mode === "link" ? <Button disabled={!canLink} onClick={() => void linkPr()}>{busy ? "Linking…" : "Link a PR"}</Button>
           : mode === "move" ? <Button disabled={!canMove} onClick={() => void move()}>{busy ? "Saving…" : actionLabel}</Button>
+          : mode === "create" ? <Button disabled={!canCreate} onClick={() => void createEffort()}>{busy ? "Creating…" : "Create and assign"}</Button>
           : <>
             {picker !== null && picker.threadEffort !== null ? <Button variant="outline" disabled={!canClearThread} onClick={() => void setThreadEffort(null)}>Clear thread effort</Button> : null}
             <Button disabled={!canSetThread} onClick={() => void setThreadEffort(threadDestinationKey)}>{busy ? "Saving…" : "Save thread effort"}</Button>

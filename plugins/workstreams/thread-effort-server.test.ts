@@ -7,6 +7,12 @@ import { createRunStore } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
 import { threadEffortAssignmentScope, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 
+const model = vi.hoisted(() => vi.fn());
+vi.mock("@typesafe-ai/sdk", async (original) => {
+  const actual = await original<typeof import("@typesafe-ai/sdk")>();
+  return { ...actual, TypeSafeClient: class { systemOne = model; } };
+});
+
 const a = "https://github.com/inkwell/folio/pull/42";
 const b = "https://github.com/inkwell/folio/pull/43";
 const makePr = (number: number, ticket: string) => parsePrList(JSON.stringify([{ number, url: number === 42 ? a : b,
@@ -16,7 +22,7 @@ const units: RawUnit[] = [42, 43].map((number) => ({ path: `/p/folio-${number}`,
   ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: makePr(number, number === 42 ? "ABC-101" : "ABC-202"),
   shipped: null, changedPaths: [], observed: { status: true, pr: true } }));
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
+afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); model.mockReset(); });
 
 async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDestination?: boolean; remoteUrlVariant?: boolean; environmentPath?: string | null } = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
@@ -26,19 +32,23 @@ async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDe
   let archived = false;
   let metadataGate: Promise<void> | null = null;
   let metadataStarted: (() => void) | null = null;
+  let failMetadataWrite = false;
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "proj", name: "Folio", sources: [{ hostId: "host-inkwell", path: "/p" }] }] as never },
     threads: { list: async () => [] as never,
       get: async ({ threadId }: { threadId: string }) => threadId === "thread" ? {
-        ...makeThreadResponse({ id: "thread", projectId: "proj", archivedAt: archived ? 100 : null }),
+        ...makeThreadResponse({ id: "thread", title: "Improve manuscript review", projectId: "proj", archivedAt: archived ? 100 : null }),
         environment: environmentPath === null ? null : { path: environmentPath },
       } as never : Promise.reject(new Error("missing thread")),
       getPluginMetadata: async ({ threadId }: { threadId: string }) => {
         if (metadataGate) { const gate = metadataGate; metadataGate = null; metadataStarted?.(); await gate; }
         return (metadata.get(threadId) ?? {}) as never;
       },
-      updatePluginMetadata: async ({ threadId, set }: { threadId: string; set?: Record<string, unknown> }) => { metadata.set(threadId, { ...metadata.get(threadId), ...set }); return metadata.get(threadId) as never; },
+      updatePluginMetadata: async ({ threadId, set }: { threadId: string; set?: Record<string, unknown> }) => {
+        if (failMetadataWrite) { failMetadataWrite = false; throw new Error("Synthetic metadata write failure"); }
+        metadata.set(threadId, { ...metadata.get(threadId), ...set }); return metadata.get(threadId) as never;
+      },
       events: { list: async () => [] }, interactions: { list: async () => [] as never } },
   }, experimental_callHostRpc: ({ method }) => {
     if (method === "scan" || method === "inspectPaths") return { units: localEnabled ? [
@@ -62,6 +72,7 @@ async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDe
   const board = async () => await harness.callRpc("board_get", null) as Board;
   const db = bb.storage.database();
   return { harness, metadata, context, board, store: createEffortStore(db), db, clearLocal: () => { localEnabled = false; },
+    failNextMetadataWrite: () => { failMetadataWrite = true; },
     failInventory: (failed: boolean) => { inventoryFailed = failed; },
     setEnvironmentPath: (path: string | null) => { environmentPath = path; }, archive: () => { archived = true; },
     deferMetadata: () => {
@@ -99,6 +110,133 @@ it("rejects a missing thread before resolving or linking work", async () => {
   const { harness } = await setup();
   expect(await harness.callRpc("thread_effort_context", { threadId: "missing" })).toMatchObject({ ok: false });
   expect(await harness.callRpc("thread_effort_link_pr", { threadId: "missing", prUrl: a })).toMatchObject({ ok: false });
+});
+
+const createRequestId = "11111111-1111-4111-8111-111111111111";
+
+it("creates an empty effort for the thread and returns the same effort on request retry", async () => {
+  const env = await setup();
+  env.clearLocal();
+  await env.harness.runCli(["refresh"]);
+  const preview = await env.context();
+  expect(preview.efforts).toEqual([]);
+  const input = { threadId: "thread", name: "  Manuscript review  ", requestId: createRequestId,
+    expectedScope: threadEffortAssignmentScope(preview, null) };
+  const created = await env.harness.callRpc("thread_effort_create", input) as ThreadEffortReady;
+  expect(created).toMatchObject({ ok: true, threadEffort: { name: "Manuscript review" } });
+  const effort = env.store.source(`thread-created:thread:${createRequestId}`)!;
+  expect(effort).toMatchObject({ name: "Manuscript review", projectId: "proj", coordinatorState: "none",
+    coordinatorThreadId: null, members: { tickets: [], prUrls: [] } });
+  expect(env.metadata.get("thread")).toMatchObject({ workEffortId: effort.id });
+  expect(await env.harness.callRpc("thread_effort_create", input)).toMatchObject({ ok: true,
+    threadEffort: { key: effort.key } });
+  expect(env.store.list().filter((item) => item.id === effort.id)).toHaveLength(1);
+  expect(env.harness.inspection.sdk.callsTo("threads.spawn")).toEqual([]);
+});
+
+it("rejects invalid and duplicate effort names before writing an effort", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const input = { threadId: "thread", requestId: createRequestId, expectedScope: threadEffortAssignmentScope(preview, null) };
+  expect(await env.harness.callRpc("thread_effort_create", { ...input, name: " \t " })).toMatchObject({ ok: false,
+    error: expect.stringContaining("1 and 120") });
+  expect(await env.harness.callRpc("thread_effort_create", { ...input, name: "x".repeat(121) })).toMatchObject({ ok: false,
+    error: expect.stringContaining("1 and 120") });
+  const existing = preview.efforts[0]!;
+  expect(await env.harness.callRpc("thread_effort_create", { ...input,
+    name: `  ${existing.name.toUpperCase().replace(/ /gu, "   ")}  ` })).toMatchObject({ ok: false,
+    error: expect.stringContaining("already exists") });
+  expect(env.store.source(`thread-created:thread:${createRequestId}`)).toBeNull();
+});
+
+it("rejects stale creation and never reapplies an old request after a clear", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const input = { threadId: "thread", name: "Manuscript review", requestId: createRequestId,
+    expectedScope: threadEffortAssignmentScope(preview, null) };
+  const oldDestination = preview.efforts[0]!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: oldDestination.key,
+    expectedScope: threadEffortAssignmentScope(preview, oldDestination.key) });
+  expect(await env.harness.callRpc("thread_effort_create", input)).toMatchObject({ ok: false,
+    error: expect.stringContaining("changed") });
+  const assigned = await env.context();
+  const fresh = { ...input, expectedScope: threadEffortAssignmentScope(assigned, null) };
+  const created = await env.harness.callRpc("thread_effort_create", fresh) as ThreadEffortReady;
+  expect(created.threadEffort?.name).toBe("Manuscript review");
+  expect(await env.harness.callRpc("thread_effort_create", { ...fresh, name: "Another name" })).toMatchObject({ ok: false,
+    error: expect.stringContaining("different name") });
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: null,
+    expectedScope: threadEffortAssignmentScope(created, null) });
+  expect(await env.harness.callRpc("thread_effort_create", fresh)).toMatchObject({ ok: false,
+    error: expect.stringContaining("Choose the existing effort") });
+  expect((await env.context()).threadEffort).toBeNull();
+  expect(env.store.list().filter((item) => item.name === "Manuscript review")).toHaveLength(1);
+});
+
+it("keeps a recoverable empty effort when the metadata write fails", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  env.failNextMetadataWrite();
+  const input = { threadId: "thread", name: "Manuscript review", requestId: createRequestId,
+    expectedScope: threadEffortAssignmentScope(preview, null) };
+  expect(await env.harness.callRpc("thread_effort_create", input)).toMatchObject({ ok: false,
+    error: expect.stringContaining("Choose it from the picker") });
+  expect(env.store.source(`thread-created:thread:${createRequestId}`)?.members).toEqual({ tickets: [], prUrls: [] });
+  expect(await env.harness.callRpc("thread_effort_create", input)).toMatchObject({ ok: false,
+    error: expect.stringContaining("Choose the existing effort") });
+  expect((await env.context()).threadEffort).toBeNull();
+});
+
+it("inherits a confirmed checkout PR into a new effort without taking another effort's work", async () => {
+  const env = await setup({ environmentPath: "/p/folio-42" });
+  const preview = await env.context();
+  const created = await env.harness.callRpc("thread_effort_create", { threadId: "thread", name: "Manuscript review",
+    requestId: createRequestId, expectedScope: threadEffortAssignmentScope(preview, null) }) as ThreadEffortReady;
+  const effort = env.store.source(created.threadEffort!.key)!;
+  expect(env.store.owner("prUrl", a)?.id).toBe(effort.id);
+  expect(env.store.owner("ticket", "ABC-101")?.id).toBe(effort.id);
+  expect(env.harness.inspection.sdk.callsTo("threads.spawn")).toEqual([]);
+
+  const other = env.store.establish({ sourceKey: "other-owner", name: "Other manuscript work", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: ["ABC-202"], prUrls: [b] } });
+  env.setEnvironmentPath("/p/folio-43");
+  await env.harness.runCli(["refresh"]);
+  expect(env.store.owner("prUrl", b)?.id).toBe(other.id);
+  expect(env.store.owner("ticket", "ABC-202")?.id).toBe(other.id);
+  expect(env.store.get(effort.id)?.members.prUrls).toEqual([a]);
+});
+
+it("calls Jev only for explicit suggestions and leaves manual creation available on missing key or failure", async () => {
+  const env = await setup();
+  const noKey = await env.harness.callRpc("thread_effort_suggest", { threadId: "thread" });
+  expect(noKey).toMatchObject({ ok: true, suggestions: [], notice: expect.stringContaining("API key") });
+  expect(model).not.toHaveBeenCalled();
+  await env.harness.behavior.setSettings({ typesafeApiKey: "synthetic-test-value" });
+  env.store.establish({ sourceKey: "existing-editorial", name: "Editorial review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+  expect((await env.context()).efforts.length).toBeGreaterThan(0);
+  await env.board();
+  expect(model).not.toHaveBeenCalled();
+  model.mockImplementation(async ({ questions }: { questions: Record<string, unknown> }) => ({
+    answers: Object.fromEntries(Object.keys(questions).map((key) => [key, key === "name"
+      ? { type: "choice", choice: "n0", confidence: 0.9 }
+      : { type: "score", score: key === "e0" ? 4 : 0, confidence: 0.9 }])),
+    usage: { input_tokens: 20, output_tokens: 5 },
+  }));
+  const beforeSuggestions = env.store.list();
+  const beforeMetadata = env.metadata.get("thread");
+  const result = await env.harness.callRpc("thread_effort_suggest", { threadId: "thread" });
+  expect(result).toMatchObject({ ok: true, notice: null, suggestions: [{ key: expect.any(String), reason: expect.any(String) }] });
+  expect(model).toHaveBeenCalledTimes(1);
+  expect(env.store.list()).toEqual(beforeSuggestions);
+  expect(env.metadata.get("thread")).toEqual(beforeMetadata);
+  model.mockRejectedValueOnce(new Error("Synthetic Jev outage"));
+  expect(await env.harness.callRpc("thread_effort_suggest", { threadId: "thread" })).toMatchObject({ ok: true,
+    suggestions: [], notice: expect.stringContaining("Synthetic Jev outage") });
+  const preview = await env.context();
+  expect(await env.harness.callRpc("thread_effort_create", { threadId: "thread", name: "Manual manuscript review",
+    requestId: createRequestId, expectedScope: threadEffortAssignmentScope(preview, null) })).toMatchObject({ ok: true,
+    threadEffort: { name: "Manual manuscript review" } });
 });
 
 it("assigns an empty thread, then inherits only a PR in its exact scanned checkout", async () => {
