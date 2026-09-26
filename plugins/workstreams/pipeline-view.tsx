@@ -517,7 +517,7 @@ export function PipelineView({
         key={card.key}
         id={`pipeline-${card.key}`}
         className={cn(
-          "group relative min-w-0 rounded-lg border bg-card px-2 py-1.5 text-left shadow-sm transition-colors hover:border-foreground/30",
+          "group relative min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
           card.hold && "opacity-55 hover:opacity-90",
           selected === card.key && "border-ring ring-1 ring-ring/40",
         )}
@@ -529,7 +529,7 @@ export function PipelineView({
           aria-label={`Details for ${card.repo}${card.pr ? ` #${card.pr.number}` : ""}: ${card.title}`}
           className="absolute inset-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
-        <div className="relative flex min-w-0 items-baseline gap-1.5 font-mono text-[11px]">
+        <div className="relative flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
           <b className="pointer-events-none truncate" title={card.repo}>
             {repoName}
           </b>
@@ -557,7 +557,7 @@ export function PipelineView({
           </span>
         </div>
         <div
-          className="pointer-events-none relative mt-0.5 overflow-hidden text-ellipsis text-[12px] leading-4"
+          className="pointer-events-none relative mt-1 overflow-hidden text-ellipsis text-[12px] leading-4"
           style={{
             display: "-webkit-box",
             WebkitLineClamp: 2,
@@ -566,7 +566,7 @@ export function PipelineView({
         >
           {card.title}
         </div>
-        <div className="relative mt-1 flex min-w-0 items-center gap-1.5">
+        <div className="relative mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
           <span
             className={cn(
               "pointer-events-none shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
@@ -575,16 +575,18 @@ export function PipelineView({
           >
             {card.blocker.label}
           </span>
-          <span
-            className="pointer-events-none min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
-            title={card.effortName ?? "One-offs"}
-          >
-            {card.effortName ?? "One-offs"}
-          </span>
+          {layout === "stage" ? (
+            <span
+              className="pointer-events-none min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
+              title={card.effortName ?? "One-offs"}
+            >
+              {card.effortName ?? "One-offs"}
+            </span>
+          ) : null}
           {card.action?.kind === "open-pr" && card.pr ? (
             <UrlLink
               href={card.pr.url}
-              className="relative z-10 shrink-0 rounded border px-1.5 py-0.5 text-[10.5px] font-semibold hover:bg-foreground/[0.06]"
+              className="relative z-10 ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold hover:bg-foreground/[0.06]"
             >
               Open PR
             </UrlLink>
@@ -593,7 +595,7 @@ export function PipelineView({
               type="button"
               onClick={() => run(card)}
               className={cn(
-                "relative z-10 shrink-0 rounded border px-1.5 py-0.5 text-[10.5px] font-semibold outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring",
+                "relative z-10 ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring",
                 card.action.kind === "merge" &&
                   "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700",
                 card.action.kind === "fix" &&
@@ -610,7 +612,7 @@ export function PipelineView({
             disabled={!card.activity.threadId}
             onClick={() => openThread(card)}
             className={cn(
-              "relative z-10 mt-1 block w-full truncate border-t border-dashed border-border/70 pt-1 text-left text-[10px] text-muted-foreground disabled:cursor-default",
+              "relative z-10 mt-2 block w-full truncate border-t border-dashed border-border/70 py-1.5 text-left text-[10px] text-muted-foreground disabled:cursor-default",
               card.activity.state === "working" &&
                 "text-violet-600 dark:text-violet-300",
               card.activity.state === "needs-you" && "text-destructive",
@@ -624,7 +626,7 @@ export function PipelineView({
           </button>
         ) : null}
         {card.activity.state === "working" ? (
-          <div className="absolute bottom-0 left-2 right-2 h-0.5 overflow-hidden rounded bg-violet-500/10">
+          <div className="absolute bottom-0 left-3 right-3 h-0.5 overflow-hidden rounded bg-violet-500/10">
             <span className="block h-full w-1/3 bg-violet-500 motion-safe:animate-pulse" />
           </div>
         ) : null}
@@ -708,7 +710,7 @@ export function PipelineView({
               ? `First ${ADVANCE_SELECTION_LIMIT} of ${bulkAdvanceCards.length} eligible PRs`
               : undefined
           }
-          className="ml-auto rounded border px-1.5 py-0.5 text-[10px] hover:bg-foreground/[0.06]"
+          className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
         >
           Advance {bulkAdvance.length}
         </button>
@@ -718,7 +720,7 @@ export function PipelineView({
         <button
           type="button"
           onClick={() => startDirectQueue(bulkMerge, "merge")}
-          className="ml-auto rounded border px-1.5 py-0.5 text-[10px] hover:bg-foreground/[0.06]"
+          className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
         >
           Merge {bulkMerge.length}
         </button>
@@ -728,7 +730,7 @@ export function PipelineView({
         <button
           type="button"
           onClick={() => startDirectQueue(bulkNudge, "nudge")}
-          className="ml-auto rounded border px-1.5 py-0.5 text-[10px] hover:bg-foreground/[0.06]"
+          className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
         >
           Nudge {bulkNudge.length}
         </button>
@@ -749,8 +751,8 @@ export function PipelineView({
     });
   };
   return (
-    <div className="flex min-h-0 flex-1 flex-col text-foreground">
-      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
         <div
           role="tablist"
           aria-label="Workstreams views"
@@ -973,14 +975,14 @@ export function PipelineView({
       </div>
       <div
         aria-label="Pipeline stage counts"
-        className="flex shrink-0 gap-1 border-b border-border/60 bg-muted/30 px-3 py-1"
+        className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 bg-muted/30 px-3 py-1"
       >
         {PIPELINE_STAGES.map((stage) => (
           <button
             key={stage}
             type="button"
             onClick={() => scrollToStage(stage)}
-            className="flex min-w-0 flex-1 items-center justify-between rounded bg-background px-2 py-1 text-[10.5px] hover:bg-foreground/[0.05]"
+            className="flex min-w-20 flex-1 items-center justify-between rounded bg-background px-2 py-1 text-[10.5px] hover:bg-foreground/[0.05]"
           >
             <span className="truncate">{LABEL[stage]}</span>
             <b
@@ -995,16 +997,16 @@ export function PipelineView({
         ))}
       </div>
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1 overflow-auto p-2.5">
+        <div className="min-w-0 flex-1 overflow-auto p-3">
           {layout === "stage" ? (
-            <div className="grid min-w-[1320px] grid-cols-6 gap-2.5">
+            <div className="grid min-w-[1520px] grid-cols-6 gap-4">
               {PIPELINE_STAGES.map((stage) => (
                 <section
                   key={stage}
                   id={`pipeline-column-${stage}`}
-                  className="flex min-w-0 flex-col gap-1.5"
+                  className="flex min-w-0 flex-col gap-3"
                 >
-                  <header className="sticky top-0 z-10 flex items-center gap-1 border-b border-border bg-background py-1 text-[11px]">
+                  <header className="sticky top-0 z-10 flex min-h-12 items-center gap-2 border-b border-border bg-background py-2 text-[11px]">
                     <h2 className="font-semibold">{LABEL[stage]}</h2>
                     <span className="font-mono text-muted-foreground">
                       {stageCount(stage)}
@@ -1016,7 +1018,7 @@ export function PipelineView({
               ))}
             </div>
           ) : (
-            <div className="min-w-[1480px]">
+            <div className="min-w-[1696px]">
               <p className="border-b border-border px-1 pb-1 text-[10.5px] text-muted-foreground">
                 Automatic actions run for one effort at a time
                 {dispatch.effortKey
@@ -1027,13 +1029,21 @@ export function PipelineView({
               {efforts.map(([key, name]) => (
                 <section
                   key={key}
-                  className="grid grid-cols-[150px_repeat(6,minmax(212px,1fr))] gap-2 border-b border-border/70 py-2"
+                  className="grid grid-cols-[160px_repeat(6,minmax(240px,1fr))] gap-4 border-b border-border/70 py-3"
                 >
-                  <div className="sticky left-0 z-10 bg-background text-[11px]">
-                    <b className="block truncate" title={name}>
+                  <div className="sticky left-0 z-10 bg-background text-[12px] leading-4">
+                    <b
+                      className="overflow-hidden break-words"
+                      title={name}
+                      style={{
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                      }}
+                    >
                       {name}
                     </b>
-                    <span className="text-muted-foreground">
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
                       {
                         visible.filter(
                           (card) =>
@@ -1045,7 +1055,7 @@ export function PipelineView({
                       open
                     </span>
                     {key ? (
-                      <details className="relative mt-1">
+                      <details className="relative mt-2">
                         <summary className="cursor-pointer text-[10px] text-muted-foreground">
                           ⋯ Agents
                         </summary>
@@ -1074,9 +1084,9 @@ export function PipelineView({
                     <div
                       key={stage}
                       data-pipeline-stage={stage}
-                      className="flex min-w-0 flex-col gap-1.5"
+                      className="flex min-w-0 flex-col gap-3"
                     >
-                      <h3 className="text-[10px] font-medium text-muted-foreground">
+                      <h3 className="text-[11px] font-medium text-muted-foreground">
                         {LABEL[stage]}
                       </h3>
                       {columnCards(
@@ -1308,7 +1318,7 @@ export function PipelineView({
           </aside>
         ) : null}
       </div>
-      <div className="flex shrink-0 gap-3 border-t border-border/60 px-3 py-1 text-[10px] text-muted-foreground">
+      <div className="flex shrink-0 flex-wrap gap-x-3 gap-y-1 border-t border-border/60 px-3 py-2 text-[10px] text-muted-foreground">
         <span>j/k move</span>
         <span>a advance</span>
         <span>m merge</span>
