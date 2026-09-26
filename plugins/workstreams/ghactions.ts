@@ -208,7 +208,7 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
             comment.body.toLowerCase().includes(String(pr?.headRefOid).slice(0, 7).toLowerCase()));
         });
       }
-      if (includeFollowup && threadNodes.length > 0) {
+      if (includeFollowup) {
         const comments = pr?.comments as { nodes?: unknown } | undefined;
         const commits = pr?.commits as { nodes?: unknown } | undefined;
         const author = (pr?.author as { login?: unknown } | undefined)?.login;

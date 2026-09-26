@@ -7,7 +7,7 @@ import type { PrHold, PrHolds } from "./pr-holds.js";
 import { canonicalPrUrl } from "./pr-holds.js";
 import { prBacklog, type BacklogEntry, type BacklogRow } from "./pr-backlog.js";
 import type { WireRun } from "./server.js";
-import { isAdvanceEligible } from "./bulk-advance-selection.js";
+import { advancePrKey, selectVisibleOpen, type AdvanceSelection } from "./bulk-advance-selection.js";
 import { displayTitle, isTicketlessClone, prLifecycle, type Lifecycle } from "./workstreams.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
 import { prWorkItemKey } from "./work-item-index.js";
@@ -20,7 +20,7 @@ export type PipelineAction = { kind: "merge" | "advance" | "fix" | "nudge" | "op
 export type PipelineCard = {
   key: string; repo: string; title: string; pr: Pr | null; local: Row | null; backlog: BacklogRow | null;
   effortKey: string | null; effortName: string | null; hold: PrHold | null;
-  stage: PipelineStage; blocker: PipelineBlocker; activity: PipelineActivity; action: PipelineAction;
+  stage: PipelineStage; blocker: PipelineBlocker; activity: PipelineActivity; action: PipelineAction; nextStep: string;
   ageSince: number | null; stale: boolean;
 };
 export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[] };
@@ -49,7 +49,7 @@ export function stageFor(lifecycle: Lifecycle, pr: Pr | null, behind: number | n
 export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | null, behind: number | null = null, stale = false): PipelineBlocker {
   if (hold !== null) return { label: "On hold", tone: "wait" };
   if (stage === "merged" || stage === "released") return { label: "Clear", tone: "clear" };
-  if (pr === null || stage === "build") return { label: "In progress", tone: "wait" };
+  if (pr === null) return { label: "In progress", tone: "wait" };
   if (stale) return { label: "Status unknown", tone: "wait" };
   if (checksFailed(pr.checkConclusions)) return { label: "CI failing", tone: "bad" };
   if (pr.mergeStateStatus === "DIRTY") return { label: "Conflicts", tone: "bad" };
@@ -57,9 +57,11 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (pr.unresolvedReviewThreads !== null && pr.unresolvedReviewThreads > 0) return { label: `${pr.unresolvedReviewThreads} open threads`, tone: "warn" };
   if (pr.reviewDecision === "APPROVED" && pr.approvalHasBody && !pr.approvalNoteFollowedUp) return { label: "Review note", tone: "warn" };
   if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
+  if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
+  if (pr.isDraft) return { label: "Draft", tone: "wait" };
+  if (stage === "build") return { label: "In progress", tone: "wait" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && pr.reviewFollowupPosted) return { label: "Awaiting re-review", tone: "wait" };
   if (pr.reviewDecision === "APPROVED" && !checksGreen(pr.checkConclusions)) return { label: "Checks pending", tone: "wait" };
-  if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
   if (pr.mergeStateStatus === "BLOCKED") return { label: "Rules block", tone: "wait" };
   if (pr.mergeStateStatus === "UNKNOWN" || pr.unresolvedReviewThreads === null) return { label: "Status unknown", tone: "wait" };
   if (pr.reviewDecision !== "APPROVED" && pr.reviewRequests.length === 0) return { label: "No reviewer", tone: "wait" };
@@ -93,14 +95,38 @@ export function activityFor(prUrl: string | null, path: string | null, sources: 
 export function primaryPipelineAction(stage: PipelineStage, blocker: PipelineBlocker, activity: PipelineActivity, hold: PrHold | null, behind: number | null): PipelineAction {
   if (hold !== null) return { kind: "release", label: "Release" };
   if (stage === "merged" || stage === "released") return null;
-  if (activity.state === "needs-you") return { kind: "fix", label: "Fix" };
+  if (activity.state === "needs-you") return { kind: "fix", label: "Review blocker" };
   if (activity.state === "working") return stage === "build" && activity.threadId !== null ? { kind: "open-thread", label: "Open thread" } : null;
-  if (stage === "build") return activity.threadId !== null ? { kind: "open-thread", label: "Open thread" } : null;
+  if (stage === "build" && activity.threadId !== null) return { kind: "open-thread", label: "Open thread" };
   if (behind !== null) return { kind: "open-parent", label: "Open parent", behind };
   if (stage === "ready" && blocker.label === "Clear") return { kind: "merge", label: "Merge" };
-  if (stage === "feedback" && blocker.label !== "Status unknown") return { kind: "advance", label: "Advance" };
-  if (stage === "review" && (blocker.label === "Awaiting review" || blocker.label === "No reviewer")) return { kind: "nudge", label: "Nudge" };
-  return null;
+  if (stage === "review" && blocker.label === "No reviewer") return { kind: "open-pr", label: "Choose reviewer" };
+  if (stage === "review" && blocker.label === "Awaiting review") return { kind: "nudge", label: "Nudge" };
+  return { kind: "advance", label: "Advance" };
+}
+
+/** Explain the current gate and the next deliberate action, including real waits. */
+export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: PipelineBlocker, activity: PipelineActivity, hold: PrHold | null, behind: number | null): string {
+  if (hold !== null) return "Release the hold when work can resume.";
+  if (stage === "released") return "No PR action remains.";
+  if (stage === "merged") return "Check release status when needed.";
+  if (activity.state === "working") return activity.threadId ? "Follow the running agent thread." : "Wait for the running agent.";
+  if (activity.state === "needs-you") return "Review the agent result and remaining blocker.";
+  if (pr === null) return "Open the checkout to continue branch work.";
+  if (blocker.label === "Status unknown") return "Advance to refresh live PR status.";
+  if (behind !== null) return `Advance parent PR #${behind} first.`;
+  if (blocker.label === "CI failing") return "Advance to investigate failing checks.";
+  if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
+  if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
+  if (blocker.label === "Changes requested" || blocker.label === "Review note" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
+  if (blocker.label === "Awaiting re-review") return "Wait for the reviewer to respond to the follow-up.";
+  if (blocker.label === "Awaiting review") return "Nudge the requested reviewer or wait for review.";
+  if (blocker.label === "No reviewer") return "Choose a reviewer on GitHub; Advance can recheck other gates.";
+  if (blocker.label === "Checks pending") return "Wait for checks to finish; Advance can recheck status.";
+  if (blocker.label === "Rules block") return "Inspect branch rules, then Advance to recheck.";
+  if (stage === "ready") return "Review the merge preview, then merge.";
+  if (stage === "build") return "Continue branch work; Advance checks for blockers.";
+  return "Advance to check the remaining PR gates.";
 }
 
 function ageOf(pr: Pr | null, local: Row | null): number | null {
@@ -129,16 +155,13 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
     }
     if (stage === "ready" && blocker.label === "Clear" && activity.state === "needs-you") activity = NONE;
     let action = primaryPipelineAction(stage, blocker, activity, hold, behind);
-    if (action?.kind === "advance" && pr !== null) {
-      const canStartBatch = pr.state === "OPEN" && pr.reviewDecision === "APPROVED";
-      const canStartLocalAgent = local?.action?.kind === "agent" || local !== null && blocker.label === "CI failing";
-      if (!canStartBatch && !canStartLocalAgent) action = { kind: "open-pr", label: "Open PR" };
-    }
+    if (pr?.state !== "OPEN" && action?.kind === "advance") action = null;
+    const nextStep = nextStepFor(pr, stage, blocker, activity, hold, behind);
     if (pr !== null) covered.add(prWorkItemKey(pr.url));
     cards.push({ key: pr === null ? local!.key : prWorkItemKey(pr.url), repo: pr === null ? local!.repo : repoOf(pr, remote?.repo ?? local!.repo),
       title: pr === null ? local!.title : displayTitle(pr.title), pr, local, backlog: remote,
       effortKey: remote?.effortKey ?? local?.effortKey ?? null, effortName: remote?.effortName ?? local?.effort ?? null,
-      hold, stage, blocker, activity, action, ageSince: ageOf(pr, local), stale });
+      hold, stage, blocker, activity, action, nextStep, ageSince: ageOf(pr, local), stale });
   };
   for (const row of backlog) add(row.local, row);
   for (const local of [...locals].sort((a, b) => Number(b.unit.pr?.state === "MERGED" && b.unit.lifecycle === "shipped") - Number(a.unit.pr?.state === "MERGED" && a.unit.lifecycle === "shipped") ||
@@ -175,17 +198,27 @@ export function byPipelineOrder(a: PipelineCard, b: PipelineCard): number {
 export type PipelineColumn = { stage: PipelineStage; cards: PipelineCard[]; bulk: "nudge" | "advance" | "merge" | null; bulkCount: number };
 /** The exact cards represented by a column bulk button, in the same sort order. */
 export function pipelineBulkCards(cards: readonly PipelineCard[], stage: PipelineStage): PipelineCard[] {
-  const bulk = stage === "review" ? "nudge" : stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
+  const bulk = stage === "build" || stage === "review" || stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
   if (bulk === null) return [];
-  return cards.filter((card) => card.stage === stage && card.hold === null && !card.stale &&
-    (bulk === "advance" ? card.pr !== null && !card.pr.isDraft && isAdvanceEligible(card.pr) && card.activity.state !== "working" : card.action?.kind === bulk)).sort(byPipelineOrder);
+  return cards.filter((card) => card.stage === stage && card.hold === null &&
+    (bulk === "advance" ? card.pr?.state === "OPEN" : card.action?.kind === bulk)).sort(byPipelineOrder);
 }
 export function pipelineColumns(cards: readonly PipelineCard[]): PipelineColumn[] {
   return PIPELINE_STAGES.map((stage) => {
     const members = cards.filter((card) => card.stage === stage).sort(byPipelineOrder);
-    const bulk = stage === "review" ? "nudge" : stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
+    const bulk = stage === "build" || stage === "review" || stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
     return { stage, cards: members, bulk, bulkCount: pipelineBulkCards(members, stage).length };
   });
+}
+
+export const selectablePipelineCard = (card: PipelineCard): boolean => card.pr?.state === "OPEN" && card.hold === null;
+
+export function togglePipelineSelection(selection: AdvanceSelection, card: PipelineCard): AdvanceSelection {
+  if (!selectablePipelineCard(card)) return selection;
+  const url = advancePrKey(canonicalPrUrl(card.pr!.url) ?? card.pr!.url);
+  return selection.urls.includes(url)
+    ? { ...selection, urls: selection.urls.filter((item) => item !== url) }
+    : { ...selection, urls: selectVisibleOpen(selection.urls, [{ url, state: "OPEN" }]) };
 }
 
 export type PipelineEffort = { key: string | null; name: string; cards: PipelineCard[] };

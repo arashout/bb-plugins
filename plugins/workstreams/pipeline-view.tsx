@@ -13,6 +13,8 @@ import {
   pipelineBulkCards,
   byPipelineOrder,
   PIPELINE_STAGES,
+  selectablePipelineCard,
+  togglePipelineSelection,
   type PipelineCard,
   type PipelineStage,
 } from "./pipeline";
@@ -33,7 +35,9 @@ import { backlogThreads } from "./backlog-threads";
 import { StartThreadDialog } from "./inbox";
 import type { Row } from "./inbox-rows";
 import { matchesApprovedFilter } from "./approval-filter";
-import { ADVANCE_SELECTION_LIMIT } from "./bulk-advance-selection";
+import { ADVANCE_SELECTION_LIMIT, advancePrKey, reconcileAdvanceSelection, selectVisibleOpen, type AdvanceSelection } from "./bulk-advance-selection";
+import { canonicalPrUrl } from "./pr-holds";
+import type { PrHolds } from "./pr-holds";
 import { relativeTime } from "./workstreams";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -64,6 +68,7 @@ const HISTORY_LIMIT: Partial<Record<PipelineStage, number>> = {
   merged: 5,
   released: 3,
 };
+const EMPTY_SELECTION: AdvanceSelection = { urls: [], removed: 0 };
 
 function age(card: PipelineCard, now: number): string {
   if (card.ageSince === null) return "";
@@ -113,6 +118,7 @@ export function PipelineView({
   const [query, setQuery] = useState("");
   const [layout, setLayout] = useState<"stage" | "effort">("stage");
   const [selected, setSelected] = useState<string | null>(null);
+  const [advanceSelection, setAdvanceSelection] = useState<AdvanceSelection>(EMPTY_SELECTION);
   const [filterOpen, setFilterOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showHistory, setShowHistory] = useState<Record<string, boolean>>({});
@@ -199,6 +205,12 @@ export function PipelineView({
       ? `${filteredCounts[stage]}/${counts[stage]}`
       : String(counts[stage]);
   const selectedCard = cards.find((card) => card.key === selected) ?? null;
+  const selectionUrl = (card: PipelineCard) => card.pr ? advancePrKey(canonicalPrUrl(card.pr.url) ?? card.pr.url) : null;
+  const selectionPrs = cards.flatMap((card) => card.pr ? [{ url: selectionUrl(card)!, state: card.pr.state }] : []);
+  const selectionHolds: PrHolds = Object.fromEntries(cards.filter((card) => card.pr && card.hold).map((card) => [selectionUrl(card)!, card.hold!]));
+  useEffect(() => setAdvanceSelection((current) => reconcileAdvanceSelection(current, selectionPrs, selectionHolds)), [cards]);
+  const visibleSelection = new Set(visible.map(selectionUrl).filter((url): url is string => url !== null));
+  const hiddenSelected = advanceSelection.urls.filter((url) => !visibleSelection.has(url)).length;
   useEffect(() => {
     if (messaging && (
       !cards.some((card) => card.key === messaging.key && card.pr?.state === "OPEN" && !card.hold) ||
@@ -349,11 +361,7 @@ export function PipelineView({
           return;
         }
       }
-      if (card.blocker.label === "CI failing" && card.local) {
-        setAgent({ kind: "agent", action: "investigate-ci", row: card.local });
-        return;
-      }
-      if (card.pr?.state === "OPEN" && card.pr.reviewDecision === "APPROVED") {
+      if (card.pr?.state === "OPEN" && !card.hold) {
         setAgent({ kind: "advance", prUrls: [card.pr.url] });
         return;
       }
@@ -525,6 +533,16 @@ export function PipelineView({
           className="absolute inset-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <div className="relative flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
+          {selectablePipelineCard(card) ? (
+            <input
+              type="checkbox"
+              checked={advanceSelection.urls.includes(selectionUrl(card)!)}
+              disabled={advanceSelection.urls.length >= ADVANCE_SELECTION_LIMIT && !advanceSelection.urls.includes(selectionUrl(card)!)}
+              onChange={() => setAdvanceSelection((current) => togglePipelineSelection(current, card))}
+              aria-label={`Select ${card.repo} #${card.pr!.number} for Advance`}
+              className="relative z-10 mt-0.5 shrink-0 accent-foreground"
+            />
+          ) : null}
           <b className="pointer-events-none truncate" title={card.repo}>
             {repoName}
           </b>
@@ -583,7 +601,7 @@ export function PipelineView({
               href={card.pr.url}
               className="relative z-10 ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold hover:bg-foreground/[0.06]"
             >
-              Open PR
+              {card.action.label}
             </UrlLink>
           ) : card.action ? (
             <button
@@ -601,6 +619,9 @@ export function PipelineView({
             </button>
           ) : null}
         </div>
+        <p className="pointer-events-none relative mt-1 text-[10.5px] leading-4 text-muted-foreground">
+          <b className="text-foreground">Next:</b> {card.nextStep}
+        </p>
         {card.pr?.state === "OPEN" && !card.hold ? (
           <div className="relative z-10 mt-2 border-t border-border/70 pt-1.5">
             {messaging?.key === card.key && messaging.location === "card" ? (
@@ -708,30 +729,43 @@ export function PipelineView({
       </>
     );
   };
-  const bulkAdvanceCards = pipelineBulkCards(visible, "feedback");
-  const bulkAdvance = bulkAdvanceCards
-    .slice(0, ADVANCE_SELECTION_LIMIT)
-    .map((card) => card.pr!.url);
   const bulkMerge = pipelineBulkCards(visible, "ready");
-  const bulkNudge = pipelineBulkCards(visible, "review").filter(
-    (card) => card.ageSince !== null && now - card.ageSince >= 7 * 86_400_000,
+  const bulkNudge = visible.filter(
+    (card) => card.stage === "review" && card.action?.kind === "nudge" && card.ageSince !== null && now - card.ageSince >= 7 * 86_400_000,
+  );
+  const selectedNudge = cards.filter((card) =>
+    card.action?.kind === "nudge" &&
+    (selectionUrl(card) !== null && advanceSelection.urls.includes(selectionUrl(card)!)),
   );
   const bulkButton = (stage: PipelineStage) => {
-    if (stage === "feedback" && bulkAdvance.length)
+    if (stage === "build" || stage === "review" || stage === "feedback") {
+      const candidates = pipelineBulkCards(visible, stage);
+      const urls = candidates.slice(0, ADVANCE_SELECTION_LIMIT).map((card) => card.pr!.url);
+      if (!urls.length && !(stage === "review" && bulkNudge.length)) return null;
       return (
-        <button
-          type="button"
-          onClick={() => setAgent({ kind: "advance", prUrls: bulkAdvance })}
-          title={
-            bulkAdvanceCards.length > ADVANCE_SELECTION_LIMIT
-              ? `First ${ADVANCE_SELECTION_LIMIT} of ${bulkAdvanceCards.length} eligible PRs`
-              : undefined
-          }
-          className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
-        >
-          Advance {bulkAdvance.length}
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          {urls.length ? (
+            <button
+              type="button"
+              onClick={() => setAgent({ kind: "advance", prUrls: urls })}
+              title={candidates.length > ADVANCE_SELECTION_LIMIT ? `First ${ADVANCE_SELECTION_LIMIT} of ${candidates.length} visible PRs` : undefined}
+              className="rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
+            >
+              Advance {urls.length}
+            </button>
+          ) : null}
+          {stage === "review" && bulkNudge.length ? (
+            <button
+              type="button"
+              onClick={() => startDirectQueue(bulkNudge, "nudge")}
+              className="rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
+            >
+              Nudge {bulkNudge.length}
+            </button>
+          ) : null}
+        </div>
       );
+    }
     if (stage === "ready" && bulkMerge.length)
       return (
         <button
@@ -740,16 +774,6 @@ export function PipelineView({
           className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
         >
           Merge {bulkMerge.length}
-        </button>
-      );
-    if (stage === "review" && bulkNudge.length)
-      return (
-        <button
-          type="button"
-          onClick={() => startDirectQueue(bulkNudge, "nudge")}
-          className="ml-auto rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
-        >
-          Nudge {bulkNudge.length}
         </button>
       );
     return null;
@@ -990,6 +1014,43 @@ export function PipelineView({
           ) : null}
         </div>
       </div>
+      <div role="group" aria-label="Advance selection" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
+        <button
+          type="button"
+          onClick={() => setAdvanceSelection((current) => ({ ...current, urls: selectVisibleOpen(current.urls, visible.filter(selectablePipelineCard).map((card) => ({ url: selectionUrl(card)!, state: "OPEN" }))) }))}
+          disabled={!visible.some((card) => selectablePipelineCard(card) && !advanceSelection.urls.includes(selectionUrl(card)!)) || advanceSelection.urls.length >= ADVANCE_SELECTION_LIMIT}
+          className="rounded border px-2 py-1 hover:bg-foreground/[0.06] disabled:opacity-50"
+        >
+          Select visible
+        </button>
+        <button
+          type="button"
+          onClick={() => setAgent({ kind: "advance", prUrls: advanceSelection.urls })}
+          disabled={advanceSelection.urls.length === 0}
+          className="rounded border px-2 py-1 font-medium hover:bg-foreground/[0.06] disabled:opacity-50"
+        >
+          Advance selected ({advanceSelection.urls.length})
+        </button>
+        {selectedNudge.length ? (
+          <button
+            type="button"
+            onClick={() => startDirectQueue(selectedNudge, "nudge")}
+            className="rounded border px-2 py-1 hover:bg-foreground/[0.06]"
+          >
+            Nudge selected ({selectedNudge.length})
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => setAdvanceSelection(EMPTY_SELECTION)}
+          disabled={advanceSelection.urls.length === 0 && advanceSelection.removed === 0}
+          className="rounded px-2 py-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+        >
+          Clear selection
+        </button>
+        {hiddenSelected ? <span className="text-muted-foreground">{hiddenSelected} selected outside this filter</span> : null}
+        {advanceSelection.removed ? <span className="text-muted-foreground">{advanceSelection.removed} removed after hold, close, or disappearance</span> : null}
+      </div>
       <div
         aria-label="Pipeline stage counts"
         className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 bg-muted/30 px-3 py-1"
@@ -1144,6 +1205,10 @@ export function PipelineView({
                 ×
               </button>
             </div>
+            <div className="mt-3 rounded border border-border bg-muted/30 p-2">
+              <p><b>Blocker:</b> {selectedCard.blocker.label}</p>
+              <p className="mt-1"><b>Next:</b> {selectedCard.nextStep}</p>
+            </div>
             <div className="mt-3 grid grid-cols-2 gap-1">
               {[
                 ["Review", selectedCard.pr?.reviewDecision ?? "—"],
@@ -1254,7 +1319,7 @@ export function PipelineView({
                   href={selectedCard.pr.url}
                   className="rounded bg-foreground px-2 py-1 font-medium text-background"
                 >
-                  Open PR
+                  {selectedCard.action.label}
                 </UrlLink>
               ) : selectedCard.action ? (
                 <button
@@ -1263,6 +1328,15 @@ export function PipelineView({
                   className="rounded bg-foreground px-2 py-1 font-medium text-background"
                 >
                   {selectedCard.action.label}
+                </button>
+              ) : null}
+              {selectedCard.pr?.state === "OPEN" && !selectedCard.hold && selectedCard.activity.state !== "working" && selectedCard.action?.kind !== "advance" && selectedCard.action?.kind !== "fix" ? (
+                <button
+                  type="button"
+                  onClick={() => setAgent({ kind: "advance", prUrls: [selectedCard.pr!.url] })}
+                  className="rounded border px-2 py-1"
+                >
+                  Advance…
                 </button>
               ) : null}
               {selectedCard.pr ? (
@@ -1366,7 +1440,16 @@ export function PipelineView({
       <PipelineAgentSheet
         request={agent}
         onClose={() => setAgent(null)}
-        onStarted={advance.refresh}
+        onStarted={() => {
+          if (agent?.kind === "advance") {
+            const started = new Set(agent.prUrls.map((url) => advancePrKey(canonicalPrUrl(url) ?? url)));
+            setAdvanceSelection((current) => {
+              const urls = current.urls.filter((url) => !started.has(url));
+              return urls.length === current.urls.length ? current : { ...current, urls };
+            });
+          }
+          void advance.refresh();
+        }}
         onOpenThread={(id) => navigate.toThread(id)}
       />
       <StartThreadDialog row={starting} onClose={() => setStarting(null)} />

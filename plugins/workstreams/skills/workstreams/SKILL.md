@@ -465,13 +465,16 @@ items without a key appear in **One-offs**. A held PR stays in its stage with
 actions, automatic dispatch, or the agents chip. Merged shows the five most
 recent cards, and Released shows three, until you choose **Show all**.
 
-Use a card's primary action or a column bulk button. Feedback bulk advance
-includes approved open PRs only. Review bulk nudge includes PRs that have
-waited at least seven days. Ready bulk merge opens a confirmation for each
-unblocked PR. The shared agent sheet shows its plan, workspace, and **Pushes**
-or **Read-only** effect. Advance batches use fixed service instructions;
-single-row agent prompts and repair direction remain editable. The card shows
-agent progress, and the Pipeline options menu opens **Advance history** and
+Use a card's **Next** line and primary action to identify the next move. Select
+card checkboxes or **Select visible**, then **Advance selected** across stages;
+search keeps earlier selections. Advance accepts open,
+unheld PRs, including drafts and PRs awaiting approval. Review bulk nudge
+includes PRs that have waited at least seven days. Ready bulk merge opens a
+confirmation for each unblocked PR. The shared agent sheet shows its plan,
+workspace, and **Pushes** or **Read-only** effect. Advance batches use fixed
+service instructions; single-row agent prompts and repair direction remain
+editable. The card shows agent progress, and the Pipeline options menu opens
+**Advance history** and
 the legacy Board.
 
 The panel opens on the last view you used in this browser, or the **Map** on
@@ -508,13 +511,15 @@ Direct GitHub actions work on remote PRs; single-PR agent repairs need a scanned
 
 PR row menus include **Put on hold** with an optional reason; held PRs remain under their effort and in the backlog’s **Held** group with readiness and thread access intact. Hold excludes Advance selection and automatic actions; **Release hold** restores the current readiness group without changing GitHub.
 
-In **PR backlog**, select approved open PRs and choose **Advance selected** to
-preview a finite batch. The preview distinguishes feedback work, branch
-preparation, both, and verification only. Confirmation authorizes the listed
-work. A PR in an effort uses one persistent repository controller under the
-effort coordinator. The controller handles PR instructions in sequence and can
-delegate bounded PR work to child threads. Confirmed Advance can establish the
-effort and create its coordinator and repository controller; preview and other
+In **Pipeline**, select open, unheld PR cards across stages and choose
+**Advance selected** to preview a finite batch. The legacy **PR backlog** also
+offers this action. The preview distinguishes feedback, branch preparation,
+failed-check work, readiness checks, waiting PRs, and skips. Confirmation
+authorizes the listed work. A PR in an effort uses one persistent repository
+controller under the effort coordinator. The controller handles PR instructions
+in sequence and can delegate bounded PR work to child threads. Confirmed
+Advance can establish the effort and create its coordinator and repository
+controller; preview and other
 reads do not launch them. An unassigned PR uses a descriptively titled
 repository thread for the batch. Each PR keeps a separate result and isolated
 worktree; remote PRs can use a worktree from an exactly matched scanned
@@ -522,10 +527,12 @@ repository. For feedback, the agent reads reviews and current code,
 verifies fixes already made, addresses remaining changes, and integrates the
 current base as needed. It tests changes, pushes when needed, replies with
 evidence, and resolves only feedback verified as addressed. History rewrites
-use an exact commit lease. Pushed changes receive a PR summary.
-Verification-only jobs do not spawn an agent. Saved per-PR results appear in
-**Advance progress** across Board lenses. Readiness requires fresh approval,
-review feedback, checks, branch state, and stack dependencies on the checked head.
+use an exact commit lease. Pushed changes receive a PR summary. Agents diagnose
+and fix confirmed failed checks. Draft PRs remain drafts. Readiness-only jobs do
+not spawn an agent; pending review or checks remain waiting. Saved per-PR
+results appear in **Advance progress** across Board lenses. Readiness requires
+fresh approval, review feedback, checks, branch state, and stack dependencies
+on the checked head.
 **Recheck readiness** reads current facts; **Stop queued PRs** stops pending work
 while active workers can finish. Keep worktrees for inspection. Advance never
 merges or deploys. Saved batches retain their original scope; start a new preview

@@ -213,6 +213,10 @@ describe("readReviewThreads", () => {
     };
     const read = (value: unknown) => readReviewThreads(fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET, true);
     expect(await read(pr)).toMatchObject({ ok: true, count: 0, reviewFollowupPosted: true });
+    expect(await read({ ...pr, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } }))
+      .toMatchObject({ ok: true, count: 0, reviewFollowupPosted: true });
+    expect(await read({ ...pr, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] }, comments: { nodes: [] } }))
+      .toMatchObject({ ok: true, count: 0, reviewFollowupPosted: false });
     expect(await read({ ...pr, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ ...resolved, isResolved: false }] } })).toMatchObject({ ok: true, count: 1 });
     expect(await read({ ...pr, comments: { nodes: [{ author: { login: "mjsz" }, createdAt: "2026-09-25T02:00:23Z", body: "Fixes pushed." }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });
     expect(await read({ ...pr, commits: { nodes: [{ commit: { oid: pr.headRefOid, committedDate: "2026-09-26T00:00:00Z" } }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });

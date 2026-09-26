@@ -119,7 +119,6 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
     let readiness: AdvanceFacts["readiness"] = "needs-attention";
     let detail: string;
     if (view.state !== "OPEN") detail = "This PR is no longer open.";
-    else if (view.isDraft) detail = "This PR is still a draft.";
     else if (needsPreparation) detail = mergeStateStatus === "DIRTY" || view.mergeable === "CONFLICTING" ? "Resolve conflicts, test, and push the prepared branch." : "Update the branch against its base, test, and push.";
     else if (threads.count > 0) detail = `${threads.count}${threads.hasNextPage ? "+" : ""} unresolved review threads need attention.`;
     else if (threads.hasNextPage) detail = "Review threads are incomplete; readiness needs another check.";
@@ -127,9 +126,12 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
     else if (approvalNotePending) detail = "An approving review includes a note without confirmed follow-up.";
     else if (checks === "failed") detail = "One or more checks failed.";
     else if (checks === "unknown") detail = "Check results are incomplete or unknown.";
-    else if (view.reviewDecision !== "APPROVED") { readiness = "waiting-review"; detail = view.reviewDecision === "CHANGES_REQUESTED" ? "Review still requests changes; wait for a new approval after follow-up." : "Waiting for approval on the current PR."; }
     else if (basePrNumber !== null) detail = "The base branch belongs to another open PR; advance that dependency first.";
     else if (checks === "pending") { readiness = "waiting-checks"; detail = "Waiting for checks on the current head commit."; }
+    else if (view.reviewDecision === "CHANGES_REQUESTED" && threads.reviewFollowupPosted === false) detail = "Review requests changes without a verified author follow-up.";
+    else if (view.reviewDecision === "CHANGES_REQUESTED" && threads.reviewFollowupPosted === undefined) detail = "Review follow-up could not be verified; inspect the review discussion.";
+    else if (view.isDraft) detail = "Draft PR: finish the work and mark it ready for review.";
+    else if (view.reviewDecision !== "APPROVED") { readiness = "waiting-review"; detail = view.reviewDecision === "CHANGES_REQUESTED" ? "Review still requests changes; wait for a new approval after follow-up." : "Waiting for approval on the current PR."; }
     else if (view.mergeable !== "MERGEABLE" || !["CLEAN", "HAS_HOOKS"].includes(mergeStateStatus)) detail = "GitHub has not confirmed that all merge requirements are satisfied.";
     else { readiness = "ready"; detail = "Approved, review feedback clear, checks passed, and branch ready to merge."; }
     return { ok: true, facts: {
@@ -138,6 +140,7 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
       state: view.state, isDraft: view.isDraft, isCrossRepository: view.isCrossRepository,
       reviewDecision: view.reviewDecision || null, mergeStateStatus, mergeable: view.mergeable,
       needsPreparation, readiness, detail, unresolvedThreads: threads.count, checks, basePrNumber, approvalNotePending,
+      ...(threads.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: threads.reviewFollowupPosted }),
     } };
   }
   return { ok: false, error: "The PR head, base, or reviews changed during verification. Refresh and try again." };

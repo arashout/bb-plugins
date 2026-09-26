@@ -95,14 +95,14 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
     <Dialog open={open} onOpenChange={(next) => { if (!starting) setOpen(next); }}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Advance approved PRs</DialogTitle>
-          <DialogDescription>Address feedback, prepare branches where needed, and verify current merge readiness.</DialogDescription>
+          <DialogTitle>Advance selected PRs</DialogTitle>
+          <DialogDescription>Review feedback, branch preparation, failed checks, and readiness before starting.</DialogDescription>
         </DialogHeader>
         {loading ? <p role="status" className="text-[12px] text-muted-foreground">Refreshing {selection.length} selected PRs and checking workspaces…</p> : null}
         {plan === null ? null : <>
           <div className="space-y-1 text-[12px]">
-            <p className="font-medium">{summary.agentJobs} with agent · {summary.verifyJobs} verify only · {summary.skipped} skipped</p>
-            <p className="text-muted-foreground">{summary.agentJobs === 0 ? "Verification runs without an agent." : "Each effort reuses one controller per repository. PRs run sequentially in separate checkouts."}</p>
+            <p className="font-medium">{summary.agentJobs} agent work · {summary.verifyJobs} readiness checks · {summary.skipped} skipped</p>
+            <p className="text-muted-foreground">{summary.agentJobs === 0 ? "Readiness checks run without an agent; waiting PRs remain waiting." : "Each effort reuses one controller per repository. PRs run sequentially in separate checkouts."}</p>
           </div>
           <div className="space-y-3">
             {repositories.map((repo) => <section key={repo} className="rounded-md border border-border px-3 py-2">
@@ -114,7 +114,7 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
                     <span className={cn("max-w-full shrink-0 break-words rounded px-1.5 py-0.5 text-[10.5px]", job.eligible ? "bg-foreground/[0.06]" : "bg-amber-500/10 text-amber-700 dark:text-amber-300")}>{advancePreviewAction(job)}</span>
                   </div>
                   <p className="break-words text-muted-foreground">{job.detail}</p>
-                  {job.eligible && (job.needsPreparation || job.needsFeedback) ? <p className="text-muted-foreground">{job.workspace === "create" ? "Create an isolated checkout" : job.workspace === "existing" ? "Use the matched checkout" : "Workspace unavailable"}{job.needsPreparation && job.baseRefName ? ` · integrate ${job.baseRefName}` : ""}</p> : null}
+                  {job.eligible && (job.needsPreparation || job.needsFeedback || job.needsChecks) ? <p className="text-muted-foreground">{job.workspace === "create" ? "Create an isolated checkout" : job.workspace === "existing" ? "Use the matched checkout" : "Workspace unavailable"}{job.needsPreparation && job.baseRefName ? ` · integrate ${job.baseRefName}` : ""}</p> : null}
                 </li>)}
               </ul>
             </section>)}
@@ -122,6 +122,7 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
           <div className="space-y-1 rounded-md bg-foreground/[0.035] px-3 py-2 text-[11.5px] text-muted-foreground">
             {summary.hasFeedback ? <p>For listed feedback, read reviews and current code, verify fixes already made, and address remaining changes. Check and integrate the current base as needed, test and push changes, reply with evidence, and resolve only feedback verified as addressed.</p> : null}
             {summary.hasPreparation ? <p>Update the listed branches and resolve conflicts, then test and push.</p> : null}
+            {summary.hasChecks ? <p>Diagnose failed checks, fix their cause, then run the relevant checks and push any code changes.</p> : null}
             <p>{summary.agentJobs > 0 ? "Push only when changes are needed, use an exact commit lease for rewritten history, and post a PR summary after pushed changes. " : "This batch only reads readiness. "}Check approval, unresolved feedback, checks, and mergeability against the final commit. No PRs are merged.</p>
           </div>
         </>}
@@ -130,7 +131,7 @@ export function AdvancePreviewButton({ prUrls, disabled, onStarted }: {
         <DialogFooter className="flex-wrap gap-2">
           <Button variant="ghost" disabled={starting} onClick={() => setOpen(false)}>Cancel</Button>
           {!loading && (plan === null || expired || error !== null) ? <Button variant="outline" disabled={starting} onClick={() => void preview(selection)}>Refresh preview</Button> : null}
-          <Button disabled={disabled || loading || starting || expired || eligible.length === 0} onClick={() => void start()}>{starting ? "Starting…" : summary.agentJobs > 0 ? `Start advance · ${eligible.length}` : `Verify ${eligible.length} ${eligible.length === 1 ? "PR" : "PRs"}`}</Button>
+          <Button disabled={disabled || loading || starting || expired || eligible.length === 0} onClick={() => void start()}>{starting ? "Starting…" : summary.agentJobs > 0 ? `Start advance · ${eligible.length}` : `Check readiness · ${eligible.length}`}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

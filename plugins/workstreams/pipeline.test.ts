@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { prSchema, type Pr } from "./contract.js";
 import type { Row } from "./inbox-rows.js";
 import type { BacklogEntry } from "./pr-backlog.js";
-import { activityFor, blockerFor, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, primaryPipelineAction, stageFor } from "./pipeline.js";
+import { activityFor, blockerFor, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, primaryPipelineAction, stageFor, togglePipelineSelection } from "./pipeline.js";
+import { reconcileAdvanceSelection, selectVisibleOpen } from "./bulk-advance-selection.js";
 import type { Lifecycle } from "./workstreams.js";
 
 const now = Date.parse("2026-09-25T00:00:00Z");
@@ -47,32 +48,36 @@ describe("pipeline position and gates", () => {
     const held = pr(4, { unresolvedReviewThreads: 2 });
     const key = held.url;
     const cards = pipelineCards([entry(held)], [], now, { holds: { [key]: { reason: "Waiting for copy review", heldAt: now } } });
-    expect(cards[0]).toMatchObject({ stage: "feedback", blocker: { label: "On hold" }, activity: { state: "none" }, action: { kind: "release" } });
+    expect(cards[0]).toMatchObject({ stage: "feedback", blocker: { label: "On hold" }, activity: { state: "none" }, action: { kind: "release" }, nextStep: "Release the hold when work can resume." });
     expect(pipelineColumns(cards).find((column) => column.stage === "feedback")?.bulkCount).toBe(0);
   });
 
-  it("gives stale and pending PRs no merge action, and never nudges after follow-up", () => {
-    expect(pipelineCards([entry(pr(5), { stale: true })], [], now)[0]).toMatchObject({ stage: "review", action: null });
+  it("keeps real waits explicit while offering a fresh Advance preview", () => {
+    expect(pipelineCards([entry(pr(5), { stale: true })], [], now)[0]).toMatchObject({ stage: "review", action: { kind: "advance" }, nextStep: "Advance to refresh live PR status." });
     const pending = pipelineCards([entry(pr(6, { checkConclusions: ["WAITING"] }))], [], now)[0]!;
     expect(pending.blocker.label).toBe("Checks pending");
-    expect(pending.action).toBeNull();
+    expect(pending).toMatchObject({ action: { kind: "advance" }, nextStep: "Wait for checks to finish; Advance can recheck status." });
     const rereview = pipelineCards([entry(pr(7, { reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true, reviewRequests: ["reviewer"] }))], [], now)[0]!;
-    expect(rereview).toMatchObject({ stage: "review", blocker: { label: "Awaiting re-review" }, action: null });
+    expect(rereview).toMatchObject({ stage: "review", blocker: { label: "Awaiting re-review" }, action: { kind: "advance" }, nextStep: "Wait for the reviewer to respond to the follow-up." });
+    const noReviewer = pipelineCards([entry(pr(19, { reviewDecision: "REVIEW_REQUIRED", reviewRequests: [] }))], [], now)[0]!;
+    expect(noReviewer).toMatchObject({ blocker: { label: "No reviewer" }, action: { kind: "open-pr", label: "Choose reviewer" }, nextStep: "Choose a reviewer on GitHub; Advance can recheck other gates." });
+    const review = pipelineCards([entry(pr(20, { reviewDecision: "REVIEW_REQUIRED", reviewRequests: ["reviewer"] }))], [], now)[0]!;
+    expect(review).toMatchObject({ blocker: { label: "Awaiting review" }, action: { kind: "nudge" }, nextStep: "Nudge the requested reviewer or wait for review." });
   });
 
-  it("counts only approved, unheld Feedback PRs for Advance", () => {
+  it("counts all open, unheld Feedback PRs for preview, including unapproved feedback", () => {
     const cards = pipelineCards([entry(pr(8, { unresolvedReviewThreads: 2 })), entry(pr(9, { reviewDecision: "CHANGES_REQUESTED" }))], [], now);
-    expect(cards.map((card) => card.action?.kind)).toEqual(["advance", "open-pr"]);
-    expect(pipelineColumns(cards).find((column) => column.stage === "feedback")?.bulkCount).toBe(1);
-    expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([8]);
+    expect(cards.map((card) => card.action?.kind)).toEqual(["advance", "advance"]);
+    expect(pipelineColumns(cards).find((column) => column.stage === "feedback")?.bulkCount).toBe(2);
+    expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([8, 9]);
   });
 
-  it("opens remote unapproved feedback and keeps approved CI in the batch contract", () => {
+  it("routes unapproved feedback and failing CI through Advance preview", () => {
     const unapproved = pipelineCards([entry(pr(90, { reviewDecision: "CHANGES_REQUESTED" }))], [], now)[0]!;
-    expect(unapproved).toMatchObject({ stage: "feedback", action: { kind: "open-pr", label: "Open PR" } });
+    expect(unapproved).toMatchObject({ stage: "feedback", action: { kind: "advance" }, nextStep: "Advance to address review feedback." });
     const ciOnly = pipelineCards([entry(pr(91, { checkConclusions: ["TIMED_OUT"] }))], [], now)[0]!;
-    expect(ciOnly).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" } });
-    expect(pipelineBulkCards([unapproved, ciOnly], "feedback").map((card) => card.pr?.number)).toEqual([91]);
+    expect(ciOnly).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" }, nextStep: "Advance to investigate failing checks." });
+    expect(pipelineBulkCards([unapproved, ciOnly], "feedback").map((card) => card.pr?.number)).toEqual([90, 91]);
     const localCi = pipelineCards([entry(pr(94, { checkConclusions: ["TIMED_OUT"], reviewDecision: null }))], [local(pr(94, { checkConclusions: ["TIMED_OUT"], reviewDecision: null }))], now)[0]!;
     expect(localCi).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" } });
   });
@@ -110,7 +115,17 @@ describe("pipeline position and gates", () => {
 
   it("keeps stale drafts and unverified local work in Build, and uses PR age only for PRs", () => {
     const draft = pipelineCards([entry(pr(15, { isDraft: true, checkConclusions: ["FAILURE"] }), { stale: true })], [], now)[0]!;
-    expect(draft.stage).toBe("build");
+    expect(draft).toMatchObject({ stage: "build", action: { kind: "advance" }, nextStep: "Advance to refresh live PR status." });
+    const freshDraft = pipelineCards([entry(pr(18, { isDraft: true }))], [], now)[0]!;
+    expect(freshDraft).toMatchObject({ stage: "build", blocker: { label: "Draft" }, action: { kind: "advance" }, nextStep: "Finish draft work; Advance checks for repairable blockers." });
+    for (const mergeStateStatus of ["BLOCKED", "UNKNOWN"] as const) {
+      const cleanDraft = pipelineCards([entry(pr(27, { isDraft: true, mergeStateStatus }))], [], now)[0]!;
+      expect(cleanDraft).toMatchObject({ stage: "build", blocker: { label: "Draft" }, nextStep: "Finish draft work; Advance checks for repairable blockers." });
+    }
+    const draftFeedback = pipelineCards([entry(pr(25, { isDraft: true, reviewDecision: "CHANGES_REQUESTED" }))], [], now)[0]!;
+    expect(draftFeedback).toMatchObject({ stage: "build", blocker: { label: "Changes requested" }, nextStep: "Advance to address review feedback." });
+    const draftBehind = pipelineCards([entry(pr(26, { isDraft: true, mergeStateStatus: "BEHIND" }))], [], now)[0]!;
+    expect(draftBehind).toMatchObject({ stage: "build", blocker: { label: "Branch behind" }, nextStep: "Advance to update the branch." });
     const noPr = local(null, { unit: { ...local(null).unit, lifecycle: "unverified", lastCommitAt: "2026-09-10T00:00:00Z" } });
     expect(pipelineCards([], [noPr], now)[0]).toMatchObject({ stage: "build", ageSince: Date.parse("2026-09-10T00:00:00Z") });
     expect(pipelineCards([entry(pr(16, { createdAt: null }))], [], now)[0]?.ageSince).toBeNull();
@@ -195,8 +210,37 @@ describe("card activity", () => {
 
   it("uses a linked active author thread to show Build work and open it", () => {
     const row = local(pr(2, { isDraft: true }), { cluster: { units: [{ path: "/work/catalog-2" }], threads: [{ id: "author-2", title: "Write catalog copy", active: true, tier: "started" }] } as Row["cluster"] });
-    expect(pipelineCards([], [row], now)[0]).toMatchObject({ stage: "build", activity: { state: "working", threadId: "author-2" }, action: { kind: "open-thread" } });
+    expect(pipelineCards([], [row], now)[0]).toMatchObject({ stage: "build", activity: { state: "working", threadId: "author-2" }, action: { kind: "open-thread" }, nextStep: "Follow the running agent thread." });
     const merged = local(pr(21, { state: "MERGED" }), { cluster: row.cluster });
     expect(pipelineCards([], [merged], now)[0]).toMatchObject({ stage: "merged", activity: { state: "none" } });
+  });
+});
+
+describe("explicit Advance selection", () => {
+  const empty = { urls: [], removed: 0 };
+  it("keeps chosen PRs through search, adds only visible PRs on request, and removes held or closed PRs", () => {
+    const [draft, review, feedback] = pipelineCards([
+      entry(pr(51, { isDraft: true })),
+      entry(pr(52, { reviewDecision: "REVIEW_REQUIRED", reviewRequests: ["reviewer"] })),
+      entry(pr(53, { checkConclusions: ["FAILURE"] })),
+    ], [], now).sort((a, b) => a.pr!.number - b.pr!.number);
+    const chosen = togglePipelineSelection(empty, draft!);
+    const allPrs = [draft!, review!, feedback!].map((card) => card.pr!);
+    expect(reconcileAdvanceSelection(chosen, allPrs)).toBe(chosen);
+    expect(reconcileAdvanceSelection(chosen, allPrs).urls).toEqual([draft!.pr!.url]);
+    const visibleOnly = selectVisibleOpen([], [feedback!.pr!]);
+    expect(visibleOnly).toEqual([feedback!.pr!.url]);
+    const crossStage = { ...chosen, urls: selectVisibleOpen(chosen.urls, [review!.pr!, feedback!.pr!]) };
+    expect(crossStage.urls).toEqual([draft!.pr!.url, review!.pr!.url, feedback!.pr!.url]);
+    const held = { ...review!, hold: { reason: "Waiting", heldAt: now } };
+    const closed = { ...feedback!, pr: pr(53, { state: "CLOSED" }) };
+    expect(reconcileAdvanceSelection(crossStage, [draft!.pr!, held.pr!, closed.pr!], { [held.pr!.url]: held.hold })).toEqual({ urls: [draft!.pr!.url], removed: 2 });
+  });
+
+  it("includes an active PR for preview but excludes holds from explicit selection", () => {
+    const active = pipelineCards([entry(pr(54, { isDraft: true }))], [local(pr(54, { isDraft: true }), { cluster: { units: [{ path: "/work/catalog-54" }], threads: [{ id: "author-54", title: "Write catalog copy", active: true, tier: "started" }] } as Row["cluster"] })], now)[0]!;
+    expect(active.activity.state).toBe("working");
+    expect(selectVisibleOpen([], [active.pr!])).toEqual([active.pr!.url]);
+    expect(togglePipelineSelection(empty, { ...active, hold: { reason: "Waiting", heldAt: now } }).urls).toEqual([]);
   });
 });

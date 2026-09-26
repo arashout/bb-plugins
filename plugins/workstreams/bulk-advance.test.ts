@@ -6,9 +6,9 @@ import { ADVANCE_MIGRATIONS, createAdvanceService, preparationPrompt, type Advan
 const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts => ({
   prUrl: `https://github.com/acme/app/pull/${number}`, number, repo: "acme/app", title: `Fix ${number}`,
   headOid: `${number}`.repeat(40), baseOid: "a".repeat(40), headRefName: `fix-${number}`, baseRefName: "main",
-  needsPreparation: true, needsFeedback: false, eligible: true, detail: "Needs rebase", workspace: "create", projectId: "project",
+  needsPreparation: true, needsFeedback: false, needsChecks: false, eligible: true, detail: "Needs rebase", workspace: "create", projectId: "project",
   hostId: "host", sourcePath: "/source", path: `/checkout/${number}`, effortId: null, effortKey: null, effortMembers: null,
-  readiness: "needs-attention", blockedBy: null, ...overrides,
+  reviewDecision: "APPROVED", isDraft: false, readiness: "needs-attention", blockedBy: null, ...overrides,
 });
 const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 function setup(facts = [fact()]) {
@@ -313,7 +313,7 @@ describe("finite Advance preparation", () => {
     await expect(t.service.start(plan.token)).rejects.toThrow("changed");
     expect(t.deps.spawn).not.toHaveBeenCalled();
   });
-  it("defaults legacy persisted jobs to no feedback permission and never adds writes during recovery", async () => {
+  it("defaults legacy approved batches to no feedback or CI permission without adding writes during recovery", async () => {
     for (const feedbackAppeared of [false, true]) {
       const current = fact(1, { needsPreparation: false, needsFeedback: false, readiness: "ready" });
       const t = setup([current]); const batch = await t.start(); t.service.dispose();
@@ -322,16 +322,31 @@ describe("finite Advance preparation", () => {
       saved.jobs[0].status = "queued";
       saved.prepared = {};
       delete saved.jobs[0].needsFeedback;
+      delete saved.jobs[0].needsChecks;
       delete saved.facts[saved.jobs[0].id].needsFeedback;
+      delete saved.facts[saved.jobs[0].id].needsChecks;
+      delete saved.facts[saved.jobs[0].id].reviewDecision;
+      delete saved.facts[saved.jobs[0].id].isDraft;
       t.db.prepare("UPDATE advance_batches SET body = ? WHERE id = ?").run(JSON.stringify(saved), batch.id);
       t.current.set(current.prUrl, { ...current, needsFeedback: feedbackAppeared });
       const restored = createAdvanceService(t.db, t.deps);
-      expect(restored.list()[0]!.jobs[0]!.needsFeedback).toBe(false);
+      expect(restored.list()[0]!.jobs[0]).toMatchObject({ needsFeedback: false, needsChecks: false });
       await restored.tick(true); await drain();
       expect(t.deps.spawn).not.toHaveBeenCalled();
       expect(t.deps.workspace).not.toHaveBeenCalled();
       expect(restored.list()[0]!.jobs[0]!.status).toBe(feedbackAppeared ? "needs-attention" : "ready");
     }
+  });
+  it("keeps an explicitly unapproved draft unapproved when its saved batch reloads", async () => {
+    const draft = fact(1, { needsPreparation: false, reviewDecision: null, isDraft: true,
+      readiness: "needs-attention", detail: "Draft PR: finish and mark ready." });
+    const t = setup([draft]);
+    const batch = await t.start();
+    await drain();
+    const row = t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string };
+    expect(JSON.parse(row.body).facts[batch.jobs[0]!.id]).toMatchObject({ reviewDecision: null, isDraft: true, needsChecks: false });
+    const restored = createAdvanceService(t.db, t.deps);
+    expect(restored.list()[0]!.jobs[0]!.status).toBe("needs-attention");
   });
   it("never promotes a preview skip if its busy writer finishes before confirmation", async () => {
     const t = setup([fact(1), fact(2)]);

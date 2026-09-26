@@ -9,7 +9,7 @@ export const advanceFactsSchema = z.object({
   needsPreparation: z.boolean(), readiness: z.enum(["ready", "waiting-checks", "waiting-review", "needs-attention", "merged", "closed"]),
   detail: z.string().max(800), unresolvedThreads: z.number().int().nonnegative(),
   checks: z.enum(["passed", "pending", "failed", "unknown"]),
-  basePrNumber: z.number().int().positive().nullable(), approvalNotePending: z.boolean(),
+  basePrNumber: z.number().int().positive().nullable(), approvalNotePending: z.boolean(), reviewFollowupPosted: z.boolean().optional(),
 }).strict().superRefine((facts, ctx) => {
   if (facts.state !== "OPEN") return;
   for (const key of ["headOid", "baseOid"] as const) if (facts[key] === "") {

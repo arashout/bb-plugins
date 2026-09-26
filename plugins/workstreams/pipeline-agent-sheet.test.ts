@@ -6,7 +6,7 @@ const plan: AdvancePreview = {
   token: "first", expiresAt: 1,
   jobs: [{ prUrl: "https://github.com/inkwell/editor/pull/42", repo: "inkwell/editor", number: 42,
     title: "Prepare editor release", headOid: "a".repeat(40), baseRefName: "main", headRefName: "release",
-    needsPreparation: false, needsFeedback: false, eligible: true, detail: "Ready to verify", workspace: "existing" }],
+    needsPreparation: false, needsFeedback: false, needsChecks: false, eligible: true, detail: "Ready to verify", workspace: "existing" }],
 };
 
 describe("advance token renewal", () => {
@@ -14,8 +14,9 @@ describe("advance token renewal", () => {
     expect(advanceScope({ ...plan, token: "second", expiresAt: 500 })).toBe(advanceScope(plan));
   });
 
-  it("requires review if a read-only verification gains write work", () => {
+  it("requires review if a readiness check gains agent work", () => {
     expect(advanceScope({ ...plan, jobs: [{ ...plan.jobs[0]!, needsFeedback: true }] })).not.toBe(advanceScope(plan));
+    expect(advanceScope({ ...plan, jobs: [{ ...plan.jobs[0]!, needsChecks: true }] })).not.toBe(advanceScope(plan));
   });
 
   it("requires review if the checked commit or workspace changes", () => {

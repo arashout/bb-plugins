@@ -5,7 +5,7 @@ import type { Row } from "./inbox";
 import type { AgentAction, ThreadMode } from "./actions";
 import { AGENT_LABEL, actionPrompt } from "./actions";
 import type { AdvancePreview, AdvanceRepairPlan } from "./bulk-advance";
-import { advanceScope, advancePreviewSummary } from "./bulk-advance-preview";
+import { advanceScope, advancePreviewAction, advancePreviewSummary } from "./bulk-advance-preview";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -40,21 +40,9 @@ const MODE_LABEL: Record<ThreadMode, string> = {
 const failure = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 const writes = (job: AdvancePreview["jobs"][number]) =>
-  job.eligible && (job.needsFeedback || job.needsPreparation);
+  job.eligible && (job.needsFeedback || job.needsPreparation || job.needsChecks);
 const readOnly = (plan: AdvancePreview) =>
   plan.jobs.some((job) => job.eligible) && !plan.jobs.some(writes);
-
-function shortPlan(
-  feedback: boolean,
-  preparation: boolean,
-  eligible = true,
-): string {
-  if (!eligible) return "Skip this PR";
-  if (feedback && preparation) return "Fix, prepare, verify";
-  if (feedback) return "Fix and verify";
-  if (preparation) return "Prepare and verify";
-  return "Verify merge readiness";
-}
 
 export function PipelineAgentSheet({
   request,
@@ -78,7 +66,6 @@ export function PipelineAgentSheet({
   const [notice, setNotice] = useState<string | null>(null);
   const [started, setStarted] = useState<string | null>(null);
   const generation = useRef(0);
-  const launch = useRef(false);
   const requestKey =
     request === null
       ? null
@@ -98,7 +85,6 @@ export function PipelineAgentSheet({
     setMode("new");
     setThreadId(null);
     setInstruction("");
-    launch.current = false;
     if (request === null) return;
     const load = async () => {
       try {
@@ -142,33 +128,8 @@ export function PipelineAgentSheet({
               }),
             );
         }
-        if (next.kind === "advance" && readOnly(next.value)) {
-          launch.current = true;
-          const fresh =
-            next.value.expiresAt > Date.now()
-              ? next.value
-              : await rpc.call("advance_preview", {
-                  prUrls: request.kind === "advance" ? request.prUrls : [],
-                });
-          if (generation.current !== sequence) return;
-          setPlan({ kind: "advance", value: fresh });
-          if (!readOnly(fresh)) {
-            launch.current = false;
-            setNotice(
-              "The plan changed and may push code. Review it before starting.",
-            );
-            return;
-          }
-          await rpc.call("advance_start", { token: fresh.token });
-          if (generation.current !== sequence) return;
-          toast.success("Readiness check started");
-          onStarted?.();
-          onClose();
-        }
       } catch (cause) {
         if (generation.current === sequence) setError(failure(cause));
-      } finally {
-        if (generation.current === sequence) launch.current = false;
       }
     };
     void load();
@@ -208,7 +169,7 @@ export function PipelineAgentSheet({
         (active.kind === "repair" || instruction.trim() !== ""));
 
   const start = async () => {
-    if (!request || !active || !canStart || busy || launch.current) return;
+    if (!request || !active || !canStart || busy) return;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -230,7 +191,7 @@ export function PipelineAgentSheet({
           }
         }
         await rpc.call("advance_start", { token: fresh.token });
-        toast.success("Advance started");
+        toast.success(readOnly(fresh) ? "Readiness check started" : "Advance started");
         onStarted?.();
         onClose();
       } else if (active.kind === "agent" && request.kind === "agent") {
@@ -291,13 +252,13 @@ export function PipelineAgentSheet({
       ? AGENT_LABEL[request.action]
       : request?.kind === "repair"
         ? "Fix this PR"
-        : "Advance approved PRs";
+        : "Advance selected PRs";
   const description =
     request?.kind === "agent"
       ? "An agent handles the selected action and reports the result. It does not merge the PR."
       : request?.kind === "repair"
         ? "An agent repairs the remaining blocker and checks readiness. It does not merge the PR."
-        : "Agents prepare branches and address feedback where needed, then check readiness. They do not merge PRs.";
+        : "Agents address feedback, branch work, and failed checks where needed, then check readiness. They do not merge PRs.";
   const rows =
     active?.kind === "advance"
       ? active.value.jobs.map((job) => ({
@@ -305,11 +266,7 @@ export function PipelineAgentSheet({
           url: job.prUrl,
           label: `${job.repo} #${job.number}`,
           title: job.title,
-          plan: shortPlan(
-            job.needsFeedback,
-            job.needsPreparation,
-            job.eligible,
-          ),
+          plan: advancePreviewAction(job),
           workspace:
             job.workspace === "existing"
               ? "Matched checkout"
@@ -368,7 +325,7 @@ export function PipelineAgentSheet({
     <Dialog
       open={request !== null}
       onOpenChange={(open) => {
-        if (!open && !busy && !launch.current) onClose();
+        if (!open && !busy) onClose();
       }}
     >
       <DialogContent className="max-h-[min(85vh,900px)] max-w-2xl overflow-y-auto">
@@ -434,8 +391,8 @@ export function PipelineAgentSheet({
                         </td>
                         <td className="px-3 py-2">
                           {row.plan}
-                          {!row.eligible ? (
-                            <span className="mt-1 block break-words text-amber-800 dark:text-amber-300">
+                          {active?.kind === "advance" || !row.eligible ? (
+                            <span className={cn("mt-1 block break-words", row.eligible ? "text-muted-foreground" : "text-amber-800 dark:text-amber-300")}>
                               {row.detail}
                             </span>
                           ) : null}
@@ -543,7 +500,7 @@ export function PipelineAgentSheet({
               </section>
             ) : active?.kind === "advance" && active.value.jobs.some(writes) ? (
               <p className="text-xs text-muted-foreground">
-                Work runs in separate checkout workers, one per repository.
+                Each PR uses a separate checkout. Repository controllers handle their PRs in sequence.
               </p>
             ) : null}
             {active?.kind === "advance" && advanceSummary ? (
@@ -562,6 +519,12 @@ export function PipelineAgentSheet({
                     <p>
                       Integrate the current base branch, resolve conflicts,
                       test, and push changes.
+                    </p>
+                  ) : null}
+                  {advanceSummary.hasChecks ? (
+                    <p>
+                      Diagnose failed checks, fix their cause, run the relevant
+                      checks, and push any code changes.
                     </p>
                   ) : null}
                   <p>
@@ -617,17 +580,17 @@ export function PipelineAgentSheet({
         <DialogFooter className="gap-2">
           <Button
             variant="ghost"
-            disabled={busy || launch.current}
+            disabled={busy}
             onClick={onClose}
           >
             {started ? "Close" : "Cancel"}
           </Button>
           {!started ? (
             <Button
-              disabled={!canStart || busy || launch.current}
+              disabled={!canStart || busy}
               onClick={() => void start()}
             >
-              {busy || launch.current ? "Starting…" : "Start"}
+              {busy ? "Starting…" : active?.kind === "advance" ? readOnly(active.value) ? "Check status" : "Start advance" : "Start"}
             </Button>
           ) : null}
         </DialogFooter>

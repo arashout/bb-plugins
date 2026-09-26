@@ -13,7 +13,7 @@ const HEAD = "a".repeat(40), BASE = "b".repeat(40);
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string } } = {}) {
+async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string } } = {}) {
   const repo = options.mixedCase ? "Example/Widget" : "example/widget";
   const url = `https://github.com/${repo}/pull/42`;
   const pr = { ...parsePrList(JSON.stringify([{ number: 42, url, state: options.terminal ?? "OPEN", title: "ABC-42 Fix account lookup", reviewDecision: "APPROVED",
@@ -48,7 +48,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
   const send = vi.fn(async () => ({} as never));
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: HOST }) as never },
-    projects: { list: async () => [{ id: "project-example", name: "Example", sources: [{ hostId: HOST, path: "/p" }] }] as never },
+    projects: { list: async () => (options.projectAvailable === false ? [] : [{ id: "project-example", name: "Example", sources: [{ hostId: HOST, path: "/p" }] }]) as never },
     threads: {
       list: async () => (options.omitLaunchedThreadsFromList ? [] : [...threads.values()]) as never, spawn, send,
       get: async ({ threadId }: { threadId: string }) => ({ ...threads.get(threadId)!, canSpawnChild: !blockedParents.has(threadId) }) as never,
@@ -150,14 +150,12 @@ describe("bulk advance server integration", () => {
     expect(env.spawn).not.toHaveBeenCalled();
     expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
   });
-  it("allows an explicit repair of a held PR and preserves its hold", async () => {
+  it("requires releasing a hold before repairing a failed Advance item", async () => {
     const env = await setup({ failFirstWorkspace: true, author: true });
     const ids = await failedBatch(env);
     await env.harness.callRpc("pr_hold_set", { prUrl: env.url, held: true });
-    const plan = await env.harness.callRpc("advance_repair_plan", ids) as AdvanceRepairPlan;
-    expect(plan.fresh.eligible).toBe(true);
-    await env.harness.callRpc("advance_repair_run", { token: plan.token, mode: "new", threadId: null, instruction: "Fix validation only" });
-    expect(env.spawn).toHaveBeenCalledTimes(3);
+    await expect(env.harness.callRpc("advance_repair_plan", ids)).rejects.toThrow("On hold");
+    expect(env.spawn).not.toHaveBeenCalled();
     expect(await env.harness.callRpc("board_get", null)).toMatchObject({ prHolds: { [env.url]: { reason: "" } } });
   });
   it("removes and restores progress through the RPC without deleting results or launching workers", async () => {
@@ -193,6 +191,75 @@ describe("bulk advance server integration", () => {
     expect(env.spawn.mock.calls[0]?.[0]).not.toHaveProperty("model");
     expect(env.spawn.mock.calls[0]?.[0]).not.toHaveProperty("providerId");
     expect(env.spawn.mock.calls[0]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");
+  });
+
+  it("launches a CI repair for an unapproved remote PR with a mapped repository", async () => {
+    const env = await setup({ remoteOnly: true, ready: true });
+    Object.assign(env.facts, { reviewDecision: "REVIEW_REQUIRED", checks: "failed", readiness: "needs-attention", detail: "One or more checks failed." });
+    const plan = await env.preview();
+    expect(plan.jobs[0]).toMatchObject({ eligible: true, needsPreparation: false, needsFeedback: false, needsChecks: true });
+    expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
+    await env.harness.callRpc("advance_start", { token: plan.token });
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledOnce());
+    const prompt = env.spawn.mock.calls[0]![0].prompt as string;
+    expect(prompt).toContain("Inspect the failing checks");
+    expect(prompt).toContain("This preview did not authorize branch integration");
+    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
+  });
+
+  it("skips an unapproved remote CI repair without a matching BB repository source", async () => {
+    const env = await setup({ remoteOnly: true, ready: true, projectAvailable: false });
+    Object.assign(env.facts, { reviewDecision: "REVIEW_REQUIRED", checks: "failed", readiness: "needs-attention", detail: "One or more checks failed." });
+    expect((await env.preview()).jobs[0]).toMatchObject({ eligible: false, needsChecks: true,
+      detail: expect.stringContaining("No matching scanned repository") });
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
+  });
+
+  it("repairs an unaddressed changes request but does not repeat a verified author follow-up", async () => {
+    const env = await setup({ remoteOnly: true, ready: true });
+    Object.assign(env.facts, { reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: false,
+      readiness: "needs-attention", detail: "Review requests changes without a verified author follow-up." });
+    expect((await env.preview()).jobs[0]).toMatchObject({ eligible: true, needsFeedback: true });
+    env.facts.reviewFollowupPosted = true;
+    env.facts.readiness = "waiting-review";
+    env.facts.detail = "Review still requests changes; wait for a new approval after follow-up.";
+    const plan = await env.preview();
+    expect(plan.jobs[0]).toMatchObject({ eligible: true, needsFeedback: false, needsChecks: false });
+    await env.harness.callRpc("advance_start", { token: plan.token });
+    await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "waiting-review" }] }]));
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
+  });
+
+  it("verifies a clean draft without marking it ready, but repairs failed draft checks", async () => {
+    const clean = await setup({ remoteOnly: true, ready: true });
+    Object.assign(clean.facts, { isDraft: true, reviewDecision: null, readiness: "needs-attention",
+      detail: "Draft PR: finish the work and mark it ready for review." });
+    const plan = await clean.preview();
+    expect(plan.jobs[0]).toMatchObject({ eligible: true, needsChecks: false, needsPreparation: false });
+    await clean.harness.callRpc("advance_start", { token: plan.token });
+    await vi.waitFor(async () => expect(await clean.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "needs-attention", detail: expect.stringContaining("mark it ready") }] }]));
+    expect(clean.spawn).not.toHaveBeenCalled();
+
+    const failing = await setup({ remoteOnly: true, ready: true });
+    Object.assign(failing.facts, { isDraft: true, reviewDecision: null, checks: "failed", readiness: "needs-attention", detail: "One or more checks failed." });
+    const repair = await failing.preview();
+    expect(repair.jobs[0]).toMatchObject({ eligible: true, needsChecks: true });
+    await failing.harness.callRpc("advance_start", { token: repair.token });
+    await vi.waitFor(() => expect(failing.spawn).toHaveBeenCalledOnce());
+    expect(failing.spawn.mock.calls[0]![0].prompt).toContain("If this PR is a draft, keep it a draft");
+  });
+
+  it("requires a new preview when approval is lost before a ready PR starts", async () => {
+    const env = await setup({ remoteOnly: true, ready: true });
+    const plan = await env.preview();
+    Object.assign(env.facts, { reviewDecision: "REVIEW_REQUIRED", readiness: "waiting-review", detail: "Waiting for approval on the current PR." });
+    await expect(env.harness.callRpc("advance_start", { token: plan.token })).rejects.toThrow("changed");
+    expect(env.spawn).not.toHaveBeenCalled();
+    const current = await env.preview();
+    await env.harness.callRpc("advance_start", { token: current.token });
+    await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "waiting-review" }] }]));
   });
 
   it("reserves the PR against manual agent and GitHub actions while its worker runs", async () => {
@@ -334,12 +401,11 @@ describe("bulk advance server integration", () => {
     expect(env.spawn).not.toHaveBeenCalled();
   });
 
-  it.each(["closed", "draft", "fork"] as const)("refuses %s repairs even when the remaining task has no branch or feedback flag", async (blocker) => {
+  it.each(["closed", "fork"] as const)("refuses %s repairs even when the remaining task has no branch or feedback flag", async (blocker) => {
     const env = await setup({ failFirstWorkspace: true });
     const ids = await failedBatch(env);
     Object.assign(env.facts, { needsPreparation: false, unresolvedThreads: 0, approvalNotePending: false, readiness: "ready", detail: "Current state needs attention" });
     if (blocker === "closed") env.facts.state = "CLOSED";
-    if (blocker === "draft") env.facts.isDraft = true;
     if (blocker === "fork") env.facts.isCrossRepository = true;
     await expect(env.harness.callRpc("advance_repair_plan", ids)).rejects.toThrow();
     expect(env.spawn).not.toHaveBeenCalled();

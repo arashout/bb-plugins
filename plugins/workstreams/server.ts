@@ -2991,20 +2991,25 @@ export default async function plugin(bb: BbPluginApi) {
     const scope = await effortScope(prUrl);
     const fallback: AdvanceFacts = { prUrl, repo: target.slug, number: tracked.number, title: tracked.title,
       headOid: "", baseOid: "", baseRefName: tracked.baseRefName ?? "", headRefName: tracked.headRefName ?? "",
-      needsPreparation: false, needsFeedback: false, eligible: false, detail: "GitHub inspection failed", workspace: source ? "create" : "unavailable",
+      needsPreparation: false, needsFeedback: false, needsChecks: false, eligible: false, detail: "GitHub inspection failed", workspace: source ? "create" : "unavailable",
       projectId: source?.project?.projectId ?? null, hostId, sourcePath: source?.unit.path ?? null,
       path: localPath, effortId: scope?.establishedId ?? null, effortKey: scope?.key ?? null,
-      effortMembers: scope?.members ?? null, readiness: "needs-attention", blockedBy: null };
+      effortMembers: scope?.members ?? null,
+      reviewDecision: "reviewDecision" in tracked ? tracked.reviewDecision : null,
+      isDraft: "isDraft" in tracked ? tracked.isDraft : false,
+      readiness: "needs-attention", blockedBy: null };
     try {
       const result = await host.call("advanceInspect", { prUrl }, { hostId, timeoutMs: 60_000, signal: disposal.signal });
       if (!result.ok) return { ...fallback, detail: result.error };
       const facts = result.facts;
-      const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalNotePending;
-      const needsWriter = repair || facts.needsPreparation || needsFeedback;
-      const held = repair ? null : holdMessage(prUrl);
-      const eligible = held === null && facts.state === "OPEN" && (repair || facts.reviewDecision === "APPROVED") && !facts.isDraft && (!needsWriter || (!facts.isCrossRepository && !!source));
-      const detail = held ?? (facts.state !== "OPEN" || facts.isDraft ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : facts.detail);
-      return { ...fallback, ...facts, needsFeedback, eligible, detail, blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
+      const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalNotePending ||
+        (facts.reviewDecision === "CHANGES_REQUESTED" && facts.reviewFollowupPosted === false);
+      const needsChecks = facts.checks === "failed";
+      const needsWriter = repair || facts.needsPreparation || needsFeedback || needsChecks;
+      const held = holdMessage(prUrl);
+      const eligible = held === null && facts.state === "OPEN" && (!needsWriter || (!facts.isCrossRepository && !!source));
+      const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : facts.detail);
+      return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail, blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
     } catch (error) { return { ...fallback, detail: `Inspection failed: ${String(error).slice(0, 300)}` }; }
   }
   async function advanceRepairLinks(facts: AdvanceFacts, previousThreadId?: string | null) {

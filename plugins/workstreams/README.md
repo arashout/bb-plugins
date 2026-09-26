@@ -101,8 +101,12 @@ automatic dispatch enabled.
   stage, blocker, activity, or hold state. Unchanged refreshes stay still, and
   reduced-motion preferences disable the cue.
 - **Pipeline actions:** Use a card to merge, advance, fix, nudge, or open a
-  parent PR. **Feedback → Advance** selects approved open PRs only; the
-  preview reports any PR that the service skips. **Review → Nudge** selects
+  parent PR. Each card's **Next** line names its next move. Use card checkboxes
+  or **Select visible**, then **Advance selected** to preview PRs across stages;
+  search keeps earlier selections. **Advance** accepts open, unheld PRs,
+  including drafts and PRs awaiting approval. The preview separates feedback,
+  branch, and failed-check work from readiness checks, waiting PRs, and skips.
+  **Review → Nudge** selects
   reviewers on PRs open for at least seven days. **Ready → Merge** processes
   unblocked PRs in order, with confirmation for each direct action. The agent
   sheet shows the plan, workspace, and whether work can push. Advance batch
@@ -146,20 +150,23 @@ automatic dispatch enabled.
   After the author pushes a newer head, resolves review threads, and posts a
   directed PTAL, the row reads **Awaiting re-review** while GitHub still reports
   changes requested. Workstreams does not send another PTAL or reviewer nudge.
-- **Bulk advance:** In **PR backlog**, select approved PRs and choose
-  **Advance selected**. Review the exact selection, planned feedback and branch
-  work, and skips before starting. For a PR in an effort, Workstreams routes
-  each instruction through one persistent repository controller under the
-  effort coordinator. The controller handles PRs in sequence and can delegate
-  bounded PR work to child threads. Each PR keeps its own result and isolated
-  worktree. If the effort has no coordinator, the confirmed action creates one
+- **Bulk advance:** In **Pipeline**, select open, unheld cards across stages and
+  choose **Advance selected**. The legacy **PR backlog** offers the same action.
+  Review the exact selection, planned feedback, branch, and failed-check work,
+  and any waiting or skipped PRs before starting. For a
+  PR in an effort, Workstreams routes each instruction through one persistent
+  repository controller under the effort coordinator. The controller handles
+  PRs in sequence and can delegate bounded PR work to child threads. Each PR
+  keeps its own result and isolated worktree. If the effort has no coordinator,
+  the confirmed action creates one
   before creating its repository controller. An unassigned PR uses a
   descriptively titled repository thread for the batch. The agent
   reads reviews and current code, verifies fixes already made, addresses
   remaining feedback, and integrates the base where needed. It tests changes,
   pushes with an exact commit lease when rewriting history, replies with
   evidence, and resolves only feedback verified as addressed. A pushed change
-  receives a PR summary. PRs that only need verification run without an agent.
+  receives a PR summary. A draft remains a draft. PRs that only need a
+  readiness check run without an agent; pending review or checks remain waiting.
   Use **Fix…** on a result that needs attention to review its failure and fresh
   next steps, then choose a child of a linked thread or a new thread. An
   eligible stopped worker can continue when its ownership is clear. Repairs

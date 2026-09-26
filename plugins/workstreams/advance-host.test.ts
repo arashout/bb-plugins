@@ -76,6 +76,31 @@ describe("bulk advance verification", () => {
       .toMatchObject({ ok: true, facts: { readiness: "waiting-review" } });
   });
 
+  it("keeps failed checks actionable before approval and leaves a clean draft for its author to finish", async () => {
+    expect(await readAdvancePr(fixture({ view: { reviewDecision: "REVIEW_REQUIRED", statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }] } }).run, url))
+      .toMatchObject({ ok: true, facts: { readiness: "needs-attention", checks: "failed", detail: "One or more checks failed." } });
+    expect(await readAdvancePr(fixture({ view: { isDraft: true, reviewDecision: null } }).run, url))
+      .toMatchObject({ ok: true, facts: { isDraft: true, readiness: "needs-attention", detail: expect.stringContaining("mark it ready") } });
+    expect(await readAdvancePr(fixture({ view: { isDraft: true, reviewDecision: null, statusCheckRollup: [{ status: "IN_PROGRESS", conclusion: "" }] } }).run, url))
+      .toMatchObject({ ok: true, facts: { isDraft: true, readiness: "waiting-checks", checks: "pending" } });
+  });
+
+  it("recognizes verified author follow-up to a changes request without inline threads", async () => {
+    const review = { id: "requested", state: "CHANGES_REQUESTED", body: "Check the fallback", author: { login: "reviewer" }, submittedAt: "2026-09-18T17:00:00Z", commit: { oid: "c".repeat(40) } };
+    const reviewFacts = {
+      reviews: { pageInfo: { hasPreviousPage: false }, nodes: [review] },
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
+      author: { login: "author" },
+      commits: { nodes: [{ commit: { oid: head, committedDate: "2026-09-19T12:00:00Z" } }] },
+      comments: { nodes: [{ author: { login: "author" }, createdAt: "2026-09-20T12:00:00Z", body: "PTAL @reviewer — updated the fallback." }] },
+    };
+    const pending = { view: { reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ state: "CHANGES_REQUESTED", body: "Check the fallback" }] }, review: reviewFacts };
+    expect(await readAdvancePr(fixture(pending).run, url))
+      .toMatchObject({ ok: true, facts: { reviewFollowupPosted: true, readiness: "waiting-review" } });
+    expect(await readAdvancePr(fixture({ ...pending, review: { ...reviewFacts, comments: { nodes: [] } } }).run, url))
+      .toMatchObject({ ok: true, facts: { reviewFollowupPosted: false, readiness: "needs-attention", detail: expect.stringContaining("without a verified author follow-up") } });
+  });
+
   it("refuses readiness when approval history or check data is incomplete", async () => {
     for (const options of [
       { review: { reviews: { pageInfo: { hasPreviousPage: true }, nodes: [] } } },
