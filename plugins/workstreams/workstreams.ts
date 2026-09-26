@@ -1,6 +1,7 @@
 // Pure board logic: no I/O, no SDK. Everything here is unit-tested in
 // workstreams.test.ts, because these rules are the whole point of the plugin.
 import type { MergeStateStatus, Pr, RawUnit } from "./contract.js";
+import { checksFailed, checksGreen } from "./pr-checks.js";
 import { ticketFinder, type TicketSource } from "./tickets.js";
 
 /**
@@ -265,20 +266,6 @@ export function linkStacks(units: Unit[], warn: (message: string) => void): void
   }
 }
 
-const FAILING_CHECKS = new Set(["FAILURE", "ERROR"]);
-/**
- * Green means finished and passing. A rollup that is still PENDING or
- * IN_PROGRESS is not green, so an approved PR whose CI has not finished is
- * still waiting on something and is not reported as ready to merge. A rollup
- * with no entries at all is green: plenty of repos run no checks, and calling
- * those permanently un-mergeable would be a lie.
- */
-const GREEN_CHECKS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-
-function checksGreen(conclusions: readonly string[]): boolean {
-  return conclusions.every((value) => GREEN_CHECKS.has(value));
-}
-
 /**
  * Where one checkout sits in the merge pipeline, resolved in the precedence
  * order `LIFECYCLES` is written in.
@@ -318,7 +305,7 @@ export function prLifecycle(pr: Pr): Lifecycle {
   if (pr.state === "MERGED") return "merged";
   if (pr.state === "CLOSED") return "closed";
   if (pr.isDraft) return "in-progress";
-  if (pr.checkConclusions.some((value) => FAILING_CHECKS.has(value))) return "blocked";
+  if (checksFailed(pr.checkConclusions)) return "blocked";
   // Changes requested is NOT blocked: the reviewer already acted and the ball
   // is with the author. Merging the two would hide the one state the user can
   // clear on their own.
@@ -1107,8 +1094,6 @@ export function matchesFilters(
 
 // ---- rollup sentences -----------------------------------------------------
 
-const BLOCKED_CHECKS = new Set(["FAILURE", "ERROR"]);
-
 function repoOf(unit: Unit): string {
   return unit.repo ?? unit.dirName;
 }
@@ -1122,8 +1107,7 @@ function countOf(units: Unit[], lifecycle: Lifecycle): number {
 }
 
 function blockedReason(unit: Unit): string {
-  const failing =
-    unit.pr !== null && unit.pr.checkConclusions.some((value) => BLOCKED_CHECKS.has(value));
+  const failing = unit.pr !== null && checksFailed(unit.pr.checkConclusions);
   return failing ? "CI" : "review";
 }
 

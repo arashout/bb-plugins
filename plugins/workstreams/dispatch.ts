@@ -1,4 +1,5 @@
 import type { AgentAction } from "./actions.js";
+import { checksFailed } from "./pr-checks.js";
 import { prHoldFor, type PrHolds } from "./pr-holds.js";
 import type { RunDb } from "./runstore.js";
 import type { Board } from "./server.js";
@@ -33,11 +34,10 @@ type AttemptRow = {
 };
 type PolicyRow = { mode: DispatchMode; effort_key: string | null };
 const ACTIVE = new Set<DispatchStatus>(["launching", "running", "verifying"]);
-const BAD_CHECKS = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 
 export function gateOf(pr: NonNullable<Board["groups"][number]["clusters"][number]["units"][number]["pr"]>):
   { action: AgentAction; reason: string } | null {
-  if (pr.checkConclusions.some((check) => BAD_CHECKS.has(check))) return { action: "investigate-ci", reason: "CI checks are failing" };
+  if (checksFailed(pr.checkConclusions)) return { action: "investigate-ci", reason: "CI checks are failing" };
   if (pr.mergeStateStatus === "DIRTY") return { action: "resolve-conflicts", reason: "PR has merge conflicts" };
   if (!pr.reviewFollowupPosted && (pr.reviewDecision === "CHANGES_REQUESTED" || pr.latestReviewStates.includes("CHANGES_REQUESTED"))) {
     return { action: "address-review", reason: "Reviewers requested changes" };
@@ -49,7 +49,7 @@ export function gateOf(pr: NonNullable<Board["groups"][number]["clusters"][numbe
 }
 
 export function gateStillOpen(pr: NonNullable<Board["groups"][number]["clusters"][number]["units"][number]["pr"]>, action: string): boolean {
-  if (action === "investigate-ci") return pr.checkConclusions.some((check) => BAD_CHECKS.has(check));
+  if (action === "investigate-ci") return checksFailed(pr.checkConclusions);
   if (action === "resolve-conflicts") return pr.mergeStateStatus === "DIRTY";
   if (action === "address-review") return !pr.reviewFollowupPosted &&
     (pr.reviewDecision === "CHANGES_REQUESTED" || pr.latestReviewStates.includes("CHANGES_REQUESTED"));

@@ -149,6 +149,14 @@ describe("unitLifecycle", () => {
     );
   });
 
+  it.each(["TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"])(
+    "keeps an approved PR with a %s check in the CI repair state",
+    (conclusion) => {
+      expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", checkConclusions: [conclusion] }) }))).toBe("blocked");
+      expect(unitLifecycle(unit({ pr: pr({ isDraft: true, checkConclusions: [conclusion] }) }))).toBe("in-progress");
+    },
+  );
+
   it("separates awaiting-followup from blocked, because one waits on YOUR edit and the other waits on CI: merging them would hide the only state you can clear alone", () => {
     expect(
       unitLifecycle(unit({ pr: pr({ reviewDecision: "CHANGES_REQUESTED" }) })),

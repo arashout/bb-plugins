@@ -18,6 +18,15 @@ function groups(entry = unit, threads: Board["groups"][number]["clusters"][numbe
 }
 
 describe("dispatch candidate selection", () => {
+  it.each(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"])(
+    "offers a CI repair for a %s check",
+    (conclusion) => {
+      const failing = { ...unit, pr: { ...unit.pr!, mergeStateStatus: "CLEAN" as const, checkConclusions: [conclusion] } };
+      expect(selectCandidate(groups(failing), "leaf", [], [])?.candidate.action).toBe("investigate-ci");
+      expect(gateStillOpen(failing.pr, "investigate-ci")).toBe(true);
+    },
+  );
+
   it("excludes a held PR without changing its GitHub approval or repair gate", () => {
     const holds = { [URL]: { reason: "Await release decision", heldAt: 123 } };
     const mixedCase = { ...unit, pr: { ...unit.pr!, url: "https://github.com/ACME/App/pull/42" } };
