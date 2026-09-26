@@ -43,6 +43,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AGENT_ACTIONS, type AgentAction } from "./actions";
+import { usePipelineMotion } from "./pipeline-motion";
 
 const LABEL: Record<PipelineStage, string> = {
   build: "Build",
@@ -138,6 +139,7 @@ export function PipelineView({
   const [dispatch, setDispatch] = useState(board.dispatch);
   const [queuedDirect, setQueuedDirect] = useState<PipelineCard[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
+  const boardRootRef = useRef<HTMLDivElement | null>(null);
   const scrollBehavior = () =>
     window.matchMedia("(prefers-reduced-motion: reduce)").matches
       ? ("instant" as const)
@@ -182,6 +184,11 @@ export function PipelineView({
     (card) => card.activity.state === "done",
   ).length;
   const search = query.trim().toLowerCase();
+  usePipelineMotion(boardRootRef, cards, {
+    layout,
+    search,
+    approvedOnly: prefs.approvedOnly,
+  });
   const visible = cards.filter(
     (card) =>
       matchesApprovedFilter(card.pr, prefs.approvedOnly) &&
@@ -516,6 +523,7 @@ export function PipelineView({
       <div
         key={card.key}
         id={`pipeline-${card.key}`}
+        data-pipeline-motion-key={card.key}
         className={cn(
           "group relative min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
           card.hold && "opacity-55 hover:opacity-90",
@@ -647,6 +655,7 @@ export function PipelineView({
             <button
               key={card.key}
               id={`pipeline-${card.key}`}
+              data-pipeline-motion-key={card.key}
               data-pipeline-card
               type="button"
               onClick={() => choose(card)}
@@ -997,7 +1006,7 @@ export function PipelineView({
         ))}
       </div>
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1 overflow-auto p-3">
+        <div ref={boardRootRef} className="min-w-0 flex-1 overflow-auto p-3">
           {layout === "stage" ? (
             <div className="grid min-w-[1520px] grid-cols-6 gap-4">
               {PIPELINE_STAGES.map((stage) => (
