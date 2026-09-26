@@ -19,6 +19,7 @@ Return ONLY a JSON object with exactly these keys:
 Rules:
 - Every field is a string. Keep each to one or two lines.
 - NEVER invent a next step. If the work described is finished, "nextStep" MUST be the empty string. A brief that invents work is worse than one that says the thread is done.
+- Finished means nothing is left outstanding anywhere, not just in the chat. Work the transcript hands off and leaves pending is NOT finished: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround still in place, a build or rollout not yet done, a question put to someone outside the thread. In those cases "nextStep" is the follow-up that actually closes it out and "blockedOn" names who or what it is waiting on. This is not inventing work — the transcript already named it.
 - Use empty strings, not "none" / "N/A" / "nothing".
 - Write plainly and specifically. No preamble, no hedging, no restating these instructions.
 - Base every claim on the transcript. Do not speculate about what the code or the user probably wants.`;

@@ -89,6 +89,14 @@ on the next real turn. Clicking the active manual stage clears it.
 The order matters: a thread with nothing left to do reads as done even if its
 last turn ended in a question.
 
+So **done** is only as good as the summarizer's bar for "finished", and the
+prompt sets that bar past the end of the chat: work handed off and still pending
+— a PR open for review or merge, a patch carried on a fork until it lands
+upstream, a temporary workaround still in place, a rollout not yet done — earns
+a `nextStep` and a `blockedOn`, so the thread reads **waiting-on-other** rather
+than done. A thread that still reads done despite an open handoff is usually a
+brief written before this bar existed: **Re-summarize** from the header popover.
+
 ## Sidebar glyphs
 
 bb paints a plugin row status **in place of** its own unsent-draft pencil, so

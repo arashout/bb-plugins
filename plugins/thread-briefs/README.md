@@ -6,7 +6,9 @@ every thread a short, durable **brief**, generated outside the working chat:
 
 - **goal** — what the thread is actually trying to achieve
 - **currentState** — what exists now, including half-done work
-- **nextStep** — the single most concrete next action, or empty when done
+- **nextStep** — the single most concrete next action, or empty only when
+  nothing is outstanding anywhere: an open PR, a patch carried on a fork, or a
+  workaround still in place all count as outstanding
 - **blockedOn** — who or what it is waiting on
 - **constraints** — facts learned in the thread that would break a naive re-plan
 
