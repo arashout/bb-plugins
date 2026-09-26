@@ -4,7 +4,6 @@
 // Map, position here DOES follow status: this is a list you work through, and
 // the sections and in-section order come from the pure rules in
 // workstreams.ts (`inboxSection`, `byInboxOrder`), unit-tested there.
-import { prHoldFor, type PrHold } from "./pr-holds";
 import { PrHoldDialog, usePrHoldControls } from "./pr-hold-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -12,25 +11,19 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { UrlLink, experimental_useSidebarThreads, useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import type { Board, Prefs, WireGroup, WireRun, rpcContract } from "./server";
+import { inboxRows, type Row } from "./inbox-rows";
 import {
   INBOX_COLLAPSED,
   INBOX_SECTIONS,
   INBOX_SECTION_LABEL,
   ESCALATING,
   STALENESS,
-  byInboxOrder,
-  displayTitle,
-  groupChildren,
-  inboxSection,
-  inboxVerb,
   isTicketlessClone,
   outsideGrouping,
   matchesInboxQuery,
-  stateAge,
   threadPrompt,
   type InboxSection,
   type Staleness,
-  type StateAge,
 } from "./workstreams";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,7 +38,7 @@ import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { primaryAction, type PrimaryAction } from "./actions";
+import type { PrimaryAction } from "./actions";
 import { ActionDialogs, RowActionMenu, ThreadMessageDialog, type ActionRequest } from "./rowactions";
 import { ThreadMenu } from "./threadmenu";
 import { PrBacklog } from "./pr-backlog-view";
@@ -55,7 +48,7 @@ import { matchesApprovedFilter } from "./approval-filter";
 import { EffortCoordinatorControl } from "./effort-coordinator-control";
 import { backlogMatches, includeRemoteEfforts, prBacklog, remoteAttentionRows, remotePrsByEffort } from "./pr-backlog";
 import { ArchivedThreadsButton } from "./archivedthreads";
-import { rowRun, runDetail, runLabel, stripCounts, type RunStatus, type StripCounts } from "./runs";
+import { runDetail, runLabel, stripCounts, type RunStatus, type StripCounts } from "./runs";
 import { REVIEWER_MARK, reviewerInitials, reviewersLabel, reviewersOf, visibleReviewers, type Reviewer, type ReviewerState } from "./reviewers";
 import { ageHint, primaryHint, rowAge, shortAge, shortVerb, titleHint } from "./rowlabels";
 import { completedByEffort, heldByEffort, groupInboxRows, partitionCompletedRows, visibleCompletedRows, visibleInboxRows, type InboxGrouping, type RowGroup } from "./inbox-grouping";
@@ -64,67 +57,8 @@ import { attentionDetail, attentionLabel, hasBoardRows, workstreamAttention, typ
 import { usePortalScopeProps } from "./lib/portal-scope";
 
 type Cluster = WireGroup["clusters"][number];
-type Unit = Cluster["units"][number];
 
-/** One inbox row: a checkout and everything the row shows about it. */
-export type Row = {
-  key: string;
-  hold?: PrHold | null;
-  unit: Unit;
-  cluster: Cluster;
-  effortKey: string;
-  effort: string;
-  section: InboxSection;
-  verb: string | null;
-  age: StateAge;
-  repo: string;
-  title: string;
-  /** What the row's `a` key and action button do; null when there is nothing to do. */
-  action: PrimaryAction | null;
-  /** The row's latest agent or direct run, while it is still worth reporting. */
-  run: WireRun | null;
-};
-
-/** Every checkout on the board, as rows, grouped and ordered by section. */
-export function inboxRows(board: Board, now: number): Map<InboxSection, Row[]> {
-  const byParent = groupChildren(board.groups);
-  const rows: Row[] = [];
-  for (const group of board.groups) {
-    // Clusters live on the leaves; a group with children holds none itself.
-    if ((byParent.get(group.key) ?? []).length > 0) continue;
-    for (const cluster of group.clusters) {
-      for (const unit of cluster.units) {
-        const section = inboxSection(unit, now);
-        const verb = inboxVerb(unit, section);
-        rows.push({
-          key: unit.path,
-          hold: unit.pr?.state === "OPEN" ? prHoldFor(unit.pr.url, board.prHolds) : null,
-          unit,
-          cluster,
-          effortKey: group.key,
-          effort: group.name,
-          section,
-          verb,
-          action: primaryAction(unit, section, verb),
-          age: stateAge(unit),
-          run: rowRun(board.runs, unit.path, now),
-          repo: unit.repo ?? unit.dirName,
-          title: unit.pr === null ? (unit.branch ?? unit.dirName) : displayTitle(unit.pr.title),
-        });
-      }
-    }
-  }
-  const sections = new Map<InboxSection, Row[]>(INBOX_SECTIONS.map((section) => [section, []]));
-  for (const row of rows) sections.get(row.section)?.push(row);
-  const facts = (row: Row) => ({
-    repo: row.repo,
-    prNumber: row.unit.pr?.number ?? null,
-    path: row.unit.path,
-    since: row.age.since,
-  });
-  for (const list of sections.values()) list.sort((a, b) => byInboxOrder(facts(a), facts(b)));
-  return sections;
-}
+export { inboxRows, type Row } from "./inbox-rows";
 
 export function InboxBoard({
   board,
@@ -1609,7 +1543,7 @@ const DISPATCH_ACTION: Record<NonNullable<Board["dispatch"]["candidate"]>["actio
  * (no BB project holds the checkout, say) is shown here, and the dialog stays
  * open with the prompt intact.
  */
-function StartThreadDialog({ row, onClose }: { row: Row | null; onClose: () => void }) {
+export function StartThreadDialog({ row, onClose }: { row: Row | null; onClose: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [prompt, setPrompt] = useState("");

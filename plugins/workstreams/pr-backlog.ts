@@ -1,6 +1,6 @@
 import { prHoldFor, type PrHold, type PrHolds } from "./pr-holds.js";
 import type { Pr } from "./contract.js";
-import type { Row } from "./inbox.js";
+import type { Row } from "./inbox-rows.js";
 import type { AttentionRow } from "./workstream-attention.js";
 import type { RowGroup } from "./inbox-grouping.js";
 import { primaryAction, type PrimaryAction } from "./actions.js";
