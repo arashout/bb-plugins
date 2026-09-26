@@ -253,7 +253,7 @@ export function PipelineAgentSheet({
             jobId: request.jobId,
           });
           setPlan({ kind: "repair", value: fresh });
-          if (
+          const routeChanged =
             !fresh.modes.includes(mode) ||
             (mode !== "new" &&
               !fresh.candidates.some(
@@ -262,15 +262,13 @@ export function PipelineAgentSheet({
                   (mode === "continue"
                     ? candidate.canContinue
                     : candidate.canSpawnChild),
-              ))
-          ) {
+              ));
+          if (routeChanged) {
             setMode(fresh.recommendation.mode);
             setThreadId(fresh.recommendation.threadId);
-            setNotice(
-              "The available worker changed. Review where this repair runs.",
-            );
-            return;
           }
+          setNotice("The repair preview expired. Review the refreshed plan before starting.");
+          return;
         }
         const result = await rpc.call("advance_repair_run", {
           token: fresh.token,
