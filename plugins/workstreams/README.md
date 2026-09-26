@@ -2,7 +2,8 @@
 
 Workstreams connects git checkouts that belong to the same ticket, even across
 repositories. Its Map groups tickets into efforts, programs, and domains when
-the evidence supports those levels. Its Board groups checkouts by next action
+the evidence supports those levels. Its Pipeline places pull requests and
+checkout work in six stages. The legacy Board groups checkouts by next action
 or effort.
 
 ## Get started
@@ -54,15 +55,36 @@ context needed to name a group. Model calls happen when semantic inputs change;
 an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
 via agent** action starts a BB thread only when you confirm it.
 
-## Use the board
+## Use the views
 
+- **Pipeline:** Track each open pull request once across **Build**, **Review**,
+  **Feedback**, **Ready**, **Merged**, and **Released**. A draft stays in Build,
+  even when its checks fail. Switch between stage columns and effort swimlanes;
+  inventory-only PRs join their saved effort or ticket cohort, and unmatched
+  PRs appear in **One-offs**. Cards show one blocker, agent activity, and a
+  primary action. Open a card for merge gates, stack order, linked threads,
+  checkout actions, and holds. Held PRs stay in their stage, show **On hold**,
+  and offer **Release**; bulk actions and agent counts exclude them. Pipeline
+  shows the five most recent merged cards and three most recent release-tagged
+  cards until you choose **Show all**. Closed PRs that did not merge remain
+  omitted by the current scan.
+- **Pipeline actions:** Use a card to merge, advance, fix, nudge, or open a
+  parent PR. **Feedback → Advance** selects approved open PRs only; the
+  preview reports any PR that the service skips. **Review → Nudge** selects
+  reviewers on PRs open for at least seven days. **Ready → Merge** processes
+  unblocked PRs in order, with confirmation for each direct action. The agent
+  sheet shows the plan, workspace, and whether work can push. Advance batch
+  instructions come from the service and are fixed; single-row agent prompts
+  and repair direction are editable. Progress appears on each card. Use
+  **Advance history** in the Pipeline options menu for saved batch details.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
-- **Approved filter:** Keep approved open PRs in view across Map, Efforts, and
-  PR backlog; the selection persists across views and reloads. Map dims
+- **Approved filter:** Keep approved open PRs in view across Map, Pipeline,
+  and the legacy Board; the selection persists across views and reloads. Map dims
   nonmatching work without changing its layout and counts checkout-backed PRs;
   Board also includes the PR inventory.
-- **Board:** **Efforts** groups all tracked checkouts by effort. Open PRs
+- **Legacy Board:** Open **Legacy Board** from Pipeline options. **Efforts**
+  groups all tracked checkouts by effort. Open PRs
   without a scanned checkout join an effort when a saved PR link or an
   unambiguous ticket match connects them. Other PRs appear under **No effort
   assigned**. **PR backlog**
@@ -169,7 +191,9 @@ PR row menus include **Put on hold** with an optional reason; held PRs keep thei
 
 The scanner and Anthropic naming call live in `host.ts`. `server.ts` handles
 settings, local storage, refresh, enrichment, actions, and the CLI. The grouping
-and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts the Map and Board.
+and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts Map, Pipeline,
+and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
+scanned facts.
 `contract.ts` defines the host RPC schema, and `skills/workstreams/SKILL.md`
 documents the CLI for agents.
 

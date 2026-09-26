@@ -21,6 +21,7 @@ import { HOW_TAB, HowThisWorks } from "./howto";
 import { EASE_CSS } from "./layout";
 import { MapView } from "./map";
 import { InboxBoard } from "./inbox";
+import { PipelineView } from "./pipeline-view";
 import { countApprovedOpenPrs } from "./approval-filter";
 import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
@@ -230,7 +231,7 @@ function Warnings({ warnings }: { warnings: string[] }) {
  */
 const VIEWS = [
   { id: "map", title: "Map", icon: "GridView" },
-  { id: "board", title: "Board", icon: "Columns2" },
+  { id: "pipeline", title: "Pipeline", icon: "Columns2" },
 ] as const;
 
 /** Typing in a field is never a view switch. */
@@ -320,23 +321,26 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.clearTimeout(timer);
   }, [view]);
 
-  // `V` toggles Map and Board from anywhere on the page. The Map's own keys are
+  // `V` toggles Map and Pipeline from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
   // `?` opens How this works from any view.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "v" && event.key !== "V" && event.key !== "?") return;
-      if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
       event.preventDefault();
       if (event.key === "?") openHow();
-      else navigate.toPluginPanel("board", { subPath: view === "map" ? "board" : "map" });
+      else navigate.toPluginPanel("board", { subPath: view === "map" ? "pipeline" : "map" });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate, openHow, view]);
 
   const render = (id: ViewId) =>
-    id !== "map" ? (
+    id === "pipeline" ? (
+      board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
+        <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />
+    ) : id === "board" ? (
       board === null ? (
         <div className="p-4">
           <Notice>Loading the board…</Notice>
@@ -364,8 +368,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   return (
     <div className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
-      <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
-        {/* Map and Board share one fetch. */}
+      {view === "pipeline" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
+        {/* Map, Pipeline, and the legacy Board share one fetch. */}
         <div role="tablist" aria-label="Workstreams views" className="flex shrink-0 items-center gap-3">
           {VIEWS.map((entry) => (
             <button
@@ -428,7 +432,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
             <Icon name="Info" className="size-4" />
           </button>
         </Tip>
-      </header>
+      </header>}
 
       {error === null ? null : (
         <p role="alert" className="shrink-0 px-3 pt-2 text-sm text-destructive">
@@ -437,10 +441,10 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {VIEWS.map((entry) =>
-          entry.id === view || entry.id === leaving ? (
-            <ViewLayer key={entry.id} leaving={entry.id !== view}>
-              {render(entry.id)}
+        {(["map", "pipeline", "board"] as const).map((id) =>
+          id === view || id === leaving ? (
+            <ViewLayer key={id} leaving={id !== view}>
+              {render(id)}
             </ViewLayer>
           ) : null,
         )}

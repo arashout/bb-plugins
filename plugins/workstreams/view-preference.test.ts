@@ -6,6 +6,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Workstreams view preference", () => {
   it("keeps explicit view links independent of the remembered view", () => {
     expect(viewFromSubPath("map")).toBe("map");
+    expect(viewFromSubPath("pipeline/details")).toBe("pipeline");
     expect(viewFromSubPath("board/details")).toBe("board");
     expect(viewFromSubPath("board-v2/details")).toBe("board");
     expect(viewFromSubPath("")).toBeNull();
@@ -25,6 +26,8 @@ describe("Workstreams view preference", () => {
     storeLastView("board");
     expect(values.get(VIEW_STORAGE_KEY)).toBe("board");
     expect(readLastView()).toBe("board");
+    storeLastView("pipeline");
+    expect(readLastView()).toBe("pipeline");
     values.set(VIEW_STORAGE_KEY, "board-v2");
     expect(readLastView()).toBe("board");
     storeLastView("map");

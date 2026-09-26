@@ -14,7 +14,7 @@ export const PIPELINE_STAGES = ["build", "review", "feedback", "ready", "merged"
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type PipelineBlocker = { label: string; tone: "bad" | "warn" | "wait" | "clear" };
 export type PipelineActivity = { state: "none" | "working" | "done" | "needs-you"; detail: string; threadId: string | null; source: "advance" | "dispatch" | "run" | null };
-export type PipelineAction = { kind: "merge" | "advance" | "fix" | "nudge" | "open-parent" | "open-thread" | "release"; label: string; behind?: number } | null;
+export type PipelineAction = { kind: "merge" | "advance" | "fix" | "nudge" | "open-parent" | "open-thread" | "open-pr" | "release"; label: string; behind?: number } | null;
 export type PipelineCard = {
   key: string; repo: string; title: string; pr: Pr | null; local: Row | null; backlog: BacklogRow | null;
   effortKey: string | null; effortName: string | null; hold: PrHold | null;
@@ -23,7 +23,7 @@ export type PipelineCard = {
 };
 export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[] };
 
-const BAD_CHECKS = new Set(["FAILURE", "ERROR"]);
+const BAD_CHECKS = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const GREEN_CHECKS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 const ACTIVE_JOBS = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 const NONE: PipelineActivity = { state: "none", detail: "", threadId: null, source: null };
@@ -38,6 +38,7 @@ export function stageFor(lifecycle: Lifecycle, pr: Pr | null, behind: number | n
   if (lifecycle === "shipped") return "released";
   if (lifecycle === "merged" || lifecycle === "closed") return "merged";
   if (pr === null || pr.isDraft || lifecycle === "active" || lifecycle === "in-progress" || lifecycle === "up-next") return "build";
+  if (pr.checkConclusions.some((check) => BAD_CHECKS.has(check))) return "feedback";
   if (pr !== null && !pr.isDraft && (pr.mergeStateStatus === "DIRTY" || pr.mergeStateStatus === "BEHIND")) return "feedback";
   if (behind !== null && pr?.reviewDecision === "APPROVED" && lifecycle === "awaiting-merge") return "ready";
   if (lifecycle === "blocked" || lifecycle === "awaiting-followup" || lifecycle === "approved-with-comments" || lifecycle === "approved-with-note") return "feedback";
@@ -128,7 +129,12 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
       activity = { state: "working", detail: thread.title, threadId: thread.id, source: "run" };
     }
     if (stage === "ready" && blocker.label === "Clear" && activity.state === "needs-you") activity = NONE;
-    const action = primaryPipelineAction(stage, blocker, activity, hold, behind);
+    let action = primaryPipelineAction(stage, blocker, activity, hold, behind);
+    if (action?.kind === "advance" && pr !== null) {
+      const canStartBatch = pr.state === "OPEN" && pr.reviewDecision === "APPROVED";
+      const canStartLocalAgent = local?.action?.kind === "agent" || local !== null && blocker.label === "CI failing";
+      if (!canStartBatch && !canStartLocalAgent) action = { kind: "open-pr", label: "Open PR" };
+    }
     if (pr !== null) covered.add(prKey(pr.url));
     cards.push({ key: pr === null ? local!.key : prKey(pr.url), repo: pr === null ? local!.repo : repoOf(pr, remote?.repo ?? local!.repo),
       title: pr === null ? local!.title : displayTitle(pr.title), pr, local, backlog: remote,

@@ -62,9 +62,27 @@ describe("pipeline position and gates", () => {
 
   it("counts only approved, unheld Feedback PRs for Advance", () => {
     const cards = pipelineCards([entry(pr(8, { unresolvedReviewThreads: 2 })), entry(pr(9, { reviewDecision: "CHANGES_REQUESTED" }))], [], now);
-    expect(cards.map((card) => card.action?.kind)).toEqual(["advance", "advance"]);
+    expect(cards.map((card) => card.action?.kind)).toEqual(["advance", "open-pr"]);
     expect(pipelineColumns(cards).find((column) => column.stage === "feedback")?.bulkCount).toBe(1);
     expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([8]);
+  });
+
+  it("opens remote unapproved feedback and keeps approved CI in the batch contract", () => {
+    const unapproved = pipelineCards([entry(pr(90, { reviewDecision: "CHANGES_REQUESTED" }))], [], now)[0]!;
+    expect(unapproved).toMatchObject({ stage: "feedback", action: { kind: "open-pr", label: "Open PR" } });
+    const ciOnly = pipelineCards([entry(pr(91, { checkConclusions: ["TIMED_OUT"] }))], [], now)[0]!;
+    expect(ciOnly).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" } });
+    expect(pipelineBulkCards([unapproved, ciOnly], "feedback").map((card) => card.pr?.number)).toEqual([91]);
+    const localCi = pipelineCards([entry(pr(94, { checkConclusions: ["TIMED_OUT"], reviewDecision: null }))], [local(pr(94, { checkConclusions: ["TIMED_OUT"], reviewDecision: null }))], now)[0]!;
+    expect(localCi).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" } });
+  });
+
+  it("includes an approved parent-blocked Feedback PR in batch Advance even when its card opens the parent", () => {
+    const parent = pr(92, { headRefName: "foundation" });
+    const child = pr(93, { baseRefName: "foundation", checkConclusions: ["FAILURE"] });
+    const cards = pipelineCards([entry(child), entry(parent)], [], now);
+    expect(cards.find((card) => card.pr?.number === 93)).toMatchObject({ stage: "feedback", action: { kind: "open-parent" } });
+    expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([93]);
   });
 
   it("deduplicates inventory, cloned checkouts, and checkout-only PRs; retains effort keys", () => {

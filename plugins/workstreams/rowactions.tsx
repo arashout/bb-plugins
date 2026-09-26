@@ -280,7 +280,7 @@ type MergePreview = Extract<Awaited<ReturnType<ReturnType<typeof useRpc<typeof r
  * the merge is pinned to exactly that commit: if anything was pushed since,
  * GitHub refuses rather than merging code nobody looked at here.
  */
-export function MergeDialog({ row, onClose }: { row: DirectRow | null; onClose: () => void }) {
+export function MergeDialog({ row, onClose, onSuccess }: { row: DirectRow | null; onClose: () => void; onSuccess?: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
   const [preview, setPreview] = useState<MergePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -323,7 +323,7 @@ export function MergeDialog({ row, onClose }: { row: DirectRow | null; onClose: 
       });
       if (result.ok) {
         toast.success(result.detail);
-        onClose();
+        (onSuccess ?? onClose)();
         return;
       }
       setError(result.error);
@@ -431,7 +431,7 @@ export function MergeDialog({ row, onClose }: { row: DirectRow | null; onClose: 
 // ---- update branch and nudge ---------------------------------------------------
 
 /** Run one write RPC from a dialog: busy state, error kept in the dialog, toast on success. */
-function useWrite(onClose: () => void) {
+function useWrite(onClose: () => void, onSuccess?: () => void) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reset = () => {
@@ -446,7 +446,7 @@ function useWrite(onClose: () => void) {
       const result = await call();
       if (result.ok) {
         toast.success(result.detail);
-        onClose();
+        (onSuccess ?? onClose)();
         return;
       }
       setError(result.error);
@@ -498,9 +498,9 @@ export function UpdateBranchDialog({ row, onClose }: { row: DirectRow | null; on
  * reviewers GitHub still lists as pending, and post a comment. The comment is
  * prefilled and editable; it reaches gh on stdin, never on a command line.
  */
-export function NudgeDialog({ row, now, onClose }: { row: DirectRow | null; now: number; onClose: () => void }) {
+export function NudgeDialog({ row, now, onClose, onSuccess }: { row: DirectRow | null; now: number; onClose: () => void; onSuccess?: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
-  const write = useWrite(onClose);
+  const write = useWrite(onClose, onSuccess);
   const reviewers = row?.unit.pr?.reviewRequests ?? [];
   const [rerequest, setRerequest] = useState(false);
   const [comment, setComment] = useState(true);
@@ -776,13 +776,13 @@ export function AgentDialog({ request, onClose }: { request: { action: AgentActi
 }
 
 /** The one dialog a row action opens, if any. */
-export function ActionDialogs({ request, now, onClose }: { request: ActionRequest | null; now: number; onClose: () => void }) {
+export function ActionDialogs({ request, now, onClose, onSuccess }: { request: ActionRequest | null; now: number; onClose: () => void; onSuccess?: () => void }) {
   const direct = (action: DirectAction) => (request?.kind === "direct" && request.action === action ? request.row : null);
   return (
     <>
-      <MergeDialog row={direct("merge")} onClose={onClose} />
+      <MergeDialog row={direct("merge")} onClose={onClose} onSuccess={onSuccess} />
       <UpdateBranchDialog row={direct("update-branch")} onClose={onClose} />
-      <NudgeDialog row={direct("nudge")} now={now} onClose={onClose} />
+      <NudgeDialog row={direct("nudge")} now={now} onClose={onClose} onSuccess={onSuccess} />
       <AgentDialog request={request?.kind === "agent" ? request : null} onClose={onClose} />
     </>
   );

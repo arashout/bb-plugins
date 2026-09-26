@@ -39,8 +39,7 @@ The Map's layout comes from the grouping hierarchy and stable weights alone.
 by memory must not reshuffle when a PR turns red. Status drives colour, halos
 and dimming there, and nothing else.
 
-The Board is the deliberate opposite: an inbox you work through, so it IS
-ordered by status (see Views).
+Pipeline and the legacy Board order work by status (see Views).
 
 The Map's lens control filters and dims **in place**: switching lenses never
 moves a circle or a region. Its three status lenses are exactly the three lifecycle
@@ -426,9 +425,33 @@ that thread has newer activity.
 
 ## Views
 
+**Pipeline** shares the Board's scan and is the main action view. It assigns
+checkout work and each open pull request to **Build**, **Review**, **Feedback**,
+**Ready**, **Merged**, or **Released**. Stage and blocker come from GitHub and
+git facts; a draft remains in Build even when CI fails. **Released** means a
+merge commit appears in a local release tag, not that production received a
+deployment. Current scans omit closed pull requests that did not merge.
+
+Switch between stage columns and effort swimlanes. Existing effort keys,
+including ticket cohorts of remote-only PRs, provide swimlane membership;
+items without a key appear in **One-offs**. A held PR stays in its stage with
+**On hold** and **Release** as its only action. Holds do not count toward bulk
+actions, automatic dispatch, or the agents chip. Merged shows the five most
+recent cards, and Released shows three, until you choose **Show all**.
+
+Use a card's primary action or a column bulk button. Feedback bulk advance
+includes approved open PRs only. Review bulk nudge includes PRs that have
+waited at least seven days. Ready bulk merge opens a confirmation for each
+unblocked PR. The shared agent sheet shows its plan, workspace, and **Pushes**
+or **Read-only** effect. Advance batches use fixed service instructions;
+single-row agent prompts and repair direction remain editable. The card shows
+agent progress, and the Pipeline options menu opens **Advance history** and
+the legacy Board.
+
 The panel opens on the last view you used in this browser, or the **Map** on
-your first visit. **Map** and **Board** have deep links and read the same board
-data. **Efforts** groups all tracked checkouts by effort; **PR backlog** groups
+your first visit. **Map**, **Pipeline**, and the legacy **Board** have deep
+links and read the same board data. In the legacy Board, **Efforts** groups
+all tracked checkouts by effort; **PR backlog** groups
 your open PRs by next action. The effort chooser counts scanned rows and associated inventory PRs, even
 when search or filters hide some.
 It counts a PR once by URL and ranks efforts by their first available move:
