@@ -1,11 +1,11 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { createEffortStore } from "./effort-store.js";
 import { createRunStore } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
-import { threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
+import { threadEffortAssignmentScope, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 
 const a = "https://github.com/inkwell/folio/pull/42";
 const b = "https://github.com/inkwell/folio/pull/43";
@@ -18,15 +18,26 @@ const units: RawUnit[] = [42, 43].map((number) => ({ path: `/p/folio-${number}`,
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
 
-async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDestination?: boolean; remoteUrlVariant?: boolean } = {}) {
+async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDestination?: boolean; remoteUrlVariant?: boolean; environmentPath?: string | null } = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
   let localEnabled = true;
+  let inventoryFailed = false;
+  let environmentPath = options.environmentPath ?? null;
+  let archived = false;
+  let metadataGate: Promise<void> | null = null;
+  let metadataStarted: (() => void) | null = null;
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "proj", name: "Folio", sources: [{ hostId: "host-inkwell", path: "/p" }] }] as never },
     threads: { list: async () => [] as never,
-      get: async ({ threadId }: { threadId: string }) => threadId === "thread" ? makeThreadResponse({ id: "thread", projectId: "proj" }) as never : Promise.reject(new Error("missing thread")),
-      getPluginMetadata: async ({ threadId }: { threadId: string }) => (metadata.get(threadId) ?? {}) as never,
+      get: async ({ threadId }: { threadId: string }) => threadId === "thread" ? {
+        ...makeThreadResponse({ id: "thread", projectId: "proj", archivedAt: archived ? 100 : null }),
+        environment: environmentPath === null ? null : { path: environmentPath },
+      } as never : Promise.reject(new Error("missing thread")),
+      getPluginMetadata: async ({ threadId }: { threadId: string }) => {
+        if (metadataGate) { const gate = metadataGate; metadataGate = null; metadataStarted?.(); await gate; }
+        return (metadata.get(threadId) ?? {}) as never;
+      },
       updatePluginMetadata: async ({ threadId, set }: { threadId: string; set?: Record<string, unknown> }) => { metadata.set(threadId, { ...metadata.get(threadId), ...set }); return metadata.get(threadId) as never; },
       events: { list: async () => [] }, interactions: { list: async () => [] as never } },
   }, experimental_callHostRpc: ({ method }) => {
@@ -36,6 +47,7 @@ async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDe
       ...(options.remoteDestination ? [] : [units[1]!]),
     ] : [], warnings: [] };
     if (method === "authoredPrs") {
+      if (inventoryFailed) throw new Error("Inventory unavailable");
       const remote = options.remoteDestination ? [44, 45].map((number) => ({ repo: "inkwell/atlas", pr: parsePrList(JSON.stringify([{
         number, url: `https://github.com/inkwell/atlas/pull/${number}${options.remoteUrlVariant && number === 44 ? "/?tab=files" : ""}`, state: "OPEN", title: `ABC-202 Improve atlas review ${number}`,
         headRefName: `abc-202-${number}` }]))!.pr })) : [];
@@ -49,7 +61,17 @@ async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDe
   const context = async () => await harness.callRpc("thread_effort_context", { threadId: "thread" }) as ThreadEffortReady;
   const board = async () => await harness.callRpc("board_get", null) as Board;
   const db = bb.storage.database();
-  return { harness, metadata, context, board, store: createEffortStore(db), db, clearLocal: () => { localEnabled = false; } };
+  return { harness, metadata, context, board, store: createEffortStore(db), db, clearLocal: () => { localEnabled = false; },
+    failInventory: (failed: boolean) => { inventoryFailed = failed; },
+    setEnvironmentPath: (path: string | null) => { environmentPath = path; }, archive: () => { archived = true; },
+    deferMetadata: () => {
+      let release!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      metadataGate = new Promise<void>((resolve) => { release = resolve; });
+      metadataStarted = started;
+      return { entered, release };
+    } };
 }
 
 it("requires an explicit known PR link, then moves its ticket and PR without spawning a coordinator", async () => {
@@ -77,6 +99,178 @@ it("rejects a missing thread before resolving or linking work", async () => {
   const { harness } = await setup();
   expect(await harness.callRpc("thread_effort_context", { threadId: "missing" })).toMatchObject({ ok: false });
   expect(await harness.callRpc("thread_effort_link_pr", { threadId: "missing", prUrl: a })).toMatchObject({ ok: false });
+});
+
+it("assigns an empty thread, then inherits only a PR in its exact scanned checkout", async () => {
+  const env = await setup();
+  env.metadata.set("thread", { role: "worker", effortId: "historical", ticket: "ABC-101" });
+  const preview = await env.context();
+  expect(preview.sources).toEqual([]);
+  const destinationKey = (await env.board()).groups.find((group) => group.level === "effort" &&
+    group.clusters.some((cluster) => cluster.units.some((unit) => unit.ticket === "ABC-202")))!.key;
+  const destination = preview.efforts.find((effort) => effort.key === destinationKey)!;
+  const assigned = await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: destination.key,
+    expectedScope: threadEffortAssignmentScope(preview, destination.key) }) as ThreadEffortReady;
+  expect(assigned.threadEffort?.name).toBe(destination.name);
+  expect(env.metadata.get("thread")).toMatchObject({ role: "worker", effortId: "historical", ticket: "ABC-101",
+    workEffortId: env.store.source(destination.key)!.id });
+  expect(env.store.owner("prUrl", a)).toBeNull();
+  env.setEnvironmentPath("/p/folio-42/child");
+  await env.harness.runCli(["refresh"]);
+  expect(env.store.owner("prUrl", a)).toBeNull();
+  env.setEnvironmentPath("/p/folio-42");
+  await env.harness.runCli(["refresh"]);
+  await vi.waitFor(() => expect(env.store.owner("prUrl", a)?.id).toBe(env.store.source(destination.key)!.id));
+  expect(env.store.owner("ticket", "ABC-101")?.id).toBe(env.store.source(destination.key)!.id);
+  const updated = await env.context();
+  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: null,
+    expectedScope: threadEffortAssignmentScope(updated, null) })).toMatchObject({ ok: true, threadEffort: null });
+  expect(env.store.owner("prUrl", a)?.id).toBe(env.store.source(destination.key)!.id);
+  expect(env.metadata.get("thread")).toMatchObject({ role: "worker", effortId: "historical", workEffortId: null });
+  expect(env.harness.inspection.sdk.callsTo("threads.spawn")).toEqual([]);
+});
+
+it("inherits multiple recorded PRs, including completed action runs", async () => {
+  const env = await setup();
+  const runs = createRunStore(env.db);
+  for (const [url, ticket, path, number] of [[a, "ABC-101", "/p/folio-42", 42], [b, "ABC-202", "/p/folio-43", 43]] as const) {
+    const id = runs.begin({ action: "review", path, ticket, prUrl: url, prNumber: number, mode: "continue", threadId: "thread" });
+    runs.settle(id, true, "Done");
+  }
+  const preview = await env.context();
+  const destinationKey = (await env.board()).groups.find((group) => group.level === "effort" &&
+    group.clusters.some((cluster) => cluster.units.some((unit) => unit.ticket === "ABC-101")))!.key;
+  const destination = preview.efforts.find((effort) => effort.key === destinationKey)!;
+  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: destination.key,
+    expectedScope: threadEffortAssignmentScope(preview, destination.key) })).toMatchObject({ ok: true });
+  const effort = env.store.source(destination.key)!;
+  expect(env.store.owner("prUrl", a)?.id).toBe(effort.id);
+  expect(env.store.owner("prUrl", b)?.id).toBe(effort.id);
+  expect(env.store.owner("ticket", "ABC-202")?.id).toBe(effort.id);
+  await env.harness.runCli(["refresh"]);
+  expect(env.store.get(effort.id)?.members.prUrls).toEqual([a, b]);
+});
+
+it("preserves an explicit owner and reports the blocked linked PR", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.key === (env.store.owner("ticket", "ABC-202")?.key ??
+    preview.efforts.find((effort) => effort.scope.includes("ABC-202"))?.key))!;
+  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) })).toMatchObject({ ok: true });
+  const other = env.store.establish({ sourceKey: "other", name: "Other effort", goal: "", projectId: "", coordinatorState: "none",
+    members: { tickets: ["ABC-101"], prUrls: [a] } });
+  env.setEnvironmentPath("/p/folio-42");
+  await env.harness.runCli(["refresh"]);
+  await vi.waitFor(async () => expect((await env.context()).inheritanceNotice).toContain("another effort"));
+  expect(env.store.owner("ticket", "ABC-101")?.id).toBe(other.id);
+  expect(env.store.owner("prUrl", a)?.id).toBe(other.id);
+});
+
+it("pauses inheritance while automatic dispatch is on, then resumes when it is off", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
+  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) })).toMatchObject({ ok: true });
+  const effort = env.store.source(target.key)!;
+  await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: effort.key });
+  env.setEnvironmentPath("/p/folio-42");
+  await env.harness.runCli(["refresh"]);
+  expect(env.store.owner("prUrl", a)).toBeNull();
+  expect((await env.context()).inheritanceNotice).toContain("Automatic dispatch");
+  await env.harness.callRpc("dispatch_set", { mode: "off", effortKey: effort.key });
+  await vi.waitFor(() => expect(env.store.owner("prUrl", a)?.id).toBe(effort.id));
+});
+
+it("does not claim after an archive event races a metadata read", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) });
+  env.setEnvironmentPath("/p/folio-42");
+  const gate = env.deferMetadata();
+  await env.harness.runCli(["refresh"]);
+  await gate.entered;
+  env.archive();
+  await env.harness.emitThreadEvent("thread.archived", { thread: makeThreadResponse({ id: "thread", archivedAt: 100 }) });
+  gate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(env.store.owner("prUrl", a)).toBeNull();
+});
+
+it("does not claim a PR from a checkout snapshot replaced during metadata lookup", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) });
+  env.setEnvironmentPath("/p/folio-42");
+  const gate = env.deferMetadata();
+  await env.harness.runCli(["refresh"]);
+  await gate.entered;
+  env.clearLocal();
+  await env.harness.runCli(["refresh"]);
+  gate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(env.store.owner("prUrl", a)).toBeNull();
+});
+
+it("does not claim work after the thread intent is cleared during a metadata read", async () => {
+  const env = await setup();
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) });
+  env.setEnvironmentPath("/p/folio-42");
+  const gate = env.deferMetadata();
+  await env.harness.runCli(["refresh"]);
+  await gate.entered;
+  const assigned = await env.context();
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: null,
+    expectedScope: threadEffortAssignmentScope(assigned, null) });
+  gate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(env.store.owner("prUrl", a)).toBeNull();
+});
+
+it("holds background inheritance while a thread effort change reads its context", async () => {
+  const env = await setup();
+  const first = await env.context();
+  const oldDestination = first.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: oldDestination.key,
+    expectedScope: threadEffortAssignmentScope(first, oldDestination.key) });
+  const newDestination = env.store.establish({ sourceKey: "future", name: "Future effort", goal: "", projectId: "",
+    coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+  const preview = await env.context();
+  env.setEnvironmentPath("/p/folio-42");
+  const gate = env.deferMetadata();
+  const changing = env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: newDestination.key,
+    expectedScope: threadEffortAssignmentScope(preview, newDestination.key) });
+  await gate.entered;
+  await env.harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thread", status: "idle" }), lastAssistantText: "Done" });
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(env.store.owner("prUrl", a)).toBeNull();
+  gate.release();
+  expect(await changing).toMatchObject({ ok: true, threadEffort: { key: newDestination.key } });
+  expect(env.store.owner("prUrl", a)?.id).toBe(newDestination.id);
+});
+
+it("waits for fresh PR evidence before inheriting an inventory-only link", async () => {
+  const env = await setup({ remoteDestination: true });
+  const remote = "https://github.com/inkwell/atlas/pull/44";
+  env.metadata.set("thread", { linkedPrUrl: remote });
+  env.failInventory(true);
+  await env.harness.runCli(["refresh"]);
+  const preview = await env.context();
+  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-101"))!;
+  await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
+    expectedScope: threadEffortAssignmentScope(preview, target.key) });
+  expect(env.store.owner("prUrl", remote)).toBeNull();
+  env.failInventory(false);
+  await env.harness.runCli(["refresh"]);
+  await vi.waitFor(() => expect(env.store.owner("prUrl", remote)?.id).toBe(env.store.source(target.key)!.id));
 });
 
 it("resolves a prior Workstreams run's PR without reading thread transcripts", async () => {

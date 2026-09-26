@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useComposerView, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import { threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort";
+import { threadEffortAssignmentScope, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -21,6 +21,8 @@ function effortLabel(context: ThreadEffortReady): string {
   const name = assigned[0]?.effortName ?? "Unnamed effort";
   return unassigned ? `${name} + unassigned work` : name;
 }
+
+type PickerMode = "thread" | "move" | "link";
 
 function SourceScope({ source }: { source: ThreadEffortReady["sources"][number] }) {
   const detail = <div className="space-y-1 break-all text-[11px] text-muted-foreground">
@@ -49,11 +51,12 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   // A board event updates the strip, but never changes a choice mid-dialog.
   const [picker, setPicker] = useState<ThreadEffortReady | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [destinationKey, setDestinationKey] = useState("");
+  const [threadDestinationKey, setThreadDestinationKey] = useState("");
+  const [moveDestinationKey, setMoveDestinationKey] = useState("");
   const [effortSearch, setEffortSearch] = useState("");
   const [prSearch, setPrSearch] = useState("");
   const [prUrl, setPrUrl] = useState("");
-  const [linkMode, setLinkMode] = useState(false);
+  const [mode, setMode] = useState<PickerMode>("thread");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewNeeded, setReviewNeeded] = useState(false);
@@ -85,11 +88,12 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     if (context === null) return;
     setPicker(context);
     setSelectedIds(context.sources.length === 1 ? [context.sources[0]!.id] : []);
-    setDestinationKey("");
+    setThreadDestinationKey(context.threadEffort?.key ?? "");
+    setMoveDestinationKey("");
     setEffortSearch("");
     setPrSearch("");
     setPrUrl("");
-    setLinkMode(context.sources.length === 0);
+    setMode("thread");
     setError(null);
     setReviewNeeded(false);
     setOpen(true);
@@ -97,23 +101,33 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
 
   const selectedSources = picker?.sources.filter((source) => selectedIds.includes(source.id)) ?? [];
   const invalidSelection = selectedIds.some((id) => !picker?.sources.some((source) => source.id === id));
-  const destination = picker?.efforts.find((effort) => effort.key === destinationKey);
+  const threadDestination = picker?.efforts.find((effort) => effort.key === threadDestinationKey);
+  const moveDestination = picker?.efforts.find((effort) => effort.key === moveDestinationKey);
   // A matching label can still hide inferred or mixed ownership that needs saving.
-  const changed = selectedSources.some((source) => source.effortKey !== destinationKey || !source.explicit);
-  const moving = selectedSources.some((source) => source.effortKey !== null && source.effortKey !== destinationKey);
+  const changed = selectedSources.some((source) => source.effortKey !== moveDestinationKey || !source.explicit);
+  const moving = selectedSources.some((source) => source.effortKey !== null && source.effortKey !== moveDestinationKey);
   const actionLabel = moving ? "Move linked work" : "Add to effort";
+  const effortSelection = mode === "thread" ? threadDestinationKey : moveDestinationKey;
   const filteredEfforts = useMemo(() => {
     if (picker === null) return [];
     const query = effortSearch.trim().toLocaleLowerCase();
-    return picker.efforts.filter((effort) => effort.key === destinationKey || effort.name.toLocaleLowerCase().includes(query));
-  }, [destinationKey, effortSearch, picker]);
+    return picker.efforts.filter((effort) => effort.key === effortSelection || effort.name.toLocaleLowerCase().includes(query));
+  }, [effortSelection, effortSearch, picker]);
   const filteredPrs = useMemo(() => {
     if (picker === null) return [];
     const query = prSearch.trim().toLocaleLowerCase();
     return picker.linkablePrs.filter((pr) => pr.url === prUrl || `${pr.label} ${pr.url}`.toLocaleLowerCase().includes(query));
   }, [picker, prSearch, prUrl]);
-  const canMove = picker !== null && picker.sources.length > 0 && selectedIds.length > 0 && !invalidSelection && destination !== undefined && changed && !busy && !reviewNeeded;
-  const canLink = picker !== null && linkMode && picker.linkablePrs.some((pr) => pr.url === prUrl) && !busy;
+  const canSetThread = picker !== null && threadDestination !== undefined && picker.threadEffort?.key !== threadDestinationKey && !busy && !reviewNeeded;
+  const canClearThread = picker !== null && picker.threadEffort !== null && !busy && !reviewNeeded;
+  const canMove = picker !== null && picker.sources.length > 0 && selectedIds.length > 0 && !invalidSelection && moveDestination !== undefined && changed && !busy && !reviewNeeded;
+  const canLink = picker !== null && mode === "link" && picker.linkablePrs.some((pr) => pr.url === prUrl) && !busy && !reviewNeeded;
+
+  const switchMode = (next: PickerMode) => {
+    setMode(next);
+    setEffortSearch("");
+    if (!reviewNeeded) setError(null);
+  };
 
   const acceptResult = (result: Awaited<ReturnType<typeof rpc.call<"thread_effort_context">>>) => {
     if (!result.ok) {
@@ -129,12 +143,28 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
 
   const move = async () => {
     if (!canMove || picker === null) return;
-    const expectedScope = threadEffortMoveScope(picker, selectedIds, destinationKey);
+    const expectedScope = threadEffortMoveScope(picker, selectedIds, moveDestinationKey);
     if (expectedScope === "") return;
     setBusy(true);
     setError(null);
     try {
-      acceptResult(await rpc.call("thread_effort_move", { threadId, sourceIds: selectedIds, destinationKey, expectedScope }));
+      acceptResult(await rpc.call("thread_effort_move", { threadId, sourceIds: selectedIds, destinationKey: moveDestinationKey, expectedScope }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setReviewNeeded(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setThreadEffort = async (destinationKey: string | null) => {
+    if (picker === null || busy || reviewNeeded || (destinationKey === null ? !canClearThread : !canSetThread)) return;
+    const expectedScope = threadEffortAssignmentScope(picker, destinationKey);
+    if (expectedScope === "") return;
+    setBusy(true);
+    setError(null);
+    try {
+      acceptResult(await rpc.call("thread_effort_set", { threadId, destinationKey, expectedScope }));
     } catch (cause) {
       setError(errorMessage(cause));
       setReviewNeeded(true);
@@ -165,6 +195,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
       requestId.current++;
       setContext(result);
       setPicker(result);
+      setThreadDestinationKey((current) => result.efforts.some((effort) => effort.key === current) ? current : (result.threadEffort?.key ?? ""));
       setReadError(null);
       setError(null);
       setReviewNeeded(false);
@@ -175,26 +206,27 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     }
   };
 
-  if (context === null) return <div className="px-1 pb-1 text-[11px] text-muted-foreground" role="status">{readError === null ? "Reading linked work…" : <button type="button" onClick={refetch} className="text-destructive underline underline-offset-2">Could not read linked work. Retry</button>}</div>;
+  if (context === null) return <div className="px-1 pb-1 text-[11px] text-muted-foreground" role="status">{readError === null ? "Reading thread effort…" : <button type="button" onClick={refetch} className="text-destructive underline underline-offset-2">Could not read thread effort. Retry</button>}</div>;
 
   return <Dialog open={open} onOpenChange={(next) => { if (busy) return; if (next) openPicker(); else setOpen(false); }}>
     <div className="flex min-w-0 items-center gap-1 px-1 pb-1 text-[11px] text-muted-foreground">
       <DialogTrigger asChild>
-        <button type="button" aria-label={`Effort: ${effortLabel(context)}. Change linked work effort`}
+        <button type="button" aria-label={`Effort: ${context.threadEffort?.name ?? "No thread effort"}. Change thread effort`}
           className="inline-flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
-          <span className="shrink-0">Effort:</span><span className="truncate font-medium text-foreground">{effortLabel(context)}</span><span aria-hidden="true">⌄</span>
+          <span className="shrink-0">Effort:</span><span className="truncate font-medium text-foreground">{context.threadEffort?.name ?? "No thread effort"}</span><span aria-hidden="true">⌄</span>
         </button>
       </DialogTrigger>
       {readError === null ? null : <span role="status" title={readError}>Could not refresh effort</span>}
     </div>
     <DialogContent className={cn("max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto", POINTER_CURSORS)}>
       <DialogHeader>
-        <DialogTitle>{linkMode ? "Link a PR" : "Linked work effort"}</DialogTitle>
-        <DialogDescription>{linkMode
-          ? "Choose a scanned or inventoried pull request to link to this thread."
-          : "Choose the linked work and the effort that should contain it."}</DialogDescription>
+        <DialogTitle>{mode === "thread" ? "Thread effort" : mode === "move" ? "Move linked work" : "Link a PR"}</DialogTitle>
+        <DialogDescription>{mode === "thread"
+          ? "Confirmed, unassigned work in this thread inherits this effort. Existing assignments stay intact."
+          : mode === "move" ? "Choose the linked work and the effort that should contain it."
+          : "Choose a scanned or inventoried pull request to link to this thread."}</DialogDescription>
       </DialogHeader>
-      {picker === null ? null : linkMode ? <div className="space-y-3 text-[12.5px]">
+      {picker === null ? null : mode === "link" ? <div className="space-y-3 text-[12.5px]">
         {picker.linkedPrUrl === null ? null : <p className="break-all text-muted-foreground">Current linked PR: {picker.linkedPrUrl}</p>}
         {picker.linkablePrs.length === 0 ? <p className="text-muted-foreground">No scanned or inventoried PR is available. Refresh the workstreams scan, then reopen this picker.</p> : <label className="grid gap-1.5 font-medium">Known pull request
           {picker.linkablePrs.length > 8 ? <input type="search" value={prSearch} onChange={(event) => setPrSearch(event.target.value)} placeholder="Find a PR by title or URL" disabled={busy}
@@ -205,7 +237,38 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
             {filteredPrs.map((pr) => <option key={pr.url} value={pr.url}>{pr.label} — {pr.url}</option>)}
           </select>
         </label>}
-        {picker.sources.length > 0 ? <button type="button" onClick={() => setLinkMode(false)} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Back to effort</button> : null}
+        <button type="button" onClick={() => switchMode("thread")} disabled={busy} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Back to thread effort</button>
+      </div> : mode === "thread" ? <div className="space-y-4 text-[12.5px]">
+        <label className="grid gap-1.5 font-medium">Thread effort
+          {picker.efforts.length > 8 ? <input type="search" value={effortSearch} onChange={(event) => setEffortSearch(event.target.value)} placeholder="Find an effort" disabled={busy}
+            className="h-8 w-full rounded-md border border-input bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring" /> : null}
+          <select value={threadDestinationKey} onChange={(event) => setThreadDestinationKey(event.target.value)} disabled={busy || picker.efforts.length === 0}
+            className="h-9 w-full rounded-md border border-input bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+            <option value="">Choose an effort</option>
+            {filteredEfforts.map((effort) => <option key={effort.key} value={effort.key}>{effort.name}</option>)}
+          </select>
+        </label>
+        {picker.efforts.length === 0 ? <p className="text-muted-foreground">No efforts are available for this thread.</p> : null}
+        {picker.threadEffort !== null && threadDestinationKey === picker.threadEffort.key ? <p className="text-muted-foreground">This thread is already assigned to {picker.threadEffort.name}.</p> : null}
+        {picker.inheritanceNotice === null ? null : <p role="status" className="text-muted-foreground">{picker.inheritanceNotice}</p>}
+        <section aria-label="Linked work details" className="space-y-1.5">
+          <p className="text-muted-foreground">Linked work: {effortLabel(picker)}</p>
+          {picker.sources.length > 0 ? <details className="text-muted-foreground">
+            <summary className="w-fit cursor-pointer hover:text-foreground">Show linked work details</summary>
+            <div className="max-h-52 space-y-2 overflow-y-auto pt-2">
+              {picker.sources.map((source) => <div key={source.id} className="rounded-md border border-border px-2.5 py-2">
+                <p className="font-medium text-foreground">{source.label}</p>
+                {source.ticket === null ? null : <p className="font-mono text-[11px]">Ticket: {source.ticket}</p>}
+                <p className="text-[11px]">{source.effortName === null ? "No effort" : `Currently in ${source.effortName}`}</p>
+                <SourceScope source={source} />
+              </div>)}
+            </div>
+          </details> : null}
+        </section>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px]">
+          {picker.sources.length > 0 ? <button type="button" onClick={() => switchMode("move")} disabled={busy} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Move linked work</button> : null}
+          <button type="button" onClick={() => switchMode("link")} disabled={busy} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{picker.linkedPrUrl === null ? "Link a PR" : "Change linked PR"}</button>
+        </div>
       </div> : <div className="space-y-4 text-[12.5px]">
         <section aria-label="Linked work" className="space-y-1.5">
           <p className="font-medium">Linked work</p>
@@ -230,22 +293,26 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
         <label className="grid gap-1.5 font-medium">Destination effort
           {picker.efforts.length > 8 ? <input type="search" value={effortSearch} onChange={(event) => setEffortSearch(event.target.value)} placeholder="Find an effort" disabled={busy}
             className="h-8 w-full rounded-md border border-input bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring" /> : null}
-          <select value={destinationKey} onChange={(event) => setDestinationKey(event.target.value)} disabled={busy || picker.efforts.length === 0}
+          <select value={moveDestinationKey} onChange={(event) => setMoveDestinationKey(event.target.value)} disabled={busy || picker.efforts.length === 0}
             className="h-9 w-full rounded-md border border-input bg-background px-2 font-normal outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
             <option value="">Choose an effort</option>
             {filteredEfforts.map((effort) => <option key={effort.key} value={effort.key}>{effort.name}</option>)}
           </select>
         </label>
         {picker.efforts.length === 0 ? <p className="text-muted-foreground">No efforts are available for this work.</p> : null}
-        {destination !== undefined && selectedSources.length > 0 && !changed ? <p className="text-muted-foreground">The selected work is already in {destination.name}.</p> : null}
-        {picker.linkedPrUrl !== null ? <button type="button" onClick={() => setLinkMode(true)} className="text-[11.5px] text-muted-foreground underline underline-offset-2 hover:text-foreground">Change linked PR</button> : null}
+        {moveDestination !== undefined && selectedSources.length > 0 && !changed ? <p className="text-muted-foreground">The selected work is already in {moveDestination.name}.</p> : null}
+        <button type="button" onClick={() => switchMode("thread")} disabled={busy} className="text-[11.5px] text-muted-foreground underline underline-offset-2 hover:text-foreground">Back to thread effort</button>
       </div>}
       {error === null ? null : <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}
       {reviewNeeded ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void refreshPicker()}>Refresh details</Button> : null}
       <DialogFooter className="gap-2">
         <Button variant="ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
-        {linkMode ? <Button disabled={!canLink} onClick={() => void linkPr()}>{busy ? "Linking…" : "Link a PR"}</Button>
-          : <Button disabled={!canMove} onClick={() => void move()}>{busy ? "Saving…" : actionLabel}</Button>}
+        {mode === "link" ? <Button disabled={!canLink} onClick={() => void linkPr()}>{busy ? "Linking…" : "Link a PR"}</Button>
+          : mode === "move" ? <Button disabled={!canMove} onClick={() => void move()}>{busy ? "Saving…" : actionLabel}</Button>
+          : <>
+            {picker !== null && picker.threadEffort !== null ? <Button variant="outline" disabled={!canClearThread} onClick={() => void setThreadEffort(null)}>Clear thread effort</Button> : null}
+            <Button disabled={!canSetThread} onClick={() => void setThreadEffort(threadDestinationKey)}>{busy ? "Saving…" : "Save thread effort"}</Button>
+          </>}
       </DialogFooter>
     </DialogContent>
   </Dialog>;

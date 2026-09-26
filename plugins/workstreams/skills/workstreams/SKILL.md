@@ -425,14 +425,21 @@ that thread has newer activity.
 
 ## Views
 
-The **Effort** control above a thread's composer organizes its linked work.
-It assigns tickets and PRs, not the thread itself. A ticket move includes its
-related PRs and checkouts; a standalone PR can move independently. The picker
-shows this scope and requires a choice when several work items are linked.
-**Link a PR** adds a tracked PR as thread context when no work is recognized.
-Explicit membership survives rescans. Organizing an effort does not launch
-its coordinator, start an agent, or change existing thread parents. Automatic
-dispatch must be off for an affected effort before its membership changes.
+The **Effort** control above a thread's composer assigns the thread to an
+effort before it has a PR. Confirmed, unassigned PR work inherits that effort
+from exact checkout links, recorded actions, or explicit PR links. Title and
+discussion mentions do not authorize automatic assignment. Existing explicit
+ticket and PR ownership stays intact, and clearing thread intent does not
+remove inherited membership.
+
+**Move linked work** changes existing membership explicitly. A ticket move
+includes its related PRs and checkouts; a standalone PR can move independently.
+The picker shows this scope and requires a choice when several work items are
+linked. **Link a PR** adds a tracked PR as thread context. Explicit membership
+survives rescans. Organizing an effort does not launch its coordinator, start
+an agent, or change existing thread parents. Automatic dispatch must be off
+for an affected effort before a move; automatic inheritance pauses while the
+destination effort has automatic dispatch enabled.
 
 **Pipeline** shares the Board's scan and is the main action view. It assigns
 checkout work and each open pull request to **Build**, **Review**, **Feedback**,

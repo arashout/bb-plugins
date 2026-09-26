@@ -25,7 +25,8 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, establishedEffortSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
-import { threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
+import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
+import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
@@ -321,6 +322,7 @@ export const rpcContract = defineRpcContract({
   effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
   thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: threadEffortContextSchema },
+  thread_effort_set: { input: z.object({ threadId: z.string().min(1).max(200), destinationKey: z.string().min(1).max(500).nullable(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_move: { input: z.object({ threadId: z.string().min(1).max(200), sourceIds: z.array(z.string().min(1).max(600)).min(1).max(100), destinationKey: z.string().min(1).max(500), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_link_pr: { input: z.object({ threadId: z.string().min(1).max(200), prUrl: z.string().min(1).max(500) }).strict(), output: threadEffortContextSchema },
   advance_preview: { input: z.object({ prUrls: z.array(z.string().max(500)).min(1).max(100) }).strict(), output: advancePreviewSchema },
@@ -608,6 +610,8 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE TABLE IF NOT EXISTS grouping_legacy_labels (hash TEXT PRIMARY KEY, label TEXT NOT NULL)`,
     ...ADVANCE_MIGRATIONS,
     ...PR_HOLD_MIGRATIONS,
+    // Index only: the thread's plugin metadata is the sole source of effort intent.
+    `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
   ]);
   const runs = createRunStore(db);
   const dispatch = createDispatchStore(db);
@@ -638,6 +642,7 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare(`DELETE FROM units`).run();
       for (const unit of units) insert.run(unit.path, JSON.stringify(unit));
     })();
+    intentEvidenceVersion++;
   }
 
   function readTransitions(): Map<string, Transition> {
@@ -735,6 +740,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (hostId === null) throw new Error("No primary BB host is available to read authored PRs.");
       const result = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
       inventory.apply(result);
+      intentEvidenceVersion++;
       advance.invalidate(result.entries.map((entry) => entry.pr));
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
@@ -748,11 +754,13 @@ export default async function plugin(bb: BbPluginApi) {
         const result: InventoryResult = { owners, entries: [], repositories: [], complete: false, discoveryComplete: false,
           warnings: [`Authored PR refresh failed: ${String(error).slice(0, 400)}`] };
         inventory.apply(result);
+        intentEvidenceVersion++;
       }
       return false;
     } finally {
       inventoryRefreshing = false;
       if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
     }
   }
 
@@ -769,6 +777,7 @@ export default async function plugin(bb: BbPluginApi) {
       for (let offset = 0; offset < urls.length; offset += 100) {
         const result = await host.call("inspectPrs", { prUrls: urls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: SCAN_TIMEOUT_MS });
         inventory.inspect(result);
+        intentEvidenceVersion++;
         advance.invalidate(result.entries.map((entry) => entry.pr));
         const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         const closed = new Set(result.closed.map((url) => url.toLowerCase()));
@@ -803,6 +812,7 @@ export default async function plugin(bb: BbPluginApi) {
     } finally {
       inventoryTargeting = false;
       if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+      queueMicrotask(() => void reconcileAllThreadIntents());
     }
   }
   const inventoryRefreshes = createRescanQueue({ delayMs: RESCAN_DELAY_MS, rescan: refreshInventoryUrls,
@@ -910,6 +920,7 @@ export default async function plugin(bb: BbPluginApi) {
       // After the scan, never inside it: a slow thread log must not hold the
       // board, and a failed one must not fail the scan.
       void syncThreads();
+      queueMicrotask(() => void reconcileAllThreadIntents());
       queueMicrotask(() => void dispatchOne());
       return true;
     } catch (error) {
@@ -1507,6 +1518,31 @@ export default async function plugin(bb: BbPluginApi) {
   /** Every visible, unarchived thread, with the paths its recent events worked in. */
   let threadFacts = new Map<string, ThreadFacts>();
   let threadEnvironments = new Map<string, string | null>();
+  const intentNotes = new Map<string, string>();
+  const intentEpoch = new Map<string, number>();
+  let intentEvidenceVersion = 0;
+  const intentLocks = new Map<string, Promise<void>>();
+  const intentChanging = new Set<string>();
+  const intentRecheck = new Set<string>();
+  const intentIds = () => (db.prepare(`SELECT thread_id FROM thread_work_intent_ids`).all() as { thread_id: string }[]).map((row) => row.thread_id);
+  const hasIntent = (threadId: string) => db.prepare(`SELECT 1 FROM thread_work_intent_ids WHERE thread_id = ?`).get(threadId) !== undefined;
+  async function serialIntent<T>(threadId: string, action: () => Promise<T>): Promise<T> {
+    const previous = intentLocks.get(threadId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const current = previous.then(() => gate);
+    intentLocks.set(threadId, current);
+    await previous;
+    intentChanging.add(threadId);
+    try { return await action(); }
+    finally {
+      intentChanging.delete(threadId);
+      release();
+      if (intentLocks.get(threadId) === current) intentLocks.delete(threadId);
+      if (intentRecheck.delete(threadId) && hasIntent(threadId))
+        queueMicrotask(() => void reconcileThreadIntent(threadId).catch(onThreadError));
+    }
+  }
   const prFreshness = createPrFreshness({
     subscribe: (environmentId, changed) => bb.sdk.subscribe({
       event: "environment:changed", environmentId,
@@ -1727,6 +1763,7 @@ export default async function plugin(bb: BbPluginApi) {
     row: ThreadRow & { environmentId: string | null; originPluginId: string | null },
     reread: boolean): Promise<void> {
     if (row.visibility !== "visible" || row.archivedAt !== null || row.deletedAt !== null) {
+      intentEpoch.set(row.id, (intentEpoch.get(row.id) ?? 0) + 1);
       threadEnvironments.delete(row.id);
       prFreshnessLinks.add("");
       if (threadFacts.delete(row.id)) announceThreads();
@@ -1774,7 +1811,10 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
     void advance.signal(thread.id, "idle", lastAssistantText).catch(onThreadError);
-    onThreadChanged(thread, true).then(() => prFreshnessLinks.add(thread.id)).catch(onThreadError);
+    onThreadChanged(thread, true).then(() => {
+      prFreshnessLinks.add(thread.id);
+      if (hasIntent(thread.id)) void reconcileThreadIntent(thread.id).catch(onThreadError);
+    }).catch(onThreadError);
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     signalRuns(thread.id, { kind: "failed", text: null, error });
@@ -1785,6 +1825,7 @@ export default async function plugin(bb: BbPluginApi) {
     onThreadChanged(thread, true).catch(onThreadError);
   });
   bb.events.on("thread.archived", ({ thread }) => {
+    intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
@@ -1792,6 +1833,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (threadFacts.delete(thread.id)) announceThreads();
   });
   bb.events.on("thread.deleted", ({ thread }) => {
+    intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
@@ -1839,12 +1881,14 @@ export default async function plugin(bb: BbPluginApi) {
         for (const path of paths) remove.run(path);
         for (const unit of result.units) insert.run(unit.path, JSON.stringify(unit));
       })();
+      intentEvidenceVersion++;
       recordTransitions(readUnits());
       inventory.observe(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
       advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
       bb.log.info(`rescanned ${paths.length} checkout(s) after row actions finished`);
+      queueMicrotask(() => void reconcileAllThreadIntents());
       return true;
     } catch (error) {
       bb.log.warn(`targeted rescan failed: ${String(error).slice(0, 300)}`);
@@ -2621,9 +2665,79 @@ export default async function plugin(bb: BbPluginApi) {
             ...current.prInventory.entries.filter((entry) => entry.effortKey === group.key).map((entry) => entry.pr.url)] });
         efforts.push({ key: group.key, name: group.name, scope: JSON.stringify({ name: group.name, members, established: established?.id ?? null }) });
       }
+      const intended = typeof metadata.workEffortId === "string" ? effortStore.get(metadata.workEffortId) : null;
+      const paused = intended && dispatch.policy().mode === "auto" && dispatch.policy().effort_key === intended.key;
       return { ok: true, sources, efforts, linkablePrs: [...known.values()].sort((a, b) => a.label.localeCompare(b.label))
-        .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl };
+        .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl,
+        threadEffort: intended ? { key: intended.key, name: intended.name } : null,
+        inheritanceNotice: paused ? "Automatic dispatch is on for this effort. Unassigned thread work will be assigned after dispatch is off."
+          : intentNotes.get(threadId) ?? null };
     } catch (error) { return { ok: false, error: `Thread work could not be read: ${String(error).slice(0, 300)}` }; }
+  }
+
+  async function reconcileThreadIntent(threadId: string, duringSet = false): Promise<void> {
+    if (disposal.signal.aborted || !hasIntent(threadId)) return;
+    if (intentChanging.has(threadId) && !duringSet) { intentRecheck.add(threadId); return; }
+    const epoch = intentEpoch.get(threadId) ?? 0;
+    const evidenceVersion = intentEvidenceVersion;
+    const scanned = readUnits();
+    const current = await board();
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const freshPaths = new Set(scanned.filter((unit) => unit.observed?.pr === true).map((unit) => unit.path));
+    const work = workItemIndex(
+      current.prInventory.entries.filter((entry) => !entry.stale).map((entry) => ({ url: entry.pr.url, stale: false,
+        tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.url })),
+      current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
+        unit.pr && freshPaths.has(unit.path) ? [{ url: unit.pr.url, path: unit.path,
+          tickets: [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])],
+          value: unit.pr.url }] : []))),
+    );
+    const recordedUrls = (db.prepare(`SELECT pr_url FROM action_runs WHERE thread_id = ? AND pr_url IS NOT NULL ORDER BY id DESC LIMIT 100`)
+      .all(threadId) as { pr_url: string }[]).map((row) => row.pr_url);
+    for (const batch of advance.list()) for (const job of batch.jobs) {
+      if (job.threadId === threadId || job.previousAttempts.some((attempt) => attempt.threadId === threadId)) recordedUrls.push(job.prUrl);
+    }
+    const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
+    if (thread.deletedAt !== null || thread.archivedAt !== null) return;
+    const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
+    if (disposal.signal.aborted || !hasIntent(threadId) || (intentEpoch.get(threadId) ?? 0) !== epoch) return;
+    if (scanning || targeting || inventoryRefreshing || inventoryTargeting || intentEvidenceVersion !== evidenceVersion ||
+      (intentChanging.has(threadId) && !duringSet)) {
+      if (duringSet || intentChanging.has(threadId)) intentRecheck.add(threadId);
+      return;
+    }
+    if (duringSet) intentRecheck.delete(threadId);
+    const effort = typeof metadata.workEffortId === "string" ? effortStore.get(metadata.workEffortId) : null;
+    if (!effort) return;
+    const note = (value: string | null) => {
+      const previous = intentNotes.get(threadId) ?? null;
+      if (value === null) intentNotes.delete(threadId); else intentNotes.set(threadId, value);
+      if (value !== previous) bb.realtime.publish(BOARD_CHANGED, { scanning });
+    };
+    if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === effort.key) {
+      note("Automatic dispatch is on for this effort. Unassigned thread work will be assigned after dispatch is off.");
+      return;
+    }
+    const environment = "environment" in thread ? thread.environment : null;
+    const urls = confirmedThreadPrUrls({ metadata, recordedUrls, environmentPath: environment?.path ?? null,
+      scanned: scanned.filter((unit) => unit.observed?.pr === true), knownUrls: [...work.keys()] });
+    let claimed = false;
+    let conflicts = 0;
+    for (const cohort of confirmedPrCohorts(urls, [...work.values()])) {
+      const result = effortStore.claimUnowned(effort.key, cohort.members, cohort.guard);
+      claimed ||= result.claimed.tickets.length + result.claimed.prUrls.length > 0;
+      if (result.conflict) conflicts++;
+    }
+    note(conflicts ? `${conflicts} linked PR ${conflicts === 1 ? "group has" : "groups have"} work assigned to another effort. Review linked work to move it.` : null);
+    if (claimed) bb.realtime.publish(BOARD_CHANGED, { scanning });
+  }
+
+  async function reconcileAllThreadIntents(): Promise<void> {
+    for (const threadId of intentIds()) {
+      if (disposal.signal.aborted) break;
+      try { await reconcileThreadIntent(threadId); }
+      catch (error) { bb.log.warn(`thread ${threadId}: effort inheritance failed: ${String(error).slice(0, 200)}`); }
+    }
   }
 
   const coordinators = createCoordinatorService(effortStore, {
@@ -3062,6 +3176,40 @@ export default async function plugin(bb: BbPluginApi) {
       return result;
     },
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
+    thread_effort_set: ({ threadId, destinationKey, expectedScope }) => serialIntent(threadId, async () => {
+      intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+      const context = await threadEffortContext(threadId);
+      if (!context.ok) return context;
+      if (threadEffortAssignmentScope(context, destinationKey) !== expectedScope) {
+        return { ok: false as const, error: "The thread effort or destination changed. Reopen the effort picker." };
+      }
+      if (destinationKey === null) {
+        await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: null } });
+        intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+        db.prepare(`DELETE FROM thread_work_intent_ids WHERE thread_id = ?`).run(threadId);
+        intentNotes.delete(threadId);
+      } else {
+        const destination = context.efforts.find((effort) => effort.key === destinationKey)!;
+        if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === destinationKey) {
+          return { ok: false as const, error: "Turn off automatic dispatch for this effort before assigning a thread." };
+        }
+        const established = effortStore.source(destinationKey);
+        const initial = JSON.parse(destination.scope) as { members: EffortMembers };
+        let effort;
+        try { effort = established ?? effortStore.transfer(destinationKey, { tickets: [], prUrls: [] },
+          { name: destination.name, members: initial.members }); }
+        catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
+        if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === effort.key) {
+          return { ok: false as const, error: "Turn off automatic dispatch for this effort before assigning a thread." };
+        }
+        await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
+        intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+        db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
+      }
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (destinationKey !== null) await reconcileThreadIntent(threadId, true);
+      return threadEffortContext(threadId);
+    }),
     thread_effort_move: async ({ threadId, sourceIds, destinationKey, expectedScope }) => {
       const context = await threadEffortContext(threadId);
       if (!context.ok) return context;
@@ -3089,6 +3237,7 @@ export default async function plugin(bb: BbPluginApi) {
         established ? undefined : { name: destination.name, members: initial.members }); }
       catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return threadEffortContext(threadId);
     },
     thread_effort_link_pr: async ({ threadId, prUrl }) => {
@@ -3097,6 +3246,7 @@ export default async function plugin(bb: BbPluginApi) {
       const canonical = canonicalPrUrl(prUrl);
       if (!canonical || !context.linkablePrs.some((pr) => pr.url === canonical)) return { ok: false as const, error: "Choose a tracked PR from the picker." };
       await bb.sdk.threads.updatePluginMetadata({ threadId, set: { linkedPrUrl: canonical } });
+      if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return threadEffortContext(threadId);
     },
     inventory_refresh: () => {
@@ -3112,6 +3262,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       dispatch.setPolicy(mode, effortKey);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (mode !== "auto") queueMicrotask(() => void reconcileAllThreadIntents());
       if (mode === "auto") queueMicrotask(() => void dispatchOne());
       return (await board()).dispatch;
     },

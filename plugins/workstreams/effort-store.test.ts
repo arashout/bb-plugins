@@ -95,4 +95,49 @@ describe("established effort storage", () => {
     expect(store.owner("ticket", "ABC-101")?.id).toBe(destination.id);
     expect(store.owner("prUrl", url)?.id).toBe(destination.id);
   });
+
+  it("inherits an unowned PR cohort once and leaves explicit ownership untouched", () => {
+    const { store, db } = setup();
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: [], prUrls: [] }, coordinatorState: "none" });
+    const conflicting = store.establish({ ...input, sourceKey: "other", members: { tickets: ["ABC-202"], prUrls: [] } });
+    const cohort = { tickets: ["ABC-101"], prUrls: [url] };
+    expect(store.claimUnowned(destination.key, cohort)).toMatchObject({ conflict: false, claimed: cohort });
+    expect(store.claimUnowned(destination.key, cohort)).toMatchObject({ conflict: false, claimed: { tickets: [], prUrls: [] } });
+    const blocked = { tickets: ["ABC-202"], prUrls: ["https://github.com/inkwell/folio/pull/43"] };
+    expect(store.claimUnowned(destination.key, blocked)).toMatchObject({ conflict: true, claimed: { tickets: [], prUrls: [] } });
+    expect(store.owner("ticket", "ABC-202")?.id).toBe(conflicting.id);
+    expect(store.owner("prUrl", blocked.prUrls[0]!)?.id).toBeUndefined();
+    const sibling = "https://github.com/inkwell/folio/pull/44";
+    store.claimUnowned(conflicting.key, { tickets: [], prUrls: [sibling] });
+    expect(store.claimUnowned(destination.key, { tickets: ["ABC-303"], prUrls: [blocked.prUrls[0]!] },
+      { tickets: ["ABC-303"], prUrls: [blocked.prUrls[0]!, sibling] })).toMatchObject({ conflict: true });
+    expect(store.owner("ticket", "ABC-303")).toBeNull();
+    expect(createEffortStore(db).get(destination.id)?.members).toEqual(cohort);
+  });
+
+  it("sees explicit PR owners across copied URL variants without rewriting their rows", () => {
+    const { store, db } = setup();
+    const copied = `${url.toUpperCase()}/?view=files`;
+    const owner = store.establish({ ...input, sourceKey: "legacy", members: { tickets: [], prUrls: [copied] } });
+    const destination = store.establish({ ...input, sourceKey: "new", members: { tickets: [], prUrls: [] } });
+    expect(store.claimUnowned(destination.key, { tickets: ["ABC-101"], prUrls: [url] })).toMatchObject({ conflict: true });
+    expect(store.owner("ticket", "ABC-101")).toBeNull();
+    expect(store.get(owner.id)?.members.prUrls).toEqual([copied.toLowerCase()]);
+    expect((db.prepare(`SELECT ref FROM effort_members WHERE effort_id = ?`).all(owner.id) as { ref: string }[])
+      .map((row) => row.ref)).toEqual([copied.toLowerCase()]);
+    expect(() => store.transfer("suggested-group", { tickets: [], prUrls: [] },
+      { name: "Suggested", members: { tickets: [], prUrls: [url] } })).toThrow("Destination membership changed");
+  });
+
+  it("rejects an oversized automatic claim before changing ownership or the readable effort", () => {
+    const { store, db } = setup();
+    const tickets = Array.from({ length: 1000 }, (_, index) => `ABC-${index}`);
+    const destination = store.establish({ ...input, members: { tickets, prUrls: [] } });
+    const extra = "ABC-1000";
+    expect(() => store.claimUnowned(destination.key, { tickets: [extra], prUrls: [url] })).toThrow();
+    expect(store.owner("ticket", extra)).toBeNull();
+    expect(store.owner("prUrl", url)).toBeNull();
+    expect(createEffortStore(db).get(destination.id)?.members).toEqual(normalizeMembers({ tickets, prUrls: [] }));
+    expect(store.list()).toHaveLength(1);
+  });
 });

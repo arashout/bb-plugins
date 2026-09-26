@@ -57,17 +57,25 @@ via agent** action starts a BB thread only when you confirm it.
 
 ## Organize work from a thread
 
-Use **Effort** above the thread composer to add or move linked work. The
+Use **Effort** above the thread composer to assign the thread to an effort,
+even before it has a PR. Confirmed, unassigned work in the thread inherits
+that effort, including existing recorded work and work discovered later.
+Workstreams discovers PRs through the thread's exact checkout, recorded
+actions, or explicit PR links. A PR mentioned only in a title or discussion
+does not inherit automatically. Existing explicit assignments stay intact.
+Clearing the thread effort leaves previously assigned work where it is.
+
+Use **Move linked work** to change existing ticket or PR membership. The
 picker shows the affected ticket, PRs, and checkouts. Select the work when a
 thread has several links. Ticket work moves together; a standalone PR moves
-on its own. If the thread has no recognized work, use **Link a PR** to choose
-a tracked pull request as its context.
+on its own. **Link a PR** supplies an explicit link to a tracked pull request.
 
 Explicit assignments use the same ticket and PR membership as the board.
 Assigning work preserves existing thread parents and worker history and does
 not create a coordinator or start an agent. You can set up a coordinator
 separately. Turn off automatic dispatch for an affected effort before moving
-its work.
+its work. Automatic inheritance pauses while the destination effort has
+automatic dispatch enabled.
 
 ## Use the views
 
