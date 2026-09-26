@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRealtime, useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
+import { ThreadChat, useRealtime, useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import type { PipelineCard } from "./pipeline";
 
@@ -117,6 +117,7 @@ export function PipelinePrComposer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showUpdates, setShowUpdates] = useState(false);
   const sending = useRef(false);
   const mounted = useRef(true);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -160,6 +161,7 @@ export function PipelinePrComposer({
       if (result.ok) {
         setMessage("");
         setNotice(result.delivery === "queued" ? "Message queued for the agent." : "Message sent to the agent.");
+        setShowUpdates(true);
       } else setError(result.error);
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
@@ -169,7 +171,10 @@ export function PipelinePrComposer({
     }
   };
 
+  const selectedThread = context?.threads.find((thread) => thread.id === threadId);
+
   return (
+    <>
     <form
       aria-label={`Message agent for ${card.repo} #${card.pr?.number ?? ""}`}
       onSubmit={(event) => { event.preventDefault(); void send(); }}
@@ -205,9 +210,9 @@ export function PipelinePrComposer({
               To {ROLE_LABEL[context.threads[0]!.role].toLowerCase()} · {context.threads[0]!.title}
             </p>
           )}
-          {context.threads.find((thread) => thread.id === threadId) ? (
+          {selectedThread ? (
             <p role="status" className="text-muted-foreground">
-              {threadProgress(context.threads.find((thread) => thread.id === threadId)!, sidebarThreads, card)}
+              {threadProgress(selectedThread, sidebarThreads, card)}
             </p>
           ) : null}
           <label className="block space-y-1">
@@ -245,5 +250,30 @@ export function PipelinePrComposer({
         </>
       ) : null}
     </form>
+    {selectedThread ? (
+      <div className="relative z-20 mt-2 text-[11px]">
+        <button
+          type="button"
+          aria-expanded={showUpdates}
+          aria-controls={`pipeline-thread-updates-${card.key}`}
+          onClick={() => setShowUpdates((value) => !value)}
+          className="rounded text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {showUpdates ? "Hide agent updates" : "View agent updates"}
+        </button>
+        {showUpdates ? (
+          <section id={`pipeline-thread-updates-${card.key}`} aria-label={`${ROLE_LABEL[selectedThread.role]} conversation`} className="mt-2 space-y-1">
+            <p className="truncate font-medium" title={selectedThread.title}>{ROLE_LABEL[selectedThread.role]} conversation · {selectedThread.title}</p>
+            {selectedThread.role === "repo" || selectedThread.role === "coordinator" ? (
+              <p className="text-muted-foreground">This thread can include work on other PRs.</p>
+            ) : null}
+            <div className="h-56 min-h-0 overflow-hidden rounded border border-border">
+              <ThreadChat key={selectedThread.id} threadId={selectedThread.id} variant="timeline" layout="contained" />
+            </div>
+          </section>
+        ) : null}
+      </div>
+    ) : null}
+    </>
   );
 }

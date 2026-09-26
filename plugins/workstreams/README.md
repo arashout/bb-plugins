@@ -116,7 +116,10 @@ automatic dispatch enabled.
   repository controller when one is available. If several other threads qualify,
   choose the target. **Rebase and PTAL** fills an editable draft; only **Send
   message** delivers it. The composer reports whether BB sent or queued the
-  message, and the board shows agent activity.
+  message, and the board shows agent activity. Choose **View agent updates**
+  to read the selected agent's conversation on the card and send a follow-up
+  from the same composer. Repository and effort threads can include work on
+  other PRs.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
 - **Approved filter:** Keep approved open PRs in view across Map, Pipeline,
