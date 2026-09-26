@@ -30,6 +30,7 @@ import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from 
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
+import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
 import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS } from "./inventory-store.js";
 import type { InventoryResult } from "./inventory.js";
@@ -1460,10 +1461,10 @@ export default async function plugin(bb: BbPluginApi) {
     const inventoryTickets = storedInventory.entries.flatMap((entry) => ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern));
     const ticketTitles = new Map([...linear.read(inventoryTickets)].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : []));
     const remoteEfforts = inventoryTicketEfforts(storedInventory.entries, wired, established, pattern, ticketTitles);
-    const remoteMembership = new Map(remoteEfforts.flatMap((effort) => effort.prUrls.map((url) => [url, { effortKey: effort.key, effortName: effort.name }] as const)));
+    const remoteMembership = new Map(remoteEfforts.flatMap((effort) => effort.prUrls.map((url) => [prWorkItemKey(url), { effortKey: effort.key, effortName: effort.name }] as const)));
     const remoteGroups: Board["groups"] = remoteEfforts.map((effort) => {
-      const urls = new Set(effort.prUrls);
-      const members = storedInventory.entries.filter((entry) => urls.has(entry.pr.url.toLowerCase()));
+      const urls = new Set(effort.prUrls.map(prWorkItemKey));
+      const members = storedInventory.entries.filter((entry) => urls.has(prWorkItemKey(entry.pr.url)));
       return { key: effort.key, name: effort.name, level: "effort", parentKey: null, clusters: [], cohesion: null,
         rollup: `${effort.prUrls.length} open PRs for ${effort.ticket}`, repoCount: effort.repoCount, total: effort.prUrls.length, merged: 0,
         lifecycle: mostUrgent(members.map((entry) => prLifecycle(entry.pr))),
@@ -1480,7 +1481,7 @@ export default async function plugin(bb: BbPluginApi) {
       lastScanAt: (await bb.storage.kv.get<string>("lastScanAt")) ?? null,
       scanning,
       prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
-        ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(entry.pr.url.toLowerCase()) ?? {}),
+        ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
       })), refreshing: inventoryRefreshing || inventoryTargeting },
       warnings: [
         ...((await bb.storage.kv.get<string[]>("warnings")) ?? []),
@@ -2534,20 +2535,14 @@ export default async function plugin(bb: BbPluginApi) {
       const current = await board();
       const pattern = compilePattern((await settings.get()).ticketPattern);
       const units = readUnits();
-      const known = new Map<string, { url: string; label: string; paths: string[]; tickets: string[] }>();
-      const addPr = (url: string, label: string, path: string | null, tickets: string[]) => {
-        const canonical = canonicalPrUrl(url);
-        if (!canonical) return;
-        const prior = known.get(canonical);
-        known.set(canonical, { url: canonical, label: prior?.label ?? label, paths: [...new Set([...(prior?.paths ?? []), ...(path ? [path] : [])])].sort(),
-          tickets: [...new Set([...(prior?.tickets ?? []), ...tickets])].sort() });
-      };
-      for (const entry of current.prInventory.entries) addPr(entry.pr.url, entry.pr.title, null,
-        ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern));
-      for (const group of current.groups) for (const cluster of group.clusters) for (const unit of cluster.units) {
-        if (unit.pr) addPr(unit.pr.url, unit.pr.title, unit.path, [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])]);
-      }
-      for (const unit of units) if (unit.pr) addPr(unit.pr.url, unit.pr.title, unit.path, []);
+      const observations = workItemIndex(
+        current.prInventory.entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale, tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.title })),
+        [...current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [{
+          url: unit.pr.url, path: unit.path, tickets: [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])], value: unit.pr.title,
+        }] : []))), ...units.flatMap((unit) => unit.pr ? [{ url: unit.pr.url, path: unit.path, tickets: [], value: unit.pr.title }] : [])],
+      );
+      const known = new Map([...observations.values()].flatMap((item) => canonicalPrUrl(item.key) ? [[item.key,
+        { url: item.key, label: item.remote ?? item.locals[0] ?? item.key, paths: item.paths, tickets: item.tickets }] as const] : []));
       if (known.size > 1000) return { ok: false, error: "Too many tracked PRs to choose safely. Narrow the workstream inventory." };
       const linked = new Set<string>();
       for (const candidate of [linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null]) if (candidate && known.has(candidate)) linked.add(candidate);

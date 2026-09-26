@@ -12,6 +12,16 @@ const entry = (patch: Partial<Pr> = {}, stale = false): BacklogEntry => ({ repo:
 const now = Date.parse("2026-09-25T00:00:00Z");
 
 describe("authored PR backlog", () => {
+  it("joins copied GitHub URLs to a checkout and uses fresh remote facts", () => {
+    const url = "https://github.com/inkwell/folio/pull/42";
+    const localPr = pr({ number: 42, url: `${url}#discussion`, title: "Old folio title" });
+    const local = { key: "/p/folio", unit: { path: "/p/folio", pr: localPr, stack: null } } as Row;
+    const stale = { repo: "inkwell/folio", pr: pr({ number: 42, url: `${url}?tab=files`, title: "Stale title" }), stale: true };
+    const fresh = { repo: "inkwell/folio", pr: pr({ number: 42, url: url.toUpperCase() + "/", title: "Current title" }), stale: false };
+    const rows = prBacklog([stale, fresh], [local], now);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stale: false, pr: { title: "Current title" }, local: { key: "/p/folio", title: "Current title" } });
+  });
   it("shows each open PR once and ignores closed or merged inventory rows", () => {
     const rows = prBacklog([entry({}, true), entry(), entry({ state: "CLOSED", url: "https://github.com/acme/app/pull/2" }), entry({ state: "MERGED", url: "https://github.com/acme/app/pull/3" })], [], now);
     expect(rows).toHaveLength(1);

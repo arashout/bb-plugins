@@ -9,6 +9,8 @@ import { prBacklog, type BacklogEntry, type BacklogRow } from "./pr-backlog.js";
 import type { WireRun } from "./server.js";
 import { isAdvanceEligible } from "./bulk-advance-selection.js";
 import { displayTitle, isTicketlessClone, prLifecycle, type Lifecycle } from "./workstreams.js";
+import { checksFailed, checksGreen } from "./pr-checks.js";
+import { prWorkItemKey } from "./work-item-index.js";
 
 export const PIPELINE_STAGES = ["build", "review", "feedback", "ready", "merged", "released"] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
@@ -23,11 +25,8 @@ export type PipelineCard = {
 };
 export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[] };
 
-const BAD_CHECKS = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
-const GREEN_CHECKS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 const ACTIVE_JOBS = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 const NONE: PipelineActivity = { state: "none", detail: "", threadId: null, source: null };
-const prKey = (url: string): string => canonicalPrUrl(url) ?? url.replace(/\/$/u, "").toLowerCase();
 const repoOf = (pr: Pr, fallback: string): string => {
   const canonical = canonicalPrUrl(pr.url);
   return canonical === null ? fallback : new URL(canonical).pathname.split("/").slice(1, 3).join("/");
@@ -38,7 +37,7 @@ export function stageFor(lifecycle: Lifecycle, pr: Pr | null, behind: number | n
   if (lifecycle === "shipped") return "released";
   if (lifecycle === "merged" || lifecycle === "closed") return "merged";
   if (pr === null || pr.isDraft || lifecycle === "active" || lifecycle === "in-progress" || lifecycle === "up-next") return "build";
-  if (pr.checkConclusions.some((check) => BAD_CHECKS.has(check))) return "feedback";
+  if (checksFailed(pr.checkConclusions)) return "feedback";
   if (pr !== null && !pr.isDraft && (pr.mergeStateStatus === "DIRTY" || pr.mergeStateStatus === "BEHIND")) return "feedback";
   if (behind !== null && pr?.reviewDecision === "APPROVED" && lifecycle === "awaiting-merge") return "ready";
   if (lifecycle === "blocked" || lifecycle === "awaiting-followup" || lifecycle === "approved-with-comments" || lifecycle === "approved-with-note") return "feedback";
@@ -52,14 +51,14 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (stage === "merged" || stage === "released") return { label: "Clear", tone: "clear" };
   if (pr === null || stage === "build") return { label: "In progress", tone: "wait" };
   if (stale) return { label: "Status unknown", tone: "wait" };
-  if (pr.checkConclusions.some((check) => BAD_CHECKS.has(check))) return { label: "CI failing", tone: "bad" };
+  if (checksFailed(pr.checkConclusions)) return { label: "CI failing", tone: "bad" };
   if (pr.mergeStateStatus === "DIRTY") return { label: "Conflicts", tone: "bad" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && !pr.reviewFollowupPosted) return { label: "Changes requested", tone: "warn" };
   if (pr.unresolvedReviewThreads !== null && pr.unresolvedReviewThreads > 0) return { label: `${pr.unresolvedReviewThreads} open threads`, tone: "warn" };
   if (pr.reviewDecision === "APPROVED" && pr.approvalHasBody && !pr.approvalNoteFollowedUp) return { label: "Review note", tone: "warn" };
   if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && pr.reviewFollowupPosted) return { label: "Awaiting re-review", tone: "wait" };
-  if (pr.reviewDecision === "APPROVED" && !pr.checkConclusions.every((check) => GREEN_CHECKS.has(check))) return { label: "Checks pending", tone: "wait" };
+  if (pr.reviewDecision === "APPROVED" && !checksGreen(pr.checkConclusions)) return { label: "Checks pending", tone: "wait" };
   if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
   if (pr.mergeStateStatus === "BLOCKED") return { label: "Rules block", tone: "wait" };
   if (pr.mergeStateStatus === "UNKNOWN" || pr.unresolvedReviewThreads === null) return { label: "Status unknown", tone: "wait" };
@@ -73,18 +72,18 @@ export function activityFor(prUrl: string | null, path: string | null, sources: 
   const candidates: { at: number; activity: PipelineActivity }[] = [];
   if (prUrl !== null) {
     for (const batch of sources.batches ?? []) for (const job of batch.jobs) {
-      if (prKey(job.prUrl) !== prKey(prUrl) || job.hiddenFromProgress || job.status === "cancelled" || job.status === "merged" || job.status === "closed") continue;
+      if (prWorkItemKey(job.prUrl) !== prWorkItemKey(prUrl) || job.hiddenFromProgress || job.status === "cancelled" || job.status === "merged" || job.status === "closed") continue;
       const state = ACTIVE_JOBS.has(job.status) ? "working" : job.status === "needs-attention" ? "needs-you" : "done";
       candidates.push({ at: job.updatedAt, activity: { state, detail: job.detail, threadId: job.threadId, source: "advance" } });
     }
     for (const attempt of sources.dispatch?.attempts ?? []) {
-      if (prKey(attempt.prUrl) !== prKey(prUrl)) continue;
+      if (prWorkItemKey(attempt.prUrl) !== prWorkItemKey(prUrl)) continue;
       const state = ["launching", "running", "verifying"].includes(attempt.status) ? "working" : ["needs-you", "failed"].includes(attempt.status) ? "needs-you" : "done";
       candidates.push({ at: attempt.startedAt, activity: { state, detail: attempt.detail, threadId: attempt.threadId, source: "dispatch" } });
     }
   }
   for (const run of sources.runs ?? []) {
-    if (run.kind !== "agent" || (prUrl === null || run.prUrl === null ? run.path !== path : prKey(run.prUrl) !== prKey(prUrl))) continue;
+    if (run.kind !== "agent" || (prUrl === null || run.prUrl === null ? run.path !== path : prWorkItemKey(run.prUrl) !== prWorkItemKey(prUrl))) continue;
     const state = run.status === "running" ? "working" : run.status === "needs-you" || run.status === "failed" ? "needs-you" : "done";
     candidates.push({ at: run.finishedAt ?? run.startedAt, activity: { state, detail: run.result ?? run.error ?? run.action, threadId: run.threadId, source: "run" } });
   }
@@ -113,7 +112,7 @@ function ageOf(pr: Pr | null, local: Row | null): number | null {
 /** One card per PR, with remote inventory facts preferred; checkout-only work also appears. */
 export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly Row[], now: number, sources: PipelineSources = {}): PipelineCard[] {
   const backlog = prBacklog(entries, locals, now, sources.holds);
-  const covered = new Set(backlog.map((row) => prKey(row.pr.url)));
+  const covered = new Set(backlog.map((row) => prWorkItemKey(row.pr.url)));
   const cards: PipelineCard[] = [];
   const add = (local: Row | null, remote: BacklogRow | null): void => {
     const pr = remote?.pr ?? local?.unit.pr ?? null;
@@ -135,16 +134,16 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
       const canStartLocalAgent = local?.action?.kind === "agent" || local !== null && blocker.label === "CI failing";
       if (!canStartBatch && !canStartLocalAgent) action = { kind: "open-pr", label: "Open PR" };
     }
-    if (pr !== null) covered.add(prKey(pr.url));
-    cards.push({ key: pr === null ? local!.key : prKey(pr.url), repo: pr === null ? local!.repo : repoOf(pr, remote?.repo ?? local!.repo),
+    if (pr !== null) covered.add(prWorkItemKey(pr.url));
+    cards.push({ key: pr === null ? local!.key : prWorkItemKey(pr.url), repo: pr === null ? local!.repo : repoOf(pr, remote?.repo ?? local!.repo),
       title: pr === null ? local!.title : displayTitle(pr.title), pr, local, backlog: remote,
-      effortKey: local?.effortKey ?? remote?.effortKey ?? null, effortName: local?.effort ?? remote?.effortName ?? null,
+      effortKey: remote?.effortKey ?? local?.effortKey ?? null, effortName: remote?.effortName ?? local?.effort ?? null,
       hold, stage, blocker, activity, action, ageSince: ageOf(pr, local), stale });
   };
   for (const row of backlog) add(row.local, row);
   for (const local of [...locals].sort((a, b) => Number(b.unit.pr?.state === "MERGED" && b.unit.lifecycle === "shipped") - Number(a.unit.pr?.state === "MERGED" && a.unit.lifecycle === "shipped") ||
     Number(b.unit.rebasing === true) - Number(a.unit.rebasing === true) || a.key.localeCompare(b.key))) {
-    if (local.unit.pr !== null && covered.has(prKey(local.unit.pr.url))) continue;
+    if (local.unit.pr !== null && covered.has(prWorkItemKey(local.unit.pr.url))) continue;
     if (isTicketlessClone(local.unit)) continue;
     if (local.unit.pr !== null && local.unit.pr.state !== "OPEN" && local.unit.pr.state !== "MERGED") continue;
     add(local, null);

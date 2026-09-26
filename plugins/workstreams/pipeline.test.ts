@@ -94,8 +94,18 @@ describe("pipeline position and gates", () => {
     expect(cards.find((card) => card.pr?.number === 10)?.local).not.toBeNull();
     expect(cards.find((card) => card.pr?.number === 10)?.repo).toBe("inkwell/catalog");
     expect(cards.find((card) => card.pr?.number === 11)?.stage).toBe("build");
-    expect(pipelineEfforts(cards).map((effort) => effort.key)).toEqual(["ticket:INK-1"]);
+    expect(cards.find((card) => card.pr?.number === 10)).toMatchObject({ effortKey: "cohort:INK-1", effortName: "Catalog cohort" });
+    expect(pipelineEfforts(cards).map((effort) => effort.key)).toEqual(["cohort:INK-1", "ticket:INK-1"]);
     expect(pipelineCards([entry(pr(12), { effortKey: "cohort:INK-1", effortName: "Catalog cohort" })], [], now)[0]).toMatchObject({ effortKey: "cohort:INK-1" });
+  });
+
+  it("joins copied PR URLs across inventory and checkouts", () => {
+    const url = pr(24).url;
+    const checkout = local(pr(24, { url: `${url}#discussion` }));
+    const cards = pipelineCards([entry(pr(24, { url: `${url}?tab=files` }), { effortKey: "effort:folio", effortName: "Folio review" })],
+      [checkout, local(pr(24, { url: url.toUpperCase() + "/" }), { key: "/work/clone" })], now);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ key: url, effortKey: "effort:folio", local: { key: checkout.key } });
   });
 
   it("keeps stale drafts and unverified local work in Build, and uses PR age only for PRs", () => {

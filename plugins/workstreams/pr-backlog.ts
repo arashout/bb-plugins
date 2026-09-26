@@ -5,6 +5,7 @@ import type { AttentionRow } from "./workstream-attention.js";
 import type { RowGroup } from "./inbox-grouping.js";
 import { primaryAction, type PrimaryAction } from "./actions.js";
 import { displayTitle, inboxSection, inboxVerb, prLifecycle, unitLifecycle, type InboxSection, type Lifecycle } from "./workstreams.js";
+import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 
 export const BACKLOG_GROUPS = ["ready", "approved", "respond", "waiting", "draft", "unknown", "held"] as const;
 export type BacklogGroup = (typeof BACKLOG_GROUPS)[number];
@@ -17,26 +18,19 @@ export type BacklogRow = BacklogEntry & {
   hold?: PrHold | null; group: BacklogGroup; lifecycle: Lifecycle; section: InboxSection; verb: string; action: PrimaryAction | null; local: Row | null;
   parent: { repo: string; pr: Pr } | null;
 };
-const urlKey = (url: string) => url.replace(/\/$/u, "").toLowerCase();
-
 /** Inventory owns membership and remote facts; a real checkout only adds local context. */
 export function prBacklog(entries: readonly BacklogEntry[], locals: readonly Row[], now: number, holds: PrHolds = {}): BacklogRow[] {
-  const unique = new Map<string, BacklogEntry>();
-  for (const entry of entries) {
-    if (entry.pr.state !== "OPEN") continue;
-    const key = urlKey(entry.pr.url);
-    if (!unique.has(key) || unique.get(key)!.stale && !entry.stale) unique.set(key, entry);
-  }
-  const localByUrl = new Map<string, Row>();
   // A rebase in any checkout must not disappear behind a second clean checkout.
-  for (const row of [...locals].sort((a, b) => Number(b.unit.rebasing === true) - Number(a.unit.rebasing === true) || a.key.localeCompare(b.key))) {
-    if (row.unit.pr !== null && !localByUrl.has(urlKey(row.unit.pr.url))) localByUrl.set(urlKey(row.unit.pr.url), row);
-  }
-  const result = [...unique.values()].map((entry): BacklogRow => {
+  const sortedLocals = [...locals].sort((a, b) => Number(b.unit.rebasing === true) - Number(a.unit.rebasing === true) || a.key.localeCompare(b.key));
+  const items = workItemIndex(entries.filter((entry) => entry.pr.state === "OPEN").map((entry) => ({ url: entry.pr.url, stale: entry.stale, value: entry })),
+    sortedLocals.flatMap((row) => row.unit.pr === null ? [] : [{ url: row.unit.pr.url, path: row.key,
+      tickets: row.unit.ticket ? [row.unit.ticket] : [], value: row }]));
+  const unique = [...items.values()].flatMap((item) => item.remote ? [item.remote] : []);
+  const result = unique.map((entry): BacklogRow => {
     const { pr } = entry;
     const hold = prHoldFor(pr.url, holds);
-    const original = localByUrl.get(urlKey(pr.url)) ?? null;
-    const parent = pr.baseRefName === null ? null : [...unique.values()].find((candidate) =>
+    const original = items.get(prWorkItemKey(pr.url))?.locals[0] ?? null;
+    const parent = pr.baseRefName === null ? null : unique.find((candidate) =>
       candidate.repo.toLowerCase() === entry.repo.toLowerCase() && candidate.pr.number !== pr.number && candidate.pr.headRefName === pr.baseRefName,
     ) ?? null;
     const lifecycle = original === null ? prLifecycle(pr) : unitLifecycle({ ...original.unit, pr });

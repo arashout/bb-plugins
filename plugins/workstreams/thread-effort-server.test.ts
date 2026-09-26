@@ -18,7 +18,7 @@ const units: RawUnit[] = [42, 43].map((number) => ({ path: `/p/folio-${number}`,
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
 
-async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDestination?: boolean } = {}) {
+async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDestination?: boolean; remoteUrlVariant?: boolean } = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
   let localEnabled = true;
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
@@ -37,7 +37,7 @@ async function setup(options: { shared?: boolean; ticketless?: boolean; remoteDe
     ] : [], warnings: [] };
     if (method === "authoredPrs") {
       const remote = options.remoteDestination ? [44, 45].map((number) => ({ repo: "inkwell/atlas", pr: parsePrList(JSON.stringify([{
-        number, url: `https://github.com/inkwell/atlas/pull/${number}`, state: "OPEN", title: `ABC-202 Improve atlas review ${number}`,
+        number, url: `https://github.com/inkwell/atlas/pull/${number}${options.remoteUrlVariant && number === 44 ? "/?tab=files" : ""}`, state: "OPEN", title: `ABC-202 Improve atlas review ${number}`,
         headRefName: `abc-202-${number}` }]))!.pr })) : [];
       return { owners: ["inkwell"], entries: remote, discoveryComplete: true, complete: true,
         repositories: options.remoteDestination ? [{ repo: "inkwell/atlas", complete: true }] : [], warnings: [] };
@@ -89,6 +89,12 @@ it("resolves a prior Workstreams run's PR without reading thread transcripts", a
   expect((await context()).sources.map((source) => source.id)).toContain("ticket:ABC-101");
 });
 
+it("links a copied PR URL to its known ticket and checkout path", async () => {
+  const { harness } = await setup();
+  const linked = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a.toUpperCase() + "/?tab=files" }) as ThreadEffortReady;
+  expect(linked.sources).toMatchObject([{ id: "ticket:ABC-101", prUrls: [a], checkoutPaths: ["/p/folio-42"] }]);
+});
+
 it("offers a shared PR's other ticket and refuses to move only one side", async () => {
   const { harness } = await setup({ shared: true });
   const linked = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a }) as ThreadEffortReady;
@@ -130,6 +136,15 @@ it("shows a remote-only ticket's inferred effort before any explicit ownership",
   const preview = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: "https://github.com/inkwell/atlas/pull/44" }) as ThreadEffortReady;
   expect(preview.sources).toMatchObject([{ id: "ticket:ABC-202", effortKey: "ticket:ABC-202", explicit: false }]);
   expect(preview.sources[0]?.effortName).toBeTruthy();
+});
+
+it("assigns a copied remote PR URL to its inferred ticket cohort on the board", async () => {
+  const { board } = await setup({ remoteDestination: true, remoteUrlVariant: true });
+  const current = await board();
+  expect(current.prInventory.entries.filter((entry) => entry.repo === "inkwell/atlas")).toMatchObject([
+    { effortKey: "ticket:ABC-202" }, { effortKey: "ticket:ABC-202" },
+  ]);
+  expect(current.groups.find((group) => group.key === "ticket:ABC-202")).toMatchObject({ total: 2, lifecycle: "awaiting-review" });
 });
 
 it("pins an unowned PR when its ticket already belongs to the destination", async () => {
