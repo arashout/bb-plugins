@@ -116,14 +116,16 @@ describe("pipeline position and gates", () => {
     expect(pipelineCards([entry(pr(16, { createdAt: null }))], [], now)[0]?.ageSince).toBeNull();
   });
 
-  it("puts recently updated cards first within a stage, even when the older card has a stronger blocker", () => {
+  it("puts held cards below unheld cards in a stage, then sorts each group by recent updates", () => {
     const oldFailure = pr(30, { createdAt: "2026-09-23T00:00:00Z", updatedAt: "2026-09-23T00:00:00Z", checkConclusions: ["FAILURE"] });
     const newHeld = pr(31, { createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-24T00:00:00Z", unresolvedReviewThreads: 2 });
-    const cards = pipelineCards([entry(oldFailure), entry(newHeld)], [], now, { holds: { [newHeld.url]: { reason: "Waiting for copy review", heldAt: now } } });
-    expect(cards.map((card) => card.pr?.number)).toEqual([31, 30]);
-    expect(cards.map((card) => card.stage)).toEqual(["feedback", "feedback"]);
-    expect(cards[0]?.ageSince).toBe(Date.parse("2026-09-01T00:00:00Z"));
-    expect(pipelineColumns([...cards].reverse()).find((column) => column.stage === "feedback")?.cards.map((card) => card.pr?.number)).toEqual([31, 30]);
+    const oldHeld = pr(38, { updatedAt: "2026-09-22T00:00:00Z", unresolvedReviewThreads: 2 });
+    const holds = Object.fromEntries([newHeld, oldHeld].map((item) => [item.url, { reason: "Waiting for copy review", heldAt: now }]));
+    const cards = pipelineCards([entry(oldFailure), entry(newHeld), entry(oldHeld)], [], now, { holds });
+    expect(cards.map((card) => card.pr?.number)).toEqual([30, 31, 38]);
+    expect(cards.map((card) => card.stage)).toEqual(["feedback", "feedback", "feedback"]);
+    expect(cards[1]?.ageSince).toBe(Date.parse("2026-09-01T00:00:00Z"));
+    expect(pipelineColumns([...cards].reverse()).find((column) => column.stage === "feedback")?.cards.map((card) => card.pr?.number)).toEqual([30, 31, 38]);
     expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([30]);
   });
 

@@ -168,6 +168,7 @@ export function byPipelineOrder(a: PipelineCard, b: PipelineCard): number {
   const aAt = recentAt(a) ?? Number.NEGATIVE_INFINITY;
   const bAt = recentAt(b) ?? Number.NEGATIVE_INFINITY;
   return PIPELINE_STAGES.indexOf(a.stage) - PIPELINE_STAGES.indexOf(b.stage) ||
+    Number(a.hold !== null) - Number(b.hold !== null) ||
     (aAt === bAt ? a.key.localeCompare(b.key) : bAt - aAt);
 }
 
