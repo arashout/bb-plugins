@@ -1,4 +1,11 @@
+import type { AdvancePreview } from "./bulk-advance";
+
 type PlannedWork = { repo: string; eligible: boolean; needsPreparation: boolean; needsFeedback?: boolean };
+
+/** Work that needs renewed review if an advance preview token expires. */
+export function advanceScope(plan: AdvancePreview): string {
+  return JSON.stringify(plan.jobs.map((job) => [job.prUrl, job.eligible, job.needsFeedback, job.needsPreparation, job.workspace, job.headOid, job.baseRefName, job.headRefName]));
+}
 
 export function advancePreviewAction(job: PlannedWork): string {
   if (!job.eligible) return "Skip";
