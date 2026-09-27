@@ -13,6 +13,21 @@ const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts =
 });
 
 describe("scoped Advance admissions", () => {
+  it("recovers an accepted batch by preview token after expiry and reload", async () => {
+    const t = setup();
+    const preview = await t.service.preview([fact().prUrl], "Check the fallback path first.");
+    expect(t.service.started(preview.token)).toBeNull();
+    const batch = await t.service.start(preview.token); await drain();
+    expect(t.service.started(preview.token)).toEqual(batch);
+    t.service.dispose();
+    t.time(preview.expiresAt + 1);
+    const restored = createAdvanceService(t.db, t.deps);
+    expect(restored.started(preview.token)).toEqual(batch);
+    expect(restored.started("missing")).toBeNull();
+    expect(await restored.start(preview.token)).toEqual(batch);
+    expect(t.deps.spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("binds preview direction to the saved batch and preserves it on reload", async () => {
     const t = setup();
     const preview = await t.service.preview([fact().prUrl], "Check the fallback path first.");

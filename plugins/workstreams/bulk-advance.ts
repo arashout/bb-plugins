@@ -471,6 +471,10 @@ export function createAdvanceService(db: RunDb, deps: {
       const batch = batches.get(id);
       return batch ? publicBatch(batch) : null;
     },
+    started: (token: string): AdvanceBatch | null => {
+      const batch = [...batches.values()].find((entry) => entry.token === token);
+      return batch ? publicBatch(batch) : null;
+    },
     async preview(prUrls: string[], instruction = ""): Promise<AdvancePreview> {
       instruction = z.string().max(4_000).parse(instruction);
       const urls = [...new Set(prUrls.map((url) => url.toLowerCase()))];

@@ -559,6 +559,33 @@ verification-only child need branch edits, preview the child again before
 authorizing those edits. Fork writes are skipped; PRs mapped to different BB
 projects in the same repository require separate batches.
 
+## Scoped PR conversations
+
+**Work on these…** starts one visible BB conversation for an exact selection of
+up to 100 known PR URLs. The immutable scope includes held and remote-only PRs.
+The conversation thread plans and reports; it does not start workers or alter
+the selected PRs. Use the current Pipeline stage, blocker, observation time,
+linked threads, and saved Advance jobs to assess each PR. Legacy Board lifecycle
+names do not replace Pipeline feedback or verified readiness.
+
+To read a conversation, write `{"conversationId":"<id>"}` to a JSON file and
+run `bb plugin rpc call workstreams conversation_get --input-file <path> --json`.
+The result includes the full scope, current cached PR facts, the proposal, and
+saved batch results. Read its `revision` before proposing a change.
+
+To propose a later preparation batch, write a JSON file with `conversationId`,
+`expectedRevision`, an ordered `selectedPrUrls` subset, an `instruction` of at
+most 4,000 characters, and `exclusions`. Each excluded scope PR needs one
+`{"prUrl":"<url>","reason":"<reason>"}` entry. An empty subset is valid when
+no preparation is needed. Run
+`bb plugin rpc call workstreams conversation_propose --input-file <path> --json`.
+The server rejects PRs outside the original scope, missing exclusion reasons,
+held PRs in the subset, and stale revisions. Do not invoke `advance_start` or
+`conversation_start` from the conversation thread. The user reviews a fresh
+preview and chooses **Start preparation** in Workstreams. A new proposal applies
+to a later batch; it does not cancel queued or running jobs. Use the existing
+Advance controls to inspect or cancel those jobs.
+
 The shared **Approved** filter persists across Map, Efforts, PR backlog, and
 reloads, including approved PRs that still need fixes, checks, or branch work.
 Map dims nonmatches without repacking and counts checkout-backed PRs; Board

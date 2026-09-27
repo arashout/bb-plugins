@@ -115,6 +115,9 @@ flowchart LR
   controller --> worker["Optional PR or checkout worker: plain title"]
   message["Send to New agent from a card"] --> context["Context agent: plain title, isolated scratch directory"]
   controller --> context
+  scope["Explicit PR scope: selected, filtered visible, or Feedback column"] --> planning["BB planning conversation: context workspace"]
+  planning --> proposal["Reviewed subset and fresh preview"]
+  proposal --> advance
   advance["Confirmed Advance for assigned PR"] --> controller
   advance --> workspace["Isolated worktree for that PR"]
   controller --> workspace
@@ -171,9 +174,23 @@ implemented.
   reviewers on PRs open for at least seven days. **Ready → Merge** processes
   unblocked PRs in order, with confirmation for each direct action. The agent
   sheet shows the plan, workspace, and whether work can push. Advance batch
-  instructions come from the service and are fixed; single-row agent prompts
-  and repair direction are editable. Progress appears on each card. Use
+  instructions combine the service rules with direction saved in the preview;
+  single-row agent prompts and repair direction are editable. Progress appears on each card. Use
   **Advance history** in the Pipeline options menu for saved batch details.
+- **Work on these…:** Open a scoped conversation for the exact selected,
+  filtered visible, or Feedback column open PRs, including held PRs. The panel
+  reads an existing conversation before it offers a first instruction. Sending
+  that instruction starts one visible BB
+  thread in a context workspace. The thread can inspect cached PR facts and
+  propose an ordered subset with a reason for each excluded PR. A held PR stays
+  in the original scope but cannot enter the preparation subset until its hold
+  is released. Review a fresh Advance preview, then choose **Start preparation**
+  to admit the proposed subset to the existing scheduler. The conversation
+  retains its scope, proposal, batch links, and per-PR results across reloads.
+  Follow-up messages use the same BB thread. A later proposal affects a later
+  preparation batch; it does not cancel work that already started. If thread
+  creation is unconfirmed, **Check for existing thread** searches for the saved
+  conversation ID without starting another thread.
 - **Message agents:** On a PR or checkout card, choose **Message agent** to
   send a question or instruction without leaving Pipeline. Select a linked
   thread or **New agent**. When you send to a new agent, Workstreams starts a
@@ -316,7 +333,8 @@ settings, local storage, refresh, enrichment, actions, and the CLI. The grouping
 and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts Map, Pipeline,
 and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
 scanned facts.
-`contract.ts` defines the host RPC schema, and `skills/workstreams/SKILL.md`
+`contract.ts` defines the host RPC schema, `work-conversation.ts` stores exact
+conversation scopes, and `skills/workstreams/SKILL.md`
 documents the CLI for agents.
 
 ```sh

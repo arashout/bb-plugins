@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   UrlLink,
   experimental_useSidebarThreads,
+  useBbContext,
   useBbNavigate,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -55,6 +56,8 @@ import { Tip } from "@/components/ui/tooltip";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { PipelineCardEffortDialog } from "./pipeline-card-effort";
 import { PipelineThreadIndicator } from "./pipeline-thread-indicator";
+import { conversationScope } from "./pipeline-conversation-scope";
+import { PipelineConversationPanel, type ConversationPanelRequest } from "./pipeline-conversation-panel";
 
 const LABEL: Record<PipelineStage, string> = {
   build: "Build",
@@ -75,6 +78,16 @@ const HISTORY_LIMIT: Partial<Record<PipelineStage, number>> = {
   released: 3,
 };
 const EMPTY_SELECTION: AdvanceSelection = { urls: [], removed: 0 };
+
+const lastConversationKey = (projectId: string | null) => `workstreams:last-conversation:${projectId ?? "global"}`;
+function readLastConversation(projectId: string | null): string | null {
+  try { return window.localStorage.getItem(lastConversationKey(projectId)); }
+  catch { return null; }
+}
+function saveLastConversation(projectId: string | null, id: string): void {
+  try { window.localStorage.setItem(lastConversationKey(projectId), id); }
+  catch { /* The open panel still retains this conversation. */ }
+}
 
 function age(card: PipelineCard, now: number): string {
   if (card.ageSince === null) return "";
@@ -118,6 +131,7 @@ export function PipelineView({
   onRescan: () => Promise<void>;
 }) {
   const rpc = useRpc<typeof rpcContract>();
+  const { projectId } = useBbContext();
   const navigate = useBbNavigate();
   const advance = useAdvanceBatches();
   const hold = usePrHoldControls();
@@ -135,6 +149,8 @@ export function PipelineView({
   const [messaging, setMessaging] = useState<{ key: string; location: "card" | "drawer" } | null>(null);
   const [starting, setStarting] = useState<Row | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversationRequest, setConversationRequest] = useState<ConversationPanelRequest | null>(null);
+  const [lastConversationId, setLastConversationId] = useState<string | null>(() => readLastConversation(projectId));
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [dispatch, setDispatch] = useState(board.dispatch);
   const [queuedDirect, setQueuedDirect] = useState<PipelineCard[]>([]);
@@ -146,6 +162,7 @@ export function PipelineView({
   const portalScope = usePortalScopeProps();
   const arrivedFocus = useRef<string | null>(null);
   useEffect(() => setDispatch(board.dispatch), [board.dispatch]);
+  useEffect(() => setLastConversationId(readLastConversation(projectId)), [projectId]);
   useEffect(() => () => { openThreadRequest.current++; }, []);
 
   const locals = useMemo(
@@ -240,6 +257,15 @@ export function PipelineView({
   useEffect(() => setAdvanceSelection((current) => reconcileAdvanceSelection(current, selectionPrs, selectionHolds)), [cards]);
   const visibleSelection = new Set(visible.map(selectionUrl).filter((url): url is string => url !== null));
   const hiddenSelected = advanceSelection.urls.filter((url) => !visibleSelection.has(url)).length;
+  const workScope = conversationScope(cards, visible, advanceSelection.urls);
+  const openWorkConversation = (request: ConversationPanelRequest) => {
+    setDetailsOpen(false);
+    setConversationRequest(request);
+  };
+  const rememberConversation = (id: string) => {
+    setLastConversationId(id);
+    saveLastConversation(projectId, id);
+  };
   useEffect(() => {
     if (messaging && (
       !cards.some((card) => card.key === messaging.key) ||
@@ -549,6 +575,13 @@ export function PipelineView({
   }, [messaging, navCards]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (conversationRequest) {
+        if (event.key === "Escape" && !event.defaultPrevented && !canTypeKey(event.target)) {
+          event.preventDefault();
+          setConversationRequest(null);
+        }
+        return;
+      }
       if (
         event.key === "Escape" && detailsOpen &&
         !event.defaultPrevented && !effortEditing && !agent && !direct &&
@@ -606,7 +639,7 @@ export function PipelineView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [conversationRequest, detailsOpen, selected, navCards, messaging, filterOpen, menuOpen, effortEditing, agent, direct, hold.target, starting, historyOpen]);
 
   const linkedThreadIds = (card: PipelineCard): string[] => card.pr
     ? board.prThreadLinks[canonicalPrUrl(card.pr.url) ?? card.pr.url] ?? []
@@ -877,9 +910,22 @@ export function PipelineView({
     if (stage === "build" || stage === "review" || stage === "feedback") {
       const candidates = pipelineBulkCards(visible, stage, stackGraph);
       const urls = candidates.slice(0, ADVANCE_SELECTION_LIMIT).map((card) => card.pr!.url);
-      if (!urls.length && !(stage === "review" && bulkNudge.length)) return null;
+      const stageWork = stage === "feedback"
+        ? conversationScope(cards, visible.filter((card) => card.stage === stage), [], "Feedback")
+        : null;
+      if (!urls.length && !(stage === "review" && bulkNudge.length) && !stageWork?.prUrls.length) return null;
       return (
         <div className="ml-auto flex items-center gap-1">
+          {stageWork?.prUrls.length ? (
+            <button
+              type="button"
+              onClick={() => openWorkConversation({ kind: "scope", scope: stageWork })}
+              title={`Work on ${stageWork.prUrls.length} matching Feedback PRs`}
+              className="rounded border px-2 py-1 text-[10px] hover:bg-foreground/[0.06]"
+            >
+              Work on these…
+            </button>
+          ) : null}
           {urls.length ? (
             <button
               type="button"
@@ -977,6 +1023,14 @@ export function PipelineView({
           onChange={(event) => setQuery(event.target.value)}
           className="h-7 min-w-36 flex-1 rounded-md border border-input bg-background px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
+        <button
+          type="button"
+          onClick={() => openWorkConversation({ kind: "scope", scope: workScope })}
+          className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {advanceSelection.urls.length ? `Work on ${advanceSelection.urls.length} PRs…` : "Work on these…"}
+        </button>
+        {lastConversationId ? <button type="button" onClick={() => openWorkConversation({ kind: "resume", conversationId: lastConversationId })} className="shrink-0 rounded-md px-2 py-1.5 text-[11px] text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Resume conversation</button> : null}
         <div className="relative">
           <button
             type="button"
@@ -1305,7 +1359,8 @@ export function PipelineView({
             </div>
           )}
         </div>
-        {detailsOpen && selectedCard ? (
+        {conversationRequest ? <PipelineConversationPanel request={conversationRequest} onClose={() => setConversationRequest(null)} onRemember={rememberConversation} /> : null}
+        {detailsOpen && selectedCard && !conversationRequest ? (
           <aside
             aria-label="Pipeline item detail"
             className="absolute inset-y-0 right-0 z-20 flex w-[min(390px,100%)] shrink-0 flex-col overflow-hidden border-l border-border bg-background text-[13px] shadow-xl lg:static lg:shadow-none"
