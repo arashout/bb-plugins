@@ -83,6 +83,47 @@ separately. Turn off automatic dispatch for an affected effort before moving
 its work. Automatic inheritance pauses while the destination effort has
 automatic dispatch enabled.
 
+## How work and agents connect
+
+Workstreams combines scanned checkouts, GitHub pull request inventory, and
+thread links into work context. Explicit effort membership for a ticket, pull
+request, or checkout path takes precedence over inferred grouping. Map and
+Pipeline read the resulting board without starting threads.
+
+```mermaid
+flowchart LR
+  scan["Checkout scan: git and gh"] --> context["Derived board: tickets, PR cohorts, thread links"]
+  inventory["GitHub PR inventory"] --> context
+  threads["BB thread links"] --> context
+  members["Explicit effort membership: ticket, PR URL, checkout path"] --> context
+  context --> map["Map: efforts, programs, domains"]
+  context --> pipeline["Pipeline: stages, cards, actions"]
+  change["Change effort from a card"] --> members
+```
+
+Changing a card's effort transfers the affected tickets, PRs, and checkout
+paths after you review the scope. The change updates membership;
+it does not launch an agent. When a checkout gains a PR, its explicit path
+membership supplies the effort unless an explicit ticket or PR owner takes
+precedence.
+
+```mermaid
+flowchart LR
+  change["Change effort"] --> stored["Stored membership; no thread launch"]
+  action["Confirmed agent action for assigned work"] --> parent["Effort parent: emoji title"]
+  parent --> controller["Repository controller: plain title"]
+  controller --> worker["Optional PR or checkout worker: plain title"]
+  advance["Confirmed Advance for assigned PR"] --> controller
+  advance --> workspace["Isolated worktree for that PR"]
+  controller --> workspace
+```
+
+The confirmed agent action creates a missing parent or controller when it needs
+one. A controller can work directly or delegate a bounded task to a child.
+Advance keeps each PR's isolated worktree for inspection after the result
+finishes. Workstreams retains merged PR worktrees; automatic cleanup is not
+implemented.
+
 ## Use the views
 
 - **Pipeline:** Track each open pull request once across **Build**, **Review**,
@@ -92,8 +133,11 @@ automatic dispatch enabled.
   PRs appear in **One-offs**. Cards show one blocker, agent activity, and a
   primary action. Each stage lists the most recently updated PRs first, with
   checkout-only work ordered by its latest commit. Merged and released cards
-  use their merge date. Open a card for merge gates, stack order, linked threads,
-  checkout actions, and holds. Held PRs stay in their stage, show **On hold**,
+  use their merge date. Use **Open details** for merge gates, stack order,
+  linked threads, checkout actions, and holds. Select a card by its title;
+  the details button opens its drawer separately. Select the effort label or
+  **Change effort…** in the card menu to review and move its work. Held PRs
+  stay in their stage, show **On hold**,
   and offer **Release**; bulk actions and agent counts exclude them. Pipeline
   shows the five most recent merged cards and three most recent release-tagged
   cards until you choose **Show all**. Closed PRs that did not merge remain
@@ -120,10 +164,10 @@ automatic dispatch enabled.
   repository controller when one is available. If several other threads qualify,
   choose the target. **Rebase and PTAL** fills an editable draft; only **Send
   message** delivers it. The composer reports whether BB sent or queued the
-  message, and the board shows agent activity. Choose **View agent updates**
-  to read the selected agent's conversation on the card and send a follow-up
-  from the same composer. Repository and effort threads can include work on
-  other PRs.
+  message, and the board shows agent activity. The composer shows the selected
+  agent's latest reply and live status. Use **Open thread** for the full
+  conversation, or **Follow up** to send another message.
+  Repository and effort threads can include work on other PRs.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
 - **Approved filter:** Keep approved open PRs in view across Map, Pipeline,
@@ -194,7 +238,8 @@ automatic dispatch enabled.
   Create a planning thread in a separate worktree with that project's default
   agent, or link an eligible idle thread. New and explicitly linked coordinator
   titles use a relevant emoji or a stable, varied fallback, preserving an
-  existing leading emoji. Creating a coordinator establishes a stable effort identity
+  existing leading emoji. Repository controllers and PR or checkout workers use
+  plain titles. Creating a coordinator establishes a stable effort identity
   that later grouping passes preserve. **Effort thread** opens it from the
   heading. Authorized PR work uses a repository controller as its parent or
   destination. Repair previews retain earlier PR workers and result links for
