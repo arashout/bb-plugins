@@ -1,4 +1,5 @@
 import type { EffortStore, EstablishedEffort, RepoController } from "./effort-store.js";
+import { rejectedScratchPlacement } from "./scratch-placement.js";
 
 type Thread = { id: string; projectId: string; parentThreadId: string | null; status: string; canSpawnChild: boolean;
   archivedAt: number | null; deletedAt: number | null; environmentHostId?: string | null };
@@ -40,11 +41,13 @@ export function createRepoControllerService(store: EffortStore, sdk: RepoControl
       throw new Error("The effort coordinator cannot own a repository controller. Restore it before advancing this repository.");
     }
     let { record, created } = store.claimRepoController({ effortId: effort.id, repo, projectId, hostId });
+    let previous: RepoController | null = null;
     if (record.threadId) {
       let thread: Thread;
       try { thread = await sdk.get(record.threadId); }
       catch { throw new Error("Repository controller could not be inspected. Retry when BB can read its thread; no replacement was launched."); }
       if (thread.deletedAt === null) return checked(record, coordinatorThreadId, thread);
+      previous = record;
       ({ record, created } = store.beginDeletedRepoReplacement(effort.id, repo, thread.id));
       if (record.threadId) return checked(record, coordinatorThreadId);
     }
@@ -53,8 +56,14 @@ export function createRepoControllerService(store: EffortStore, sdk: RepoControl
       if (found.length === 1) return checked(store.saveRepoController({ ...record, threadId: found[0], state: "ready" }), coordinatorThreadId);
       throw new Error("Repository controller launch is uncertain. Inspect existing threads before advancing; another controller will not start automatically.");
     }
-    const thread = await sdk.spawn({ projectId, parentThreadId: coordinatorThreadId, title: repo, prompt: repoControllerPrompt(effort, repo),
-      pluginMetadata: { effortId: effort.id, repo, role: "repo" } });
+    let thread: { id: string };
+    try {
+      thread = await sdk.spawn({ projectId, parentThreadId: coordinatorThreadId, title: repo, prompt: repoControllerPrompt(effort, repo),
+        pluginMetadata: { effortId: effort.id, repo, role: "repo" } });
+    } catch (error) {
+      if (rejectedScratchPlacement(error)) store.resetRejectedRepoController(record, previous);
+      throw error;
+    }
     return checked(store.saveRepoController({ ...record, threadId: thread.id, state: "ready" }), coordinatorThreadId);
   }
   return {

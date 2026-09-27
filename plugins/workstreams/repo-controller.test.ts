@@ -76,6 +76,39 @@ describe("persistent effort repository controllers", () => {
     expect(t.sdk.spawn).toHaveBeenCalledTimes(1);
   });
 
+  it("discards only a definitively rejected workspace claim before retrying", async () => {
+    const t = setup();
+    vi.mocked(t.sdk.spawn).mockRejectedValueOnce(Object.assign(new Error(
+      "Workspace path is a bb-managed workspace owned by another project"), { status: 409 }));
+    await expect(t.service.ensure(t.input)).rejects.toThrow("owned by another project");
+    expect(t.store.repoController(t.input.effort.id, t.input.repo)).toBeNull();
+    expect((await t.service.ensure(t.input)).threadId).toBe("repo-1");
+    expect(t.sdk.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores a deleted controller binding when its replacement workspace is rejected", async () => {
+    const t = setup();
+    await t.service.ensure(t.input);
+    t.threads.get("repo-1")!.deletedAt = 1;
+    vi.mocked(t.sdk.spawn).mockRejectedValueOnce(Object.assign(new Error(
+      "Workspace path is inside bb-managed storage but is not a workspace of this project"), { status: 409 }));
+    await expect(t.service.ensure(t.input)).rejects.toThrow("inside bb-managed storage");
+    expect(t.store.repoController(t.input.effort.id, t.input.repo)).toMatchObject({
+      threadId: "repo-1", state: "ready", previousThreadIds: [],
+    });
+    expect((await t.service.ensure(t.input)).threadId).toBe("repo-2");
+    expect(t.store.repoController(t.input.effort.id, t.input.repo)?.previousThreadIds).toEqual(["repo-1"]);
+  });
+
+  it("does not reset a repository claim changed after the rejected attempt", async () => {
+    const t = setup();
+    const claim = t.store.claimRepoController({ effortId: t.input.effort.id, repo: t.input.repo,
+      projectId: t.input.projectId, hostId: t.input.hostId }).record;
+    t.store.saveRepoController({ ...claim, state: "ready", threadId: "another-controller" });
+    expect(t.store.resetRejectedRepoController(claim, null)).toBe(false);
+    expect(t.store.repoController(t.input.effort.id, t.input.repo)?.threadId).toBe("another-controller");
+  });
+
   it("replaces a confirmed deleted controller once and retains its previous ID", async () => {
     const t = setup();
     await t.service.ensure(t.input);

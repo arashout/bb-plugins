@@ -104,6 +104,33 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     list: () => (db.prepare(`SELECT value FROM established_efforts ORDER BY id`).all()).map((row) => read(row)!),
     source: (sourceKey: string) => get(sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(sourceKey)),
     owner,
+    /** Release only the exact coordinator claim whose workspace BB rejected before thread creation. */
+    resetRejectedCoordinator(record: EstablishedEffort): boolean {
+      return db.transaction(() => {
+        const current = get(record.id);
+        if (!current || current.coordinatorState !== "creating" || current.coordinatorThreadId !== null ||
+          JSON.stringify(current) !== JSON.stringify(establishedEffortSchema.parse(record))) return false;
+        save({ ...current, coordinatorState: "none" });
+        return true;
+      })();
+    },
+    /** Restore the prior binding, or discard an exact new claim, after BB rejects its workspace. */
+    resetRejectedRepoController(record: RepoController, previous: RepoController | null): boolean {
+      return db.transaction(() => {
+        const row = db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? AND repo = ?`)
+          .get(record.effortId, record.repo) as { value: string } | undefined;
+        if (!row || row.value !== JSON.stringify(record) || record.state !== "creating" || record.threadId !== null) return false;
+        if (previous) {
+          if (previous.effortId !== record.effortId || previous.repo !== record.repo) return false;
+          db.prepare(`UPDATE effort_repo_controllers SET value = ? WHERE effort_id = ? AND repo = ? AND value = ?`)
+            .run(JSON.stringify(previous), record.effortId, record.repo, row.value);
+        } else {
+          db.prepare(`DELETE FROM effort_repo_controllers WHERE effort_id = ? AND repo = ? AND value = ?`)
+            .run(record.effortId, record.repo, row.value);
+        }
+        return true;
+      })();
+    },
     establish(input: { sourceKey: string; name: string; goal: string; projectId: string; members: EffortMembers; coordinatorState?: "none" | "creating" }): EstablishedEffort {
       return db.transaction(() => {
         const existing = get(input.sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(input.sourceKey));

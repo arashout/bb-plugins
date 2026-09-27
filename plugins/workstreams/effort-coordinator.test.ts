@@ -43,6 +43,24 @@ describe("coordinator identity and launch safety", () => {
     expect(sdk.spawn).toHaveBeenCalledTimes(1);
     expect(store.source(input.groupKey)?.coordinatorState).toBe("creating");
   });
+  it("releases only a definitively rejected workspace claim so the same effort can retry", async () => {
+    const { store, sdk, service } = setup();
+    vi.mocked(sdk.spawn).mockRejectedValueOnce(Object.assign(new Error(
+      "Workspace path is inside bb-managed storage but is not a workspace of this project"), { status: 409 }));
+    expect(await service.coordinate(input, plan)).toMatchObject({ ok: false });
+    const rejected = store.source(input.groupKey)!;
+    expect(rejected).toMatchObject({ coordinatorState: "none", coordinatorThreadId: null });
+    expect(await service.coordinate(input, plan)).toMatchObject({ ok: true,
+      effort: { id: rejected.id, coordinatorState: "ready", coordinatorThreadId: "spawned" } });
+    expect(sdk.spawn).toHaveBeenCalledTimes(2);
+  });
+  it("does not reset a coordinator claim changed after the rejected attempt", () => {
+    const { store } = setup();
+    const claim = store.establish({ ...input, sourceKey: "claim" });
+    store.save({ ...claim, name: "Updated review" });
+    expect(store.resetRejectedCoordinator(claim)).toBe(false);
+    expect(store.get(claim.id)).toMatchObject({ coordinatorState: "creating", name: "Updated review" });
+  });
   it("deduplicates a double click after the durable record exists but before spawn returns", async () => {
     const { store, sdk, service } = setup();
     let finish!: (thread: { id: string }) => void;

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { effortMembersSchema, establishedEffortSchema, sameMembers, type EffortMembers, type EffortStore, type EstablishedEffort } from "./effort-store.js";
 import { effortTitle } from "./effort-title.js";
+import { rejectedScratchPlacement } from "./scratch-placement.js";
 
 const failure = z.object({ ok: z.literal(false), error: z.string() });
 export const effortPlanSchema = z.discriminatedUnion("ok", [failure, z.object({
@@ -66,8 +67,14 @@ export function createCoordinatorService(store: EffortStore, sdk: CoordinatorSdk
       if (recovered.length === 1) return { ok: true, effort: store.save({ ...effort, coordinatorThreadId: recovered[0]!, coordinatorState: "ready" }) };
       return { ok: false, error: "A coordinator launch was already recorded. Choose an existing thread after checking BB; another coordinator will not be launched automatically." };
     }
-    const thread = await sdk.spawn({ projectId: effort.projectId, title: effortTitle(effort.name), prompt: coordinatorPrompt(effort),
-      pluginMetadata: { effortId: effort.id, role: "coordinator" } });
+    let thread: { id: string };
+    try {
+      thread = await sdk.spawn({ projectId: effort.projectId, title: effortTitle(effort.name), prompt: coordinatorPrompt(effort),
+        pluginMetadata: { effortId: effort.id, role: "coordinator" } });
+    } catch (error) {
+      if (rejectedScratchPlacement(error)) store.resetRejectedCoordinator(effort);
+      throw error;
+    }
     return { ok: true, effort: store.save({ ...effort, coordinatorThreadId: thread.id, coordinatorState: "ready" }) };
   }
   return {

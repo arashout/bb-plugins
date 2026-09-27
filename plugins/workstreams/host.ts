@@ -1,7 +1,7 @@
 // Per-machine scanning. Runs in the BB host worker, so node:child_process and
 // node:fs are available here and only here.
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -553,10 +553,11 @@ export async function inspectAll(
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
-    contextWorkspace: async (_input, context) => {
-      const path = join(context.experimental_paths.dataDir, "contexts", randomUUID());
+    contextWorkspace: async () => {
+      // BB reserves plugin host-data for its own storage, not unmanaged thread workspaces.
+      const path = join(homedir(), ".local", "share", "bb-workstreams", "contexts", randomUUID());
       await mkdir(path, { recursive: true, mode: 0o700 });
-      return { path };
+      return { path: await realpath(path) };
     },
     advanceInspect: ({ prUrl }, context) => readAdvancePr(ghRunner(context.signal), prUrl),
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
