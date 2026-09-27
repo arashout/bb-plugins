@@ -22,7 +22,7 @@ import { prTarget, readLiveMerge, readReviewThreads, runMerge, runNudge, runUpda
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs } from "./inventory.js";
-import { readAdvancePr } from "./advance-host.js";
+import { readAdvancePr, readEqualHeadTrees } from "./advance-host.js";
 import { prepareAdvanceWorkspace } from "./advance-workspace.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -560,6 +560,8 @@ export default experimental_defineHostEntry({
       return { path: await realpath(path) };
     },
     advanceInspect: ({ prUrl }, context) => readAdvancePr(ghRunner(context.signal), prUrl),
+    equalHeadTrees: ({ prUrl, priorHeadOid, currentHeadOid }, context) =>
+      readEqualHeadTrees(ghRunner(context.signal), prUrl, priorHeadOid, currentHeadOid),
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
       (args, cwd) => run("git", args, cwd, GH_WRITE_TIMEOUT_MS, context.signal), ghRunner(context.signal), input),
     authoredPrs: ({ owners }, context) => readAuthoredPrs(ghRunner(context.signal), owners),

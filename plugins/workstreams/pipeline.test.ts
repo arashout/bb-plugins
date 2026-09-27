@@ -135,6 +135,14 @@ describe("pipeline position and gates", () => {
     expect(review).toMatchObject({ blocker: { label: "Awaiting review" }, action: { kind: "nudge" }, nextStep: "Nudge the requested reviewer or wait for review." });
   });
 
+  it("does not present stale local-only PR facts as Ready after a failed GitHub read", () => {
+    const value = pr(30);
+    const card = pipelineCards([], [local(value, { unit: { ...local(value).unit, lifecycle: "awaiting-merge" } })], now, {
+      observations: { [value.url]: { checkedAt: "2026-09-24T00:00:00Z", failedAt: "2026-09-25T00:00:00Z" } },
+    })[0]!;
+    expect(card).toMatchObject({ stage: "review", stale: true, blocker: { label: "Status unknown" } });
+  });
+
   it("counts all open, unheld Feedback PRs for preview, including unapproved feedback", () => {
     const cards = pipelineCards([entry(pr(8, { unresolvedReviewThreads: 2 })), entry(pr(9, { reviewDecision: "CHANGES_REQUESTED" }))], [], now);
     expect(cards.map((card) => card.action?.kind)).toEqual(["advance", "advance"]);

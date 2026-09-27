@@ -44,6 +44,8 @@ const recordSchema = reportSchema.extend({
   verifiedAt: z.number().int().nonnegative(),
   // Older worker records predate explicit provenance; only audited recovery uses the legacy variant.
   provenance: approvalFeedbackProvenanceSchema.default({ kind: "worker" }),
+  equivalence: z.object({ sourceHeadOid: sha, sourceVerifiedAt: z.number().int().nonnegative(),
+    treeOid: sha, checkedAt: z.number().int().nonnegative() }).strict().optional(),
 });
 
 // Callers may still construct pre-provenance records; parsing supplies the worker default.
@@ -78,6 +80,16 @@ export function feedbackVerified(snapshot: ApprovalFeedbackSnapshot, headOid: st
     JSON.stringify(record.findings.map((item) => item.sourceId).sort()) === JSON.stringify([...snapshot.sourceIds].sort());
 }
 
+export function feedbackVerificationState(snapshot: ApprovalFeedbackSnapshot | undefined, headOid: string | null,
+  record: ApprovalFeedbackRecord | null): "none" | "verified" | "missing" | "head-changed" | "feedback-changed" | "unknown" {
+  if (snapshot?.status === "none") return "none";
+  if (snapshot?.status !== "present" || headOid === null) return "unknown";
+  if (record === null) return "missing";
+  if (!feedbackVerified(snapshot, record.headOid, record)) return "feedback-changed";
+  if (record.headOid !== headOid) return "head-changed";
+  return "verified";
+}
+
 export function createApprovalFeedbackStore(db: RunDb) {
   return {
     get(prUrl: string): ApprovalFeedbackRecord | null {
@@ -94,6 +106,27 @@ export function createApprovalFeedbackStore(db: RunDb) {
       const record = recordSchema.parse({ ...report, prUrl: key, threadId, verifiedAt, provenance });
       db.prepare("INSERT OR REPLACE INTO approval_feedback_verifications (pr_url, body) VALUES (?, ?)").run(key, JSON.stringify(record));
       return record;
+    },
+    carryEquivalent(prUrl: string, expected: ApprovalFeedbackRecord, snapshot: ApprovalFeedbackSnapshot,
+      currentHeadOid: string, priorTreeOid: string, currentTreeOid: string, checkedAt: number): ApprovalFeedbackRecord | null {
+      const key = canonicalPrUrl(prUrl);
+      if (key === null || expected.headOid === currentHeadOid || priorTreeOid !== currentTreeOid ||
+          !sha.safeParse(currentHeadOid).success || !sha.safeParse(priorTreeOid).success ||
+          !feedbackVerified(snapshot, expected.headOid, expected)) return null;
+      const row = db.prepare("SELECT body FROM approval_feedback_verifications WHERE pr_url = ?").get(key) as { body: string } | undefined;
+      if (!row) return null;
+      let body: unknown;
+      try { body = JSON.parse(row.body); } catch { return null; }
+      const parsed = recordSchema.safeParse(body);
+      if (!parsed.success || JSON.stringify(parsed.data) !== JSON.stringify(recordSchema.parse(expected))) return null;
+      const next = recordSchema.parse({ ...parsed.data, headOid: currentHeadOid,
+        equivalence: { sourceHeadOid: parsed.data.equivalence?.sourceHeadOid ?? parsed.data.headOid,
+          sourceVerifiedAt: parsed.data.equivalence?.sourceVerifiedAt ?? parsed.data.verifiedAt,
+          treeOid: currentTreeOid, checkedAt } });
+      db.prepare("UPDATE approval_feedback_verifications SET body = ? WHERE pr_url = ? AND body = ?")
+        .run(JSON.stringify(next), key, row.body);
+      const written = db.prepare("SELECT changes() AS count").get() as { count: number };
+      return written.count === 1 ? next : null;
     },
   };
 }

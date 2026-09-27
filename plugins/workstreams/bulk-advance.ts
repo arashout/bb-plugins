@@ -561,7 +561,10 @@ export function createAdvanceService(db: RunDb, deps: {
             continue;
           }
           if (thread.status === "idle" && finalLine(thread.output) === marker(job)) {
-            if (!await completePrepared(batch, job, thread.output)) continue;
+            // A prepared attempt already has accepted evidence. Recheck its live gates
+            // without parsing the old worker output against a rewritten head.
+            if (batch.prepared[job.id]) await verify(batch, job, facts);
+            else if (!await completePrepared(batch, job, thread.output)) continue;
             completedNow = true;
           }
           // Read-only reconciliation can release a proven stopped worker, but only its

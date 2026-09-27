@@ -23,7 +23,8 @@ export type PipelineCard = {
   stage: PipelineStage; blocker: PipelineBlocker; activity: PipelineActivity; action: PipelineAction; nextStep: string;
   ageSince: number | null; stale: boolean;
 };
-export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[] };
+export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[];
+  observations?: Readonly<Record<string, { checkedAt: string | null; failedAt: string | null }>> };
 
 const ACTIVE_JOBS = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 const NONE: PipelineActivity = { state: "none", detail: "", threadId: null, source: null };
@@ -55,7 +56,10 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (pr.mergeStateStatus === "DIRTY") return { label: "Conflicts", tone: "bad" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && !pr.reviewFollowupPosted) return { label: "Changes requested", tone: "warn" };
   if (pr.unresolvedReviewThreads !== null && pr.unresolvedReviewThreads > 0) return { label: `${pr.unresolvedReviewThreads} open threads`, tone: "warn" };
-  if (pr.reviewDecision === "APPROVED" && pr.approvalFeedback?.status === "present" && !pr.approvalFeedbackVerified) return { label: "Review feedback", tone: "warn" };
+  if (pr.reviewDecision === "APPROVED" && pr.approvalFeedback?.status === "present" && !pr.approvalFeedbackVerified) {
+    return { label: pr.approvalFeedbackVerification === "head-changed" ? "Verification needs recheck" :
+      pr.approvalFeedbackVerification === "feedback-changed" ? "New review feedback" : "Feedback verification needed", tone: "warn" };
+  }
   if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
   if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
   if (pr.isDraft) return { label: "Draft", tone: "wait" };
@@ -112,6 +116,7 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (stage === "released") return "No PR action remains.";
   if (stage === "merged") return "Check release status when needed.";
   if (activity.state === "working") return activity.threadId ? "Follow the running agent thread." : "Wait for the running agent.";
+  if (blocker.label === "Verification needs recheck") return "Refresh GitHub status. Changed code still needs feedback verification.";
   if (activity.state === "needs-you") return "Review the agent result and remaining blocker.";
   if (pr === null) return "Open the checkout to continue branch work.";
   if (blocker.label === "Status unknown") return "Advance to refresh live PR status.";
@@ -119,7 +124,7 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (blocker.label === "CI failing") return "Advance to investigate failing checks.";
   if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
   if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
-  if (blocker.label === "Changes requested" || blocker.label === "Review feedback" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
+  if (blocker.label === "Changes requested" || blocker.label === "New review feedback" || blocker.label === "Feedback verification needed" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
   if (blocker.label === "Awaiting re-review") return "Wait for the reviewer to respond to the follow-up.";
   if (blocker.label === "Awaiting review") return "Nudge the requested reviewer or wait for review.";
   if (blocker.label === "No reviewer") return "Choose a reviewer on GitHub; Advance can recheck other gates.";
@@ -143,7 +148,9 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
   const cards: PipelineCard[] = [];
   const add = (local: Row | null, remote: BacklogRow | null): void => {
     const pr = remote?.pr ?? local?.unit.pr ?? null;
-    const stale = remote?.stale ?? false;
+    const observation = pr === null ? null : sources.observations?.[canonicalPrUrl(pr.url)?.toLowerCase() ?? pr.url.toLowerCase()];
+    const failed = observation?.failedAt && (!observation.checkedAt || observation.failedAt >= observation.checkedAt);
+    const stale = remote?.stale ?? (pr?.state === "OPEN" && !!failed);
     const lifecycle = stale ? "unverified" : remote?.lifecycle ?? local?.unit.lifecycle ?? (pr === null ? "up-next" : prLifecycle(pr));
     const behind = remote?.parent?.pr.number ?? local?.unit.stack?.blockedBelow ?? null;
     const hold = remote?.hold ?? local?.hold ?? null;

@@ -87,6 +87,8 @@ export const prSchema = z
     approvalFeedback: approvalFeedbackSchema.optional(),
     /** Server comparison with the current head-bound verification record. */
     approvalFeedbackVerified: z.boolean().optional(),
+    /** Why approval feedback is not yet verified against the current PR. */
+    approvalFeedbackVerification: z.enum(["none", "verified", "missing", "head-changed", "feedback-changed", "unknown"]).optional(),
     /** Changes requested remains GitHub's decision, but the author posted a verified PTAL after a newer head. */
     reviewFollowupPosted: z.boolean().optional(),
     /** Null until review threads are checked; zero means no unresolved threads. */
@@ -271,6 +273,14 @@ export const hostContract = defineRpcContract({
   advanceInspect: {
     input: z.object({ prUrl: z.string().max(500) }).strict(),
     output: advanceInspectionSchema,
+  },
+  equalHeadTrees: {
+    input: z.object({ prUrl: z.string().max(500), priorHeadOid: z.string().regex(/^[0-9a-f]{40}$/u),
+      currentHeadOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), priorTreeOid: z.string().regex(/^[0-9a-f]{40}$/u), currentTreeOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
+      z.object({ ok: z.literal(false) }).strict(),
+    ]),
   },
   advanceWorkspace: { input: advanceWorkspaceInputSchema, output: advanceWorkspaceSchema },
   authoredPrs: {

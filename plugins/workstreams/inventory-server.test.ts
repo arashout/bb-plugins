@@ -14,7 +14,7 @@ const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githu
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean; approvalFeedback?: boolean } = {}) {
+async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean; approvalFeedback?: boolean; inspection?: "open" | "closed" | "failed" } = {}) {
   const calls: { method: string; input: unknown }[] = [];
   const beforeLive = vi.fn(async () => {});
   const primary = { ...(options.cohort ? { ...PR, title: "EPD-42: Improve manuscript review", headRefName: "epd-42-review" } : PR),
@@ -38,7 +38,11 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
       approvalFeedback: primary.approvalFeedback } }; }
     if (method === "prReviewers") return options.closed ? { ok: false, error: "PR is no longer open." } : { ok: true, reviewers: options.reviewers ?? ["ada"] };
     if (method === "prWrite") return { ok: true, detail: "Done." };
-    if (method === "inspectPrs") return { entries: [], closed: [URL], failed: [], warnings: [] };
+    if (method === "inspectPrs") return options.inspection === "open"
+      ? { entries: [entries[0]], closed: [], failed: [], warnings: [] }
+      : options.inspection === "failed"
+        ? { entries: [], closed: [], failed: [URL], warnings: ["GitHub unavailable"] }
+        : { entries: [], closed: [URL], failed: [], warnings: [] };
     throw new Error(`Unexpected host method ${method}`);
   } });
   await plugin(bb);
@@ -49,6 +53,35 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
 }
 
 describe("authored backlog server actions", () => {
+  it("shares the visible-view PR poll across callers", async () => {
+    const { harness, calls } = await setup({ inspection: "open" });
+    expect(await harness.callRpc("pr_poll", null)).toEqual({ scheduled: 1 });
+    expect(await harness.callRpc("pr_poll", null)).toEqual({ scheduled: 0 });
+    expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(0);
+  });
+
+  it("coalesces an explicit PR refresh and reports its observation time", async () => {
+    const { harness, calls, board } = await setup({ inspection: "open" });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const [first, second] = await Promise.all([
+      harness.callRpc("pr_refresh", { prUrl: URL }),
+      harness.callRpc("pr_refresh", { prUrl: URL }),
+    ]);
+    expect(first).toMatchObject({ status: "checked", checkedAt: expect.any(String) });
+    expect(second).toEqual(first);
+    expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(1);
+    expect((await board()).prObservations[URL]?.checkedAt).toBe((first as { checkedAt: string }).checkedAt);
+    expect(await harness.callRpc("pr_refresh", { prUrl: URL })).toEqual(first);
+    expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(1);
+  });
+
+  it("keeps the last successful check time when an explicit refresh fails", async () => {
+    const { harness, board } = await setup({ inspection: "failed" });
+    const previous = (await board()).prObservations[URL]?.checkedAt;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    expect(await harness.callRpc("pr_refresh", { prUrl: URL })).toMatchObject({ status: "failed", checkedAt: previous });
+    expect((await board()).prObservations[URL]).toMatchObject({ checkedAt: previous, failedAt: expect.any(String) });
+  });
   it("keeps legacy cached approval replies visible without clearing missing or current feedback", async () => {
     const env = await setup({ local: true });
     const legacy = { ...env.entries[0]!.pr, approvalFeedback: undefined, approvalNoteFollowedUp: true };

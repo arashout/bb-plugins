@@ -8,6 +8,8 @@ export const INVENTORY_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS authored_prs (url TEXT PRIMARY KEY, repo TEXT NOT NULL, entry TEXT NOT NULL, stale INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS authored_pr_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)`,
 ];
+export const PR_OBSERVATIONS_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_observations (url TEXT PRIMARY KEY, checked_at TEXT, failed_at TEXT)`;
+export type PrObservation = { checkedAt: string | null; failedAt: string | null };
 export type InventoryMeta = { owners: string[]; complete: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; warnings: string[] };
 export const EMPTY_INVENTORY = { owners: [], entries: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, refreshing: false, warnings: [] };
 type InventoryDb = RunDb & { transaction(fn: () => void): () => void };
@@ -18,6 +20,12 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
   const put = db.prepare(`INSERT OR REPLACE INTO authored_prs (url, repo, entry, stale) VALUES (?, ?, ?, ?)`);
   const remove = db.prepare(`DELETE FROM authored_prs WHERE url = ?`);
   const writeMeta = (meta: InventoryMeta) => db.prepare(`INSERT OR REPLACE INTO authored_pr_metadata (id, value) VALUES (1, ?)`).run(JSON.stringify(meta));
+  const success = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)
+    ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL`);
+  const failure = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, NULL, ?)
+    ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at`);
+  const recordSuccess = (url: string, at: string) => success.run(url.toLowerCase(), at);
+  const recordFailure = (url: string, at: string) => failure.run(url.toLowerCase(), at);
   function metadata(): InventoryMeta {
     const row = db.prepare(`SELECT value FROM authored_pr_metadata WHERE id = 1`).get() as { value: string } | undefined;
     if (row === undefined) return { owners: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, warnings: [] };
@@ -38,6 +46,15 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
   const insert = (entry: InventoryEntry) => put.run(entry.pr.url.toLowerCase(), entry.repo, JSON.stringify(entry), 0);
   return {
     read: () => ({ ...metadata(), entries: entries(), refreshing: false }),
+    observation(url: string): PrObservation | null {
+      const row = db.prepare(`SELECT checked_at, failed_at FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as
+        { checked_at: string | null; failed_at: string | null } | undefined;
+      return row === undefined ? null : { checkedAt: row.checked_at, failedAt: row.failed_at };
+    },
+    lastCheckedAt(): string | null {
+      const row = db.prepare(`SELECT MAX(checked_at) AS checked_at FROM pr_observations`).get() as { checked_at: string | null };
+      return row.checked_at;
+    },
     get(url: string): (InventoryEntry & { stale: boolean }) | undefined {
       const row = db.prepare(`SELECT entry, stale FROM authored_prs WHERE url = ?`).get(url.toLowerCase()) as { entry: string; stale: number } | undefined;
       if (row === undefined) return undefined;
@@ -57,8 +74,12 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
           if (!result.owners.includes(repo.split("/")[0]!) || coverage.get(repo) === true ||
               (result.discoveryComplete && !coverage.has(repo))) remove.run(entry.pr.url.toLowerCase());
         }
-        for (const entry of result.entries) if (entry.pr.state === "OPEN") insert(entry);
+        for (const entry of result.entries) if (entry.pr.state === "OPEN") {
+          insert(entry);
+          recordSuccess(entry.pr.url, at);
+        }
         const retained = entries().sort((a, b) => Number(a.stale) - Number(b.stale) || a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
+        for (const entry of retained) if (entry.stale) recordFailure(entry.pr.url, at);
         const capped = retained.length > INVENTORY_LIMIT;
         for (const entry of retained.slice(INVENTORY_LIMIT)) remove.run(entry.pr.url.toLowerCase());
         writeMeta({ owners: result.owners, complete: result.complete && !capped, lastAttemptAt: at,
@@ -67,19 +88,28 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       })();
     },
     inspect(result: InventoryInspection): void {
+      const at = new Date(now()).toISOString();
       db.transaction(() => {
         const known = new Set(entries().map((entry) => entry.pr.url.toLowerCase()));
-        for (const url of result.closed) remove.run(url.toLowerCase());
-        for (const url of result.failed) db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
-        for (const entry of result.entries) if (known.has(entry.pr.url.toLowerCase())) insert(entry);
+        for (const url of result.closed) { remove.run(url.toLowerCase()); recordSuccess(url, at); }
+        for (const url of result.failed) {
+          db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
+          recordFailure(url, at);
+        }
+        for (const entry of result.entries) {
+          recordSuccess(entry.pr.url, at);
+          if (known.has(entry.pr.url.toLowerCase())) insert(entry);
+        }
         if (result.warnings.length > 0) writeMeta({ ...metadata(), complete: false, warnings: result.warnings });
       })();
     },
     /** Checkout scans also refresh already-discovered authored PRs. */
     observe(prs: readonly Pr[]): void {
+      const at = new Date(now()).toISOString();
       const known = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry]));
       db.transaction(() => {
         for (const pr of prs) {
+          recordSuccess(pr.url, at);
           const entry = known.get(pr.url.toLowerCase());
           if (entry === undefined) continue;
           if (pr.state !== "OPEN") remove.run(pr.url.toLowerCase());

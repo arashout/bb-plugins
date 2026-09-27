@@ -138,6 +138,8 @@ export function PipelineView({
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [dispatch, setDispatch] = useState(board.dispatch);
   const [queuedDirect, setQueuedDirect] = useState<PipelineCard[]>([]);
+  const [refreshingPr, setRefreshingPr] = useState<string | null>(null);
+  const [refreshResults, setRefreshResults] = useState<Record<string, { checkedAt: string | null; error: string | null; attemptAt: number }>>({});
   const searchRef = useRef<HTMLInputElement>(null);
   const boardRootRef = useRef<HTMLDivElement | null>(null);
   const openThreadRequest = useRef(0);
@@ -157,6 +159,7 @@ export function PipelineView({
         batches: advance.batches,
         dispatch,
         runs: board.runs,
+        observations: board.prObservations,
       }),
     [board, locals, now, advance.batches, dispatch],
   );
@@ -222,6 +225,15 @@ export function PipelineView({
   ).length;
   const completedCount = visible.filter((card) => card.stage === "merged" || card.stage === "released").length;
   const selectedCard = cards.find((card) => card.key === selected) ?? null;
+  const selectedObservation = selectedCard?.pr ? board.prObservations[selectedCard.pr.url.toLowerCase()] : null;
+  const selectedRefresh = selectedCard?.pr ? refreshResults[selectedCard.pr.url] : null;
+  const selectedCheckedAt = [selectedObservation?.checkedAt, selectedRefresh?.checkedAt].filter((at): at is string => !!at)
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
+  const selectedRefreshError = selectedRefresh?.error && (!selectedCheckedAt || Date.parse(selectedCheckedAt) <= selectedRefresh.attemptAt)
+    ? selectedRefresh.error
+    : selectedObservation?.failedAt && (!selectedCheckedAt || Date.parse(selectedObservation.failedAt) >= Date.parse(selectedCheckedAt))
+      ? "The latest GitHub status check failed. Previous PR facts may be stale."
+      : null;
   const selectionUrl = (card: PipelineCard) => card.pr ? advancePrKey(canonicalPrUrl(card.pr.url) ?? card.pr.url) : null;
   const selectionPrs = cards.flatMap((card) => card.pr ? [{ url: selectionUrl(card)!, state: card.pr.state }] : []);
   const selectionHolds: PrHolds = Object.fromEntries(cards.filter((card) => card.pr && card.hold).map((card) => [selectionUrl(card)!, card.hold!]));
@@ -316,6 +328,28 @@ export function PipelineView({
           age: { since: card.ageSince },
           unit: { pr: card.pr, prUrl: card.pr.url },
         });
+  const refreshPr = async (card: PipelineCard) => {
+    if (!card.pr || refreshingPr !== null) return;
+    const url = card.pr.url;
+    setRefreshingPr(url);
+    const attemptAt = Date.now();
+    setRefreshResults((current) => ({ ...current, [url]: { checkedAt: current[url]?.checkedAt ?? null, error: null, attemptAt } }));
+    try {
+      const result = await rpc.call("pr_refresh", { prUrl: url });
+      if (result.status === "checked") {
+        setRefreshResults((current) => ({ ...current, [url]: { checkedAt: result.checkedAt, error: null, attemptAt } }));
+      } else {
+        setRefreshResults((current) => ({ ...current, [url]: { checkedAt: result.checkedAt, error: result.error, attemptAt } }));
+        toast.error(result.error);
+      }
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : "Could not refresh GitHub status";
+      setRefreshResults((current) => ({ ...current, [url]: { checkedAt: current[url]?.checkedAt ?? null, error, attemptAt } }));
+      toast.error(error);
+    } finally {
+      setRefreshingPr(null);
+    }
+  };
   const openThread = async (card: PipelineCard) => {
     const request = ++openThreadRequest.current;
     if (card.pr) {
@@ -724,6 +758,7 @@ export function PipelineView({
             </Tip>
           ) : null}
           <div className="ml-auto flex items-center gap-1">
+            {refreshingPr === card.pr?.url ? <span role="status" className="text-[10px] text-muted-foreground">Checking GitHub…</span> : null}
             <Tip label="Open details">
               <button type="button" aria-label={`Open details for ${label}`} aria-expanded={detailsOpen && selected === card.key} onClick={() => openDetails(card)} className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.07] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><Icon name="PanelRight" className="size-[18px]" /></button>
             </Tip>
@@ -734,6 +769,7 @@ export function PipelineView({
                 {card.hold && card.pr ? <DropdownMenu.Item className={menuItem} onSelect={() => void hold.release(card.pr!.url)}>Release hold</DropdownMenu.Item> : null}
                 {card.pr?.state === "OPEN" && !card.hold ? <DropdownMenu.Item className={menuItem} onSelect={() => hold.edit({ url: card.pr!.url, label: `${card.repo} #${card.pr!.number}`, hold: card.hold })}>Put on hold…</DropdownMenu.Item> : null}
                 {card.activity.threadId || card.local?.cluster.threads.length ? <DropdownMenu.Item className={menuItem} onSelect={() => openThread(card)}>Open thread</DropdownMenu.Item> : null}
+                {card.pr ? <DropdownMenu.Item disabled={refreshingPr !== null} className={menuItem} onSelect={() => void refreshPr(card)}>{refreshingPr === card.pr.url ? "Checking GitHub…" : "Refresh GitHub status"}</DropdownMenu.Item> : null}
                 {!card.hold && card.local ? <DropdownMenu.Item className={menuItem} onSelect={() => openCheckout(card)}>Open checkout</DropdownMenu.Item> : null}
                 {card.pr?.state === "OPEN" && !card.hold && card.activity.state !== "working" && card.action?.kind !== "advance" && card.action?.kind !== "fix" ? <DropdownMenu.Item className={menuItem} onSelect={() => setAgent({ kind: "advance", prUrls: [card.pr!.url] })}>Advance…</DropdownMenu.Item> : null}
               </DropdownMenu.Content></DropdownMenu.Portal>
@@ -793,10 +829,14 @@ export function PipelineView({
               </button>
               <button type="button" onClick={() => setEffortEditing(card)} aria-label={`Change effort for ${card.repo} #${card.pr?.number}`} title={`Change effort: ${card.effortName ?? "One-offs"}`} className="min-w-0 flex-1 truncate rounded px-1 text-left text-[10px] text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring">{card.effortName ?? "One-offs"}</button>
               <PipelineThreadIndicator threadIds={linkedThreadIds(card)} sidebarThreads={sidebarThreads} preferredThreadId={card.activity.threadId} />
+              {refreshingPr === card.pr?.url ? <span role="status" className="text-[10px] text-muted-foreground">Checking GitHub…</span> : null}
               <Tip label="Open details"><button type="button" onClick={() => openDetails(card)} aria-label={`Open details for ${card.repo} #${card.pr?.number}`} className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"><Icon name="PanelRight" className="size-4" /></button></Tip>
               <DropdownMenu.Root>
                 <Tip label="More actions"><DropdownMenu.Trigger asChild><button type="button" aria-label={`More actions for ${card.repo} #${card.pr?.number}`} className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"><Icon name="MoreHorizontal" className="size-4" /></button></DropdownMenu.Trigger></Tip>
-                <DropdownMenu.Portal><DropdownMenu.Content {...portalScope} side="bottom" align="end" sideOffset={4} collisionPadding={8} className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"><DropdownMenu.Item className="cursor-pointer rounded px-2 py-1.5 text-[12px] outline-none focus:bg-foreground/[0.06]" onSelect={() => setEffortEditing(card)}>Change effort…</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal>
+                <DropdownMenu.Portal><DropdownMenu.Content {...portalScope} side="bottom" align="end" sideOffset={4} collisionPadding={8} className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md">
+                  <DropdownMenu.Item className="cursor-pointer rounded px-2 py-1.5 text-[12px] outline-none focus:bg-foreground/[0.06]" onSelect={() => setEffortEditing(card)}>Change effort…</DropdownMenu.Item>
+                  {card.pr ? <DropdownMenu.Item disabled={refreshingPr !== null} className="cursor-pointer rounded px-2 py-1.5 text-[12px] outline-none focus:bg-foreground/[0.06]" onSelect={() => void refreshPr(card)}>Refresh GitHub status</DropdownMenu.Item> : null}
+                </DropdownMenu.Content></DropdownMenu.Portal>
               </DropdownMenu.Root>
             </div>
           ) : (
@@ -1297,6 +1337,13 @@ export function PipelineView({
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Next step</p>
                 <p className="mt-2 text-[14px] leading-5 text-foreground">{selectedCard.nextStep}</p>
                 <p className={cn("mt-2 text-[11px]", selectedCard.blocker.tone === "bad" ? "text-destructive" : selectedCard.blocker.tone === "warn" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground")}>{selectedCard.blocker.label}</p>
+                {selectedCard.pr ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                    <span>GitHub checked {selectedCheckedAt ? relativeTime(selectedCheckedAt, now) : "never"}</span>
+                    <button type="button" disabled={refreshingPr !== null} onClick={() => void refreshPr(selectedCard)} className="rounded underline-offset-2 hover:underline disabled:opacity-50">{refreshingPr === selectedCard.pr.url ? "Checking…" : "Refresh GitHub status"}</button>
+                    {selectedRefreshError ? <span role="alert" className="w-full text-destructive">{selectedRefreshError}</span> : null}
+                  </div>
+                ) : null}
                 {selectedCard.hold?.reason ? <p className="mt-2 break-words text-[11px] text-muted-foreground">Hold reason: {selectedCard.hold.reason}</p> : null}
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   {selectedCard.action?.kind === "open-pr" && selectedCard.pr ? (
@@ -1434,9 +1481,8 @@ export function PipelineView({
         <span>o checkout</span>
         <span>v map</span>
         <span className="ml-auto">
-          {board.lastScanAt
-            ? `Scanned ${relativeTime(board.lastScanAt, now)}`
-            : "Never scanned"}
+          {board.lastScanAt ? `Checkouts scanned ${relativeTime(board.lastScanAt, now)}` : "Checkouts not scanned"}
+          {board.lastPrCheckedAt ? ` · Latest GitHub check ${relativeTime(board.lastPrCheckedAt, now)}` : " · GitHub not checked"}
         </span>
       </div>
       <PrHoldDialog target={hold.target} onClose={hold.close} />

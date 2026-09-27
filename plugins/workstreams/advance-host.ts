@@ -36,6 +36,34 @@ function terminalFacts(value: unknown, prUrl: string, repo: string, number: numb
 const fields = Object.keys(viewSchema.shape).join(",");
 const refsSchema = z.object({ headRefOid: oid, baseRefName: branch, baseRef: z.object({ name: branch, target: z.object({ oid }) }) });
 const refsQuery = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid baseRefName baseRef{name target{oid}}}}}";
+const commitTrees = new Map<string, string>();
+
+/** Equal Git trees prove a head rewrite changed history without changing PR content. */
+export async function readEqualHeadTrees(run: GhRunner, prUrl: string, priorHeadOid: string, currentHeadOid: string): Promise<{
+  ok: true; priorTreeOid: string; currentTreeOid: string;
+} | { ok: false }> {
+  const target = prTarget(prUrl);
+  if (!target || !oid.safeParse(priorHeadOid).success || !oid.safeParse(currentHeadOid).success || priorHeadOid === currentHeadOid) return { ok: false };
+  const commit = z.object({ sha: oid, tree: z.object({ sha: oid }) });
+  const tree = async (sha: string): Promise<string | null> => {
+    const key = `${target.host}/${target.owner}/${target.name}/${sha}`.toLowerCase();
+    const cached = commitTrees.get(key);
+    if (cached) return cached;
+    const response = await run(["api", ...(target.host === "github.com" ? [] : ["--hostname", target.host]),
+      `repos/${target.owner}/${target.name}/git/commits/${sha}`]);
+    const parsed = commit.safeParse(decoded(response));
+    if (!parsed.success || parsed.data.sha !== sha) return null;
+    if (commitTrees.size >= 256) commitTrees.delete(commitTrees.keys().next().value!);
+    commitTrees.set(key, parsed.data.tree.sha);
+    return parsed.data.tree.sha;
+  };
+  const [oldTree, freshTree] = await Promise.all([tree(priorHeadOid), tree(currentHeadOid)]);
+  if (!oldTree || !freshTree || oldTree !== freshTree) return { ok: false };
+  const final = await run(["pr", "view", String(target.number), "--repo", target.slug, "--json", "url,state,headRefOid"]);
+  const view = z.object({ url: z.string(), state: z.literal("OPEN"), headRefOid: oid }).safeParse(decoded(final));
+  if (!view.success || view.data.url.toLowerCase() !== prUrl.toLowerCase() || view.data.headRefOid !== currentHeadOid) return { ok: false };
+  return { ok: true, priorTreeOid: oldTree, currentTreeOid: freshTree };
+}
 
 function refsOf(result: Run) {
   const body = decoded(result) as { errors?: unknown; data?: { repository?: { pullRequest?: unknown } } } | undefined;

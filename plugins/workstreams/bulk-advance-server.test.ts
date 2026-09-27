@@ -91,6 +91,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     if (method === "authoredPrs") return { owners: [repo.split("/")[0]], entries: pr.state === "OPEN" ? [{ repo, pr }] : [], discoveryComplete: true,
       repositories: [{ repo, complete: true }], complete: true, warnings: [] };
     if (method === "advanceInspect") return { ok: true, facts };
+    if (method === "equalHeadTrees") return { ok: true, priorTreeOid: "c".repeat(40), currentTreeOid: "c".repeat(40) };
     if (method === "prLive") return { ok: true, live: { state: pr.state, isDraft: false, reviewDecision: pr.reviewDecision,
       mergeStateStatus: pr.mergeStateStatus, headRefOid: pr.headRefOid, stackedAbove: [], unresolvedThreads: 0,
       unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
@@ -142,6 +143,30 @@ async function failedBatch(env: Awaited<ReturnType<typeof setup>>) {
 }
 
 describe("bulk advance server integration", () => {
+  it("carries complete saved feedback across a code-identical head during a targeted read-only refresh", async () => {
+    const env = await setup({ ready: true, feedback: "approval-note" });
+    const snapshot = env.facts.approvalFeedback;
+    if (!snapshot || snapshot.status !== "present") throw new Error("Expected synthetic approval feedback");
+    Object.assign(env.pr, { approvalFeedback: snapshot });
+    const record = { prUrl: env.url, threadId: "thr-old", attemptId: "attempt-old", headOid: HEAD,
+      fingerprint: snapshot.fingerprint, findings: [{ sourceId: "approval-42", resolution: "already-satisfied",
+        evidence: "The current fallback handles the reviewed case in src/fallback.ts.",
+        validation: { outcome: "passed", detail: "Focused fallback test passed." } }], blockers: [], verifiedAt: 1_000,
+      provenance: { kind: "worker" } };
+    env.bb.storage.database().prepare("INSERT INTO approval_feedback_verifications (pr_url, body) VALUES (?, ?)")
+      .run(env.url, JSON.stringify(record));
+    const freshHead = "d".repeat(40);
+    env.pr.headRefOid = freshHead; env.facts.headOid = freshHead;
+    const refreshed = await env.harness.callRpc("pr_refresh", { prUrl: env.url });
+    expect(refreshed).toMatchObject({ status: "checked" });
+    expect(env.calls.some((call) => call.method === "equalHeadTrees")).toBe(true);
+    const saved = env.bb.storage.database().prepare("SELECT body FROM approval_feedback_verifications WHERE pr_url = ?")
+      .get(env.url) as { body: string };
+    expect(JSON.parse(saved.body)).toMatchObject({ headOid: freshHead, verifiedAt: 1_000,
+      equivalence: { sourceHeadOid: HEAD, sourceVerifiedAt: 1_000, treeOid: "c".repeat(40) } });
+    const board = await env.harness.callRpc("board_get", null) as { prInventory: { entries: { pr: { approvalFeedbackVerified: boolean } }[] } };
+    expect(board.prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(true);
+  });
   it("automatically retires a saved failed item when complete discovery loses its merged PR", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const env = await setup({ remoteOnly: true, failFirstWorkspace: true });

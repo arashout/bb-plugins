@@ -285,6 +285,18 @@ function ViewLayer({ leaving, children }: { leaving: boolean; children: ReactNod
 
 function WorkstreamsPage({ subPath }: { subPath: string }) {
   const { rpc, board, error, refetch } = useBoard();
+  useEffect(() => {
+    const poll = () => {
+      if (document.visibilityState === "visible") void rpc.call("pr_poll", null).catch(() => {});
+    };
+    poll();
+    document.addEventListener("visibilitychange", poll);
+    const timer = window.setInterval(poll, 45_000);
+    return () => {
+      document.removeEventListener("visibilitychange", poll);
+      window.clearInterval(timer);
+    };
+  }, [rpc]);
   const { prefs, update } = usePrefs();
   const navigate = useBbNavigate();
   const explicitView = viewFromSubPath(subPath);
@@ -398,9 +410,10 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
         {board === null ? (
           <p className="truncate text-[11px] text-muted-foreground">Loading…</p>
         ) : (
-          <Tip label={board.lastScanAt === null ? "No scan has finished yet" : `Last scan: ${new Date(board.lastScanAt).toLocaleString()}`}>
+          <Tip label={`Checkouts: ${board.lastScanAt === null ? "no scan yet" : new Date(board.lastScanAt).toLocaleString()}. GitHub PRs: ${board.lastPrCheckedAt === null ? "no check yet" : new Date(board.lastPrCheckedAt).toLocaleString()}.`}>
             <p tabIndex={0} className="truncate text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              {board.lastScanAt === null ? "Never scanned" : `scanned ${relativeTime(board.lastScanAt, now)}`}
+              {board.lastScanAt === null ? "Checkouts not scanned" : `Checkouts scanned ${relativeTime(board.lastScanAt, now)}`}
+              {board.lastPrCheckedAt === null ? " · GitHub not checked" : ` · Latest GitHub check ${relativeTime(board.lastPrCheckedAt, now)}`}
             </p>
           </Tip>
         )}

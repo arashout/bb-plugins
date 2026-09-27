@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerified, parseFeedbackReport } from "./approval-feedback.js";
+import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, parseFeedbackReport } from "./approval-feedback.js";
 import { readReviewThreads, type GhRunner } from "./ghactions.js";
 
 const url = "https://github.com/example/widget/pull/42";
@@ -14,7 +14,7 @@ const gh: GhRunner = async () => ({ ok: true, stdout: JSON.stringify({ data: { r
 } } } }) });
 
 function report(attemptId: string, fingerprint: string, outcome: "passed" | "not-needed" | "failed" = "passed") {
-  return { attemptId, headOid: head, fingerprint, findings: [{ sourceId: review.id, resolution: "already-satisfied",
+  return { attemptId, headOid: head, fingerprint, findings: [{ sourceId: review.id, resolution: "already-satisfied" as const,
     evidence: "The current fallback already handles the reviewed case in src/fallback.ts.",
     validation: { outcome, detail: outcome === "not-needed" ? "Static inspection covers this wording request." : "Focused fallback test passed." } }], blockers: [] };
 }
@@ -72,6 +72,42 @@ describe("approval feedback verification", () => {
       { ...provenance, evidenceRefs: ["  "] },
     ]) expect(() => store.save(url, "old-thread", parsed, 3_000, invalid)).toThrow();
     expect(store.get(url)?.verifiedAt).toBe(2_000);
+    db.close();
+  });
+
+  it("carries exact feedback across an identical Git tree while preserving the original evidence and refusing a superseded record", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const provenance = { kind: "legacy-reconciliation" as const, auditThreadId: "thr_audit", evidenceRefs: ["thr_old"] };
+    const original = store.save(url, "thr_old", report("attempt-old", snapshot.fingerprint!), 1_000, provenance);
+    const newHead = "b".repeat(40), tree = "c".repeat(40);
+    expect(feedbackVerificationState(snapshot, newHead, original)).toBe("head-changed");
+    expect(store.carryEquivalent(url, original, snapshot, newHead, tree, "d".repeat(40), 2_000)).toBeNull();
+    expect(store.carryEquivalent(url, original, { ...snapshot, sourceIds: ["new-review"] }, newHead, tree, tree, 2_000)).toBeNull();
+    expect(store.carryEquivalent(url, original, { ...snapshot, fingerprint: "d".repeat(64) }, newHead, tree, tree, 2_000)).toBeNull();
+    const carried = store.carryEquivalent(url, original, snapshot, newHead, tree, tree, 2_000);
+    expect(carried).toMatchObject({ headOid: newHead, attemptId: "attempt-old", threadId: "thr_old", verifiedAt: 1_000,
+      provenance, equivalence: { sourceHeadOid: head, sourceVerifiedAt: 1_000, treeOid: tree, checkedAt: 2_000 } });
+    expect(feedbackVerified(snapshot, newHead, store.get(url))).toBe(true);
+    expect(store.carryEquivalent(url, original, snapshot, "e".repeat(40), tree, tree, 3_000)).toBeNull();
+    const newer = store.save(url, "thr_new", report("attempt-new", snapshot.fingerprint!), 3_000);
+    expect(store.carryEquivalent(url, carried!, snapshot, "e".repeat(40), tree, tree, 4_000)).toBeNull();
+    expect(store.get(url)).toEqual(newer);
+    db.close();
+  });
+
+  it("does not carry failed or missing validation into a new head", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const failed = store.save(url, "thr_old", report("attempt-old", snapshot.fingerprint!, "failed"), 1_000);
+    expect(store.carryEquivalent(url, failed, snapshot, "b".repeat(40), "c".repeat(40), "c".repeat(40), 2_000)).toBeNull();
+    expect(feedbackVerificationState(snapshot, "b".repeat(40), failed)).toBe("feedback-changed");
     db.close();
   });
 

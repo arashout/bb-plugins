@@ -226,6 +226,35 @@ describe("finite Advance preparation", () => {
     expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", checkedHeadOid: facts.headOid });
   });
 
+  it("rechecks a prepared job after identical-tree feedback verification moves to a new head without rerunning its worker", async () => {
+    const snapshot = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+    const facts = fact(1, { needsPreparation: false, needsFeedback: true, approvalFeedback: snapshot });
+    const t = setup([facts]);
+    t.deps.inspect.mockImplementation(async (url) => {
+      const current = t.current.get(url)!;
+      return { ...current, readiness: feedbackVerified(snapshot, current.headOid, t.feedbackStore.get(url)) ? "ready" as const : "needs-attention" as const };
+    });
+    const batch = await t.start(); const job = batch.jobs[0]!;
+    const evidence = { attemptId: job.id, headOid: facts.headOid, fingerprint: snapshot.fingerprint,
+      findings: [{ sourceId: "review-1", resolution: "already-satisfied", evidence: "The fallback already handles this reviewed case in src/fallback.ts.",
+        validation: { outcome: "passed", detail: "Focused fallback test passed." } }], blockers: [] };
+    const output = `${FEEDBACK_REPORT_PREFIX}${JSON.stringify(evidence)}\nWorkstreams job ${job.id} complete: prepared`;
+    await t.service.signal("thread", "idle", output);
+    const oldRecord = t.feedbackStore.get(facts.prUrl)!;
+    const newHead = "b".repeat(40), tree = "c".repeat(40);
+    t.current.set(facts.prUrl, { ...facts, headOid: newHead });
+    t.service.invalidate([{ url: facts.prUrl, headRefOid: newHead, baseRefOid: facts.baseOid,
+      approvalFeedback: snapshot, approvalFeedbackVerified: false }]);
+    expect(t.service.list()[0]!.jobs[0]!.status).toBe("needs-attention");
+    expect(t.feedbackStore.carryEquivalent(facts.prUrl, oldRecord, snapshot, newHead, tree, tree, 2_000)).not.toBeNull();
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output });
+    await t.service.recheck(batch.id, job.id);
+    expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", checkedHeadOid: newHead });
+    expect(t.deps.spawn).toHaveBeenCalledTimes(1);
+    expect(t.deps.send).not.toHaveBeenCalled();
+    expect(t.deps.recordFeedback).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a worker marker blocked when approval evidence or validation is incomplete", async () => {
     const snapshot = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
     const facts = fact(1, { needsPreparation: false, needsFeedback: true, approvalFeedback: snapshot });

@@ -40,7 +40,7 @@ import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
-import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS } from "./inventory-store.js";
+import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
 import type { InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
@@ -132,6 +132,7 @@ import { RUNS_MIGRATION, createRunStore } from "./runstore.js";
 import { RUN_STATUSES, ROW_RUN_MS, directOutcome, type Run, type ThreadSignal } from "./runs.js";
 import { createRescanQueue } from "./rescan.js";
 import { createPrFreshness } from "./pr-freshness.js";
+import { createPrPoll } from "./pr-poll.js";
 import { scanFailure } from "./scancancel.js";
 import { parseLinearKeys, projectNameOf } from "./linear.js";
 import { AGENT_FETCH_MAX, parseAgentAnswer, startLinearFetch } from "./linearagent.js";
@@ -139,7 +140,7 @@ import { PIN_AFTER, planClusterAsks, type AskMemory } from "./asks.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
 import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
-import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerified } from "./approval-feedback.js";
+import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified } from "./approval-feedback.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -273,6 +274,8 @@ const boardSchema = z.object({
    */
   hostId: z.string().nullable(),
   lastScanAt: z.string().nullable(),
+  lastPrCheckedAt: z.string().nullable(),
+  prObservations: z.record(z.string(), z.object({ checkedAt: z.string().nullable(), failedAt: z.string().nullable() })).default({}),
   scanning: z.boolean(),
   warnings: z.array(z.string()),
   /** How many threads the link rules reached, by strongest tier. Reported, never inflated. */
@@ -328,6 +331,12 @@ const threadModeSchema = z.enum(["continue", "subthread", "new"]);
 
 export const rpcContract = defineRpcContract({
   board_get: { input: z.null(), output: boardSchema },
+  pr_poll: { input: z.null(), output: z.object({ scheduled: z.number() }) },
+  pr_refresh: { input: prUrlInput, output: z.discriminatedUnion("status", [
+    z.object({ status: z.literal("checked"), checkedAt: z.string() }),
+    z.object({ status: z.literal("failed"), checkedAt: z.string().nullable(), error: z.string() }),
+    z.object({ status: z.literal("busy"), checkedAt: z.string().nullable(), error: z.string() }),
+  ]) },
   pr_hold_set: { input: z.object({ prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null, "Choose a valid GitHub PR URL"), held: z.boolean(), reason: z.string().max(1_000).optional() }).strict(), output: prHoldsSchema },
   effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
@@ -662,6 +671,7 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
     APPROVAL_FEEDBACK_MIGRATION,
     UNASSIGNED_PLACEMENT_MIGRATION,
+    PR_OBSERVATIONS_MIGRATION,
   ]);
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);
@@ -722,8 +732,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function withApprovalFeedback(pr: Pr): Pr {
-    return { ...pr, approvalFeedbackVerified: pr.approvalFeedback === undefined ? false :
-      feedbackVerified(pr.approvalFeedback, pr.headRefOid ?? null, approvalFeedback.get(pr.url)) };
+    const verification = feedbackVerificationState(pr.approvalFeedback, pr.headRefOid ?? null, approvalFeedback.get(pr.url));
+    return { ...pr, approvalFeedbackVerification: verification,
+      approvalFeedbackVerified: verification === "none" || verification === "verified" };
   }
 
   function writeUnits(units: RawUnit[]): void {
@@ -820,6 +831,27 @@ export default async function plugin(bb: BbPluginApi) {
     return advance.list().flatMap((batch) => batch.jobs.filter((job) => !["merged", "closed", "cancelled"].includes(job.status))
       .map((job) => ({ batchId: batch.id, job })));
   }
+  async function carryEquivalentFeedback(pr: Pick<Pr, "url" | "headRefOid" | "approvalFeedback">, hostId: string): Promise<boolean> {
+    const record = approvalFeedback.get(pr.url);
+    const head = pr.headRefOid;
+    if (!record || !head || head === record.headOid || !pr.approvalFeedback ||
+        !feedbackVerified(pr.approvalFeedback, record.headOid, record)) return false;
+    try {
+      const proof = await host.call("equalHeadTrees", { prUrl: pr.url, priorHeadOid: record.headOid, currentHeadOid: head },
+        { hostId, signal: disposal.signal, timeoutMs: 60_000 });
+      return proof.ok && approvalFeedback.carryEquivalent(pr.url, record, pr.approvalFeedback,
+        head, proof.priorTreeOid, proof.currentTreeOid, Date.now()) !== null;
+    } catch { return false; }
+  }
+  async function recheckCarriedFeedback(urls: readonly string[]): Promise<void> {
+    const keys = new Set(urls.map((url) => canonicalPrUrl(url)));
+    const jobs = pendingAdvanceJobs().filter(({ job }) => keys.has(canonicalPrUrl(job.prUrl)) &&
+      !["queued", "launching", "running", "verifying"].includes(job.status) && !job.uncertain);
+    for (const { batchId, job } of jobs) {
+      try { await advance.recheck(batchId, job.id); }
+      catch (error) { bb.log.warn(`Advance feedback recheck: ${String(error).slice(0, 300)}`); }
+    }
+  }
   async function refreshInventory(signal = disposal.signal): Promise<boolean> {
     if (inventoryRefreshing || inventoryTargeting || signal.aborted) return false;
     inventoryRefreshing = true;
@@ -829,9 +861,12 @@ export default async function plugin(bb: BbPluginApi) {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       if (hostId === null) throw new Error("No primary BB host is available to read authored PRs.");
       const result = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+      const carried: string[] = [];
+      for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
       inventory.apply(result);
       intentEvidenceVersion++;
       advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+      await recheckCarriedFeedback(carried);
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
         const repo = prTarget(job.prUrl)?.slug.toLowerCase();
@@ -866,9 +901,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (hostId === null) return true;
       for (let offset = 0; offset < urls.length; offset += 100) {
         const result = await host.call("inspectPrs", { prUrls: urls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: SCAN_TIMEOUT_MS });
+        const carried: string[] = [];
+        for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
         inventory.inspect(result);
         intentEvidenceVersion++;
         advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+        await recheckCarriedFeedback(carried);
         const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         const closed = new Set(result.closed.map((url) => url.toLowerCase()));
         // The inventory reports closed URLs without distinguishing merged from
@@ -909,6 +947,64 @@ export default async function plugin(bb: BbPluginApi) {
     onError: (error) => bb.log.warn(`PR refresh queue: ${String(error).slice(0, 300)}`) });
   function scheduleInventoryUrls(urls: readonly string[]): void {
     for (const url of urls) inventoryRefreshes.add(url);
+  }
+  const prPoll = createPrPoll({ now: Date.now, intervalMs: 45_000, batchSize: 20 });
+  const directPrRefreshes = new Map<string, Promise<z.infer<typeof rpcContract.pr_refresh.output>>>();
+  const directPrResults = new Map<string, { at: number; result: z.infer<typeof rpcContract.pr_refresh.output> }>();
+  function knownPrUrl(raw: string): string | null {
+    const url = canonicalPrUrl(raw);
+    if (url === null) return null;
+    return inventory.get(url) || readUnits().some((unit) => canonicalPrUrl(unit.pr?.url ?? "") === url) ||
+      pendingAdvanceJobs().some(({ job }) => canonicalPrUrl(job.prUrl) === url) ? url : null;
+  }
+  function pollKnownPrs(): number {
+    const urls = [...inventory.read().entries.map((entry) => entry.pr.url),
+      ...readUnits().flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : []),
+      ...pendingAdvanceJobs().map(({ job }) => job.prUrl)].map((url) => canonicalPrUrl(url)).filter((url): url is string => url !== null);
+    const priority = pendingAdvanceJobs().map(({ job }) => canonicalPrUrl(job.prUrl)).filter((url): url is string => url !== null);
+    const selected = prPoll.select(urls, priority);
+    scheduleInventoryUrls(selected);
+    return selected.length;
+  }
+  async function refreshPrNow(raw: string): Promise<z.infer<typeof rpcContract.pr_refresh.output>> {
+    const url = knownPrUrl(raw);
+    if (url === null) return { status: "failed", checkedAt: null, error: "This PR is not tracked on the board." };
+    const existing = directPrRefreshes.get(url);
+    if (existing) return existing;
+    const prior = inventory.observation(url);
+    const recent = directPrResults.get(url);
+    if (recent && Date.now() - recent.at < 5_000) return recent.result;
+    const run = (async (): Promise<z.infer<typeof rpcContract.pr_refresh.output>> => {
+      const deadline = Date.now() + 30_000;
+      while ((inventoryRefreshing || inventoryTargeting) && Date.now() < deadline && !disposal.signal.aborted)
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      if (inventoryRefreshing || inventoryTargeting || disposal.signal.aborted)
+        return { status: "busy", checkedAt: inventory.observation(url)?.checkedAt ?? null, error: "A GitHub refresh is still running. Try again shortly." };
+      const afterWait = inventory.observation(url);
+      if (afterWait?.checkedAt && afterWait.checkedAt !== prior?.checkedAt && !afterWait.failedAt)
+        return { status: "checked", checkedAt: afterWait.checkedAt };
+      if (afterWait?.failedAt && afterWait.failedAt !== prior?.failedAt)
+        return { status: "failed", checkedAt: afterWait.checkedAt, error: "GitHub status could not be checked. Try again shortly." };
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const completed = await Promise.race([
+        refreshInventoryUrls([url]).then(() => true),
+        new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 30_000); }),
+      ]).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
+      const latest = inventory.observation(url);
+      if (!completed) return { status: "busy", checkedAt: latest?.checkedAt ?? null, error: "GitHub is still checking this PR. The board will update when it finishes." };
+      if (latest?.failedAt && latest.failedAt !== prior?.failedAt)
+        return { status: "failed", checkedAt: latest?.checkedAt ?? null, error: "GitHub status could not be checked. Try again shortly." };
+      if (latest?.checkedAt && latest.checkedAt !== prior?.checkedAt) return { status: "checked", checkedAt: latest.checkedAt };
+      return { status: "failed", checkedAt: latest?.checkedAt ?? null, error: "GitHub did not return fresh status for this PR." };
+    })();
+    directPrRefreshes.set(url, run);
+    try {
+      const result = await run;
+      if (directPrResults.size >= 1_000) directPrResults.delete(directPrResults.keys().next().value!);
+      directPrResults.set(url, { at: Date.now(), result });
+      return result;
+    }
+    finally { directPrRefreshes.delete(url); }
   }
   bb.onDispose(() => inventoryRefreshes.dispose());
 
@@ -1638,6 +1734,12 @@ export default async function plugin(bb: BbPluginApi) {
       mode,
       hostId: (await bb.sdk.system.config()).primaryHostId,
       lastScanAt: (await bb.storage.kv.get<string>("lastScanAt")) ?? null,
+      lastPrCheckedAt: inventory.lastCheckedAt(),
+      prObservations: Object.fromEntries([...new Set([...storedInventory.entries.map((entry) => entry.pr.url),
+        ...readUnits().flatMap((unit) => unit.pr ? [unit.pr.url] : [])])].flatMap((url) => {
+        const observation = inventory.observation(url);
+        return observation === null ? [] : [[url.toLowerCase(), observation]];
+      })),
       scanning,
       prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
         ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
@@ -3261,6 +3363,10 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await host.call("advanceInspect", { prUrl }, { hostId, timeoutMs: 60_000, signal: disposal.signal });
       if (!result.ok) return { ...fallback, detail: result.error };
       const facts = result.facts;
+      if (facts.approvalFeedback.status === "present" && facts.headOid) {
+        await carryEquivalentFeedback({ url: prUrl, headRefOid: facts.headOid,
+          approvalFeedback: facts.approvalFeedback }, hostId);
+      }
       const feedbackClear = feedbackVerified(facts.approvalFeedback, facts.headOid, approvalFeedback.get(prUrl));
       const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalFeedback.status === "present" && !feedbackClear ||
         (facts.reviewDecision === "CHANGES_REQUESTED" && facts.reviewFollowupPosted === false);
@@ -3752,6 +3858,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     board_get: () => board(),
+    pr_poll: () => ({ scheduled: pollKnownPrs() }),
+    pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
     pr_hold_set: ({ prUrl, held, reason }) => {
       const holds = prHolds.set(prUrl, held, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });

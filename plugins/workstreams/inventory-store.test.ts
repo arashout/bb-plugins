@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePrList } from "./gh.js";
-import { createInventoryStore, INVENTORY_MIGRATIONS } from "./inventory-store.js";
+import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
 import { INVENTORY_LIMIT, type InventoryEntry, type InventoryResult } from "./inventory.js";
 
 const databases: Database.Database[] = [];
@@ -10,6 +10,7 @@ function setup() {
   const db = new Database(":memory:");
   databases.push(db);
   for (const migration of INVENTORY_MIGRATIONS) db.exec(migration);
+  db.exec(PR_OBSERVATIONS_MIGRATION);
   let clock = 1_000;
   return { db, store: createInventoryStore(db, () => clock), tick: () => { clock += 1_000; } };
 }
@@ -53,6 +54,9 @@ describe("authored PR cache coverage", () => {
     ], warnings: ["spine is offline"] }));
     expect(store.read()).toMatchObject({ complete: false, lastSuccessAt: success, entries: [{ repo: "inkwell/spine", stale: true }] });
     expect(store.read().lastAttemptAt).not.toBe(success);
+    expect(store.observation(entry(2, "inkwell/spine").pr.url)).toEqual({
+      checkedAt: success, failedAt: new Date(2_000).toISOString(),
+    });
   });
 
   it("removes undiscovered repositories only when discovery is complete", () => {
@@ -72,13 +76,19 @@ describe("authored PR cache coverage", () => {
   });
 
   it("keeps a targeted failed read stale, removes confirmed closed PRs, and refuses unrelated inserts", () => {
-    const { store } = setup();
+    const { store, tick } = setup();
     const first = entry(1), second = entry(2);
     store.apply(result([first, second]));
+    const checkedAt = store.observation(second.pr.url)?.checkedAt;
+    tick();
     store.inspect({ entries: [entry(3)], closed: [first.pr.url], failed: [second.pr.url], warnings: ["offline"] });
     expect(store.read()).toMatchObject({ complete: false, entries: [{ pr: { number: 2 }, stale: true }] });
+    expect(store.observation(second.pr.url)).toEqual({ checkedAt, failedAt: new Date(2_000).toISOString() });
+    expect(store.observation(first.pr.url)).toEqual({ checkedAt: new Date(2_000).toISOString(), failedAt: null });
+    tick();
     store.inspect({ entries: [second], closed: [], failed: [], warnings: [] });
     expect(store.get(second.pr.url)?.stale).toBe(false);
+    expect(store.observation(second.pr.url)).toEqual({ checkedAt: new Date(3_000).toISOString(), failedAt: null });
   });
 
   it("bounds retained failed-repository history when new repositories arrive", () => {
@@ -97,5 +107,6 @@ describe("authored PR cache coverage", () => {
     store.apply(result([first]));
     store.observe([{ ...first.pr, state: "CLOSED" }, entry(2).pr]);
     expect(store.read().entries).toEqual([]);
+    expect(store.observation(entry(2).pr.url)?.checkedAt).toBe(new Date(1_000).toISOString());
   });
 });
