@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { RunDb } from "./runstore.js";
 import { rejectedScratchPlacement } from "./scratch-placement.js";
+import { waitForChildParent } from "./thread-readiness.js";
 
 export const UNASSIGNED_PLACEMENT_MIGRATION =
   "CREATE TABLE IF NOT EXISTS unassigned_thread_placements (key TEXT PRIMARY KEY, body TEXT NOT NULL)";
@@ -28,12 +29,12 @@ export function createUnassignedPlacementService(db: Db, sdk: UnassignedPlacemen
     .run(JSON.stringify(record), record.key);
   async function checked(record: Record): Promise<string> {
     if (!record.threadId) throw new Error("Unassigned parent launch is uncertain. Inspect its thread before retrying.");
-    const thread = await sdk.get(record.threadId);
-    if (thread.deletedAt !== null || thread.archivedAt !== null || !thread.canSpawnChild ||
-      thread.projectId !== record.projectId || thread.parentThreadId !== record.parentThreadId ||
-      (record.hostId !== null && thread.environmentHostId !== record.hostId)) {
-      throw new Error("Unassigned parent no longer matches its recorded project, host, or hierarchy. Inspect its thread before retrying.");
-    }
+    const threadId = record.threadId;
+    const failure = "Unassigned parent no longer matches its recorded project, host, or hierarchy. Inspect its thread before retrying.";
+    const thread = await waitForChildParent(() => sdk.get(threadId), (current) => {
+      if (current.deletedAt !== null || current.archivedAt !== null || current.projectId !== record.projectId ||
+        current.parentThreadId !== record.parentThreadId) throw new Error(failure);
+    }, record.hostId, failure);
     return thread.id;
   }
   async function ensure(key: string, projectId: string, hostId: string | null, parentThreadId: string | null,

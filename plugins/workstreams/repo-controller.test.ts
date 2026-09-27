@@ -41,6 +41,25 @@ describe("persistent effort repository controllers", () => {
     await expect(t.service.ensure({ ...t.input, hostId: "other-host" })).rejects.toThrow("different project or host");
   });
 
+  it("waits for a new repository controller's host binding before using it", async () => {
+    const t = setup();
+    vi.mocked(t.sdk.spawn).mockImplementationOnce(async (args) => {
+      t.threads.set("pending-repo", { id: "pending-repo", projectId: args.projectId,
+        parentThreadId: args.parentThreadId, status: "active", canSpawnChild: true,
+        archivedAt: null, deletedAt: null, environmentHostId: null });
+      return { id: "pending-repo" };
+    });
+    const get = vi.mocked(t.sdk.get).getMockImplementation()!;
+    let reads = 0;
+    vi.mocked(t.sdk.get).mockImplementation(async (id) => {
+      if (id === "pending-repo" && ++reads === 2) t.threads.get(id)!.environmentHostId = "repo-host";
+      return get(id);
+    });
+    expect((await t.service.ensure(t.input)).threadId).toBe("pending-repo");
+    expect(reads).toBe(2);
+    expect(t.sdk.spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a conflicting concurrent binding and keeps separate efforts in the same repository", async () => {
     const t = setup();
     let finish!: (value: { id: string }) => void;

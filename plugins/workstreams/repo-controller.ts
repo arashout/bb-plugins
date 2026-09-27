@@ -1,5 +1,6 @@
 import type { EffortStore, EstablishedEffort, RepoController } from "./effort-store.js";
 import { rejectedScratchPlacement } from "./scratch-placement.js";
+import { waitForChildParent } from "./thread-readiness.js";
 
 type Thread = { id: string; projectId: string; parentThreadId: string | null; status: string; canSpawnChild: boolean;
   archivedAt: number | null; deletedAt: number | null; environmentHostId?: string | null };
@@ -19,25 +20,29 @@ export function createRepoControllerService(store: EffortStore, sdk: RepoControl
   const pending = new Map<string, { binding: string; task: Promise<RepoController> }>();
   async function checked(record: RepoController, parentThreadId: string, known?: Thread): Promise<RepoController> {
     if (!record.threadId) throw new Error("Repository controller has no thread. Inspect its recorded launch before retrying.");
-    let thread: Thread;
-    try { thread = known ?? await sdk.get(record.threadId); }
-    catch { throw new Error("Repository controller could not be inspected. Retry when BB can read its thread; no replacement was launched."); }
-    if (thread.deletedAt !== null) throw new Error("Repository controller was deleted during validation. Reopen the action to create one replacement.");
-    if (thread.archivedAt !== null) {
-      store.saveRepoController({ ...record, state: "unavailable" });
-      throw new Error("Repository controller is archived. Unarchive it before advancing this repository.");
-    }
-    if (thread.projectId !== record.projectId || thread.parentThreadId !== parentThreadId ||
-        (thread.environmentHostId != null && thread.environmentHostId !== record.hostId) || !thread.canSpawnChild) {
-      throw new Error("Repository controller no longer matches its effort, project, host, or child-thread capacity. Inspect its thread before advancing.");
-    }
+    const threadId = record.threadId;
+    let first = known;
+    const failure = "Repository controller no longer matches its effort, project, host, or child-thread capacity. Inspect its thread before advancing.";
+    await waitForChildParent(async () => {
+      if (first) { const thread = first; first = undefined; return thread; }
+      try { return await sdk.get(threadId); }
+      catch { throw new Error("Repository controller could not be inspected. Retry when BB can read its thread; no replacement was launched."); }
+    }, (thread) => {
+      if (thread.deletedAt !== null) throw new Error("Repository controller was deleted during validation. Reopen the action to create one replacement.");
+      if (thread.archivedAt !== null) {
+        store.saveRepoController({ ...record, state: "unavailable" });
+        throw new Error("Repository controller is archived. Unarchive it before advancing this repository.");
+      }
+      if (thread.projectId !== record.projectId || thread.parentThreadId !== parentThreadId) throw new Error(failure);
+    }, record.hostId, failure);
     return record.state === "ready" ? record : store.saveRepoController({ ...record, state: "ready" });
   }
   async function perform(input: { effort: EstablishedEffort; repo: string; projectId: string; hostId: string; coordinatorThreadId: string }): Promise<RepoController> {
     const { effort, projectId, hostId, coordinatorThreadId } = input;
     const repo = input.repo.toLowerCase();
     const parent = await sdk.get(coordinatorThreadId);
-    if (parent.archivedAt !== null || parent.deletedAt !== null || !parent.canSpawnChild) {
+    if (parent.id !== coordinatorThreadId || parent.projectId !== effort.projectId ||
+        parent.archivedAt !== null || parent.deletedAt !== null || !parent.canSpawnChild) {
       throw new Error("The effort coordinator cannot own a repository controller. Restore it before advancing this repository.");
     }
     let { record, created } = store.claimRepoController({ effortId: effort.id, repo, projectId, hostId });

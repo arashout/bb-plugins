@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 
 const dbs: Database.Database[] = [];
-afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
+afterEach(() => { for (const db of dbs.splice(0)) db.close(); vi.useRealTimers(); });
 
 function setup() {
   const db = new Database(":memory:"); dbs.push(db); db.exec(UNASSIGNED_PLACEMENT_MIGRATION);
@@ -73,5 +73,48 @@ it("rejects a mismatched parent and keeps the recorded thread for inspection", a
   await expect(env.service.ensureRoot("project-a", "host-a")).rejects.toThrow("hierarchy");
   expect(env.service.root()?.threadId).toBe("wrong-parent");
   await expect(env.service.ensureRoot("project-a", "host-a")).rejects.toThrow("hierarchy");
+  expect(env.spawn).toHaveBeenCalledTimes(1);
+});
+
+it("waits for a new parent's host binding without spawning a duplicate", async () => {
+  const env = setup();
+  const get = env.sdk.get;
+  let reads = 0;
+  env.sdk.get = async (id) => {
+    const thread = await get(id);
+    return ++reads === 1 ? { ...thread, environmentHostId: null } : thread;
+  };
+  expect(await env.service.ensureRoot("project-a", "host-a")).toBe("thread-1");
+  expect(reads).toBeGreaterThan(1);
+  expect(env.spawn).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a parent whose host never binds and reuses it after attachment", async () => {
+  vi.useFakeTimers();
+  const env = setup();
+  env.spawn.mockImplementationOnce(async (record) => {
+    const id = "pending-host";
+    env.threads.set(id, { id, projectId: record.projectId, parentThreadId: null,
+      archivedAt: null, deletedAt: null, canSpawnChild: true, environmentHostId: null });
+    return { id };
+  });
+  const pending = env.service.ensureRoot("project-a", "host-a");
+  const failure = expect(pending).rejects.toThrow("workspace did not attach");
+  await vi.advanceTimersByTimeAsync(5_000);
+  await failure;
+  expect(env.service.root()?.threadId).toBe("pending-host");
+  env.threads.get("pending-host")!.environmentHostId = "host-a";
+  expect(await env.service.ensureRoot("project-a", "host-a")).toBe("pending-host");
+  expect(env.spawn).toHaveBeenCalledTimes(1);
+});
+
+it("rejects a known wrong host or missing child capacity immediately", async () => {
+  const env = setup();
+  await env.service.ensureRoot("project-a", "host-a");
+  env.threads.get("thread-1")!.environmentHostId = "other-host";
+  await expect(env.service.ensureRoot("project-a", "host-a")).rejects.toThrow("recorded project, host");
+  env.threads.get("thread-1")!.environmentHostId = "host-a";
+  env.threads.get("thread-1")!.canSpawnChild = false;
+  await expect(env.service.ensureRoot("project-a", "host-a")).rejects.toThrow("recorded project, host");
   expect(env.spawn).toHaveBeenCalledTimes(1);
 });
