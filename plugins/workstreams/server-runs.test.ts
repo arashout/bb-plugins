@@ -51,6 +51,7 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
   remoteOnly?: boolean; metadata?: Record<string, unknown>; delivery?: "sent" | "queued"; threadStatus?: "active" | "idle" | "error" } = {}) {
   const rpcCalls: { method: string; input: unknown }[] = [];
   const spawned = new Map<string, ReturnType<typeof makeThreadResponse>>();
+  let contextWorkspaces = 0;
   const { bb, harness } = createFakePluginHost({
     pluginId: "workstreams",
     settings: { scanRoots: "/p" },
@@ -64,7 +65,7 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
           const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" : "thr-quill-new";
           const result = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
             status: role === "coordinator" ? "idle" : "active" }), parentThreadId: args.parentThreadId ?? null,
-            environment: { hostId: HOST } };
+            environment: { hostId: args.environment.hostId } };
           spawned.set(id, result);
           return result as never;
         },
@@ -79,6 +80,7 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
     },
     experimental_callHostRpc: (call) => {
       rpcCalls.push({ method: call.method, input: call.input });
+      if (call.method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
       if (call.method === "scan") return { units: [{ ...unit("DIRTY"), pr: options.remoteOnly ? null : unit("DIRTY").pr, rebasing: options.rebasing ?? false }], warnings: [] };
       if (call.method === "authoredPrs") return { owners: ["inkwell"], entries: [{ repo: "inkwell/quill", pr: unit("DIRTY").pr }], discoveryComplete: true,
         repositories: [{ repo: "inkwell/quill", complete: true }], complete: true, warnings: [] };
@@ -143,6 +145,12 @@ describe("agent runs through the server", () => {
     const { harness, open } = await load();
     const result = await harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Fix it." });
     expect(result).toMatchObject({ ok: true, threadId: "thr-quill-new" });
+    const spawns = harness.sdk.callsTo("threads.spawn").map(([args]) => args as Record<string, any>);
+    expect(spawns.slice(0, 2).map((args) => args.environment)).toEqual([
+      expect.objectContaining({ type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } }),
+      expect.objectContaining({ type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/2" } }),
+    ]);
+    expect(spawns[2]?.environment).toMatchObject({ workspace: { path: PATH } });
     expect(await open()).toEqual([
       expect.objectContaining({ kind: "agent", action: "resolve-conflicts", status: "running", threadId: "thr-quill-new", ticket: "ABC-101", prNumber: 42, prUrl: PR_URL, mode: "new" }),
     ]);

@@ -11,6 +11,7 @@ import {
   defineCli,
   defineRpcContract,
   type BbPluginApi,
+  type PluginRpcHandlers,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -32,6 +33,7 @@ import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
 import { effortParent, activeCheckoutThread } from "./effort-routing.js";
 import { createRepoControllerService } from "./repo-controller.js";
+import { cardThreadPrompt, type CardThreadSnapshot } from "./card-thread.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
@@ -253,6 +255,8 @@ const enrichmentSchema = z.object({
 const boardSchema = z.object({
   efforts: z.array(establishedEffortSchema).default([]),
   prInventory: inventoryBoardSchema.default(EMPTY_INVENTORY),
+  /** Known PR thread links, including context threads without checkout runs. */
+  prThreadLinks: z.record(z.string(), z.array(z.string()).max(20)).default({}),
   prHolds: prHoldsSchema.default({}),
   groups: z.array(groupSchema),
   /** How many grouping levels survived the collapse: 1, 2 or 3. */
@@ -477,6 +481,18 @@ export const rpcContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: z.string() }),
     ]),
   },
+  /** Send to a linked thread, or start an isolated context agent on explicit Send. */
+  card_thread_message: {
+    input: z.object({ target: cardEffortTargetSchema, threadId: z.string().max(200).nullable(), message: z.string().max(4_000) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), threadId: z.string(), delivery: z.enum(["sent", "queued"]), created: z.boolean() }),
+      z.object({ ok: z.literal(false), error: z.string() }),
+    ]),
+  },
+  card_thread_update: {
+    input: z.object({ target: cardEffortTargetSchema, threadId: z.string().max(200) }).strict(),
+    output: z.object({ lastLine: z.string().max(280).nullable() }),
+  },
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -650,6 +666,11 @@ export default async function plugin(bb: BbPluginApi) {
   dispatch.closeStranded();
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
+
+  async function contextWorkspace(hostId: string): Promise<{ type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } }> {
+    const { path } = await host.call("contextWorkspace", {}, { hostId });
+    return { type: "host", hostId, workspace: { type: "unmanaged", path } };
+  }
 
   // ---- persisted state -------------------------------------------------
 
@@ -1434,7 +1455,10 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const links = new Map<string, Map<string, ThreadTier>>();
     for (const thread of threadFacts.values()) {
-      links.set(thread.id, linkThread({ ...thread, startedFor: startedFor.get(thread.id) ?? thread.startedFor }, targets, pattern));
+      const found = linkThread({ ...thread, startedFor: startedFor.get(thread.id) ?? thread.startedFor }, targets, pattern);
+      const contextPath = contextPathLinks.get(thread.id);
+      if (contextPath) for (const target of targets) if (target.path === contextPath.path && target.branch === contextPath.branch) found.set(target.cluster, "started");
+      links.set(thread.id, found);
     }
     return links;
   }
@@ -1510,9 +1534,22 @@ export default async function plugin(bb: BbPluginApi) {
         lifecycle: mostUrgent(members.map((entry) => prLifecycle(entry.pr))),
         staleness: freshest(members.map((entry) => stalenessOf(entry.pr.createdAt ?? null, Date.now()))), surfaces: [], risk: "none" };
     });
+    const knownPrKeys = new Set([...storedInventory.entries.map((entry) => prWorkItemKey(entry.pr.url)),
+      ...wired.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [prWorkItemKey(unit.pr.url)] : [])))]);
+    const prThreadLinks: Board["prThreadLinks"] = {};
+    for (const [threadId, urls] of threadPrUrls) {
+      if (!threadFacts.has(threadId) && !newContextThreads.has(threadId)) continue;
+      for (const url of urls) {
+        const key = prWorkItemKey(url);
+        if (!knownPrKeys.has(key)) continue;
+        const links = prThreadLinks[key] ?? [];
+        if (links.length < 20 && !links.includes(threadId)) prThreadLinks[key] = [...links, threadId];
+      }
+    }
     return {
       prHolds: prHolds.list(),
       efforts: established,
+      prThreadLinks,
       groups: [...wired, ...remoteGroups],
       depth: Math.max(hierarchyDepth(groups), remoteGroups.length > 0 ? 1 : 0),
       surfaces,
@@ -1702,7 +1739,9 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Plugin-origin, intent-bearing and explicitly linked threads get one cached metadata read. */
   const startedFor = new Map<string, string>();
+  const contextPathLinks = new Map<string, { path: string; branch: string | null }>();
   const threadPrUrls = new Map<string, string[]>();
+  const newContextThreads = new Set<string>();
   const metadataRead = new Set<string>();
   let linkBackfill: Promise<void> | null = null;
 
@@ -1743,6 +1782,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.originPluginId === bb.pluginId) {
         const ticket = startedForOf(metadata);
         if (ticket !== null) startedFor.set(row.id, ticket);
+        if (typeof metadata.linkedCheckoutPath === "string" && metadata.linkedCheckoutPath.length <= 1_000) {
+          contextPathLinks.set(row.id, { path: metadata.linkedCheckoutPath,
+            branch: typeof metadata.linkedCheckoutBranch === "string" ? metadata.linkedCheckoutBranch : null });
+        }
       }
       const urls = [metadata.linkedPrUrl, metadata.prUrl].flatMap((url) =>
         typeof url === "string" && canonicalPrUrl(url) ? [canonicalPrUrl(url)!] : []);
@@ -1841,6 +1884,7 @@ export default async function plugin(bb: BbPluginApi) {
     row: ThreadRow & { environmentId: string | null; originPluginId: string | null },
     reread: boolean): Promise<void> {
     if (row.visibility !== "visible" || row.archivedAt !== null || row.deletedAt !== null) {
+      newContextThreads.delete(row.id);
       intentEpoch.set(row.id, (intentEpoch.get(row.id) ?? 0) + 1);
       threadEnvironments.delete(row.id);
       prFreshnessLinks.add("");
@@ -1872,6 +1916,7 @@ export default async function plugin(bb: BbPluginApi) {
       worked = refreshed.updates.get(row.id) ?? worked;
     }
     threadFacts.set(row.id, factsOf(row, environment, worked));
+    newContextThreads.delete(row.id);
     threadEnvironments.set(row.id, row.environmentId);
     prFreshnessLinks.add("");
     announceThreads();
@@ -2938,6 +2983,41 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) { return { ok: false, error: `Card effort could not be read: ${String(error).slice(0, 300)}` }; }
   }
 
+  async function cardThreadTarget(target: CardEffortTarget) {
+    const current = await board();
+    const clusters = current.groups.flatMap((group) => group.clusters);
+    const cluster = clusters.find((item) => item.units.some((unit) => "path" in target ? unit.path === target.path :
+      unit.pr && prWorkItemKey(unit.pr.url) === prWorkItemKey(target.prUrl))) ?? null;
+    const unit = cluster?.units.find((item) => "path" in target ? item.path === target.path :
+      item.pr && prWorkItemKey(item.pr.url) === prWorkItemKey(target.prUrl)) ?? null;
+    const prUrl = "prUrl" in target ? canonicalPrUrl(target.prUrl) : unit?.pr ? canonicalPrUrl(unit.pr.url) : null;
+    const known = prUrl ? knownPr(prUrl) : null;
+    if (("prUrl" in target && !known) || ("path" in target && !unit)) return null;
+    const context = await cardEffortContext(target);
+    const ticket = unit?.ticket ?? (context.ok ? context.source.ticket : null);
+    const effort = context.ok && context.source.effortKey ? effortStore.source(context.source.effortKey) : null;
+    const repo = known?.repo ?? unit?.githubRepo ?? null;
+    const path = unit?.path ?? known?.path ?? null;
+    return { current, cluster, unit, known, prUrl, ticket, effort, repo, path,
+      title: known?.pr.title ?? cluster?.linear?.title ?? cluster?.summary ?? unit?.dirName ?? "Tracked work",
+      linearUrl: cluster?.linear?.url ?? null,
+      effortName: context.ok ? context.source.effortName : null,
+      contextWarning: context.ok ? null : context.error,
+      linkedThreadIds: [...new Set([...(cluster?.threads.map((thread) => thread.id) ?? []),
+        ...(prUrl ? current.prThreadLinks[prUrl] ?? [] : [])])].slice(0, 20) };
+  }
+
+  function cardThreadSnapshot(card: NonNullable<Awaited<ReturnType<typeof cardThreadTarget>>>, hold: string | null,
+    hierarchyWarning: string | null = card.contextWarning): CardThreadSnapshot {
+    const pr = card.known?.pr ?? null;
+    return { title: card.title, prUrl: card.prUrl, prState: pr?.state ?? null,
+      readiness: pr ? { reviewDecision: pr.reviewDecision, mergeState: pr.mergeStateStatus,
+        checks: pr.checkConclusions.slice(0, 20), unresolvedReviewThreads: pr.unresolvedReviewThreads,
+        baseRef: pr.baseRefName, headRef: pr.headRefName, stackParentPrNumber: card.unit?.stack?.blockedBelow ?? null } : null,
+      linearUrl: card.linearUrl, ticket: card.ticket, checkoutPath: card.path,
+      effortName: card.effortName, linkedThreadIds: card.linkedThreadIds, hold, hierarchyWarning };
+  }
+
   async function reconcileThreadIntent(threadId: string, duringSet = false): Promise<void> {
     if (disposal.signal.aborted || !hasIntent(threadId)) return;
     if (intentChanging.has(threadId) && !duringSet) { intentRecheck.add(threadId); return; }
@@ -3013,9 +3093,8 @@ export default async function plugin(bb: BbPluginApi) {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       const project = projects.find((entry) => entry.id === args.projectId);
       const source = project?.sources.find((entry) => entry.hostId === hostId) ?? project?.sources[0];
-      if (!source) throw new Error("The selected project has no available source for a separate coordinator worktree.");
-      return bb.sdk.threads.spawn({ ...args, environment: { type: "provider", environmentProviderId: "git-worktree",
-        machine: { type: "existing", hostId: source.hostId }, inputs: { branch: { kind: "default" } } } });
+      if (!source) throw new Error("The selected project has no available source for its coordinator.");
+      return bb.sdk.threads.spawn({ ...args, environment: await contextWorkspace(source.hostId) });
     },
     recover: async (effortId, projectId) => {
       const matches: string[] = [];
@@ -3053,8 +3132,7 @@ export default async function plugin(bb: BbPluginApi) {
       const project = projects.find((entry) => entry.id === args.projectId);
       const source = project?.sources.find((entry) => entry.hostId === (effortStore.repoController(args.pluginMetadata.effortId, args.pluginMetadata.repo)?.hostId));
       if (!source) throw new Error("The repository controller needs a source on its selected host.");
-      return bb.sdk.threads.spawn({ ...args, environment: { type: "provider", environmentProviderId: "git-worktree",
-        machine: { type: "existing", hostId: source.hostId }, inputs: { branch: { kind: "default" } } } });
+      return bb.sdk.threads.spawn({ ...args, environment: await contextWorkspace(source.hostId) });
     },
   });
 
@@ -3068,6 +3146,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const manualPrWrites = new Set<string>();
+  const contextStarting = new Set<string>();
   // SDK spawn/send can return before thread events reach the board cache.
   const pendingPrThreads = new Map<string, { id: string; startedAt: number }>();
   async function withPrWriter<T>(path: string, prUrl: string | undefined, action: () => Promise<T>): Promise<T | { ok: false; error: string }> {
@@ -3506,7 +3585,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  bb.rpc.register(rpcContract, {
+  const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     board_get: () => board(),
     pr_hold_set: ({ prUrl, held, reason }) => {
       const holds = prHolds.set(prUrl, held, reason);
@@ -3849,6 +3928,149 @@ export default async function plugin(bb: BbPluginApi) {
         }
       } finally { manualPrWrites.delete(canonical); }
     },
+    card_thread_message: async ({ target, threadId, message }) => {
+      const text = message.trim();
+      if (!text) return { ok: false, error: "Write a message before sending." };
+      const card = await cardThreadTarget(target);
+      if (!card) return { ok: false, error: "That card is no longer on the board. Refresh before sending." };
+      const hold = card.prUrl ? holdMessage(card.prUrl) : null;
+      if (threadId !== null) {
+        let metadata;
+        try { metadata = await bb.sdk.threads.getPluginMetadata({ threadId }); }
+        catch { return { ok: false, error: "That thread could not be checked. Refresh and choose another." }; }
+        if (metadata.role === "context") {
+          const samePr = card.prUrl !== null && typeof metadata.linkedPrUrl === "string" && canonicalPrUrl(metadata.linkedPrUrl) === card.prUrl;
+          const samePath = card.path !== null && metadata.linkedCheckoutPath === card.path &&
+            (metadata.linkedCheckoutBranch ?? null) === (card.unit?.branch ?? null);
+          if (card.prUrl ? !samePr : !samePath) return { ok: false, error: "That context agent is not linked to this card." };
+          const selected = await bb.sdk.threads.get({ threadId });
+          if (selected.archivedAt !== null || selected.deletedAt !== null || selected.visibility !== "visible") {
+            return { ok: false, error: "That context agent is unavailable. Choose New agent." };
+          }
+          const result = await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text",
+            text: cardThreadPrompt(cardThreadSnapshot(card, hold), text), mentions: [] }] });
+          return { ok: true, threadId, delivery: result.delivery, created: false };
+        }
+        if (card.prUrl) {
+          const linked = await prThreadContext(card.prUrl);
+          if (!linked.threads.some((thread) => thread.id === threadId)) {
+            return { ok: false, error: "That thread is no longer linked to this card. Refresh and choose another." };
+          }
+          if (!hold && card.known?.pr.state === "OPEN") {
+            const sent = await rpcHandlers.thread_message({ prUrl: card.prUrl, threadId, message: text,
+              ...(card.path && card.known?.path === card.path ? { path: card.path } : {}) });
+            return sent.ok ? { ...sent, threadId, created: false } : sent;
+          }
+          if (!hold) return { ok: false, error: "Choose New agent for a closed PR." };
+          const sent = await sendRowMessage({
+            get: ({ threadId: id }) => bb.sdk.threads.get({ threadId: id }),
+            send: (args) => bb.sdk.threads.send(args),
+          }, { threadId, message: `${hold} This is a read-only diagnostic request. Do not edit a checkout or change PR or Linear state until the hold is released.\n${text}`,
+            mode: "queue-if-active", links: linked.threads,
+            pr: { repo: card.known!.repo, number: card.known!.pr.number, title: card.known!.pr.title,
+              url: card.prUrl, checkout: card.path } });
+          return sent.ok ? { ...sent, threadId, created: false } : sent;
+        }
+        const contextPath = contextPathLinks.get(threadId);
+        if (!card.cluster?.threads.some((thread) => thread.id === threadId) &&
+          (contextPath?.path !== card.path || contextPath.branch !== (card.unit?.branch ?? null))) {
+          return { ok: false, error: "That thread is no longer linked to this checkout. Refresh and choose another." };
+        }
+        const selected = await bb.sdk.threads.get({ threadId });
+        if (selected.archivedAt !== null || selected.deletedAt !== null || selected.visibility !== "visible") {
+          return { ok: false, error: "That thread is no longer available. Choose New agent." };
+        }
+        if (card.path) {
+          const reserved = launchingCheckouts.has(card.path) || advance.reserved("", card.path) ||
+            runs.recent(0, 1_000).some((run) => run.path === card.path && run.threadId !== threadId &&
+              ["running", "needs-you"].includes(run.status)) ||
+            dispatch.attempts().some((attempt) => attempt.path === card.path && attempt.threadId !== threadId &&
+              ["launching", "running", "verifying", "needs-you"].includes(attempt.status));
+          const hostId = (await bb.sdk.system.config()).primaryHostId;
+          const writer = hostId ? await activeCheckoutThread(card.path, hostId, (offset) =>
+            bb.sdk.threads.list({ archived: false, includeHidden: true, limit: 100, offset })) : null;
+          if (reserved || (writer && writer !== threadId)) {
+            return { ok: false, error: "Another agent owns this checkout. Choose New agent for a separate context thread." };
+          }
+        }
+        const result = await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text",
+          text: `Workstreams checkout: ${card.path}\nLinear: ${card.linearUrl ?? card.ticket ?? "none"}\nCached title: ${card.title.slice(0, 300)}\nVerify current facts before acting.\n\nUser request:\n${text}`, mentions: [] }] });
+        return { ok: true, threadId, delivery: result.delivery, created: false };
+      }
+      const key = card.prUrl ?? card.path!;
+      if (contextStarting.has(key)) return { ok: false, error: "A new context agent is already starting for this card." };
+      contextStarting.add(key);
+      try {
+        const projects = await bb.sdk.projects.list();
+        const repoPath = card.repo ? (card.unit?.githubRepo === card.repo ? card.unit.path :
+          readUnits().find((unit) => unit.githubRepo?.toLowerCase() === card.repo?.toLowerCase())?.path ?? null) : null;
+        let project = repoPath ? projectForPath(projects, repoPath) : null;
+        let repoProject = project !== null;
+        if (!project && card.path) project = projectForPath(projects, card.path);
+        if (!project && card.effort?.projectId) {
+          const source = projects.find((item) => item.id === card.effort?.projectId)?.sources[0];
+          if (source) project = { projectId: card.effort.projectId, hostId: source.hostId };
+        }
+        let parentThreadId: string | null = null;
+        let hierarchyWarning = card.contextWarning;
+        if (project && card.effort) {
+          try {
+            if (repoProject && card.repo) parentThreadId = (await ensureRepoController(card.effort, card.repo, project.projectId, project.hostId)).threadId;
+            else parentThreadId = (await coordinators.ensureExisting(card.effort.id, project.projectId)).coordinatorThreadId;
+          } catch (error) {
+            hierarchyWarning = `Effort parent unavailable: ${String(error).slice(0, 200)}. Inspect its association before acting.`;
+          }
+        }
+        const snapshot = cardThreadSnapshot(card, hold, hierarchyWarning);
+        if (parentThreadId && !snapshot.linkedThreadIds.includes(parentThreadId)) {
+          snapshot.linkedThreadIds = [...snapshot.linkedThreadIds, parentThreadId].slice(0, 20);
+        }
+        let environment: Awaited<ReturnType<typeof contextWorkspace>> | { type: "host"; workspace: { type: "personal" } };
+        let projectId = project?.projectId ?? "proj_personal";
+        if (project) {
+          try { environment = await contextWorkspace(project.hostId); }
+          catch (error) {
+            projectId = "proj_personal";
+            parentThreadId = null;
+            environment = { type: "host", workspace: { type: "personal" } };
+            snapshot.hierarchyWarning = `Project context workspace unavailable: ${String(error).slice(0, 200)}. This agent uses a personal workspace.`;
+          }
+        } else environment = { type: "host", workspace: { type: "personal" } };
+        const title = `${card.repo ?? card.ticket ?? "Workstreams"}${card.known ? ` #${card.known.pr.number}` : ""}: ${card.title}`.slice(0, 200);
+        const thread = await bb.sdk.threads.spawn({ projectId, environment, title,
+          prompt: cardThreadPrompt(snapshot, text), ...(parentThreadId ? { parentThreadId } : {}),
+          pluginMetadata: { role: "context", ...(card.prUrl ? { linkedPrUrl: card.prUrl } : {}),
+            ...(card.ticket ? { ticket: card.ticket } : {}), ...(card.path ? { linkedCheckoutPath: card.path,
+              linkedCheckoutBranch: card.unit?.branch ?? null } : {}),
+            ...(card.effort ? { workEffortId: card.effort.id } : {}) } });
+        if (!threadFacts.has(thread.id)) newContextThreads.add(thread.id);
+        if (card.prUrl) {
+          db.prepare(`INSERT OR IGNORE INTO thread_pr_link_ids (thread_id) VALUES (?)`).run(thread.id);
+          threadPrUrls.set(thread.id, [card.prUrl]);
+        }
+        if (card.ticket) startedFor.set(thread.id, card.ticket);
+        if (card.path) contextPathLinks.set(thread.id, { path: card.path, branch: card.unit?.branch ?? null });
+        announceThreads();
+        bb.realtime.publish(BOARD_CHANGED, { scanning });
+        return { ok: true, threadId: thread.id, delivery: "sent", created: true };
+      } catch (error) {
+        return { ok: false, error: `Context agent launch could not be confirmed: ${String(error).slice(0, 250)}. Check linked threads before trying again.` };
+      } finally { contextStarting.delete(key); }
+    },
+    card_thread_update: async ({ target, threadId }) => {
+      const card = await cardThreadTarget(target);
+      if (!card) return { lastLine: null };
+      const linked = card.prUrl
+        ? threadPrUrls.get(threadId)?.includes(card.prUrl) || (await prThreadContext(card.prUrl)).threads.some((thread) => thread.id === threadId)
+        : card.cluster?.threads.some((thread) => thread.id === threadId) ||
+          (contextPathLinks.get(threadId)?.path === card.path && contextPathLinks.get(threadId)?.branch === (card.unit?.branch ?? null));
+      if (!linked) return { lastLine: null };
+      let thread;
+      try { thread = await bb.sdk.threads.get({ threadId }); }
+      catch { return { lastLine: null }; }
+      if (thread.archivedAt !== null || thread.deletedAt !== null || thread.visibility !== "visible") return { lastLine: null };
+      return { lastLine: lastThreadLine((await bb.sdk.threads.output({ threadId })).output) };
+    },
     action_merge_preview: async (input) => {
       const target = await actionable(input);
       if (!target.ok) return target;
@@ -4003,7 +4225,8 @@ export default async function plugin(bb: BbPluginApi) {
       void scan();
       return { started: idle };
     },
-  });
+  };
+  bb.rpc.register(rpcContract, rpcHandlers);
 
   // ---- CLI -------------------------------------------------------------
 

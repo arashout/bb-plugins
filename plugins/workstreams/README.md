@@ -113,13 +113,23 @@ flowchart LR
   action["Confirmed agent action for assigned work"] --> parent["Effort parent: emoji title"]
   parent --> controller["Repository controller: plain title"]
   controller --> worker["Optional PR or checkout worker: plain title"]
+  message["Send to New agent from a card"] --> context["Context agent: plain title, isolated scratch directory"]
+  controller --> context
   advance["Confirmed Advance for assigned PR"] --> controller
   advance --> workspace["Isolated worktree for that PR"]
   controller --> workspace
 ```
 
 The confirmed agent action creates a missing parent or controller when it needs
-one. A controller can work directly or delegate a bounded task to a child.
+one. Newly created coordinators and controllers use isolated directories that
+do not contain a repository checkout; existing thread environments stay intact.
+A controller can work directly or delegate a bounded
+task to a child. Sending a card message can create a context agent under the
+controller; if the parent is unavailable, Workstreams starts a linked context
+agent without changing the stored parent association. Context agents inspect
+the referenced work and use guarded checkout or PR actions in execution
+workspaces for requested repairs. They do
+not reserve a PR checkout by starting a conversation.
 Advance keeps each PR's isolated worktree for inspection after the result
 finishes. Workstreams retains merged PR worktrees; automatic cleanup is not
 implemented.
@@ -157,17 +167,17 @@ implemented.
   instructions come from the service and are fixed; single-row agent prompts
   and repair direction are editable. Progress appears on each card. Use
   **Advance history** in the Pipeline options menu for saved batch details.
-- **Message agents:** On an open, unheld PR card, choose **Message agent** to
-  send an instruction without leaving Pipeline. The details drawer lists linked
-  effort coordinators, repository controllers, PR threads, and other threads,
-  including links for PRs without a checkout. Workstreams selects the current
-  repository controller when one is available. If several other threads qualify,
-  choose the target. **Rebase and PTAL** fills an editable draft; only **Send
-  message** delivers it. The composer reports whether BB sent or queued the
-  message, and the board shows agent activity. The composer shows the selected
-  agent's latest reply and live status. Use **Open thread** for the full
-  conversation, or **Follow up** to send another message.
-  Repository and effort threads can include work on other PRs.
+- **Message agents:** On a PR or checkout card, choose **Message agent** to
+  send a question or instruction without leaving Pipeline. Select a linked
+  thread or **New agent**. When you send to a new agent, Workstreams starts a
+  conversation with the card's PR or Linear reference and a cached work
+  snapshot. A status question authorizes inspection and reporting; a repair
+  request still follows the checkout or PR hold and ownership rules. Held and
+  closed PRs support diagnosis, not execution. **Rebase and PTAL** fills an
+  editable draft; only **Send message** delivers it. The composer reports
+  whether BB sent or queued the message, shows the latest reply and live
+  status, and offers **Open thread** and **Follow up**. Repository and effort
+  threads can include work on other PRs.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
 - **Approved filter:** Keep approved open PRs in view across Map, Pipeline,
@@ -235,7 +245,7 @@ implemented.
   these skips.
 - **Effort threads:** Choose **🧭 Coordinate** on an effort to review its linked
   tickets and PRs, set its name and goal, and choose a matching BB project.
-  Create a planning thread in a separate worktree with that project's default
+  Create a planning thread in an isolated non-Git scratch directory with that project's default
   agent, or link an eligible idle thread. New and explicitly linked coordinator
   titles use a relevant emoji or a stable, varied fallback, preserving an
   existing leading emoji. Repository controllers and PR or checkout workers use

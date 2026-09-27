@@ -230,7 +230,7 @@ export function PipelineView({
   const hiddenSelected = advanceSelection.urls.filter((url) => !visibleSelection.has(url)).length;
   useEffect(() => {
     if (messaging && (
-      !cards.some((card) => card.key === messaging.key && card.pr?.state === "OPEN" && !card.hold) ||
+      !cards.some((card) => card.key === messaging.key) ||
       (messaging.location === "drawer" && (selected !== messaging.key || !detailsOpen))
     )) setMessaging(null);
   }, [cards, messaging, selected, detailsOpen]);
@@ -578,7 +578,10 @@ export function PipelineView({
   });
 
   const linkedThreadIds = (card: PipelineCard): string[] => card.pr
-    ? backlogThreads(card.pr.url, card.local?.cluster.threads ?? [], board.runs, [...advance.batches.flatMap((batch) => batch.jobs), ...dispatch.attempts], sidebarThreads).map((thread) => thread.id)
+    ? [...new Set([
+        ...backlogThreads(card.pr.url, card.local?.cluster.threads ?? [], board.runs, [...advance.batches.flatMap((batch) => batch.jobs), ...dispatch.attempts], sidebarThreads).map((thread) => thread.id),
+        ...(board.prThreadLinks[canonicalPrUrl(card.pr.url) ?? card.pr.url] ?? []),
+      ])]
     : card.local?.cluster.threads.map((thread) => thread.id) ?? [];
 
   const cardView = (card: PipelineCard) => {
@@ -697,19 +700,19 @@ export function PipelineView({
           <b className="text-foreground">Next:</b> {card.nextStep}
         </p>
         <div className="mt-2 flex items-center gap-1 border-t border-border/70 pt-1.5">
-          {card.pr?.state === "OPEN" && !card.hold && !(messaging?.key === card.key && messaging.location === "card") ? (
+          {!(messaging?.key === card.key && messaging.location === "card") ? (
               <Tip label="Message agent">
                 <button
                   type="button"
                   onClick={() => setMessaging({ key: card.key, location: "card" })}
-                  aria-label={`Message agent for ${card.repo} #${card.pr.number}`}
+                  aria-label={`Message agent for ${card.repo}${card.pr ? ` #${card.pr.number}` : ""}`}
                   className="flex size-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <Icon name="Bot" className="size-[18px]" />
                 </button>
               </Tip>
           ) : null}
-          {(card.pr || card.local?.cluster.threads.length) && !card.hold ? (
+          {card.pr || card.local?.cluster.threads.length ? (
             <Tip label="Open thread">
               <button type="button" onClick={() => void openThread(card)} aria-label={`Open thread for ${label}`} className="flex size-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><Icon name="ArrowUpRight" className="size-[18px]" /></button>
             </Tip>
@@ -724,7 +727,7 @@ export function PipelineView({
                 <DropdownMenu.Item className={menuItem} onSelect={() => setEffortEditing(card)}>Change effort…</DropdownMenu.Item>
                 {card.hold && card.pr ? <DropdownMenu.Item className={menuItem} onSelect={() => void hold.release(card.pr!.url)}>Release hold</DropdownMenu.Item> : null}
                 {card.pr?.state === "OPEN" && !card.hold ? <DropdownMenu.Item className={menuItem} onSelect={() => hold.edit({ url: card.pr!.url, label: `${card.repo} #${card.pr!.number}`, hold: card.hold })}>Put on hold…</DropdownMenu.Item> : null}
-                {!card.hold && (card.activity.threadId || card.local?.cluster.threads.length) ? <DropdownMenu.Item className={menuItem} onSelect={() => openThread(card)}>Open thread</DropdownMenu.Item> : null}
+                {card.activity.threadId || card.local?.cluster.threads.length ? <DropdownMenu.Item className={menuItem} onSelect={() => openThread(card)}>Open thread</DropdownMenu.Item> : null}
                 {!card.hold && card.local ? <DropdownMenu.Item className={menuItem} onSelect={() => openCheckout(card)}>Open checkout</DropdownMenu.Item> : null}
                 {card.pr?.state === "OPEN" && !card.hold && card.activity.state !== "working" && card.action?.kind !== "advance" && card.action?.kind !== "fix" ? <DropdownMenu.Item className={menuItem} onSelect={() => setAgent({ kind: "advance", prUrls: [card.pr!.url] })}>Advance…</DropdownMenu.Item> : null}
               </DropdownMenu.Content></DropdownMenu.Portal>
@@ -1320,11 +1323,11 @@ export function PipelineView({
             <section id="pipeline-detail-agent" className="border-t border-border/70 pt-5">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-[12px] font-semibold">Agent</h3>
-                {selectedCard.pr?.state === "OPEN" && !selectedCard.hold ? (
+                {selectedCard.pr || selectedCard.local ? (
                   <button
                     type="button"
                     onClick={() => setMessaging({ key: selectedCard.key, location: "drawer" })}
-                    aria-label={`Message agent in details for ${selectedCard.repo} #${selectedCard.pr.number}`}
+                    aria-label={`Message agent in details for ${selectedCard.repo}${selectedCard.pr ? ` #${selectedCard.pr.number}` : ""}`}
                     className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <Icon name="Bot" className="size-4" />

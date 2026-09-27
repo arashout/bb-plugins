@@ -519,7 +519,7 @@ authorizes the listed work. A PR in an effort uses one persistent repository
 controller under the effort coordinator. The controller handles PR instructions
 in sequence and can delegate bounded PR work to child threads. Confirmed
 Advance can establish the effort and create its coordinator and repository
-controller; preview and other
+controller in isolated non-Git scratch directories; preview and other
 reads do not launch them. An unassigned PR uses a descriptively titled
 repository thread for the batch. Each PR keeps a separate result and isolated
 worktree; remote PRs can use a worktree from an exactly matched scanned
@@ -565,7 +565,8 @@ also includes the PR inventory.
 
 **🧭 Coordinate** previews an effort's linked tickets and PRs, editable name and
 goal, and the matching BB projects. Explicit confirmation creates a planning
-thread in a separate worktree using the selected project's default agent, or
+thread in an isolated non-Git scratch directory using the selected project's
+default agent, or
 associates an eligible idle thread. Coordinator titles prefix the effort name
 with a relevant emoji or a stable, varied fallback, preserving an existing leading
 emoji. An explicitly associated thread receives this title but keeps its parent;
@@ -573,6 +574,14 @@ association does not start a turn. The saved
 effort ID preserves the chosen identity and membership across later grouping.
 The heading then opens the effort thread. Team containers and Unsorted do not
 offer this control.
+
+**Message agent** on a Pipeline PR or checkout card sends to a linked thread or
+starts a context thread only when you send. The context thread receives the
+tracked PR or Linear reference and a cached snapshot; it verifies live facts
+before reporting. A status question does not authorize a repair. A requested
+repair must use a guarded checkout or PR action and its execution workspace, not the
+scratch directory. Held and closed PRs remain diagnostic-only. Starting this
+conversation does not claim effort membership or reserve a PR writer checkout.
 
 Authorized PR work routes through the repository controller under the effort
 coordinator. Existing PR workers remain linked as history and repair context;

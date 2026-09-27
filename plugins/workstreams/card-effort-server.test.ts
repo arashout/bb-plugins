@@ -25,27 +25,31 @@ afterEach(async () => { for (const stop of cleanup.splice(0)) await stop(); });
 async function setup() {
   let draft: RawUnit = base;
   let remote: ReturnType<typeof pr>[] = [];
+  let contextWorkspaces = 0;
   const spawned: { id: string; args: Record<string, any> }[] = [];
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "project", name: "Folio", sources: [{ hostId: "host-inkwell", path: "/p" }] }] as never },
     threads: { list: async () => spawned.map(({ id, args }) => makeThreadResponse({ id, title: args.title ?? null,
-      projectId: "project", parentThreadId: args.parentThreadId ?? null }) as never) as never,
+      projectId: "project", parentThreadId: args.parentThreadId ?? null,
+      environment: { hostId: args.environment.hostId } } as never) as never) as never,
       get: async ({ threadId }: { threadId: string }) => {
         const found = spawned.find(({ id }) => id === threadId);
         if (!found) throw new Error("missing thread");
         return { ...makeThreadResponse({ id: threadId, title: found.args.title ?? null, projectId: "project",
-          parentThreadId: found.args.parentThreadId ?? null }), canSpawnChild: true } as never;
+          parentThreadId: found.args.parentThreadId ?? null, environment: { hostId: found.args.environment.hostId } } as never), canSpawnChild: true } as never;
       },
       spawn: async (args: Record<string, any>) => {
         const id = `thread-${spawned.length + 1}`;
         spawned.push({ id, args });
         return { ...makeThreadResponse({ id, title: args.title ?? null, projectId: "project",
-          parentThreadId: args.parentThreadId ?? null }), canSpawnChild: true } as never;
+          parentThreadId: args.parentThreadId ?? null }), canSpawnChild: true,
+          environment: { hostId: args.environment.hostId } } as never;
       },
       getPluginMetadata: async () => ({}), updatePluginMetadata: async () => ({}),
       events: { list: async () => [] }, interactions: { list: async () => [] as never } },
   }, experimental_callHostRpc: ({ method }) => {
+    if (method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
     if (method === "scan" || method === "inspectPaths") return { units: [draft, destination], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: remote.map((item) => ({ repo: "inkwell/folio", pr: item })),
       discoveryComplete: true, complete: true, repositories: [{ repo: "inkwell/folio", complete: true }], warnings: [] };
@@ -153,7 +157,12 @@ it("starts a pre-PR checkout thread beneath its effort repository controller", a
   expect(env.spawned).toEqual([]);
   expect(await env.harness.callRpc("thread_start", { path, prompt: "Review the manuscript changes." })).toMatchObject({ ok: true });
   expect(env.spawned).toHaveLength(3);
+  expect(env.spawned[0]?.args.environment).toMatchObject({ type: "host", hostId: "host-inkwell",
+    workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } });
   expect(env.spawned[1]?.args.parentThreadId).toBe(env.spawned[0]?.id);
+  expect(env.spawned[1]?.args.environment).toMatchObject({ type: "host", hostId: "host-inkwell",
+    workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/2" } });
   expect(env.spawned[2]?.args.parentThreadId).toBe(env.spawned[1]?.id);
+  expect(env.spawned[2]?.args.environment).toMatchObject({ workspace: { path } });
   expect(env.spawned[2]?.args.pluginMetadata).toMatchObject({ role: "checkout", effortId: env.store.owner("checkoutPath", path)?.id });
 });

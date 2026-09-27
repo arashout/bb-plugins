@@ -23,12 +23,14 @@ function unit(mergeStateStatus: "DIRTY" | "CLEAN"): RawUnit {
 
 async function setup(second = false) {
   const beforeProjects = vi.fn(async () => {});
+  let contextWorkspaces = 0;
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
-  const spawn = vi.fn(async (args: { projectId: string; parentThreadId?: string; title?: string; pluginMetadata?: { role?: string; repo?: string } }) => {
+  const spawn = vi.fn(async (args: Record<string, any>) => {
     const role = args.pluginMetadata?.role;
     const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? `thr-repo-${args.pluginMetadata?.repo?.replaceAll("/", "-")}` : "thr-dispatch";
     const row = makeThreadResponse({ id, projectId: args.projectId, parentThreadId: args.parentThreadId ?? null,
-      title: args.title ?? "PR worker", status: role === "pr" ? "active" : "idle" } as never);
+      title: args.title ?? "PR worker", status: role === "pr" ? "active" : "idle",
+      environment: { hostId: args.environment.hostId } } as never);
     threads.set(id, row);
     return row;
   });
@@ -57,6 +59,7 @@ async function setup(second = false) {
       },
     },
     experimental_callHostRpc: (call) => {
+      if (call.method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
       if (call.method === "scan") return { units: fullScan, warnings: [] };
       if (call.method === "inspectPaths") {
         inspectCount++;
@@ -78,10 +81,15 @@ async function setup(second = false) {
     const repo = spawn.mock.calls.find(([args]) => args.pluginMetadata?.role === "repo")?.[0];
     const worker = prSpawns()[0]?.[0];
     expect(coordinator).toMatchObject({ projectId: "proj-a", pluginMetadata: { role: "coordinator" } });
+    expect(coordinator?.environment).toMatchObject({ type: "host", hostId: HOST,
+      workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } });
     expect(coordinator).not.toHaveProperty("parentThreadId");
     expect(repo).toMatchObject({ projectId: "proj-a", parentThreadId: "thr-coordinator", pluginMetadata: { repo: expect.stringMatching(/^acme\//u) } });
+    expect(repo?.environment).toMatchObject({ type: "host", hostId: HOST,
+      workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/2" } });
     expect(worker).toMatchObject({ projectId: "proj-a", parentThreadId: expect.stringMatching(/^thr-repo-acme-/u),
       environment: { workspace: { path: expect.any(String) } } });
+    expect([PATH, another.path]).toContain(worker.environment.workspace.path);
   };
   return { harness, board, leafKey: leaf!.key, spawn, prSpawns, expectGraph, beforeProjects, inspectCount: () => inspectCount,
     setInspection: (next: RawUnit) => { inspected.set(next.path, next); },

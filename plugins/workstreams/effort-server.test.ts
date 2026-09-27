@@ -16,6 +16,7 @@ async function setup() {
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const metadata = new Map<string, Record<string, unknown>>();
   const spawns: Record<string, any>[] = [];
+  let contextWorkspaces = 0;
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "proj-inkwell", name: "Folio", sources: [{ hostId: "host-inkwell", path: "/p" }] }] as never },
@@ -26,7 +27,8 @@ async function setup() {
         spawns.push(args);
         const id = `thr-${spawns.length}`;
         const row = makeThreadResponse({ id, projectId: args.projectId, parentThreadId: args.parentThreadId ?? null,
-          title: args.title ?? "PR worker", status: "idle", environmentPath: args.environment.workspace?.path ?? "/planning/worktree" } as never);
+          title: args.title ?? "PR worker", status: "idle", environmentPath: args.environment.workspace?.path ?? "/planning/worktree",
+          environment: { hostId: args.environment.hostId } } as never);
         threads.set(id, row); metadata.set(id, args.pluginMetadata);
         return row;
       },
@@ -36,6 +38,7 @@ async function setup() {
       events: { list: async () => [] }, interactions: { list: async () => [] as never },
     },
   }, experimental_callHostRpc: ({ method }) => {
+    if (method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
     if (method === "scan" || method === "inspectPaths") return { units: [unit], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [], discoveryComplete: true, complete: true, repositories: [], warnings: [] };
     throw new Error(`Unexpected host call ${method}`);
@@ -50,11 +53,12 @@ async function setup() {
 }
 
 describe("established effort coordination through the server", () => {
-  it("previews without launching and establishes a persistent effort in a separate worktree", async () => {
+  it("previews without launching and establishes a persistent effort in a scratch workspace", async () => {
     const { harness, board, input, plan, spawns } = await setup();
     expect(plan.ok).toBe(true); expect(spawns).toEqual([]);
     expect(await harness.callRpc("effort_coordinate", input)).toMatchObject({ ok: true });
-    expect(spawns[0]).toMatchObject({ title: "🔍 Improve manuscript review", environment: { type: "provider", environmentProviderId: "git-worktree" }, pluginMetadata: { role: "coordinator" } });
+    expect(spawns[0]).toMatchObject({ title: "🔍 Improve manuscript review", environment: { type: "host", hostId: "host-inkwell",
+      workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } }, pluginMetadata: { role: "coordinator" } });
     expect(spawns[0]).not.toHaveProperty("model"); expect(spawns[0]).not.toHaveProperty("providerId");
     const established = (await board()).efforts[0]!;
     await harness.runCli(["refresh"]);
@@ -78,7 +82,8 @@ describe("established effort coordination through the server", () => {
     const action = { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Inspect and repair this PR." };
     expect(await harness.callRpc("agent_run", action)).toMatchObject({ ok: true, threadId: "thr-3" });
     expect(spawns[1]).toMatchObject({ projectId: "proj-inkwell", parentThreadId: "thr-1", title: "inkwell/folio",
-      environment: { type: "provider", environmentProviderId: "git-worktree" }, pluginMetadata: { role: "repo", repo: "inkwell/folio" } });
+      environment: { type: "host", hostId: "host-inkwell", workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/2" } },
+      pluginMetadata: { role: "repo", repo: "inkwell/folio" } });
     expect(spawns[2]).toMatchObject({ parentThreadId: "thr-2", environment: { workspace: { path: PATH } },
       pluginMetadata: { role: "pr", prUrl: URL, ticket: "ABC-101" } });
     expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { mode: "subthread", threadId: "thr-2" } });

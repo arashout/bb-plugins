@@ -34,14 +34,14 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
   const threadMetadata = new Map<string, Record<string, unknown>>();
   if (options.author) threads.set("thr-author", makeThreadResponse({ id: "thr-author", title: "ABC-42 Fix account lookup", projectId: "project-example", status: "idle" }));
   const blockedParents = new Set<string>();
-  let spawned = 0, workspaces = 0;
+  let spawned = 0, workspaces = 0, contextWorkspaces = 0;
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const role = args.pluginMetadata?.role;
     const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" :
       ++spawned === 1 ? "thr-rebasing" : `thr-repair-${spawned}`;
     const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
       status: role === "coordinator" ? "idle" : "active" }), parentThreadId: args.parentThreadId ?? null,
-      environment: { hostId: HOST } };
+      environment: { hostId: args.environment.hostId } };
     threadMetadata.set(thread.id, args.pluginMetadata ?? {});
     threads.set(thread.id, thread); return thread;
   });
@@ -57,6 +57,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     },
   }, experimental_callHostRpc: async ({ method, input }) => {
     calls.push({ method, input });
+    if (method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
     if (method === "scan" || method === "inspectPaths") return { units: [unit], warnings: [] };
     if (method === "authoredPrs") return { owners: [repo.split("/")[0]], entries: pr.state === "OPEN" ? [{ repo, pr }] : [], discoveryComplete: true,
       repositories: [{ repo, complete: true }], complete: true, warnings: [] };
@@ -290,8 +291,13 @@ describe("bulk advance server integration", () => {
     expect((await env.preview()).jobs[0]).toMatchObject({ eligible: false, detail: "Another action or batch already owns this PR" });
     expect(env.spawn).toHaveBeenCalledTimes(3);
     expect(env.spawn.mock.calls.map(([args]) => args.pluginMetadata?.role)).toEqual(["coordinator", "repo", "pr"]);
+    expect(env.spawn.mock.calls[0]?.[0].environment).toMatchObject({ type: "host", hostId: HOST,
+      workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } });
     expect(env.spawn.mock.calls[1]?.[0].parentThreadId).toBe("thr-coordinator");
+    expect(env.spawn.mock.calls[1]?.[0].environment).toMatchObject({ type: "host", hostId: HOST,
+      workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/2" } });
     expect(env.spawn.mock.calls[2]?.[0].parentThreadId).toBe("thr-repo");
+    expect(env.spawn.mock.calls[2]?.[0].environment).toMatchObject({ workspace: { path: PATH } });
     expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
   });
 
@@ -370,8 +376,11 @@ describe("bulk advance server integration", () => {
     expect(env.spawn).not.toHaveBeenCalled();
     await env.harness.callRpc("advance_repair_run", { token: plan.token, mode: "new", threadId: null, instruction: "Fix remaining comments" });
     expect(env.spawn.mock.calls.map(([request]) => request.pluginMetadata.role)).toEqual(["coordinator", "repo", "advance-repair"]);
+    expect(env.spawn.mock.calls[0]![0].environment.workspace.path).toBe("/synthetic/workstreams/context/1");
     expect(env.spawn.mock.calls[1]![0]).toMatchObject({ parentThreadId: "thr-coordinator" });
+    expect(env.spawn.mock.calls[1]![0].environment.workspace.path).toBe("/synthetic/workstreams/context/2");
     expect(env.spawn.mock.calls[2]![0]).toMatchObject({ parentThreadId: "thr-repo", projectId: "project-example", pluginMetadata: { role: "advance-repair" } });
+    expect(env.spawn.mock.calls[2]![0].environment.workspace.path).toBe("/synthetic/workstreams/batch/repo");
   });
 
   it("revalidates the repository controller's child capability before launching a repair", async () => {

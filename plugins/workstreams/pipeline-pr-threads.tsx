@@ -59,28 +59,29 @@ export function threadIsActive(thread: PrThread, sidebarThreads: readonly Plugin
     : thread.active;
 }
 
-function usePrThreadUpdate(prUrl: string | null, threadId: string | null) {
+function useCardThreadUpdate(prUrl: string | null, path: string | null, threadId: string | null) {
   const rpc = useRpc<typeof rpcContract>();
-  const [result, setResult] = useState<{ prUrl: string; threadId: string; lastLine: string | null; error: boolean } | null>(null);
+  const [result, setResult] = useState<{ target: string; threadId: string; lastLine: string | null; error: boolean } | null>(null);
   const generation = useRef(0);
   const refetch = useCallback(() => {
     const sequence = ++generation.current;
-    if (!prUrl || !threadId) return;
-    void rpc.call("pr_thread_update", { prUrl, threadId }).then(
+    if ((!prUrl && !path) || !threadId) return;
+    const target = prUrl ? { prUrl } : { path: path! };
+    void rpc.call("card_thread_update", { target, threadId }).then(
       (value) => {
-        if (generation.current === sequence) setResult({ prUrl, threadId, lastLine: value.lastLine, error: false });
+        if (generation.current === sequence) setResult({ target: prUrl ?? path!, threadId, lastLine: value.lastLine, error: false });
       },
       () => {
-        if (generation.current === sequence) setResult({ prUrl, threadId, lastLine: null, error: true });
+        if (generation.current === sequence) setResult({ target: prUrl ?? path!, threadId, lastLine: null, error: true });
       },
     );
-  }, [prUrl, threadId, rpc]);
+  }, [prUrl, path, threadId, rpc]);
   useEffect(() => {
     refetch();
     return () => { generation.current++; };
   }, [refetch]);
   useRealtime("board-changed", refetch);
-  const current = result?.prUrl === prUrl && result.threadId === threadId ? result : null;
+  const current = result?.target === (prUrl ?? path) && result.threadId === threadId ? result : null;
   return { lastLine: current?.lastLine ?? null, updateError: current?.error ?? false, refetch };
 }
 
@@ -143,8 +144,10 @@ export function PipelinePrComposer({
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const prUrl = card.pr?.url ?? null;
+  const path = prUrl ? null : card.local?.unit.path ?? null;
   const { context, error: loadError, loading } = usePrThreadContext(prUrl);
   const [threadId, setThreadId] = useState("");
+  const [createdThread, setCreatedThread] = useState<PrThread | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,54 +156,62 @@ export function PipelinePrComposer({
   const sending = useRef(false);
   const mounted = useRef(true);
   const input = useRef<HTMLTextAreaElement>(null);
-  const didFocus = useRef(false);
   const mayAutoSelect = useRef(true);
+  const linkedThreads: PrThread[] = prUrl
+    ? context?.threads ?? []
+    : (card.local?.cluster.threads ?? []).map((thread) => ({ ...thread, role: "linked" }));
+  const threads = createdThread && !linkedThreads.some((thread) => thread.id === createdThread.id)
+    ? [...linkedThreads, createdThread]
+    : linkedThreads;
 
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    if (!context) return;
-    if (!context.threads.some((thread) => thread.id === threadId)) {
-      const recommended = mayAutoSelect.current && context.threads.some((thread) => thread.id === context.recommendedThreadId)
-        ? context.recommendedThreadId ?? ""
-        : mayAutoSelect.current && context.threads.length === 1 ? context.threads[0]!.id : "";
-      if (recommended) mayAutoSelect.current = false;
-      setThreadId(recommended);
-    }
-    if (!didFocus.current) {
-      input.current?.focus();
-      didFocus.current = true;
-    }
-  }, [context]);
+    if (!mayAutoSelect.current || (prUrl && !context)) return;
+    const available = prUrl ? context?.threads ?? [] : card.local?.cluster.threads ?? [];
+    const active = available.filter((thread) => thread.active);
+    const recommended = prUrl
+      ? context?.recommendedThreadId && available.some((thread) => thread.id === context.recommendedThreadId)
+        ? context.recommendedThreadId
+        : ""
+      : active.length === 1 ? active[0]!.id : available.length === 1 ? available[0]!.id : "";
+    setThreadId(recommended);
+    mayAutoSelect.current = false;
+  }, [prUrl, context, card.local?.cluster.threads]);
 
-  const selectedThread = context?.threads.find((thread) => thread.id === threadId);
-  const { lastLine, updateError, refetch: refetchUpdate } = usePrThreadUpdate(prUrl, selectedThread?.id ?? null);
+  const selectedThread = threads.find((thread) => thread.id === threadId);
+  const selectedAvailable = !threadId || selectedThread !== undefined;
+  const { lastLine, updateError, refetch: refetchUpdate } = useCardThreadUpdate(prUrl, path, selectedThread?.id ?? null);
   useEffect(() => {
     if (composing) input.current?.focus();
   }, [composing]);
 
   const send = async () => {
     const trimmed = message.trim();
-    if (!prUrl || !context?.threads.some((thread) => thread.id === threadId) || !trimmed || sending.current) return;
+    if ((!prUrl && !path) || !trimmed || sending.current || loading || !selectedAvailable) return;
     sending.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const result = await rpc.call("thread_message", {
-        prUrl,
-        threadId,
+      const result = await rpc.call("card_thread_message", {
+        target: prUrl ? { prUrl } : { path: path! },
+        threadId: threadId || null,
         message: trimmed,
-        ...(card.local ? { path: card.local.unit.path } : {}),
       });
       if (!mounted.current) return;
       if (result.ok) {
+        mayAutoSelect.current = false;
+        if (result.created) {
+          setCreatedThread({ id: result.threadId, title: `${card.repo}${card.pr ? ` #${card.pr.number}` : ""} context`, tier: "started", active: false, role: "linked" });
+        }
+        setThreadId(result.threadId);
         setMessage("");
-        setNotice(result.delivery === "queued" ? "Message queued for the agent." : "Message sent to the agent.");
+        setNotice(result.created ? "Agent thread started. Message sent." : result.delivery === "queued" ? "Message queued for the agent." : "Message sent to the agent.");
         setComposing(false);
-        refetchUpdate();
+        if (!result.created) refetchUpdate();
       } else setError(result.error);
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
@@ -212,7 +223,7 @@ export function PipelinePrComposer({
 
   return (
     <form
-      aria-label={`Message agent for ${card.repo} #${card.pr?.number ?? ""}`}
+      aria-label={`Message agent for ${card.repo}${card.pr ? ` #${card.pr.number}` : ""}`}
       onSubmit={(event) => { event.preventDefault(); void send(); }}
       onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}
       className="relative z-20 space-y-2 text-[11px]"
@@ -222,51 +233,48 @@ export function PipelinePrComposer({
         <button type="button" onClick={onClose} aria-label="Close message composer" className="rounded px-1 text-muted-foreground hover:bg-foreground/[0.06]">×</button>
       </div>
       {loading ? <p className="text-muted-foreground">Loading linked threads…</p> : null}
-      {loadError ? <p role="alert" className="text-destructive">{loadError}</p> : null}
-      {context && !context.threads.length ? <p className="text-muted-foreground">No linked agent thread for this PR.</p> : null}
-      {context?.threads.length ? (
+      {loadError ? <p role="alert" className="text-destructive">Linked threads are unavailable: {loadError}. You can start a new agent.</p> : null}
+      {composing ? (
+        <label className="block space-y-1">
+          <span className="font-medium">Agent thread</span>
+          <select
+            value={threadId}
+            onChange={(event) => { mayAutoSelect.current = false; setThreadId(event.target.value); setError(null); }}
+            disabled={busy || loading}
+            className="w-full rounded border border-input bg-background px-2 py-1.5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <option value="">New agent</option>
+            {!selectedAvailable ? <option value={threadId} disabled>Previously selected thread unavailable</option> : null}
+            {threads.map((thread) => (
+              <option key={thread.id} value={thread.id}>{ROLE_LABEL[thread.role]} · {thread.title}{threadIsActive(thread, sidebarThreads) ? " · active" : ""}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {!selectedAvailable ? <p role="alert" className="text-destructive">The selected thread is no longer linked to this item. Choose another thread or New agent.</p> : null}
+      {composing && !threadId && !loading ? <p className="text-muted-foreground">A new agent starts when you send this message.</p> : null}
+      {card.hold ? <p className="text-muted-foreground">This item is on hold. Ask about status or data. Release the hold before requesting changes.</p> : null}
+      {selectedThread ? (
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => navigate.toThread(selectedThread.id)}
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:bg-foreground/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            title={selectedThread.title}
+            aria-label={`Open thread: ${selectedThread.title}`}
+          >
+            Open thread <Icon name="ArrowUpRight" className="size-3.5 shrink-0" />
+          </button>
+          <p className="line-clamp-2 break-words text-muted-foreground">{ROLE_LABEL[selectedThread.role]} · {selectedThread.title}</p>
+          <p role="status" className="text-muted-foreground">{createdThread?.id === selectedThread.id && !sidebarThreads.some((thread) => thread.id === selectedThread.id) ? "Waiting for thread status" : threadProgress(selectedThread, sidebarThreads, card)}</p>
+          {lastLine ? <p className="line-clamp-2 break-words text-muted-foreground"><span className="font-medium text-foreground">Latest thread update:</span> {lastLine}</p> : null}
+          {updateError ? <p role="status" className="text-muted-foreground">Thread update unavailable.</p> : null}
+          {selectedThread.role === "repo" || selectedThread.role === "coordinator" ? <p className="text-muted-foreground">This thread can include work on other PRs.</p> : null}
+        </div>
+      ) : null}
+      {composing ? (
         <>
-          {composing && (context.threads.length > 1 || !context.threads.some((thread) => thread.id === threadId)) ? (
-            <label className="block space-y-1">
-              <span className="font-medium">Agent thread</span>
-              <select
-                value={threadId}
-                onChange={(event) => { mayAutoSelect.current = false; setThreadId(event.target.value); }}
-                disabled={busy}
-                className="w-full rounded border border-input bg-background px-2 py-1.5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option value="">Choose a thread</option>
-                {context.threads.map((thread) => (
-                  <option key={thread.id} value={thread.id}>{ROLE_LABEL[thread.role]} · {thread.title}{threadIsActive(thread, sidebarThreads) ? " · active" : ""}</option>
-                ))}
-              </select>
-            </label>
-          ) : composing && context.threads.length === 1 ? (
-            <p className="truncate text-muted-foreground" title={context.threads[0]!.title}>
-              To {ROLE_LABEL[context.threads[0]!.role].toLowerCase()} · {context.threads[0]!.title}
-            </p>
-          ) : null}
-          {selectedThread ? (
-            <div className="space-y-1">
-              <button
-                type="button"
-                onClick={() => navigate.toThread(selectedThread.id)}
-                className="inline-flex max-w-full items-center gap-1 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:bg-foreground/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                title={selectedThread.title}
-                aria-label={`Open thread: ${selectedThread.title}`}
-              >
-                Open thread <Icon name="ArrowUpRight" className="size-3.5 shrink-0" />
-              </button>
-              <p className="line-clamp-2 break-words text-muted-foreground">{ROLE_LABEL[selectedThread.role]} · {selectedThread.title}</p>
-              <p role="status" className="text-muted-foreground">{threadProgress(selectedThread, sidebarThreads, card)}</p>
-              {lastLine ? <p className="line-clamp-2 break-words text-muted-foreground"><span className="font-medium text-foreground">Latest thread update:</span> {lastLine}</p> : null}
-              {updateError ? <p role="status" className="text-muted-foreground">Thread update unavailable.</p> : null}
-              {selectedThread.role === "repo" || selectedThread.role === "coordinator" ? (
-                <p className="text-muted-foreground">This thread can include work on other PRs.</p>
-              ) : null}
-            </div>
-          ) : null}
-          {composing ? <><label className="block space-y-1">
+          <label className="block space-y-1">
             <span className="font-medium">What should the agent do?</span>
             <textarea
               ref={input}
@@ -275,38 +283,25 @@ export function PipelinePrComposer({
               disabled={busy}
               maxLength={4_000}
               rows={3}
-              placeholder="Write a command for this PR"
+              placeholder="Ask about this item or request an adjustment"
               className="w-full resize-y rounded border border-input bg-background px-2 py-1.5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
-          <button
-            type="button"
-            onClick={() => { setMessage("Rebase this PR onto its current base, run the relevant checks, then nudge the requested reviewer with PTAL. Do not merge."); setError(null); setNotice(null); input.current?.focus(); }}
-            disabled={busy}
-            className="rounded text-muted-foreground underline hover:text-foreground disabled:opacity-50"
-          >
-            Rebase and PTAL
-          </button>
-          </> : null}
-          {error ? <p role="alert" className="text-destructive">{error}</p> : null}
-          {notice ? <p role="status" className="text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
-          {composing ? <div className="flex justify-end">
-            <button
-              type="submit"
-              disabled={busy || !threadId || !message.trim()}
-              className="rounded bg-foreground px-2 py-1 font-medium text-background disabled:opacity-50"
-            >
-              {busy ? "Sending…" : "Send message"}
-            </button>
-          </div> : null}
-          {!composing ? (
-            <button type="button" onClick={() => { setComposing(true); setNotice(null); }}
-              className="rounded text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              Follow up
-            </button>
-          ) : null}
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            <button type="button" onClick={() => { setMessage("Where are we with this? Is anything corrupt or problematic in the Workstreams data for this thread?"); setError(null); setNotice(null); input.current?.focus(); }} disabled={busy} className="rounded text-muted-foreground underline hover:text-foreground disabled:opacity-50">Check status and data</button>
+            {card.pr?.state === "OPEN" && !card.hold ? <button type="button" onClick={() => { setMessage("Rebase this PR onto its current base, run the relevant checks, then nudge the requested reviewer with PTAL. Do not merge."); setError(null); setNotice(null); input.current?.focus(); }} disabled={busy} className="rounded text-muted-foreground underline hover:text-foreground disabled:opacity-50">Rebase and PTAL</button> : null}
+          </div>
         </>
       ) : null}
+      {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+      {notice ? <p role="status" className="text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
+      {composing ? (
+        <div className="flex justify-end">
+          <button type="submit" disabled={busy || loading || !selectedAvailable || !message.trim()} className="rounded bg-foreground px-2 py-1 font-medium text-background disabled:opacity-50">{busy ? "Sending…" : "Send message"}</button>
+        </div>
+      ) : (
+        <button type="button" onClick={() => { setComposing(true); setNotice(null); }} className="rounded text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Follow up</button>
+      )}
     </form>
   );
 }

@@ -1,7 +1,8 @@
 // Per-machine scanning. Runs in the BB host worker, so node:child_process and
 // node:fs are available here and only here.
 import { execFile } from "node:child_process";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -552,6 +553,11 @@ export async function inspectAll(
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    contextWorkspace: async (_input, context) => {
+      const path = join(context.experimental_paths.dataDir, "contexts", randomUUID());
+      await mkdir(path, { recursive: true, mode: 0o700 });
+      return { path };
+    },
     advanceInspect: ({ prUrl }, context) => readAdvancePr(ghRunner(context.signal), prUrl),
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
       (args, cwd) => run("git", args, cwd, GH_WRITE_TIMEOUT_MS, context.signal), ghRunner(context.signal), input),

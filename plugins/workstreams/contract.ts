@@ -257,6 +257,11 @@ export const prWriteSchema = z.discriminatedUnion("kind", [
 export type PrWrite = z.infer<typeof prWriteSchema>;
 
 export const hostContract = defineRpcContract({
+  /** An isolated, non-Git workspace for a conversation or controller thread. */
+  contextWorkspace: {
+    input: z.object({}).strict(),
+    output: z.object({ path: z.string().min(1) }).strict(),
+  },
   advanceInspect: {
     input: z.object({ prUrl: z.string().max(500) }).strict(),
     output: advanceInspectionSchema,
