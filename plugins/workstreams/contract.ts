@@ -90,9 +90,9 @@ export const prSchema = z
     /** Changes requested remains GitHub's decision, but the author posted a verified PTAL after a newer head. */
     reviewFollowupPosted: z.boolean().optional(),
     /** Null until review threads are checked; zero means no unresolved threads. */
-    unresolvedReviewThreads: z.number().int().min(0).max(100).nullable().default(null),
+    unresolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
     /** Complete-page count of resolved review threads; null when unread or incomplete. */
-    resolvedReviewThreads: z.number().int().min(0).max(100).nullable().default(null),
+    resolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
     /**
      * Ticket IDs the PR description states, extracted on the host from its
      * first 8 KB. The description itself is client content and is never kept,

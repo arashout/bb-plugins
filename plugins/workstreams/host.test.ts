@@ -19,6 +19,13 @@ describe("PR commit identity", () => {
     expect(pr?.baseRefOid).toBeUndefined();
     expect(prSchema.safeParse(pr).success).toBe(true);
   });
+
+  it("accepts complete review-thread counts beyond one page through the reader's 2,000-thread limit", () => {
+    const pr = parsePrList(JSON.stringify([{ number: 42 }]))?.pr;
+    expect(prSchema.parse({ ...pr, unresolvedReviewThreads: 101, resolvedReviewThreads: 1_899 }))
+      .toMatchObject({ unresolvedReviewThreads: 101, resolvedReviewThreads: 1_899 });
+    expect(prSchema.safeParse({ ...pr, unresolvedReviewThreads: 2_001 }).success).toBe(false);
+  });
 });
 
 describe("Claude naming response", () => {
