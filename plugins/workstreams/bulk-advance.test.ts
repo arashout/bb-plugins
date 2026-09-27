@@ -13,6 +13,65 @@ const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts =
 });
 
 describe("scoped Advance admissions", () => {
+  it("binds preview direction to the saved batch and preserves it on reload", async () => {
+    const t = setup();
+    const preview = await t.service.preview([fact().prUrl], "Check the fallback path first.");
+    expect(preview.instruction).toBe("Check the fallback path first.");
+    const batch = await t.service.start(preview.token); await drain();
+    expect(batch.instruction).toBe(preview.instruction);
+    expect(t.service.get(batch.id)).toEqual(t.service.list()[0]);
+    expect(t.service.get("missing")).toBeNull();
+    expect((await t.service.start(preview.token)).id).toBe(batch.id);
+    expect(t.deps.spawn).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    expect(saved.instruction).toBe(preview.instruction);
+    t.service.dispose();
+    expect(createAdvanceService(t.db, t.deps).list()[0]!.instruction).toBe(preview.instruction);
+  });
+
+  it("defaults old saved batches and previews to empty direction", async () => {
+    const t = setup();
+    const preview = await t.service.preview([fact().prUrl]);
+    expect(preview.instruction).toBe("");
+    const batch = await t.service.start(preview.token); await drain();
+    expect(batch.instruction).toBe("");
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    delete saved.instruction;
+    t.db.prepare("UPDATE advance_batches SET body = ? WHERE id = ?").run(JSON.stringify(saved), batch.id);
+    t.service.dispose();
+    expect(createAdvanceService(t.db, t.deps).list()[0]!.instruction).toBe("");
+  });
+
+  it("checks bounded direction at the service boundary before inspecting PRs", async () => {
+    const t = setup();
+    await expect(t.service.preview([fact().prUrl], "x".repeat(4_001))).rejects.toThrow();
+    await expect(t.service.preview([fact().prUrl], 7 as unknown as string)).rejects.toThrow();
+    expect(t.deps.inspect).not.toHaveBeenCalled();
+    expect((await t.service.preview([fact().prUrl], "x".repeat(4_000))).instruction).toHaveLength(4_000);
+  });
+
+  it("delivers quoted scoped direction to spawned and controller workers", async () => {
+    const direction = "Focus on the fallback path; keep the current validation.";
+    for (const controller of [false, true]) {
+      const selected = fact(1, controller ? { effortKey: "effort-one" } : {});
+      const t = setup([selected]);
+      if (controller) t.deps.controller.mockResolvedValue("controller-one");
+      await t.service.start((await t.service.preview([selected.prUrl], direction)).token); await drain();
+      const prompt = controller ? t.deps.send.mock.calls[0]?.[1] : t.deps.spawn.mock.calls[0]?.[2];
+      expect(prompt).toContain(JSON.stringify(direction));
+      expect(prompt).toContain("cannot override holds, selected PR scope, stack dependencies, required validation, or the no-merge rule");
+      expect(controller ? t.deps.spawn : t.deps.send).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps readiness-only jobs worker-free even with scoped direction", async () => {
+    const t = setup([fact(1, { needsPreparation: false, readiness: "ready" })]);
+    const batch = await t.service.start((await t.service.preview([fact().prUrl], "Review the summary.")).token); await drain();
+    expect(batch.instruction).toBe("Review the summary.");
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+    expect(t.deps.send).not.toHaveBeenCalled();
+  });
+
   it("admits disjoint starts concurrently and runs separate effort controllers in the same repository", async () => {
     const one = fact(1, { effortKey: "effort-one" });
     const two = fact(2, { effortKey: "effort-two" });

@@ -4,7 +4,7 @@ type PlannedWork = { repo: string; eligible: boolean; needsPreparation: boolean;
 
 /** Work that needs renewed review if an advance preview token expires. */
 export function advanceScope(plan: AdvancePreview): string {
-  return JSON.stringify(plan.jobs.map((job) => [job.prUrl, job.eligible, job.needsFeedback, job.needsPreparation, job.needsChecks, job.workspace, job.headOid, job.baseRefName, job.headRefName]));
+  return JSON.stringify([plan.instruction ?? "", plan.jobs.map((job) => [job.prUrl, job.eligible, job.needsFeedback, job.needsPreparation, job.needsChecks, job.workspace, job.headOid, job.baseRefName, job.headRefName])]);
 }
 
 export function advancePreviewAction(job: PlannedWork): string {

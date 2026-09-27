@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { advancePreviewAction, advancePreviewSummary } from "./bulk-advance-preview";
+import { advancePreviewAction, advancePreviewSummary, advanceScope } from "./bulk-advance-preview";
 
 const job = (patch: Partial<Parameters<typeof advancePreviewAction>[0]> = {}) => ({ repo: "acme/app", eligible: true, needsPreparation: false, needsFeedback: false, needsChecks: false, ...patch });
 
 describe("advance preview scope", () => {
+  it("requires renewed review when the scoped direction changes", () => {
+    const plan = { token: "first", expiresAt: 1, instruction: "Check the fallback.", jobs: [] };
+    expect(advanceScope({ ...plan, token: "second", expiresAt: 2 })).toBe(advanceScope(plan));
+    expect(advanceScope({ ...plan, instruction: "Check the retry." })).not.toBe(advanceScope(plan));
+    expect(advanceScope({ ...plan, instruction: "" })).toBe(advanceScope({ ...plan, instruction: undefined }));
+  });
+
   it("requires an agent and explicit feedback scope even when the branch is current", () => {
     const feedback = job({ needsFeedback: true });
     expect(advancePreviewAction(feedback)).toBe("Address feedback + verify");
