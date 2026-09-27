@@ -461,6 +461,11 @@ export const rpcContract = defineRpcContract({
       recommendedThreadId: z.string().nullable(),
     }),
   },
+  /** One compact final-output line from a thread still linked to this PR. */
+  pr_thread_update: {
+    input: z.object({ prUrl: z.string().max(500), threadId: z.string().max(200) }).strict(),
+    output: z.object({ lastLine: z.string().max(280).nullable() }),
+  },
   /** Send one user-authored instruction to one thread currently linked to this PR row. */
   thread_message: {
     input: z.object({ path: z.string().max(1_000).optional(), prUrl: z.string().max(500), threadId: z.string().max(200), message: z.string().max(4_000) }).strict(),
@@ -2685,6 +2690,16 @@ export default async function plugin(bb: BbPluginApi) {
     return { threads, recommendedThreadId };
   }
 
+  function lastThreadLine(output: string | null): string | null {
+    if (!output) return null;
+    const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index]!;
+      if (!/^Workstreams job \S+ complete: (?:prepared|blocked)$/.test(line)) return line.slice(0, 280);
+    }
+    return null;
+  }
+
   async function effortPlan(groupKey: string): Promise<EffortPlan> {
     const current = await board();
     const established = effortStore.source(groupKey);
@@ -3623,6 +3638,10 @@ export default async function plugin(bb: BbPluginApi) {
     thread_restore: ({ threadId }) => restoreArchivedThread(bb.sdk.threads, archiveStore, threadId),
     thread_archived: async () => (await archiveStore.list()).sort((a, b) => b.archivedAt - a.archivedAt).slice(0, ARCHIVE_HISTORY_LIMIT),
     pr_thread_context: ({ prUrl }) => prThreadContext(prUrl),
+    pr_thread_update: async ({ prUrl, threadId }) => {
+      if (!(await prThreadContext(prUrl)).threads.some((thread) => thread.id === threadId)) return { lastLine: null };
+      return { lastLine: lastThreadLine((await bb.sdk.threads.output({ threadId })).output) };
+    },
     thread_message: async ({ path, prUrl, threadId, message }) => {
       const canonical = canonicalPrUrl(prUrl);
       const known = knownPr(prUrl);

@@ -43,6 +43,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
   };
   for (const row of options.initialThreads ?? []) add(row.id, { title: row.title });
   const send = vi.fn(async () => ({ ok: true as const, delivery: "sent" as const }));
+  const output = vi.fn(async () => ({ output: null as string | null }));
   const spawn = vi.fn(async () => add("thr-unexpected"));
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: HOST }) as never },
@@ -55,7 +56,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
         return { ...row, canSpawnChild: true } as never;
       },
       getPluginMetadata: async ({ threadId }: { threadId: string }) => (options.metadata?.[threadId] ?? {}) as never,
-      spawn, send, context: async () => ({ usage: null }) as never,
+      spawn, send, output, context: async () => ({ usage: null }) as never,
       events: { list: async () => [] }, interactions: { list: async () => [] as never },
     },
   }, experimental_callHostRpc: ({ method }) => {
@@ -72,10 +73,48 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
     projectId: PROJECT, members: { tickets: ["ABC-42"], prUrls: [URL, NEXT_URL] } });
   const context = async (url = URL) => await harness.callRpc("pr_thread_context", { prUrl: url }) as Context;
   const message = async (threadId: string, url = URL) => await harness.callRpc("thread_message", { prUrl: url, threadId, message: "Check this PR" });
-  return { bb, harness, threads, add, send, spawn, effortStore, effort, context, message };
+  const update = async (threadId: string, url = URL) => await harness.callRpc("pr_thread_update", { prUrl: url, threadId });
+  return { bb, harness, threads, add, send, output, spawn, effortStore, effort, context, message, update };
 }
 
 describe("PR thread context and messaging", () => {
+  it("shows the final content line, skipping only Advance completion markers and bounding the preview", async () => {
+    const env = await setup();
+    env.add("thr-pr");
+    env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
+    env.output.mockResolvedValue({ output: `Checked the change.\nThe review is ready.\n\nWorkstreams job attempt-1 complete: prepared\n` });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: "The review is ready." });
+    env.output.mockResolvedValue({ output: `The tests remain blocked.\nWorkstreams job attempt-1 complete: blocked` });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: "The tests remain blocked." });
+    env.output.mockResolvedValue({ output: "Workstreams job attempt-1 complete: prepared\n\n" });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: null });
+    env.output.mockResolvedValue({ output: "A".repeat(400) });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: "A".repeat(280) });
+  });
+
+  it("reads only linked threads, including closed PR history, and distinguishes missing from failed output", async () => {
+    const env = await setup({ state: "MERGED" });
+    env.add("thr-pr");
+    env.add("thr-other");
+    env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
+    expect(await env.update("thr-other")).toEqual({ lastLine: null });
+    expect(await env.update("thr-pr", "https://github.com/inkwell/folio/pull/999")).toEqual({ lastLine: null });
+    expect(env.output).not.toHaveBeenCalled();
+    expect(await env.update("thr-pr")).toEqual({ lastLine: null });
+    env.output.mockRejectedValueOnce(new Error("Output unavailable"));
+    await expect(env.update("thr-pr")).rejects.toThrow("Output unavailable");
+    expect(env.output).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps linked thread updates readable while the PR is on hold", async () => {
+    const env = await setup();
+    env.add("thr-pr");
+    env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
+    await env.harness.callRpc("pr_hold_set", { prUrl: URL, held: true, reason: "Waiting for copy review" });
+    env.output.mockResolvedValue({ output: "Waiting for copy review." });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: "Waiting for copy review." });
+  });
+
   it("reads coordinator, repository, and PR history without launching work, and recommends the current repository controller", async () => {
     const env = await setup();
     env.add("thr-coordinator", { title: "🧭 Manuscript review" });
