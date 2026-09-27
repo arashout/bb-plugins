@@ -53,7 +53,7 @@ export function createRepoControllerService(store: EffortStore, sdk: RepoControl
       if (found.length === 1) return checked(store.saveRepoController({ ...record, threadId: found[0], state: "ready" }), coordinatorThreadId);
       throw new Error("Repository controller launch is uncertain. Inspect existing threads before advancing; another controller will not start automatically.");
     }
-    const thread = await sdk.spawn({ projectId, parentThreadId: coordinatorThreadId, title: `📦 ${repo}`, prompt: repoControllerPrompt(effort, repo),
+    const thread = await sdk.spawn({ projectId, parentThreadId: coordinatorThreadId, title: repo, prompt: repoControllerPrompt(effort, repo),
       pluginMetadata: { effortId: effort.id, repo, role: "repo" } });
     return checked(store.saveRepoController({ ...record, threadId: thread.id, state: "ready" }), coordinatorThreadId);
   }

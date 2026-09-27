@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useBbNavigate, useRealtime, useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import type { PipelineCard } from "./pipeline";
+import { Icon } from "@/components/ui/icon";
 
 type PrThread = {
   id: string;
@@ -245,13 +246,13 @@ export function PipelinePrComposer({
               <button
                 type="button"
                 onClick={() => navigate.toThread(selectedThread.id)}
-                className="max-w-full break-words rounded text-left underline hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex max-w-full items-center gap-1 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:bg-foreground/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={selectedThread.title}
                 aria-label={`Open thread: ${selectedThread.title}`}
               >
-                <span className="text-muted-foreground">Open thread · {ROLE_LABEL[selectedThread.role]} · </span>
-                {selectedThread.title}
+                Open thread <Icon name="ArrowUpRight" className="size-3.5 shrink-0" />
               </button>
+              <p className="line-clamp-2 break-words text-muted-foreground">{ROLE_LABEL[selectedThread.role]} · {selectedThread.title}</p>
               <p role="status" className="text-muted-foreground">{threadProgress(selectedThread, sidebarThreads, card)}</p>
               {lastLine ? <p className="line-clamp-2 break-words text-muted-foreground"><span className="font-medium text-foreground">Latest thread update:</span> {lastLine}</p> : null}
               {updateError ? <p role="status" className="text-muted-foreground">Thread update unavailable.</p> : null}

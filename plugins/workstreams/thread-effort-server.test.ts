@@ -492,6 +492,48 @@ it("pins an unowned PR when its ticket already belongs to the destination", asyn
   expect((await context()).sources[0]?.explicit).toBe(true);
 });
 
+it("moves an explicitly owned checkout path with its thread-selected PR cohort", async () => {
+  const { harness, context, store } = await setup();
+  const previous = store.establish({ sourceKey: "path-owner", name: "Draft review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [], checkoutPaths: ["/p/folio-42"] } });
+  const destination = store.establish({ sourceKey: "target", name: "Editorial review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+  await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a });
+  const preview = await context();
+  expect(preview.sources[0]?.scope).toContain(previous.key);
+  expect(await harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"],
+    destinationKey: destination.key, expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], destination.key) }))
+    .toMatchObject({ ok: true });
+  expect(store.owner("checkoutPath", "/p/folio-42")?.id).toBe(destination.id);
+  expect(store.owner("prUrl", a)?.id).toBe(destination.id);
+  expect(store.get(previous.id)?.members.checkoutPaths).toBeUndefined();
+});
+
+it("does not inherit a PR into another effort when its checkout path has an explicit owner", async () => {
+  const { harness, context, store } = await setup({ environmentPath: "/p/folio-42" });
+  const owner = store.establish({ sourceKey: "path-owner", name: "Draft review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [], checkoutPaths: ["/p/folio-42"] } });
+  const other = store.establish({ sourceKey: "other", name: "Other review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+  const preview = await context();
+  expect(await harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: other.key,
+    expectedScope: threadEffortAssignmentScope(preview, other.key) })).toMatchObject({ ok: true });
+  expect(store.owner("checkoutPath", "/p/folio-42")?.id).toBe(owner.id);
+  expect(store.owner("prUrl", a)).toBeNull();
+  expect(store.owner("ticket", "ABC-101")).toBeNull();
+});
+
+it("keeps existing path membership when thread intent claims an unrelated PR", async () => {
+  const { harness, context, store } = await setup({ environmentPath: "/p/folio-42" });
+  const destination = store.establish({ sourceKey: "path-owner", name: "Editorial review", goal: "", projectId: "proj",
+    coordinatorState: "none", members: { tickets: [], prUrls: [], checkoutPaths: ["/p/folio-43"] } });
+  const preview = await context();
+  expect(await harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: destination.key,
+    expectedScope: threadEffortAssignmentScope(preview, destination.key) })).toMatchObject({ ok: true });
+  expect(store.get(destination.id)?.members.checkoutPaths).toEqual(["/p/folio-43"]);
+  expect(store.owner("prUrl", a)?.id).toBe(destination.id);
+});
+
 it("reconciles a ticket owner and a different PR owner into the selected effort", async () => {
   const { harness, context, store } = await setup();
   const ticketOwner = store.establish({ sourceKey: "ticket-owner", name: "Editorial", goal: "", projectId: "", coordinatorState: "none",

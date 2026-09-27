@@ -130,6 +130,32 @@ describe("established effort storage", () => {
       { name: "Suggested", members: { tickets: [], prUrls: [url] } })).toThrow("Destination membership changed");
   });
 
+  it("moves a copied PR URL by canonical identity and removes its old row and JSON member", () => {
+    const { store, db } = setup();
+    const copied = `${url.toUpperCase()}/?view=files`;
+    const previous = store.establish({ ...input, sourceKey: "legacy", members: { tickets: [], prUrls: [copied] } });
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: [], prUrls: [] } });
+    expect(store.owner("prUrl", url)?.id).toBe(previous.id);
+    store.transfer(destination.key, { tickets: [], prUrls: [url] });
+    const reloaded = createEffortStore(db);
+    expect(reloaded.owner("prUrl", `${url}/?tab=files`)?.id).toBe(destination.id);
+    expect(reloaded.get(previous.id)?.members.prUrls).toEqual([]);
+    expect(reloaded.get(destination.id)?.members.prUrls).toEqual([url]);
+    expect((db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl'`).all() as { ref: string }[])
+      .map((row) => row.ref)).toEqual([url]);
+  });
+
+  it("rejects conflicting copied-URL owners without changing either effort", () => {
+    const { store } = setup();
+    const legacy = store.establish({ ...input, sourceKey: "legacy", members: { tickets: [], prUrls: [`${url}/?view=files`] } });
+    const exact = store.establish({ ...input, sourceKey: "exact", members: { tickets: [], prUrls: [url] } });
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: [], prUrls: [] } });
+    expect(() => store.transfer(destination.key, { tickets: [], prUrls: [url] })).toThrow("Conflicting ownership");
+    expect(store.get(legacy.id)?.members.prUrls).toEqual([`${url}/?view=files`]);
+    expect(store.get(exact.id)?.members.prUrls).toEqual([url]);
+    expect(store.get(destination.id)?.members.prUrls).toEqual([]);
+  });
+
   it("rejects an oversized automatic claim before changing ownership or the readable effort", () => {
     const { store, db } = setup();
     const tickets = Array.from({ length: 1000 }, (_, index) => `ABC-${index}`);

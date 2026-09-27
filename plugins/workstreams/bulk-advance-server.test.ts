@@ -185,7 +185,7 @@ describe("bulk advance server integration", () => {
     await env.harness.callRpc("advance_start", { token: plan.token });
     await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
     expect(env.calls.find((call) => call.method === "advanceWorkspace")?.input).toMatchObject({ sourcePath: PATH, prUrl: env.url, expectedHeadOid: HEAD, expectedBaseOid: BASE });
-    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "📦 example/widget PR #42", projectId: "project-example",
+    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
       pluginMetadata: { role: "rebase-worker" } });
     expect(env.spawn.mock.calls[0]?.[0]).not.toHaveProperty("model");
@@ -284,10 +284,14 @@ describe("bulk advance server integration", () => {
     const env = await setup({ omitLaunchedThreadsFromList: true });
     expect(await env.harness.callRpc("thread_start", { path: PATH, prompt: "Rebase this PR" }))
       .toMatchObject({ ok: true, threadId: "thr-rebasing" });
-    // No thread.created or thread.active event is emitted. The scan still has
-    // no linked thread, so only the saved per-PR launch reference can guard it.
+    // The effort parent and repository controller are created before the PR worker.
+    // No lifecycle event or linked thread reaches the board, so the saved PR
+    // launch reference still guards Advance without starting another worker.
     expect((await env.preview()).jobs[0]).toMatchObject({ eligible: false, detail: "Another action or batch already owns this PR" });
-    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.spawn).toHaveBeenCalledTimes(3);
+    expect(env.spawn.mock.calls.map(([args]) => args.pluginMetadata?.role)).toEqual(["coordinator", "repo", "pr"]);
+    expect(env.spawn.mock.calls[1]?.[0].parentThreadId).toBe("thr-coordinator");
+    expect(env.spawn.mock.calls[2]?.[0].parentThreadId).toBe("thr-repo");
     expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
   });
 
@@ -308,7 +312,7 @@ describe("bulk advance server integration", () => {
     await env.harness.callRpc("advance_start", { token: plan.token });
     await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
     expect(env.calls.find((call) => call.method === "advanceWorkspace")?.input).toMatchObject({ sourcePath: PATH, prUrl: env.url, expectedHeadOid: HEAD, expectedBaseOid: BASE });
-    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "📦 example/widget PR #42", projectId: "project-example",
+    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } } });
   });
 

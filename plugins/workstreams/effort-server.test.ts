@@ -77,7 +77,7 @@ describe("established effort coordination through the server", () => {
     expect(await harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({ ok: true, recommendation: { mode: "new", threadId: null } });
     const action = { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Inspect and repair this PR." };
     expect(await harness.callRpc("agent_run", action)).toMatchObject({ ok: true, threadId: "thr-3" });
-    expect(spawns[1]).toMatchObject({ projectId: "proj-inkwell", parentThreadId: "thr-1", title: "📦 inkwell/folio",
+    expect(spawns[1]).toMatchObject({ projectId: "proj-inkwell", parentThreadId: "thr-1", title: "inkwell/folio",
       environment: { type: "provider", environmentProviderId: "git-worktree" }, pluginMetadata: { role: "repo", repo: "inkwell/folio" } });
     expect(spawns[2]).toMatchObject({ parentThreadId: "thr-2", environment: { workspace: { path: PATH } },
       pluginMetadata: { role: "pr", prUrl: URL, ticket: "ABC-101" } });

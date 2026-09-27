@@ -31,7 +31,6 @@ import {
 import { PipelinePrComposer, PrThreadLinks } from "./pipeline-pr-threads";
 import { PrHoldDialog, usePrHoldControls } from "./pr-hold-dialog";
 import { ArchivedThreadsButton } from "./archivedthreads";
-import { backlogThreads } from "./backlog-threads";
 import { StartThreadDialog } from "./inbox";
 import type { Row } from "./inbox-rows";
 import { matchesApprovedFilter } from "./approval-filter";
@@ -49,6 +48,11 @@ import {
 } from "@/components/ui/dialog";
 import { AGENT_ACTIONS, type AgentAction } from "./actions";
 import { usePipelineMotion } from "./pipeline-motion";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Icon } from "@/components/ui/icon";
+import { Tip } from "@/components/ui/tooltip";
+import { usePortalScopeProps } from "./lib/portal-scope";
+import { PipelineCardEffortDialog } from "./pipeline-card-effort";
 
 const LABEL: Record<PipelineStage, string> = {
   build: "Build",
@@ -118,6 +122,8 @@ export function PipelineView({
   const [query, setQuery] = useState("");
   const [layout, setLayout] = useState<"stage" | "effort">("stage");
   const [selected, setSelected] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [effortEditing, setEffortEditing] = useState<PipelineCard | null>(null);
   const [advanceSelection, setAdvanceSelection] = useState<AdvanceSelection>(EMPTY_SELECTION);
   const [filterOpen, setFilterOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -132,8 +138,11 @@ export function PipelineView({
   const [queuedDirect, setQueuedDirect] = useState<PipelineCard[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const boardRootRef = useRef<HTMLDivElement | null>(null);
+  const openThreadRequest = useRef(0);
+  const portalScope = usePortalScopeProps();
   const arrivedFocus = useRef<string | null>(null);
   useEffect(() => setDispatch(board.dispatch), [board.dispatch]);
+  useEffect(() => () => { openThreadRequest.current++; }, []);
 
   const locals = useMemo(
     () => [...inboxRows(board, now).values()].flat(),
@@ -220,16 +229,18 @@ export function PipelineView({
   useEffect(() => {
     if (messaging && (
       !cards.some((card) => card.key === messaging.key && card.pr?.state === "OPEN" && !card.hold) ||
-      (messaging.location === "drawer" && selected !== messaging.key)
+      (messaging.location === "drawer" && (selected !== messaging.key || !detailsOpen))
     )) setMessaging(null);
-  }, [cards, messaging, selected]);
+  }, [cards, messaging, selected, detailsOpen]);
   useEffect(() => {
     if (
       selected !== null &&
       (search || prefs.approvedOnly) &&
       !visible.some((card) => card.key === selected)
-    )
+    ) {
       setSelected(null);
+      setDetailsOpen(false);
+    }
   }, [selected, search, prefs.approvedOnly, visible]);
   const sidebarThreads = experimental_useSidebarThreads().threads;
 
@@ -257,6 +268,20 @@ export function PipelineView({
       )?.focus({ preventScroll: true });
     });
   };
+  const openDetails = (card: PipelineCard) => {
+    setSelected(card.key);
+    setDetailsOpen(true);
+  };
+  const showThreadChoices = (card: PipelineCard) => {
+    openDetails(card);
+    toast.info("Choose a linked thread in details");
+    requestAnimationFrame(() => document.getElementById("pipeline-detail-agent")?.scrollIntoView({ block: "nearest" }));
+  };
+  const toggleSelection = (card: PipelineCard) => {
+    choose(card);
+    if (selectablePipelineCard(card) && (advanceSelection.urls.includes(selectionUrl(card)!) || advanceSelection.urls.length < ADVANCE_SELECTION_LIMIT))
+      setAdvanceSelection((current) => togglePipelineSelection(current, card));
+  };
   const directRow = (card: PipelineCard): DirectRow | null =>
     card.pr === null
       ? null
@@ -266,18 +291,30 @@ export function PipelineView({
           age: { since: card.ageSince },
           unit: { pr: card.pr, prUrl: card.pr.url },
         });
-  const openThread = (card: PipelineCard) => {
-    const linked = card.pr
-      ? backlogThreads(
-          card.pr.url,
-          card.local?.cluster.threads ?? [],
-          board.runs,
-          advance.batches.flatMap((batch) => batch.jobs),
-          sidebarThreads,
-        )
-      : (card.local?.cluster.threads ?? []);
-    const id = card.activity.threadId ?? linked[0]?.id;
-    if (id) navigate.toThread(id);
+  const openThread = async (card: PipelineCard) => {
+    const request = ++openThreadRequest.current;
+    if (card.pr) {
+      try {
+        const context = await rpc.call("pr_thread_context", { prUrl: card.pr.url });
+        if (request !== openThreadRequest.current) return;
+        if (context.recommendedThreadId) {
+          navigate.toThread(context.recommendedThreadId);
+          return;
+        }
+        if (context.threads.length > 0) {
+          showThreadChoices(card);
+          return;
+        }
+        toast.info("No linked thread for this PR");
+      } catch (cause) {
+        if (request !== openThreadRequest.current) return;
+        toast.error(cause instanceof Error ? cause.message : "Could not find the linked thread");
+      }
+      return;
+    }
+    const linked = card.local?.cluster.threads ?? [];
+    if (linked.length === 1) navigate.toThread(linked[0]!.id);
+    else if (linked.length > 1) showThreadChoices(card);
     else toast.info("No linked thread for this item");
   };
   const repairAction = (card: PipelineCard): AgentAction | null => {
@@ -470,6 +507,17 @@ export function PipelineView({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (
+        event.key === "Escape" && detailsOpen &&
+        !event.defaultPrevented && !effortEditing && !agent && !direct &&
+        !hold.target && !messaging && !starting && !historyOpen &&
+        !filterOpen && !menuOpen &&
+        !(event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable], [role=dialog], [role=menu]"))
+      ) {
+        event.preventDefault();
+        setDetailsOpen(false);
+        return;
+      }
+      if (
         event.defaultPrevented ||
         event.metaKey ||
         event.ctrlKey ||
@@ -477,18 +525,14 @@ export function PipelineView({
         canTypeKey(event.target)
       )
         return;
+      if (effortEditing || agent || direct || hold.target || starting || historyOpen) return;
       if (event.key === "/") {
         event.preventDefault();
         searchRef.current?.focus();
         return;
       }
       if (
-        agent ||
-        direct ||
-        hold.target ||
         messaging ||
-        starting ||
-        historyOpen ||
         filterOpen ||
         menuOpen
       )
@@ -512,7 +556,10 @@ export function PipelineView({
           run(selectedCard);
         else if (event.key === "m" && selectedCard.action?.kind === "merge")
           run(selectedCard);
-      } else if (event.key === "Escape") setSelected(null);
+      } else if (event.key === "Escape") {
+        if (detailsOpen) setDetailsOpen(false);
+        else setSelected(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -520,6 +567,11 @@ export function PipelineView({
 
   const cardView = (card: PipelineCard) => {
     const repoName = card.repo.split("/").at(-1) ?? card.repo;
+    const label = `${card.repo}${card.pr ? ` #${card.pr.number}` : ""}: ${card.title}`;
+    const selectable = selectablePipelineCard(card);
+    const checked = selectable && advanceSelection.urls.includes(selectionUrl(card)!);
+    const selectionFull = advanceSelection.urls.length >= ADVANCE_SELECTION_LIMIT && !checked;
+    const menuItem = "cursor-pointer rounded px-2 py-1.5 text-[12px] outline-none focus:bg-foreground/[0.06] data-[disabled]:pointer-events-none data-[disabled]:opacity-40";
     return (
       <div
         key={card.key}
@@ -529,44 +581,41 @@ export function PipelineView({
           "group relative isolate min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
           card.hold && "opacity-55 hover:opacity-90",
           selected === card.key && "border-ring ring-1 ring-ring/40",
+          checked && "border-foreground/50 bg-foreground/[0.04]",
         )}
       >
-        <button
-          data-pipeline-card
-          type="button"
-          onClick={() => choose(card)}
-          aria-label={`Details for ${card.repo}${card.pr ? ` #${card.pr.number}` : ""}: ${card.title}`}
-          className="absolute inset-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        <div className="relative flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
-          {selectablePipelineCard(card) ? (
+        <div className="flex min-w-0 items-center gap-2 font-mono text-[11px]">
+          {selectable ? (
             <input
               type="checkbox"
-              checked={advanceSelection.urls.includes(selectionUrl(card)!)}
-              disabled={advanceSelection.urls.length >= ADVANCE_SELECTION_LIMIT && !advanceSelection.urls.includes(selectionUrl(card)!)}
-              onChange={() => setAdvanceSelection((current) => togglePipelineSelection(current, card))}
+              checked={checked}
+              disabled={selectionFull}
+              onChange={() => {
+                setSelected(card.key);
+                setAdvanceSelection((current) => togglePipelineSelection(current, card));
+              }}
               aria-label={`Select ${card.repo} #${card.pr!.number} for Advance`}
-              className="relative z-10 mt-0.5 shrink-0 accent-foreground"
+              className="shrink-0 accent-foreground"
             />
           ) : null}
-          <b className="pointer-events-none truncate" title={card.repo}>
+          <b className="truncate" title={card.repo}>
             {repoName}
           </b>
           {card.pr ? (
             <UrlLink
               href={card.pr.url}
-              className="z-10 shrink-0 text-muted-foreground hover:underline"
+              className="shrink-0 text-muted-foreground hover:underline"
             >
               #{card.pr.number}
             </UrlLink>
           ) : (
-            <span className="pointer-events-none text-muted-foreground">
+            <span className="text-muted-foreground">
               branch
             </span>
           )}
           <span
             className={cn(
-              "pointer-events-none ml-auto shrink-0 text-muted-foreground",
+              "ml-auto shrink-0 text-muted-foreground",
               card.ageSince !== null &&
                 now - card.ageSince > 30 * 86_400_000 &&
                 "text-amber-600",
@@ -575,8 +624,13 @@ export function PipelineView({
             {age(card, now)}
           </span>
         </div>
-        <div
-          className="pointer-events-none relative mt-1 overflow-hidden text-ellipsis text-[12px] leading-4"
+        <button
+          data-pipeline-card
+          type="button"
+          onClick={() => toggleSelection(card)}
+          aria-label={selectable ? selectionFull ? `Focus ${label}; Advance selection limit reached` : `${checked ? "Remove" : "Select"} ${label} ${checked ? "from" : "for"} Advance` : `Focus ${label}`}
+          aria-pressed={selectable ? checked : undefined}
+          className="mt-1 block w-full overflow-hidden text-ellipsis rounded text-left text-[12px] leading-4 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           style={{
             display: "-webkit-box",
             WebkitLineClamp: 2,
@@ -584,28 +638,29 @@ export function PipelineView({
           }}
         >
           {card.title}
-        </div>
-        <div className="relative mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+        </button>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
           <span
             className={cn(
-              "pointer-events-none shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
               BLOCKER_COLOR[card.blocker.tone],
             )}
           >
             {card.blocker.label}
           </span>
-          {layout === "stage" ? (
-            <span
-              className="pointer-events-none min-w-0 flex-1 truncate text-[10px] text-muted-foreground"
-              title={card.effortName ?? "One-offs"}
-            >
-              {card.effortName ?? "One-offs"}
-            </span>
-          ) : null}
+          <button
+            type="button"
+            onClick={() => setEffortEditing(card)}
+            aria-label={`Change effort for ${label}; current effort ${card.effortName ?? "One-offs"}`}
+            title={`Change effort: ${card.effortName ?? "One-offs"}`}
+            className="min-w-0 max-w-full flex-1 truncate rounded px-1 py-0.5 text-left text-[10px] text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {card.effortName ?? "One-offs"}
+          </button>
           {card.action?.kind === "open-pr" && card.pr ? (
             <UrlLink
               href={card.pr.url}
-              className="relative z-10 ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold hover:bg-foreground/[0.06]"
+              className="ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold hover:bg-foreground/[0.06]"
             >
               {card.action.label}
             </UrlLink>
@@ -614,7 +669,7 @@ export function PipelineView({
               type="button"
               onClick={() => run(card)}
               className={cn(
-                "relative z-10 ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring",
+                "ml-auto shrink-0 rounded border px-2 py-1 text-[10.5px] font-semibold outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring",
                 card.action.kind === "merge" &&
                   "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700",
                 card.action.kind === "fix" &&
@@ -625,37 +680,52 @@ export function PipelineView({
             </button>
           ) : null}
         </div>
-        <p className="pointer-events-none relative mt-1 text-[10.5px] leading-4 text-muted-foreground">
+        <p className="mt-1 text-[10.5px] leading-4 text-muted-foreground">
           <b className="text-foreground">Next:</b> {card.nextStep}
         </p>
-        {card.pr?.state === "OPEN" && !card.hold ? (
-          <div className="relative z-10 mt-2 border-t border-border/70 pt-1.5">
-            {messaging?.key === card.key && messaging.location === "card" ? (
-              <PipelinePrComposer
-                key={card.key}
-                card={card}
-                sidebarThreads={sidebarThreads}
-                onClose={() => setMessaging(null)}
-              />
-            ) : (
-              <button
-                type="button"
-                onClick={() => setMessaging({ key: card.key, location: "card" })}
-                aria-label={`Message agent for ${card.repo} #${card.pr.number}`}
-                className="rounded px-1 py-0.5 text-[10.5px] font-medium text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                Message agent
-              </button>
-            )}
+        <div className="mt-2 flex items-center gap-1 border-t border-border/70 pt-1.5">
+          {card.pr?.state === "OPEN" && !card.hold && !(messaging?.key === card.key && messaging.location === "card") ? (
+              <Tip label="Message agent">
+                <button
+                  type="button"
+                  onClick={() => setMessaging({ key: card.key, location: "card" })}
+                  aria-label={`Message agent for ${card.repo} #${card.pr.number}`}
+                  className="flex size-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Icon name="Bot" className="size-[18px]" />
+                </button>
+              </Tip>
+          ) : null}
+          {(card.pr || card.local?.cluster.threads.length) && !card.hold ? (
+            <Tip label="Open thread">
+              <button type="button" onClick={() => void openThread(card)} aria-label={`Open thread for ${label}`} className="flex size-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><Icon name="ArrowUpRight" className="size-[18px]" /></button>
+            </Tip>
+          ) : null}
+          <div className="ml-auto flex items-center gap-1">
+            <Tip label="Open details">
+              <button type="button" aria-label={`Open details for ${label}`} aria-expanded={detailsOpen && selected === card.key} onClick={() => openDetails(card)} className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.07] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><Icon name="PanelRight" className="size-[18px]" /></button>
+            </Tip>
+            <DropdownMenu.Root>
+              <Tip label="More actions"><DropdownMenu.Trigger asChild><button type="button" aria-label={`More actions for ${label}`} className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.07] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><Icon name="MoreHorizontal" className="size-4" /></button></DropdownMenu.Trigger></Tip>
+              <DropdownMenu.Portal><DropdownMenu.Content {...portalScope} side="bottom" align="end" sideOffset={4} collisionPadding={8} className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md">
+                <DropdownMenu.Item className={menuItem} onSelect={() => setEffortEditing(card)}>Change effort…</DropdownMenu.Item>
+                {card.hold && card.pr ? <DropdownMenu.Item className={menuItem} onSelect={() => void hold.release(card.pr!.url)}>Release hold</DropdownMenu.Item> : null}
+                {card.pr?.state === "OPEN" && !card.hold ? <DropdownMenu.Item className={menuItem} onSelect={() => hold.edit({ url: card.pr!.url, label: `${card.repo} #${card.pr!.number}`, hold: card.hold })}>Put on hold…</DropdownMenu.Item> : null}
+                {!card.hold && (card.activity.threadId || card.local?.cluster.threads.length) ? <DropdownMenu.Item className={menuItem} onSelect={() => openThread(card)}>Open thread</DropdownMenu.Item> : null}
+                {!card.hold && card.local ? <DropdownMenu.Item className={menuItem} onSelect={() => openCheckout(card)}>Open checkout</DropdownMenu.Item> : null}
+                {card.pr?.state === "OPEN" && !card.hold && card.activity.state !== "working" && card.action?.kind !== "advance" && card.action?.kind !== "fix" ? <DropdownMenu.Item className={menuItem} onSelect={() => setAgent({ kind: "advance", prUrls: [card.pr!.url] })}>Advance…</DropdownMenu.Item> : null}
+              </DropdownMenu.Content></DropdownMenu.Portal>
+            </DropdownMenu.Root>
           </div>
-        ) : null}
+        </div>
+        {messaging?.key === card.key && messaging.location === "card" ? <div className="mt-2"><PipelinePrComposer key={card.key} card={card} sidebarThreads={sidebarThreads} onClose={() => setMessaging(null)} /></div> : null}
         {card.activity.state !== "none" ? (
           <button
             type="button"
             disabled={!card.activity.threadId}
             onClick={() => openThread(card)}
             className={cn(
-              "relative z-10 mt-2 block w-full truncate border-t border-dashed border-border/70 py-1.5 text-left text-[10px] text-muted-foreground disabled:cursor-default",
+              "mt-2 block w-full truncate border-t border-dashed border-border/70 py-1.5 text-left text-[10px] text-muted-foreground disabled:cursor-default",
               card.activity.state === "working" &&
                 "text-violet-600 dark:text-violet-300",
               card.activity.state === "needs-you" && "text-destructive",
@@ -687,28 +757,27 @@ export function PipelineView({
       <>
         {shown.map((card) =>
           limit ? (
-            <button
+            <div
               key={card.key}
               id={`pipeline-${card.key}`}
               data-pipeline-motion-key={card.key}
-              data-pipeline-card
-              type="button"
-              onClick={() => choose(card)}
               className={cn(
-                "flex min-w-0 items-baseline gap-1 rounded px-1 py-1 text-left text-[10.5px] hover:bg-foreground/[0.05]",
+                "flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 rounded px-1 py-1 text-left text-[10.5px] hover:bg-foreground/[0.05]",
                 selected === card.key && "bg-foreground/[0.07]",
               )}
             >
-              <b className="shrink-0 font-mono">
-                {card.repo.split("/").at(-1)}
-              </b>
-              <span className="shrink-0 font-mono text-muted-foreground">
-                #{card.pr?.number}
-              </span>
-              <span className="min-w-0 truncate text-muted-foreground">
-                {card.title}
-              </span>
-            </button>
+              <button data-pipeline-card type="button" onClick={() => choose(card)} aria-label={`Focus ${card.repo} #${card.pr?.number}: ${card.title}`} className="flex min-w-0 basis-full items-baseline gap-1 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <b className="shrink-0 font-mono">{card.repo.split("/").at(-1)}</b>
+                <span className="shrink-0 font-mono text-muted-foreground">#{card.pr?.number}</span>
+                <span className="min-w-0 truncate text-muted-foreground">{card.title}</span>
+              </button>
+              <button type="button" onClick={() => setEffortEditing(card)} aria-label={`Change effort for ${card.repo} #${card.pr?.number}`} title={`Change effort: ${card.effortName ?? "One-offs"}`} className="min-w-0 flex-1 truncate rounded px-1 text-left text-[10px] text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring">{card.effortName ?? "One-offs"}</button>
+              <Tip label="Open details"><button type="button" onClick={() => openDetails(card)} aria-label={`Open details for ${card.repo} #${card.pr?.number}`} className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"><Icon name="PanelRight" className="size-4" /></button></Tip>
+              <DropdownMenu.Root>
+                <Tip label="More actions"><DropdownMenu.Trigger asChild><button type="button" aria-label={`More actions for ${card.repo} #${card.pr?.number}`} className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"><Icon name="MoreHorizontal" className="size-4" /></button></DropdownMenu.Trigger></Tip>
+                <DropdownMenu.Portal><DropdownMenu.Content {...portalScope} side="bottom" align="end" sideOffset={4} collisionPadding={8} className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"><DropdownMenu.Item className="cursor-pointer rounded px-2 py-1.5 text-[12px] outline-none focus:bg-foreground/[0.06]" onSelect={() => setEffortEditing(card)}>Change effort…</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            </div>
           ) : (
             cardView(card)
           ),
@@ -1175,7 +1244,7 @@ export function PipelineView({
             </div>
           )}
         </div>
-        {selectedCard ? (
+        {detailsOpen && selectedCard ? (
           <aside
             aria-label="Pipeline item detail"
             className="absolute inset-y-0 right-0 z-20 w-[min(320px,100%)] shrink-0 overflow-y-auto border-l border-border bg-background p-3 text-[11.5px] shadow-xl lg:static lg:shadow-none"
@@ -1194,7 +1263,7 @@ export function PipelineView({
               <button
                 type="button"
                 aria-label="Close details"
-                onClick={() => setSelected(null)}
+                onClick={() => setDetailsOpen(false)}
                 className="rounded px-1 text-muted-foreground hover:bg-foreground/[0.06]"
               >
                 ×
@@ -1265,7 +1334,7 @@ export function PipelineView({
                 ) : null}
               </section>
             ) : null}
-            <section className="mt-4">
+            <section id="pipeline-detail-agent" className="mt-4">
               <h3 className="mb-1 font-semibold">Agent</h3>
               <p className="text-muted-foreground">
                 {selectedCard.activity.state === "none"
@@ -1423,6 +1492,7 @@ export function PipelineView({
         </span>
       </div>
       <PrHoldDialog target={hold.target} onClose={hold.close} />
+      <PipelineCardEffortDialog card={effortEditing} onClose={() => setEffortEditing(null)} />
       <ActionDialogs
         request={direct}
         now={now}

@@ -35,7 +35,7 @@ describe("persistent effort repository controllers", () => {
     const first = await t.service.ensure(t.input);
     expect(first).toMatchObject({ threadId: "repo-1", state: "ready", projectId: "repo-project", hostId: "repo-host" });
     expect(t.sdk.spawn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ projectId: "repo-project", parentThreadId: "coordinator",
-      title: "📦 example/docs", pluginMetadata: { effortId: t.input.effort.id, repo: "example/docs", role: "repo" } }));
+      title: "example/docs", pluginMetadata: { effortId: t.input.effort.id, repo: "example/docs", role: "repo" } }));
     expect((await createRepoControllerService(t.store, t.sdk).ensure(t.input)).threadId).toBe("repo-1");
     expect(t.sdk.spawn).toHaveBeenCalledTimes(1);
     await expect(t.service.ensure({ ...t.input, hostId: "other-host" })).rejects.toThrow("different project or host");

@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { RunDb } from "./runstore.js";
 import { canonicalPrUrl } from "./pr-holds.js";
 
-export const effortMembersSchema = z.object({ tickets: z.array(z.string().min(1).max(300)).max(1000), prUrls: z.array(z.string().url().max(500)).max(1000) }).strict();
+export const effortMembersSchema = z.object({ tickets: z.array(z.string().min(1).max(300)).max(1000), prUrls: z.array(z.string().url().max(500)).max(1000),
+  checkoutPaths: z.array(z.string().min(1).max(1_000)).max(1000).optional() }).strict();
 export const establishedEffortSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(), goal: z.string(), projectId: z.string(),
   coordinatorThreadId: z.string().nullable(), coordinatorState: z.enum(["none", "creating", "ready", "unavailable"]),
@@ -24,7 +25,9 @@ export const REPO_CONTROLLER_MIGRATION =
   `CREATE TABLE IF NOT EXISTS effort_repo_controllers (effort_id TEXT NOT NULL, repo TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(effort_id, repo))`;
 type EffortDb = RunDb & { transaction<T>(fn: () => T): () => T };
 export function normalizeMembers(members: EffortMembers): EffortMembers {
-  return { tickets: [...new Set(members.tickets)].sort(), prUrls: [...new Set(members.prUrls.map((url) => url.toLowerCase()))].sort() };
+  const checkoutPaths = [...new Set(members.checkoutPaths ?? [])].sort();
+  return { tickets: [...new Set(members.tickets)].sort(), prUrls: [...new Set(members.prUrls.map((url) => url.toLowerCase()))].sort(),
+    ...(checkoutPaths.length ? { checkoutPaths } : {}) };
 }
 export function sameMembers(a: EffortMembers, b: EffortMembers): boolean {
   return JSON.stringify(normalizeMembers(a)) === JSON.stringify(normalizeMembers(b));
@@ -44,9 +47,16 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
   function save(effort: EstablishedEffort): EstablishedEffort {
     return write({ ...effort, members: get(effort.id)?.members ?? effort.members });
   }
-  function owner(kind: "ticket" | "prUrl", ref: string): EstablishedEffort | null {
-    const row = db.prepare(`SELECT effort_id FROM effort_members WHERE kind = ? AND ref = ?`).get(kind, kind === "prUrl" ? ref.toLowerCase() : ref) as { effort_id: string } | undefined;
-    return row ? get(row.effort_id) : null;
+  function owner(kind: "ticket" | "prUrl" | "checkoutPath", ref: string): EstablishedEffort | null {
+    if (kind !== "prUrl") {
+      const row = db.prepare(`SELECT effort_id FROM effort_members WHERE kind = ? AND ref = ?`).get(kind, ref) as { effort_id: string } | undefined;
+      return row ? get(row.effort_id) : null;
+    }
+    const canonical = canonicalPrUrl(ref) ?? ref.toLowerCase();
+    const owners = new Set((db.prepare(`SELECT ref, effort_id FROM effort_members WHERE kind = 'prUrl' AND ref LIKE ?`).all(`${canonical}%`) as { ref: string; effort_id: string }[])
+      .filter((item) => (canonicalPrUrl(item.ref) ?? item.ref) === canonical).map((item) => item.effort_id));
+    if (owners.size > 1) throw new Error("Conflicting ownership records exist for this PR. Resolve them before moving work.");
+    return owners.size ? get([...owners][0]!) : null;
   }
   return {
     get,
@@ -99,7 +109,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
         const existing = get(input.sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(input.sourceKey));
         if (existing) return existing;
         const members = normalizeMembers(input.members);
-        for (const [kind, refs] of [["ticket", members.tickets], ["prUrl", members.prUrls]] as const) {
+        for (const [kind, refs] of [["ticket", members.tickets], ["prUrl", members.prUrls], ["checkoutPath", members.checkoutPaths ?? []]] as const) {
           for (const ref of refs) if (db.prepare(`SELECT effort_id FROM effort_members WHERE kind = ? AND ref = ?`).get(kind, ref)) {
             throw new Error("Some work already belongs to an established effort. Refresh before coordinating.");
           }
@@ -108,7 +118,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
         const effort: EstablishedEffort = { id, key: `effort:${id}`, name: input.name, goal: input.goal, projectId: input.projectId,
           members, coordinatorThreadId: null, coordinatorState: input.coordinatorState ?? "creating", createdAt: now(), updatedAt: now() };
         db.prepare(`INSERT INTO established_efforts (id, source_key, value) VALUES (?, ?, ?)`).run(id, input.sourceKey, JSON.stringify(effort));
-        for (const [kind, refs] of [["ticket", members.tickets], ["prUrl", members.prUrls]] as const) {
+        for (const [kind, refs] of [["ticket", members.tickets], ["prUrl", members.prUrls], ["checkoutPath", members.checkoutPaths ?? []]] as const) {
           for (const ref of refs) db.prepare(`INSERT INTO effort_members (kind, ref, effort_id) VALUES (?, ?, ?)`).run(kind, ref, id);
         }
         return effort;
@@ -122,7 +132,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
           const initial = normalizeMembers(promotion.members);
           const ownedPrs = new Set((db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl'`).all() as { ref: string }[])
             .map((row) => canonicalPrUrl(row.ref) ?? row.ref.toLowerCase()));
-          for (const [kind, refs] of [["ticket", initial.tickets], ["prUrl", initial.prUrls]] as const) for (const ref of refs) {
+          for (const [kind, refs] of [["ticket", initial.tickets], ["prUrl", initial.prUrls], ["checkoutPath", initial.checkoutPaths ?? []]] as const) for (const ref of refs) {
             if (kind === "prUrl" ? ownedPrs.has(canonicalPrUrl(ref) ?? ref.toLowerCase()) : owner(kind, ref))
               throw new Error("Destination membership changed. Refresh before moving work.");
           }
@@ -130,26 +140,35 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
           destination = { id, key: `effort:${id}`, name: promotion.name, goal: "", projectId: "",
             coordinatorThreadId: null, coordinatorState: "none", members: initial, createdAt: now(), updatedAt: now() };
           db.prepare(`INSERT INTO established_efforts (id, source_key, value) VALUES (?, ?, ?)`).run(id, destinationKey, JSON.stringify(destination));
-          for (const [kind, refs] of [["ticket", initial.tickets], ["prUrl", initial.prUrls]] as const) for (const ref of refs) {
+          for (const [kind, refs] of [["ticket", initial.tickets], ["prUrl", initial.prUrls], ["checkoutPath", initial.checkoutPaths ?? []]] as const) for (const ref of refs) {
             db.prepare(`INSERT INTO effort_members (kind, ref, effort_id) VALUES (?, ?, ?)`).run(kind, ref, id);
           }
         }
         if (!destination) throw new Error("The destination effort changed. Refresh before moving work.");
         const moving = normalizeMembers(members);
+        const canonicalMovingPrs = new Set(moving.prUrls.map((url) => canonicalPrUrl(url) ?? url));
+        const aliases = (db.prepare(`SELECT ref, effort_id FROM effort_members WHERE kind = 'prUrl'`).all() as { ref: string; effort_id: string }[])
+          .filter((row) => canonicalMovingPrs.has(canonicalPrUrl(row.ref) ?? row.ref));
         const owners = new Map<string, EstablishedEffort>();
-        for (const [kind, refs] of [["ticket", moving.tickets], ["prUrl", moving.prUrls]] as const) for (const ref of refs) {
+        for (const [kind, refs] of [["ticket", moving.tickets], ["prUrl", moving.prUrls], ["checkoutPath", moving.checkoutPaths ?? []]] as const) for (const ref of refs) {
           const previous = owner(kind, ref);
           if (previous && previous.id !== destination.id) owners.set(previous.id, previous);
         }
         for (const previous of owners.values()) write({ ...previous, members: {
           tickets: previous.members.tickets.filter((ref) => !moving.tickets.includes(ref)),
-          prUrls: previous.members.prUrls.filter((ref) => !moving.prUrls.includes(ref)),
+          prUrls: previous.members.prUrls.filter((ref) => !canonicalMovingPrs.has(canonicalPrUrl(ref) ?? ref)),
+          checkoutPaths: previous.members.checkoutPaths?.filter((ref) => !moving.checkoutPaths?.includes(ref)),
         } });
-        for (const [kind, refs] of [["ticket", moving.tickets], ["prUrl", moving.prUrls]] as const) for (const ref of refs) {
+        for (const alias of aliases) if (!moving.prUrls.includes(alias.ref)) {
+          db.prepare(`DELETE FROM effort_members WHERE kind = 'prUrl' AND ref = ?`).run(alias.ref);
+        }
+        for (const [kind, refs] of [["ticket", moving.tickets], ["prUrl", moving.prUrls], ["checkoutPath", moving.checkoutPaths ?? []]] as const) for (const ref of refs) {
           db.prepare(`INSERT INTO effort_members (kind, ref, effort_id) VALUES (?, ?, ?) ON CONFLICT(kind, ref) DO UPDATE SET effort_id = excluded.effort_id`).run(kind, ref, destination.id);
         }
         return write({ ...destination, members: {
-          tickets: [...destination.members.tickets, ...moving.tickets], prUrls: [...destination.members.prUrls, ...moving.prUrls],
+          tickets: [...destination.members.tickets, ...moving.tickets],
+          prUrls: [...destination.members.prUrls.filter((ref) => !canonicalMovingPrs.has(canonicalPrUrl(ref) ?? ref)), ...moving.prUrls],
+          checkoutPaths: [...(destination.members.checkoutPaths ?? []), ...(moving.checkoutPaths ?? [])],
         } });
       })();
     },
@@ -171,11 +190,11 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
           owners.add(row.effort_id);
           prOwners.set(key, owners);
         }
-        const ownersOf = (kind: "ticket" | "prUrl", ref: string): Set<string> => kind === "prUrl"
+        const ownersOf = (kind: "ticket" | "prUrl" | "checkoutPath", ref: string): Set<string> => kind === "prUrl"
           ? prOwners.get(ref) ?? new Set<string>()
-          : new Set((db.prepare(`SELECT effort_id FROM effort_members WHERE kind = 'ticket' AND ref = ?`).all(ref) as { effort_id: string }[]).map((row) => row.effort_id));
+          : new Set((db.prepare(`SELECT effort_id FROM effort_members WHERE kind = ? AND ref = ?`).all(kind, ref) as { effort_id: string }[]).map((row) => row.effort_id));
         const claimed: EffortMembers = { tickets: [], prUrls: [] };
-        for (const [kind, refs] of [["ticket", checked.tickets], ["prUrl", checked.prUrls]] as const) {
+        for (const [kind, refs] of [["ticket", checked.tickets], ["prUrl", checked.prUrls], ["checkoutPath", guard.checkoutPaths ?? []]] as const) {
           for (const ref of refs) {
             const owners = ownersOf(kind, ref);
             if ([...owners].some((id) => id !== destination.id)) return { effort: destination,
@@ -189,6 +208,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
         const merged = changed ? effortMembersSchema.parse(normalizeMembers({
           tickets: [...destination.members.tickets, ...claimed.tickets],
           prUrls: [...destination.members.prUrls, ...claimed.prUrls],
+          checkoutPaths: destination.members.checkoutPaths,
         })) : destination.members;
         for (const [kind, refs] of [["ticket", claimed.tickets], ["prUrl", claimed.prUrls]] as const) {
           for (const ref of refs) db.prepare(`INSERT INTO effort_members (kind, ref, effort_id) VALUES (?, ?, ?)`).run(kind, ref, destination.id);
