@@ -172,7 +172,7 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
     if (local.unit.pr !== null && local.unit.pr.state !== "OPEN" && local.unit.pr.state !== "MERGED") continue;
     add(local, null);
   }
-  return cards.sort(byPipelineOrder);
+  return orderPipelineCards(cards);
 }
 
 function recentAt(card: PipelineCard): number | null {
@@ -196,17 +196,83 @@ export function byPipelineOrder(a: PipelineCard, b: PipelineCard): number {
     (aAt === bAt ? a.key.localeCompare(b.key) : bAt - aAt);
 }
 
+export type PipelineStackGraph = {
+  parentByChild: ReadonlyMap<string, string>;
+  childrenByParent: ReadonlyMap<string, readonly PipelineCard[]>;
+};
+
+/** Link only open PRs in the same repository; incomplete or cyclic stacks stay independent. */
+export function pipelineStackGraph(cards: readonly PipelineCard[]): PipelineStackGraph {
+  const byKey = new Map(cards.filter((card) => card.pr?.state === "OPEN").map((card) => [card.key, card]));
+  const byRepoNumber = new Map<string, PipelineCard | null>();
+  for (const card of byKey.values()) {
+    const key = `${card.repo.toLowerCase()}#${card.pr!.number}`;
+    byRepoNumber.set(key, byRepoNumber.has(key) ? null : card);
+  }
+  const parentByChild = new Map<string, string>();
+  for (const child of byKey.values()) {
+    const linked = child.backlog?.parent?.pr.url;
+    const number = child.backlog?.parent?.pr.number ?? child.local?.unit.stack?.blockedBelow;
+    const parent = linked ? byKey.get(prWorkItemKey(linked)) : number == null ? null : byRepoNumber.get(`${child.repo.toLowerCase()}#${number}`);
+    if (parent && parent.key !== child.key && parent.repo.toLowerCase() === child.repo.toLowerCase()) parentByChild.set(child.key, parent.key);
+  }
+  for (const child of parentByChild.keys()) {
+    const path: string[] = [];
+    const seen = new Map<string, number>();
+    let node: string | undefined = child;
+    while (node !== undefined && !seen.has(node)) {
+      seen.set(node, path.length);
+      path.push(node);
+      node = parentByChild.get(node);
+    }
+    if (node !== undefined) for (const cycleNode of path.slice(seen.get(node))) parentByChild.delete(cycleNode);
+  }
+  const childrenByParent = new Map<string, PipelineCard[]>();
+  for (const [childKey, parentKey] of parentByChild) {
+    const child = byKey.get(childKey)!;
+    const children = childrenByParent.get(parentKey) ?? [];
+    children.push(child);
+    childrenByParent.set(parentKey, children);
+  }
+  for (const children of childrenByParent.values()) children.sort(byPipelineOrder);
+  return { parentByChild, childrenByParent };
+}
+
+/** Keep prerequisites above visible dependents without changing stages or effort lanes. */
+export function orderPipelineCards(cards: readonly PipelineCard[], graph = pipelineStackGraph(cards)): PipelineCard[] {
+  const visible = new Set(cards.map((card) => card.key));
+  const priority = (card: PipelineCard) => (graph.childrenByParent.get(card.key) ?? []).some((child) => visible.has(child.key) && child.hold === null);
+  const compare = (a: PipelineCard, b: PipelineCard) => Number(priority(b)) - Number(priority(a)) || byPipelineOrder(a, b);
+  const ordered: PipelineCard[] = [];
+  for (const stage of PIPELINE_STAGES) for (const held of [false, true]) {
+    const bucket = cards.filter((card) => card.stage === stage && (card.hold !== null) === held);
+    if (stage === "merged" || stage === "released") {
+      ordered.push(...bucket.sort(byPipelineOrder));
+      continue;
+    }
+    const members = new Map(bucket.map((card) => [card.key, card]));
+    const parentInBucket = (card: PipelineCard) => members.get(graph.parentByChild.get(card.key) ?? "");
+    const visit = (card: PipelineCard): void => {
+      ordered.push(card);
+      for (const child of (graph.childrenByParent.get(card.key) ?? []).filter((item) => members.has(item.key)).sort(compare)) visit(child);
+    };
+    for (const root of bucket.filter((card) => !parentInBucket(card)).sort(compare)) visit(root);
+  }
+  return ordered;
+}
+
 export type PipelineColumn = { stage: PipelineStage; cards: PipelineCard[]; bulk: "nudge" | "advance" | "merge" | null; bulkCount: number };
 /** The exact cards represented by a column bulk button, in the same sort order. */
-export function pipelineBulkCards(cards: readonly PipelineCard[], stage: PipelineStage): PipelineCard[] {
+export function pipelineBulkCards(cards: readonly PipelineCard[], stage: PipelineStage, graph = pipelineStackGraph(cards)): PipelineCard[] {
   const bulk = stage === "build" || stage === "review" || stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
   if (bulk === null) return [];
-  return cards.filter((card) => card.stage === stage && card.hold === null &&
-    (bulk === "advance" ? card.pr?.state === "OPEN" : card.action?.kind === bulk)).sort(byPipelineOrder);
+  return orderPipelineCards(cards, graph).filter((card) => card.stage === stage && card.hold === null &&
+    (bulk === "advance" ? card.pr?.state === "OPEN" : card.action?.kind === bulk));
 }
 export function pipelineColumns(cards: readonly PipelineCard[]): PipelineColumn[] {
+  const ordered = orderPipelineCards(cards);
   return PIPELINE_STAGES.map((stage) => {
-    const members = cards.filter((card) => card.stage === stage).sort(byPipelineOrder);
+    const members = ordered.filter((card) => card.stage === stage);
     const bulk = stage === "build" || stage === "review" || stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
     return { stage, cards: members, bulk, bulkCount: pipelineBulkCards(members, stage).length };
   });

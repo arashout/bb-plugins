@@ -11,7 +11,8 @@ import { inboxRows } from "./inbox-rows";
 import {
   pipelineCards,
   pipelineBulkCards,
-  byPipelineOrder,
+  orderPipelineCards,
+  pipelineStackGraph,
   PIPELINE_STAGES,
   selectablePipelineCard,
   togglePipelineSelection,
@@ -159,6 +160,7 @@ export function PipelineView({
       }),
     [board, locals, now, advance.batches, dispatch],
   );
+  const stackGraph = useMemo(() => pipelineStackGraph(cards), [cards]);
   const counts = useMemo(
     () =>
       Object.fromEntries(
@@ -293,16 +295,16 @@ export function PipelineView({
     )) ?? null;
     return { number, url, card: parent };
   };
-  const goToParent = (parent: PipelineCard) => {
+  const goToCard = (card: PipelineCard) => {
     setQuery("");
     onPrefs({ approvedOnly: false });
-    if (HISTORY_LIMIT[parent.stage])
-      setShowHistory((current) => ({ ...current, [parent.stage]: true }));
-    choose(parent);
+    if (HISTORY_LIMIT[card.stage])
+      setShowHistory((current) => ({ ...current, [card.stage]: true }));
+    choose(card);
   };
   const openParent = (card: PipelineCard) => {
     const target = parentTarget(card);
-    if (target?.card) goToParent(target.card);
+    if (target?.card) goToCard(target.card);
     else if (target?.url) window.open(target.url, "_blank", "noopener,noreferrer");
     else toast.info("Parent PR is not available on this board");
   };
@@ -490,25 +492,22 @@ export function PipelineView({
       ]),
     ).entries(),
   ].sort((a, b) => a[1].localeCompare(b[1]));
+  const orderedVisible = orderPipelineCards(visible, stackGraph);
+  const orderedEfforts = new Map(efforts.map(([key]) => [key, orderPipelineCards(visible.filter((card) => (card.effortKey ?? "") === key), stackGraph)]));
   const displayedStageCards = (
     stage: PipelineStage,
     source: PipelineCard[],
   ) => {
-    const sorted = source
-      .filter((card) => card.stage === stage)
-      .sort(byPipelineOrder);
+    const sorted = source.filter((card) => card.stage === stage);
     const limit = HISTORY_LIMIT[stage];
     return limit && !showHistory[stage] ? sorted.slice(0, limit) : sorted;
   };
   const navCards =
     layout === "stage"
-      ? PIPELINE_STAGES.flatMap((stage) => displayedStageCards(stage, visible))
+      ? PIPELINE_STAGES.flatMap((stage) => displayedStageCards(stage, orderedVisible))
       : efforts.flatMap(([key]) =>
           PIPELINE_STAGES.flatMap((stage) =>
-            displayedStageCards(
-              stage,
-              visible.filter((card) => (card.effortKey ?? "") === key),
-            ),
+            displayedStageCards(stage, orderedEfforts.get(key) ?? []),
           ),
         );
   useEffect(() => {
@@ -580,8 +579,9 @@ export function PipelineView({
     ? board.prThreadLinks[canonicalPrUrl(card.pr.url) ?? card.pr.url] ?? []
     : card.local?.cluster.threads.map((thread) => thread.id) ?? [];
 
-  const cardView = (card: PipelineCard) => {
+  const cardView = (card: PipelineCard, nested: boolean) => {
     const repoName = card.repo.split("/").at(-1) ?? card.repo;
+    const dependents = stackGraph.childrenByParent.get(card.key) ?? [];
     const label = `${card.repo}${card.pr ? ` #${card.pr.number}` : ""}: ${card.title}`;
     const parent = parentTarget(card);
     const behindTag = parent !== null && card.blocker.label === `Behind #${parent.number}`;
@@ -596,6 +596,7 @@ export function PipelineView({
         data-pipeline-motion-key={card.key}
         className={cn(
           "group relative isolate min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
+          nested && "ml-2 border-l-2 border-l-foreground/25",
           card.hold && "opacity-55 hover:opacity-90",
           selected === card.key && "border-ring ring-1 ring-ring/40",
           checked && "border-foreground/50 bg-foreground/[0.04]",
@@ -653,7 +654,7 @@ export function PipelineView({
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
           {behindTag && parent.card ? (
             <Tip label={`Go to parent PR #${parent.number} card: ${parent.card.title}`}>
-              <button type="button" onClick={() => goToParent(parent.card!)} aria-label={`Go to parent PR #${parent.number} card: ${parent.card.title}`} className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</button>
+              <button type="button" onClick={() => goToCard(parent.card!)} aria-label={`Go to parent PR #${parent.number} card: ${parent.card.title}`} className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</button>
             </Tip>
           ) : behindTag && parent.url ? (
             <UrlLink href={parent.url} aria-label={`Open parent PR #${parent.number} on GitHub${card.backlog?.parent ? `: ${card.backlog.parent.pr.title}` : ""}`} title="Parent card is not on this board; open the parent PR on GitHub" className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</UrlLink>
@@ -695,6 +696,16 @@ export function PipelineView({
         <p className="mt-1 text-[10.5px] leading-4 text-muted-foreground">
           <b className="text-foreground">Next:</b> {card.nextStep}
         </p>
+        {dependents.length > 0 ? (
+          <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+            <span>{dependents.length === 1 ? "Dependent:" : "Dependents:"}</span>
+            {dependents.map((child) => (
+              <button key={child.key} type="button" onClick={() => goToCard(child)} title={child.title} aria-label={`Go to dependent ${child.repo} #${child.pr!.number} in ${LABEL[child.stage]}${child.hold ? ", on hold" : ""}: ${child.title}`} className="rounded border px-1 py-0.5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+                #{child.pr!.number} · {LABEL[child.stage]}{child.hold ? " · On hold" : ""}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="mt-2 flex items-center gap-1 border-t border-border/70 pt-1.5">
           {!(messaging?.key === card.key && messaging.location === "card") ? (
               <Tip label="Message agent">
@@ -754,12 +765,15 @@ export function PipelineView({
     );
   };
 
-  const columnCards = (stage: PipelineStage, source = visible) => {
-    const all = source
-      .filter((card) => card.stage === stage)
-      .sort(byPipelineOrder);
+  const columnCards = (stage: PipelineStage, source = orderedVisible) => {
+    const all = source.filter((card) => card.stage === stage);
     const limit = HISTORY_LIMIT[stage];
     const shown = displayedStageCards(stage, source);
+    const inColumn = new Map(all.map((card) => [card.key, card]));
+    const isNested = (card: PipelineCard) => {
+      const parent = inColumn.get(stackGraph.parentByChild.get(card.key) ?? "");
+      return parent !== undefined && (parent.hold !== null) === (card.hold !== null);
+    };
     return (
       <>
         {shown.map((card) =>
@@ -787,7 +801,7 @@ export function PipelineView({
               </DropdownMenu.Root>
             </div>
           ) : (
-            cardView(card)
+            cardView(card, isNested(card))
           ),
         )}
         {limit && all.length > limit ? (
@@ -812,7 +826,7 @@ export function PipelineView({
       </>
     );
   };
-  const bulkMerge = pipelineBulkCards(visible, "ready");
+  const bulkMerge = pipelineBulkCards(visible, "ready", stackGraph);
   const bulkNudge = visible.filter(
     (card) => card.stage === "review" && card.action?.kind === "nudge" && card.ageSince !== null && now - card.ageSince >= 7 * 86_400_000,
   );
@@ -822,7 +836,7 @@ export function PipelineView({
   );
   const bulkButton = (stage: PipelineStage) => {
     if (stage === "build" || stage === "review" || stage === "feedback") {
-      const candidates = pipelineBulkCards(visible, stage);
+      const candidates = pipelineBulkCards(visible, stage, stackGraph);
       const urls = candidates.slice(0, ADVANCE_SELECTION_LIMIT).map((card) => card.pr!.url);
       if (!urls.length && !(stage === "review" && bulkNudge.length)) return null;
       return (
@@ -1242,9 +1256,7 @@ export function PipelineView({
                       </h3>
                       {columnCards(
                         stage,
-                        visible.filter(
-                          (card) => (card.effortKey ?? "") === key,
-                        ),
+                        orderedEfforts.get(key) ?? [],
                       )}
                     </div>
                   ))}
@@ -1307,7 +1319,7 @@ export function PipelineView({
                   <p className="mt-2 break-words leading-5">
                     Behind{" "}
                     {selectedParent.card ? (
-                      <button type="button" onClick={() => goToParent(selectedParent.card!)} aria-label={`Go to parent PR #${selectedParent.number} card: ${selectedParent.card.title}`} className="rounded text-left underline outline-none focus-visible:ring-2 focus-visible:ring-ring">#{selectedParent.number} · {selectedParent.card.title}</button>
+                      <button type="button" onClick={() => goToCard(selectedParent.card!)} aria-label={`Go to parent PR #${selectedParent.number} card: ${selectedParent.card.title}`} className="rounded text-left underline outline-none focus-visible:ring-2 focus-visible:ring-ring">#{selectedParent.number} · {selectedParent.card.title}</button>
                     ) : selectedParent.url ? (
                       <UrlLink href={selectedParent.url} aria-label={`Open parent PR #${selectedParent.number} on GitHub${selectedCard.backlog?.parent ? `: ${selectedCard.backlog.parent.pr.title}` : ""}`} title="Parent card is not on this board; open the parent PR on GitHub" className="underline">#{selectedParent.number}{selectedCard.backlog?.parent ? ` · ${selectedCard.backlog.parent.pr.title}` : ""}</UrlLink>
                     ) : <>#{selectedParent.number}</>}

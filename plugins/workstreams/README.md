@@ -145,9 +145,12 @@ implemented.
   even when its checks fail. Switch between stage columns and effort swimlanes;
   inventory-only PRs join their saved effort or ticket cohort, and unmatched
   PRs appear in **One-offs**. Cards show one blocker, agent activity, and a
-  primary action. Each stage lists the most recently updated PRs first, with
-  checkout-only work ordered by its latest commit. Merged and released cards
-  use their merge date. Use **Open details** for merge gates, stack order,
+  primary action. Open prerequisite PRs appear above their dependents in each
+  stage. Dependents in the same stage nest beneath their parent; links on the
+  parent show each dependent's stage. Unrelated PRs remain newest first,
+  with checkout-only work ordered by its latest commit. Held cards stay below
+  unheld cards. Merged and released cards use their merge date. Use **Open
+  details** for merge gates, stack order,
   linked threads, checkout actions, and holds. Select a card by its title;
   the details button opens its drawer separately. Select the effort label or
   **Change effort…** in the card menu to review and move its work. Held PRs

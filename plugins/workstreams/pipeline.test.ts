@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { prSchema, type Pr } from "./contract.js";
 import type { Row } from "./inbox-rows.js";
 import type { BacklogEntry } from "./pr-backlog.js";
-import { activityFor, blockerFor, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, primaryPipelineAction, stageFor, togglePipelineSelection } from "./pipeline.js";
+import { activityFor, blockerFor, orderPipelineCards, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, pipelineStackGraph, primaryPipelineAction, stageFor, togglePipelineSelection } from "./pipeline.js";
 import { reconcileAdvanceSelection, selectVisibleOpen } from "./bulk-advance-selection.js";
 import type { Lifecycle } from "./workstreams.js";
 
@@ -43,6 +43,75 @@ describe("pipeline position and gates", () => {
     const top = cards.find((card) => card.pr?.number === 3)!;
     expect(top).toMatchObject({ stage: "ready", blocker: { label: "Behind #2" }, action: { kind: "open-parent", behind: 2 } });
     expect(pipelineColumns(cards).find((column) => column.stage === "ready")?.bulkCount).toBe(1);
+  });
+
+  it("raises an old prerequisite and keeps a branching stack together before unrelated recent work", () => {
+    const parent = pr(101, { headRefName: "foundation", updatedAt: "2026-09-20T00:00:00Z" });
+    const child = pr(102, { baseRefName: "foundation", headRefName: "followup", updatedAt: "2026-09-24T00:00:00Z" });
+    const grandchild = pr(103, { baseRefName: "followup", updatedAt: "2026-09-22T00:00:00Z" });
+    const sibling = pr(104, { baseRefName: "foundation", updatedAt: "2026-09-23T00:00:00Z" });
+    const unrelated = pr(105, { updatedAt: "2026-09-25T00:00:00Z" });
+    const cards = pipelineCards([entry(unrelated), entry(grandchild), entry(sibling), entry(child), entry(parent)], [], now);
+    expect(cards.map((card) => card.pr?.number)).toEqual([101, 102, 103, 104, 105]);
+    const graph = pipelineStackGraph(cards);
+    expect(graph.parentByChild.get(cards[2]!.key)).toBe(cards[1]!.key);
+    expect(pipelineColumns([...cards].reverse()).find((column) => column.stage === "ready")?.cards.map((card) => card.pr?.number)).toEqual([101, 102, 103, 104, 105]);
+  });
+
+  it("keeps cross-stage and cross-effort dependencies in their own columns and lanes", () => {
+    const parent = pr(106, { headRefName: "foundation", isDraft: true, updatedAt: "2026-09-20T00:00:00Z" });
+    const child = pr(107, { baseRefName: "foundation", updatedAt: "2026-09-24T00:00:00Z" });
+    const unrelated = pr(108, { isDraft: true, updatedAt: "2026-09-25T00:00:00Z" });
+    const cards = pipelineCards([entry(child, { effortKey: "effort:other" }), entry(unrelated), entry(parent, { effortKey: "effort:base" })], [], now);
+    const graph = pipelineStackGraph(cards);
+    expect(graph.parentByChild.get(cards.find((card) => card.pr?.number === 107)!.key)).toBe(cards.find((card) => card.pr?.number === 106)!.key);
+    expect(cards.filter((card) => card.stage === "build").map((card) => card.pr?.number)).toEqual([106, 108]);
+    expect(orderPipelineCards(cards.filter((card) => card.effortKey !== "effort:other"), graph).map((card) => card.pr?.number)).toEqual([108, 106]);
+    expect(orderPipelineCards(cards.filter((card) => card.pr?.number !== 106), graph).map((card) => card.pr?.number)).toEqual([108, 107]);
+  });
+
+  it("keeps holds at the bottom and never promotes a parent solely for a held child", () => {
+    const parent = pr(109, { headRefName: "foundation", updatedAt: "2026-09-20T00:00:00Z" });
+    const child = pr(110, { baseRefName: "foundation", updatedAt: "2026-09-25T00:00:00Z" });
+    const unrelated = pr(111, { updatedAt: "2026-09-24T00:00:00Z" });
+    const hold = { reason: "Waiting for a decision", heldAt: now };
+    const cards = pipelineCards([entry(parent), entry(child), entry(unrelated)], [], now, { holds: { [child.url]: hold } });
+    expect(cards.map((card) => card.pr?.number)).toEqual([111, 109, 110]);
+    const bothHeld = pipelineCards([entry(parent), entry(child), entry(unrelated)], [], now, { holds: { [parent.url]: hold, [child.url]: { ...hold } } });
+    expect(bothHeld.map((card) => card.pr?.number)).toEqual([111, 109, 110]);
+    expect(pipelineStackGraph(bothHeld).parentByChild.get(bothHeld[2]!.key)).toBe(bothHeld[1]!.key);
+  });
+
+  it("falls back to recency for missing, merged, cross-repository, and cyclic parents", () => {
+    const a = pr(112, { baseRefName: "b", headRefName: "a", updatedAt: "2026-09-20T00:00:00Z" });
+    const b = pr(113, { baseRefName: "a", headRefName: "b", updatedAt: "2026-09-21T00:00:00Z" });
+    const missing = pr(114, { baseRefName: "absent", updatedAt: "2026-09-22T00:00:00Z" });
+    const merged = pr(115, { state: "MERGED", headRefName: "merged-base" });
+    const onMerged = pr(116, { baseRefName: "merged-base", updatedAt: "2026-09-23T00:00:00Z" });
+    const otherRepo = pr(112, { url: "https://github.com/other/catalog/pull/112", headRefName: "other" });
+    const cards = pipelineCards([entry(a), entry(b), entry(missing), entry(onMerged), entry(otherRepo, { repo: "other/catalog" })], [local(merged)], now);
+    const graph = pipelineStackGraph(cards);
+    expect([...graph.parentByChild]).toEqual([]);
+    expect(cards.filter((card) => card.stage === "ready").map((card) => card.pr?.number)).toEqual([116, 114, 113, 112, 112]);
+  });
+
+  it("does not match a checkout stack parent by PR number in another repository", () => {
+    const child = pr(119, { url: "https://github.com/other/catalog/pull/119" });
+    const localChild = local(child, { repo: "other/catalog", unit: { ...local(child).unit,
+      stack: { id: "other/catalog#120", position: 2, size: 2, blockedBelow: 120 } } });
+    const first = pipelineCards([entry(pr(120))], [localChild], now);
+    expect(pipelineStackGraph(first).parentByChild.size).toBe(0);
+    const otherParent = pr(120, { url: "https://github.com/other/catalog/pull/120" });
+    const both = pipelineCards([entry(pr(120)), entry(otherParent, { repo: "other/catalog" })], [localChild], now);
+    const graph = pipelineStackGraph(both);
+    expect(graph.parentByChild.get(both.find((card) => card.pr?.url === child.url)!.key)).toBe(both.find((card) => card.pr?.url === otherParent.url)!.key);
+  });
+
+  it("uses parent-first stack order for bulk Advance while preserving eligibility", () => {
+    const parent = pr(117, { headRefName: "foundation", checkConclusions: ["FAILURE"], updatedAt: "2026-09-20T00:00:00Z" });
+    const child = pr(118, { baseRefName: "foundation", checkConclusions: ["FAILURE"], updatedAt: "2026-09-25T00:00:00Z" });
+    const cards = pipelineCards([entry(child), entry(parent)], [], now);
+    expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([117, 118]);
   });
 
   it("holds keep their stage, hide agent activity, and leave bulk selection", () => {
