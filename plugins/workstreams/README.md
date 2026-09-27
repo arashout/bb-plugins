@@ -130,6 +130,10 @@ agent without changing the stored parent association. Context agents inspect
 the referenced work and use guarded checkout or PR actions in execution
 workspaces for requested repairs. They do
 not reserve a PR checkout by starting a conversation.
+Work without an effort uses one shared **Unassigned work** parent and a plain
+repository child. This placement organizes threads without assigning the PR or
+checkout to an effort. A personal workspace keeps the same hierarchy when no
+matching BB project is available.
 Advance keeps each PR's isolated worktree for inspection after the result
 finishes. Workstreams retains merged PR worktrees; automatic cleanup is not
 implemented.
@@ -213,8 +217,8 @@ implemented.
   PRs in sequence and can delegate bounded PR work to child threads. Each PR
   keeps its own result and isolated worktree. If the effort has no coordinator,
   the confirmed action creates one
-  before creating its repository controller. An unassigned PR uses a
-  descriptively titled repository thread for the batch. The agent
+  before creating its repository controller. An unassigned PR worker starts
+  beneath its shared repository parent. The agent
   reads reviews and current code, verifies fixes already made, addresses
   remaining feedback, and integrates the base where needed. It tests changes,
   pushes with an exact commit lease when rewriting history, replies with

@@ -25,6 +25,7 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
+import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
 import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 import { cardEffortContextSchema, cardEffortMoveScope, cardEffortTargetSchema, type CardEffortReady, type CardEffortTarget } from "./card-effort.js";
@@ -487,7 +488,7 @@ export const rpcContract = defineRpcContract({
   card_thread_message: {
     input: z.object({ target: cardEffortTargetSchema, threadId: z.string().max(200).nullable(), message: z.string().max(4_000) }).strict(),
     output: z.discriminatedUnion("ok", [
-      z.object({ ok: z.literal(true), threadId: z.string(), delivery: z.enum(["sent", "queued"]), created: z.boolean() }),
+      z.object({ ok: z.literal(true), threadId: z.string(), delivery: z.enum(["sent", "queued"]), created: z.boolean(), warning: z.string().optional() }),
       z.object({ ok: z.literal(false), error: z.string() }),
     ]),
   },
@@ -656,6 +657,7 @@ export default async function plugin(bb: BbPluginApi) {
     REPO_CONTROLLER_MIGRATION,
     `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
     APPROVAL_FEEDBACK_MIGRATION,
+    UNASSIGNED_PLACEMENT_MIGRATION,
   ]);
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);
@@ -675,6 +677,34 @@ export default async function plugin(bb: BbPluginApi) {
     const { path } = await host.call("contextWorkspace", {}, { hostId });
     return { type: "host", hostId, workspace: { type: "unmanaged", path } };
   }
+  const unassignedPlacement = createUnassignedPlacementService(db, {
+    get: async (threadId) => {
+      const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
+      return { id: thread.id, projectId: thread.projectId, parentThreadId: thread.parentThreadId,
+        archivedAt: thread.archivedAt, deletedAt: thread.deletedAt, canSpawnChild: thread.canSpawnChild,
+        environmentHostId: "environment" in thread ? thread.environment?.hostId ?? null : null };
+    },
+    recover: async (key, projectId) => {
+      const matches: string[] = [];
+      for (let offset = 0; offset < 2_000; offset += 100) {
+        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+        for (const thread of rows) {
+          const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
+          if (metadata.placementKey === key && thread.archivedAt === null && thread.deletedAt === null) matches.push(thread.id);
+        }
+        if (rows.length < 100) break;
+      }
+      return matches;
+    },
+    spawn: async (record, title, role, repo) => bb.sdk.threads.spawn({ projectId: record.projectId, title,
+      ...(record.parentThreadId ? { parentThreadId: record.parentThreadId } : {}),
+      environment: record.hostId ? await contextWorkspace(record.hostId) : { type: "host", workspace: { type: "personal" } },
+      pluginMetadata: { role, placementKey: record.key, ...(repo ? { repo } : {}) },
+      prompt: role === "unassigned-root"
+        ? "Organize unassigned Workstreams repository threads. This is a context thread, not an effort or permission to start work. Do not claim PRs, edit code, or launch workers without an explicit user action."
+        : `Organize unassigned Workstreams work for repository ${repo}. This is a context thread, not an effort or permission to start work. Do not claim PRs, edit code, or launch workers without an explicit user action.`,
+    }),
+  });
 
   // ---- persisted state -------------------------------------------------
 
@@ -2710,22 +2740,24 @@ export default async function plugin(bb: BbPluginApi) {
     return remote ? { pr: remote.pr, repo: remote.repo, path: null } : null;
   }
 
-  async function effortScope(prUrl: string): Promise<{ key: string; name: string; goal: string; members: EffortMembers; establishedId: string | null } | null> {
-    const canonical = canonicalPrUrl(prUrl);
-    if (!canonical) return null;
-    const current = await board();
-    const local = current.groups.find((group) => group.level === "effort" && group.clusters.some((cluster) =>
-      cluster.units.some((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonical)));
-    const ticket = local?.clusters.find((cluster) => cluster.units.some((unit) =>
-      unit.pr && canonicalPrUrl(unit.pr.url) === canonical))?.ticket;
-    const owner = effortStore.owner("prUrl", canonical) ?? (ticket ? effortStore.owner("ticket", ticket) : null);
-    if (owner) return { key: effortStore.sourceKey(owner.id) ?? owner.key, name: owner.name, goal: owner.goal,
-      members: owner.members, establishedId: owner.id };
-    const remoteKey = current.prInventory.entries.find((entry) => canonicalPrUrl(entry.pr.url) === canonical)?.effortKey;
-    const key = local?.key ?? remoteKey;
-    if (!key) return null;
-    const group = current.groups.find((entry) => entry.key === key);
+  type PlacementScope = { key: string; name: string; goal: string; members: EffortMembers; establishedId: string | null };
+  function scopeOfEstablished(effort: NonNullable<ReturnType<typeof effortStore.get>>): PlacementScope {
+    return { key: effortStore.sourceKey(effort.id) ?? effort.key, name: effort.name, goal: effort.goal,
+      members: effort.members, establishedId: effort.id };
+  }
+  function scopeForGroup(current: Board, groupKey: string | null): PlacementScope | null {
+    const direct = groupKey ? effortStore.source(groupKey) : null;
+    if (direct) return scopeOfEstablished(direct);
+    let group = current.groups.find((entry) => entry.key === groupKey);
+    const seen = new Set<string>();
+    while (group && group.level !== "effort" && group.parentKey && !seen.has(group.key)) {
+      seen.add(group.key);
+      group = current.groups.find((entry) => entry.key === group!.parentKey);
+    }
     if (!group || group.level !== "effort" || outsideGrouping(group.key)) return null;
+    const established = effortStore.source(group.key);
+    if (established) return { key: effortStore.sourceKey(established.id) ?? group.key, name: established.name,
+      goal: established.goal, members: established.members, establishedId: established.id };
     const keys = new Set([group.key]);
     for (let pass = 0; pass < 3; pass++) for (const entry of current.groups) if (entry.parentKey && keys.has(entry.parentKey)) keys.add(entry.key);
     const clusters = current.groups.filter((entry) => keys.has(entry.key)).flatMap((entry) => entry.clusters);
@@ -2735,7 +2767,27 @@ export default async function plugin(bb: BbPluginApi) {
         ...current.prInventory.entries.filter((entry) => entry.effortKey && keys.has(entry.effortKey)).map((entry) => entry.pr.url)],
     });
     return members.tickets.length + members.prUrls.length > 0
-      ? { key, name: group.name, goal: "", members, establishedId: null } : null;
+      ? { key: group.key, name: group.name, goal: "", members, establishedId: null } : null;
+  }
+  async function effortScope(prUrl: string): Promise<PlacementScope | null> {
+    const canonical = canonicalPrUrl(prUrl);
+    if (!canonical) return null;
+    const current = await board();
+    const local = current.groups.find((group) => group.clusters.some((cluster) =>
+      cluster.units.some((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonical)));
+    const ownerId = readWorkContext(current, compilePattern((await settings.get()).ticketPattern)).ownerForPr(canonical)?.id;
+    const owner = ownerId ? effortStore.get(ownerId) : null;
+    if (owner) return { key: effortStore.sourceKey(owner.id) ?? owner.key, name: owner.name, goal: owner.goal,
+      members: owner.members, establishedId: owner.id };
+    const remoteKey = current.prInventory.entries.find((entry) => canonicalPrUrl(entry.pr.url) === canonical)?.effortKey;
+    return scopeForGroup(current, local?.key ?? null) ?? scopeForGroup(current, remoteKey ?? null);
+  }
+  async function checkoutScope(path: string): Promise<PlacementScope | null> {
+    const current = await board();
+    const group = current.groups.find((entry) => entry.clusters.some((cluster) => cluster.units.some((unit) => unit.path === path)));
+    const ticket = group?.clusters.find((cluster) => cluster.units.some((unit) => unit.path === path))?.ticket;
+    const owner = (ticket ? effortStore.owner("ticket", ticket) : null) ?? effortStore.owner("checkoutPath", path);
+    return owner ? scopeOfEstablished(owner) : scopeForGroup(current, group?.key ?? null);
   }
 
   async function prThreadContext(prUrl: string) {
@@ -2947,10 +2999,11 @@ export default async function plugin(bb: BbPluginApi) {
         checkoutPaths.map((path) => work.owner("checkoutPath", path)).find(Boolean) ?? null;
       const explicit = exactPr ?? exactTicket ?? exactPath;
       const inventoryEntry = targetUrl ? current.prInventory.entries.find((entry) => prWorkItemKey(entry.pr.url) === targetUrl) : null;
-      const group = current.groups.find((entry) => entry.level === "effort" && entry.clusters.some((cluster) =>
+      const group = current.groups.find((entry) => entry.clusters.some((cluster) =>
         cluster.units.some((unit) => "path" in target ? unit.path === target.path : unit.pr && prWorkItemKey(unit.pr.url) === targetUrl)));
-      const inferredKey = group?.key ?? inventoryEntry?.effortKey ?? null;
-      const inferredName = group?.name ?? inventoryEntry?.effortName ?? null;
+      const inferredScope = scopeForGroup(current, group?.key ?? null) ?? scopeForGroup(current, inventoryEntry?.effortKey ?? null);
+      const inferredKey = inferredScope?.key ?? null;
+      const inferredName = inferredScope?.name ?? null;
       const effortKey = explicit?.key ?? inferredKey;
       const effortName = explicit?.name ?? inferredName;
       const identity = checkoutPaths.map((path) => {
@@ -2983,10 +3036,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (("prUrl" in target && !known) || ("path" in target && !unit)) return null;
     const context = await cardEffortContext(target, current);
     const ticket = unit?.ticket ?? (context.ok ? context.source.ticket : null);
-    const effort = context.ok && context.source.effortKey ? effortStore.source(context.source.effortKey) : null;
+    const scope = context.ok ? scopeForGroup(current, context.source.effortKey) : null;
+    const effort = scope?.establishedId ? effortStore.get(scope.establishedId) : null;
     const repo = known?.repo ?? unit?.githubRepo ?? null;
     const path = unit?.path ?? known?.path ?? null;
-    return { current, cluster, unit, known, prUrl, ticket, effort, repo, path,
+    return { current, cluster, unit, known, prUrl, ticket, effort, scope, repo, path,
       title: known?.pr.title ?? cluster?.linear?.title ?? cluster?.summary ?? unit?.dirName ?? "Tracked work",
       linearUrl: cluster?.linear?.url ?? null,
       effortName: context.ok ? context.source.effortName : null,
@@ -3132,6 +3186,31 @@ export default async function plugin(bb: BbPluginApi) {
     announceThreads();
     return controller;
   }
+  async function resolvePlacement(repo: string | null, projectId: string, hostId: string | null, scope: PlacementScope | null) {
+    if (!scope) return { parentThreadId: repo ? await unassignedPlacement.ensureRepo(repo, projectId, hostId)
+      : await unassignedPlacement.ensureRoot(projectId, hostId), effort: null };
+    if (hostId === null || projectId === "proj_personal") throw new Error("This effort needs a project source before its repository can be placed.");
+    const effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
+      name: scope.name, goal: scope.goal, projectId, members: scope.members, coordinatorState: "none" });
+    if (scope.establishedId && scope.establishedId !== effort.id) throw new Error("The effort changed before placement. Refresh the action.");
+    return { parentThreadId: repo ? (await ensureRepoController(effort, repo, projectId, hostId)).threadId!
+      : (await coordinators.ensureExisting(effort.id, projectId)).coordinatorThreadId!, effort };
+  }
+  function storedPlacementParent(repo: string | null, scope: PlacementScope | null): string | null {
+    if (scope) {
+      const effort = scope.establishedId ? effortStore.get(scope.establishedId) : null;
+      if (!effort) return null;
+      if (!repo) return effort.coordinatorThreadId;
+      const controller = effortStore.repoController(effort.id, repo);
+      return controller?.state === "ready" ? controller.threadId : null;
+    }
+    const anchor = repo ? unassignedPlacement.repo(repo) : unassignedPlacement.root();
+    return anchor?.state === "ready" ? anchor.threadId : null;
+  }
+  async function placedThread(threadId: string, parentThreadId: string): Promise<void> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    if (thread.parentThreadId !== parentThreadId) throw new Error(`Thread ${threadId} was created but its parent differs. Inspect the thread before retrying.`);
+  }
 
   const manualPrWrites = new Set<string>();
   const contextStarting = new Set<string>();
@@ -3210,25 +3289,32 @@ export default async function plugin(bb: BbPluginApi) {
   async function advanceRepairCandidates(facts: AdvanceFacts, job: AdvanceJob) {
     const controller = facts.effortKey ? effortStore.source(facts.effortKey) : null;
     const repo = controller ? effortStore.repoController(controller.id, facts.repo) : null;
-    const links = facts.effortKey ? (repo?.threadId && repo.state === "ready"
-      ? [{ id: repo.threadId, title: "Repository controller", tier: "started" as const }] : [])
-      : await advanceRepairLinks(facts, job.threadId);
+    const unassigned = facts.effortKey ? null : unassignedPlacement.repo(facts.repo);
+    const parentLinks = repo?.threadId && repo.state === "ready"
+      ? [{ id: repo.threadId, title: "Repository controller", tier: "started" as const }]
+      : unassigned?.threadId && unassigned.state === "ready"
+        ? [{ id: unassigned.threadId, title: "Repository parent", tier: "started" as const }] : [];
+    const links = facts.effortKey ? parentLinks : [...parentLinks, ...await advanceRepairLinks(facts, job.threadId)];
     const selected = links.filter((link) => link.id !== job.threadId).slice(0, 7);
     const previous = links.find((link) => link.id === job.threadId);
     if (previous) selected.push(previous);
     const candidates = (await Promise.all(selected.map(async (link): Promise<ThreadCandidate | null> => {
       try {
         const thread = await bb.sdk.threads.get({ threadId: link.id, include: "environment" });
-        if (thread.archivedAt !== null || thread.deletedAt !== null || thread.projectId !== facts.projectId) return null;
+        const anchor = link.id === repo?.threadId || link.id === unassigned?.threadId;
+        if (thread.archivedAt !== null || thread.deletedAt !== null || (anchor ? thread.projectId !== (repo?.projectId ?? unassigned?.projectId) : thread.projectId !== facts.projectId)) return null;
         if (facts.effortKey && (!controller || !repo || repo.state !== "ready" ||
           thread.parentThreadId !== controller.coordinatorThreadId ||
           !("environment" in thread) || thread.environment?.hostId !== repo.hostId)) return null;
+        if (!facts.effortKey && anchor && (!unassigned || thread.parentThreadId !== unassigned.parentThreadId ||
+          !("environment" in thread) || (unassigned.hostId !== null && thread.environment?.hostId !== unassigned.hostId))) return null;
         return { ...link, title: (thread.title ?? thread.titleFallback ?? link.title).slice(0, 200), updatedAt: thread.updatedAt,
-          running: thread.status !== "idle" && thread.status !== "error", contextUsed: null, canSpawnChild: thread.canSpawnChild };
+          running: thread.status !== "idle" && thread.status !== "error", contextUsed: null,
+          canSpawnChild: anchor && thread.canSpawnChild };
       } catch { return null; }
     }))).filter((candidate): candidate is ThreadCandidate => candidate !== null);
-    return { candidates, recommendation: facts.effortKey && candidates.length === 0
-      ? { mode: "new" as const, threadId: null, reason: "Create the repository controller, then start a bounded PR repair beneath it." }
+    return { candidates, recommendation: candidates.length === 0
+      ? { mode: "new" as const, threadId: null, reason: "Create the repository parent, then start a bounded PR repair beneath it." }
       : recommendThread(facts.needsFeedback ? "address-review" : "resolve-conflicts", candidates, { send: false, subthread: true, contextUsage: false }) };
   }
   async function resolveRepoController(facts: AdvanceFacts): Promise<string | null> {
@@ -3238,10 +3324,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (!current || current.key !== facts.effortKey || !sameMembers(current.members, facts.effortMembers)) {
         throw new Error("This PR's effort or cohort changed. Preview it again before launching.");
       }
-      const effort = effortStore.source(facts.effortKey) ?? effortStore.establish({ sourceKey: facts.effortKey,
-        name: current.name, goal: current.goal, projectId: facts.projectId, members: current.members, coordinatorState: "none" });
-      if (facts.effortId && facts.effortId !== effort.id) throw new Error("This PR moved to another effort. Preview it again.");
-      return (await ensureRepoController(effort, facts.repo, facts.projectId, facts.hostId)).threadId;
+      const placed = await resolvePlacement(facts.repo, facts.projectId, facts.hostId, current);
+      if (facts.effortId && facts.effortId !== placed.effort?.id) throw new Error("This PR moved to another effort. Preview it again.");
+      return placed.parentThreadId;
   }
   const advance = createAdvanceService(db, {
     inspect: advanceInspect,
@@ -3258,16 +3343,19 @@ export default async function plugin(bb: BbPluginApi) {
       if (mode === "new" && parentThreadId !== null) throw new Error("A new repair thread cannot specify a parent.");
       const controllerId = await resolveRepoController(facts);
       if (facts.effortKey && !controllerId) throw new Error("The repository controller could not be resolved for this effort.");
+      if (!facts.effortKey && await effortScope(facts.prUrl)) throw new Error("This PR was assigned to an effort. Reopen the repair preview before launching.");
       if (controllerId && parentThreadId && parentThreadId !== controllerId) {
         throw new Error("The selected repair parent is not this effort's repository controller. Reopen the repair preview.");
       }
-      const actualParentId = controllerId ?? parentThreadId;
+      const actualParentId = controllerId ?? (await resolvePlacement(facts.repo, facts.projectId, facts.hostId, null)).parentThreadId;
+      if (parentThreadId && parentThreadId !== actualParentId) throw new Error("The selected repair parent is not this repository parent. Reopen the repair preview.");
       const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId,
         title: `${facts.repo.split("/").at(-1)} #${facts.number}: repair ${facts.needsFeedback ? "review feedback" : facts.needsPreparation ? "branch preparation" : "validation"}`,
         prompt: actualParentId ? `${prompt}\nParent context reference: @thread:${actualParentId}. Consult its relevant PR decisions only if the live PR description, review discussion, and code do not establish the intended behavior.` : prompt,
         environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
         ...(actualParentId ? { parentThreadId: actualParentId } : {}),
         pluginMetadata: { advanceJobId: attemptId, role: "advance-repair", prUrl: facts.prUrl } });
+      await placedThread(thread.id, actualParentId);
       return thread.id;
     },
     workspace: async (facts, batchId, jobId) => {
@@ -3301,9 +3389,13 @@ export default async function plugin(bb: BbPluginApi) {
     },
     spawn: async (facts, workerPath, prompt, jobId) => {
       if (!facts.projectId) throw new Error("No project is available for the repository worker");
-      const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId, title: `${facts.repo} PR #${facts.number}`, prompt,
+      if (await effortScope(facts.prUrl)) throw new Error("This PR was assigned to an effort. Preview it again before launching.");
+      const parentThreadId = (await resolvePlacement(facts.repo, facts.projectId, facts.hostId, null)).parentThreadId;
+      const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId, parentThreadId,
+        title: `${facts.repo} PR #${facts.number}`, prompt,
         environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
         pluginMetadata: { advanceJobId: jobId, role: "rebase-worker" } });
+      await placedThread(thread.id, parentThreadId);
       return thread.id;
     },
     send: async (threadId, prompt) => { await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text: prompt, mentions: [] }] }); },
@@ -3348,17 +3440,13 @@ export default async function plugin(bb: BbPluginApi) {
           const raw = readUnits().find((unit) => unit.path === path);
           let effort = (raw?.pr ? effortStore.owner("prUrl", raw.pr.url) : null) ?? effortStore.owner("ticket", args.pluginMetadata.ticket)
             ?? effortStore.owner("checkoutPath", path);
-          if (!effort && raw?.pr) {
-            const scope = await effortScope(raw.pr.url);
-            if (scope) effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
-              name: scope.name, goal: scope.goal, projectId: args.projectId, members: scope.members, coordinatorState: "none" });
-          }
+          const scope = raw?.pr ? await effortScope(raw.pr.url) ?? (effort ? scopeOfEstablished(effort) : null)
+            : await checkoutScope(path) ?? (effort ? scopeOfEstablished(effort) : null);
           const repo = raw?.pr ? prTarget(raw.pr.url)?.slug : raw?.githubRepo ?? null;
           if (effort && raw?.pr && !repo) throw new Error("The tracked PR URL is invalid. Refresh before launching work.");
-          const controller = effort && repo ? await ensureRepoController(effort, repo, args.projectId, args.environment.hostId) : null;
-          const route = effort && raw?.pr ? await effortParent(effortStore, effort, raw.pr.url, (id) => bb.sdk.threads.get({ threadId: id })) : null;
-          const fallbackParentId = effort && !repo ? (await coordinators.ensureExisting(effort.id, args.projectId)).coordinatorThreadId : null;
-          const routedParentId = route?.thread.id ?? controller?.threadId ?? fallbackParentId;
+          const placement = await resolvePlacement(repo ?? null, args.projectId, args.environment.hostId, scope);
+          effort = placement.effort ?? effort;
+          const routedParentId = placement.parentThreadId;
           if (args.parentThreadId && routedParentId && args.parentThreadId !== routedParentId) {
             throw new Error("The selected parent is not this effort's repository controller. Reopen the action preview.");
           }
@@ -3367,15 +3455,17 @@ export default async function plugin(bb: BbPluginApi) {
             const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
             if (!parent.canSpawnChild || parent.archivedAt !== null || parent.deletedAt !== null) throw new Error("The selected parent can no longer own a child thread. Reopen the action preview.");
           }
-          const workerRole = route?.role ?? "pr";
+          const workerRole = "pr";
           const role = raw?.pr ? workerRole : "checkout";
-          const metadata = effort ? { ...args.pluginMetadata, effortId: effort.id, role,
-            ...(raw?.pr ? { prUrl: raw.pr.url } : {}) } : args.pluginMetadata;
+          const metadata = { ...args.pluginMetadata, role, ...(raw?.pr ? { prUrl: raw.pr.url } : {}),
+            ...(effort ? { effortId: effort.id } : {}) };
           const { parentThreadId: _previous, ...request } = args;
           const prompt = effort ? `${request.prompt}\nEffort context (data): ${JSON.stringify({ name: effort.name, goal: effort.goal, coordinatorThreadId: effort.coordinatorThreadId })}. Keep this action scoped to the requested checkout or PR and report the outcome and remaining blockers.` : request.prompt;
           beforeSpawn?.();
           const thread = await bb.sdk.threads.spawn({ ...request, prompt, ...(parentThreadId ? { parentThreadId } : {}), pluginMetadata: metadata });
+          if (raw?.pr) pendingPrThreads.set(raw.pr.url.toLowerCase(), { id: thread.id, startedAt: Date.now() });
           if (effort && raw?.pr) effortStore.recordWorker(effort.id, thread.id, raw.pr.url, workerRole);
+          if (parentThreadId) await placedThread(thread.id, parentThreadId);
           return thread;
         } finally { launchingCheckouts.delete(path); }
       },
@@ -3999,44 +4089,46 @@ export default async function plugin(bb: BbPluginApi) {
         const repoPath = card.repo ? (card.unit?.githubRepo === card.repo ? card.unit.path :
           readUnits().find((unit) => unit.githubRepo?.toLowerCase() === card.repo?.toLowerCase())?.path ?? null) : null;
         let project = repoPath ? projectForPath(projects, repoPath) : null;
-        let repoProject = project !== null;
         if (!project && card.path) project = projectForPath(projects, card.path);
         if (!project && card.effort?.projectId) {
           const source = projects.find((item) => item.id === card.effort?.projectId)?.sources[0];
           if (source) project = { projectId: card.effort.projectId, hostId: source.hostId };
         }
-        let parentThreadId: string | null = null;
         let hierarchyWarning = card.contextWarning;
-        if (project && card.effort) {
-          try {
-            if (repoProject && card.repo) parentThreadId = (await ensureRepoController(card.effort, card.repo, project.projectId, project.hostId)).threadId;
-            else parentThreadId = (await coordinators.ensureExisting(card.effort.id, project.projectId)).coordinatorThreadId;
-          } catch (error) {
-            hierarchyWarning = `Effort parent unavailable: ${String(error).slice(0, 200)}. Inspect its association before acting.`;
+        let parentThreadId: string | null = null;
+        let placedEffort = card.effort;
+        let environment: Awaited<ReturnType<typeof contextWorkspace>> | { type: "host"; workspace: { type: "personal" } };
+        let projectId = project?.projectId ?? "proj_personal";
+        let hostId: string | null = project?.hostId ?? null;
+        if (project) {
+          try { environment = await contextWorkspace(project.hostId); }
+          catch (error) {
+            projectId = "proj_personal";
+            hostId = null;
+            environment = { type: "host", workspace: { type: "personal" } };
+            hierarchyWarning = `Project context workspace unavailable: ${String(error).slice(0, 200)}. This agent uses a personal workspace.`;
           }
+        } else environment = { type: "host", workspace: { type: "personal" } };
+        try {
+          const placementScope = projectId === "proj_personal" ? null : card.scope;
+          if (card.scope && !placementScope) hierarchyWarning = "Effort project unavailable. This context uses the shared unassigned parent in a personal workspace.";
+          const placed = await resolvePlacement(card.repo, projectId, hostId, placementScope);
+          parentThreadId = placed.parentThreadId;
+          placedEffort = placed.effort ?? card.effort;
+        } catch (error) {
+          hierarchyWarning = `Repository parent unavailable: ${String(error).slice(0, 200)}. Inspect its association before acting.`;
         }
         const snapshot = cardThreadSnapshot(card, hold, hierarchyWarning);
         if (parentThreadId && !snapshot.linkedThreadIds.includes(parentThreadId)) {
           snapshot.linkedThreadIds = [...snapshot.linkedThreadIds, parentThreadId].slice(0, 20);
         }
-        let environment: Awaited<ReturnType<typeof contextWorkspace>> | { type: "host"; workspace: { type: "personal" } };
-        let projectId = project?.projectId ?? "proj_personal";
-        if (project) {
-          try { environment = await contextWorkspace(project.hostId); }
-          catch (error) {
-            projectId = "proj_personal";
-            parentThreadId = null;
-            environment = { type: "host", workspace: { type: "personal" } };
-            snapshot.hierarchyWarning = `Project context workspace unavailable: ${String(error).slice(0, 200)}. This agent uses a personal workspace.`;
-          }
-        } else environment = { type: "host", workspace: { type: "personal" } };
         const title = `${card.repo ?? card.ticket ?? "Workstreams"}${card.known ? ` #${card.known.pr.number}` : ""}: ${card.title}`.slice(0, 200);
         const thread = await bb.sdk.threads.spawn({ projectId, environment, title,
           prompt: cardThreadPrompt(snapshot, text), ...(parentThreadId ? { parentThreadId } : {}),
           pluginMetadata: { role: "context", ...(card.prUrl ? { linkedPrUrl: card.prUrl } : {}),
             ...(card.ticket ? { ticket: card.ticket } : {}), ...(card.path ? { linkedCheckoutPath: card.path,
               linkedCheckoutBranch: card.unit?.branch ?? null } : {}),
-            ...(card.effort ? { workEffortId: card.effort.id } : {}) } });
+            ...(placedEffort ? { workEffortId: placedEffort.id } : {}) } });
         if (!threadFacts.has(thread.id)) newContextThreads.add(thread.id);
         if (card.prUrl) {
           db.prepare(`INSERT OR IGNORE INTO thread_pr_link_ids (thread_id) VALUES (?)`).run(thread.id);
@@ -4046,7 +4138,12 @@ export default async function plugin(bb: BbPluginApi) {
         if (card.path) contextPathLinks.set(thread.id, { path: card.path, branch: card.unit?.branch ?? null });
         announceThreads();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
-        return { ok: true, threadId: thread.id, delivery: "sent", created: true };
+        if (parentThreadId) {
+          try { await placedThread(thread.id, parentThreadId); }
+          catch (error) { hierarchyWarning = `Thread started, but placement could not be confirmed: ${String(error).slice(0, 200)}`; }
+        }
+        return { ok: true, threadId: thread.id, delivery: "sent", created: true,
+          ...(hierarchyWarning ? { warning: hierarchyWarning } : {}) };
       } catch (error) {
         return { ok: false, error: `Context agent launch could not be confirmed: ${String(error).slice(0, 250)}. Check linked threads before trying again.` };
       } finally { contextStarting.delete(key); }
@@ -4116,21 +4213,18 @@ export default async function plugin(bb: BbPluginApi) {
         return writeOf(target.hostId)({ kind: "nudge", prUrl: target.prUrl, reviewers, comment });
       }),
     agent_plan: async ({ path, action }) => {
-      if ((await scannedUnit(path)) === undefined) {
+      const found = await scannedUnit(path);
+      if (!found) {
         return { ok: false as const, error: "That checkout is not on the board any more. Rescan and try again." };
       }
-      const plan = await planAgent(agentSdk, action, await linkedThreads(path));
-      const found = await scannedUnit(path);
-      const effort = (found?.raw.pr ? effortStore.owner("prUrl", found.raw.pr.url) : null) ?? (found ? effortStore.owner("ticket", found.ticket) : null);
-      const parent = effort && found?.raw.pr ? await effortParent(effortStore, effort, found.raw.pr.url, (id) => bb.sdk.threads.get({ threadId: id })) : null;
-      if (found?.raw.pr && await effortScope(found.raw.pr.url)) {
-        plan.candidates = parent ? (await planAgent(agentSdk, action,
-          [{ id: parent.thread.id, title: parent.thread.title ?? "Repository controller", tier: "started" }])).candidates : [];
-        if (parent) plan.recommendation = { mode: "subthread", threadId: parent.thread.id,
-          reason: `A PR worker under ${effort!.name}'s repository controller will report its result there.` };
-        else plan.recommendation = { mode: "new", threadId: null,
-          reason: `Launch this effort's repository controller, then start a bounded PR worker beneath it.` };
-      }
+      const scope = found.raw.pr ? await effortScope(found.raw.pr.url) : await checkoutScope(path);
+      const repo = found.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found.raw.githubRepo ?? null;
+      const parentId = storedPlacementParent(repo, scope);
+      const plan = await planAgent(agentSdk, action, parentId
+        ? [{ id: parentId, title: scope?.name ?? (repo ?? "Unassigned work"), tier: "started" }] : []);
+      plan.recommendation = plan.candidates[0]?.canSpawnChild
+        ? { mode: "subthread", threadId: parentId, reason: "Start this worker beneath its current parent." }
+        : { mode: "new", threadId: null, reason: "Create or restore this work's parent before starting its worker." };
       return { ok: true as const, ...plan };
     },
     agent_run: async ({ path, action, mode, threadId, prompt }) => withPrWriter(path, readUnits().find((unit) => unit.path === path)?.pr?.url, async () => {
@@ -4138,16 +4232,16 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
       }
       const found = await scannedUnit(path);
-      const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : null;
-      const controller = scope?.establishedId && found?.raw.pr
-        ? effortStore.repoController(scope.establishedId, prTarget(found.raw.pr.url)?.slug ?? "") : null;
-      if (scope && mode === "subthread" && (!controller?.threadId || threadId !== controller.threadId)) {
-        return { ok: false as const, error: "Choose this effort's repository controller as the parent, or reopen the action preview." };
+      const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : found ? await checkoutScope(path) : null;
+      const repo = found?.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found?.raw.githubRepo ?? null;
+      const parentId = storedPlacementParent(repo, scope);
+      if (mode === "subthread" && (!parentId || threadId !== parentId)) {
+        return { ok: false as const, error: "Choose this work's current parent, or reopen the action preview." };
       }
       if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
         return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
       }
-      const linked = [...new Set([...(await linkedThreads(path)).map((thread) => thread.id), ...(controller?.threadId ? [controller.threadId] : [])])];
+      const linked = [...new Set([...(await linkedThreads(path)).map((thread) => thread.id), ...(parentId ? [parentId] : [])])];
       if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
         return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
       }

@@ -48,7 +48,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
     threads: { list: async () => [...threads.values()] as never,
       get: async ({ threadId }: { threadId: string }) => {
         const row = threads.get(threadId); if (!row) throw new Error("Unknown synthetic thread");
-        return { ...row, canSpawnChild: true } as never;
+        return { ...row, canSpawnChild: true, environment: { hostId: HOST } } as never;
       },
       getPluginMetadata: async ({ threadId }: { threadId: string }) => metadata.get(threadId) ?? {},
       spawn, send, output, context: async () => ({ usage: null }) as never,
@@ -79,9 +79,12 @@ it("starts a remote PR context only on Send, links it to the board, and keeps fo
   expect(env.spawn).not.toHaveBeenCalled();
   const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string; created: boolean };
   expect(created).toMatchObject({ ok: true, created: true });
-  expect(env.spawn).toHaveBeenCalledTimes(1);
-  const args = env.spawn.mock.calls[0]?.[0];
+  expect(env.spawn).toHaveBeenCalledTimes(3);
+  expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ pluginMetadata: { role: "coordinator" } });
+  expect(env.spawn.mock.calls[1]?.[0]).toMatchObject({ title: REPO, parentThreadId: "thr-context-1", pluginMetadata: { role: "repo" } });
+  const args = env.spawn.mock.calls[2]?.[0];
   expect(args).toMatchObject({ projectId: PROJECT,
+    parentThreadId: "thr-context-2",
     environment: { type: "host", workspace: { type: "unmanaged" } },
     pluginMetadata: { role: "context", linkedPrUrl: URL } });
   expect(args?.environment.workspace.path).toMatch(/^\/scratch\/context-/);
@@ -156,8 +159,32 @@ it("places a context beneath scratch effort parents without claiming new work me
 it("uses a personal context when no matching project exists", async () => {
   const env = await setup({ remoteOnly: true, noProject: true });
   expect(await env.message({ prUrl: URL }, null)).toMatchObject({ ok: true, created: true });
-  expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ projectId: "proj_personal",
+  expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "Unassigned work", projectId: "proj_personal", pluginMetadata: { role: "unassigned-root" } });
+  expect(env.spawn.mock.calls[1]?.[0]).toMatchObject({ title: REPO, parentThreadId: "thr-context-1", pluginMetadata: { role: "unassigned-repo" } });
+  expect(env.spawn.mock.calls.at(-1)?.[0]).toMatchObject({ projectId: "proj_personal", parentThreadId: "thr-context-2",
     environment: { type: "host", workspace: { type: "personal" } } });
+});
+
+it("keeps an explicit effort association when personal placement uses the unassigned parent", async () => {
+  const env = await setup({ remoteOnly: true, noProject: true });
+  const effort = env.store.establish({ sourceKey: "ticket:INK-42", name: "Manuscript review",
+    goal: "Finish the review", projectId: PROJECT, coordinatorState: "none",
+    members: { tickets: ["INK-42"], prUrls: [] } });
+  const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string; warning?: string };
+  expect(created.warning).toContain("Effort project unavailable");
+  expect(env.spawn.mock.calls.at(-1)?.[0].parentThreadId).toBe("thr-context-2");
+  expect(env.metadata.get(created.threadId)).toMatchObject({ role: "context", workEffortId: effort.id });
+  expect(env.store.owner("prUrl", URL)).toBeNull();
+});
+
+it("places a ticketless checkout context under the shared root when no repository is known", async () => {
+  const env = await setup();
+  env.setRaw({ ...base, repo: "local", githubRepo: null, branch: "draft", dirName: "draft" });
+  await env.refresh();
+  const created = await env.message({ path: PATH }, null) as { ok: true; threadId: string };
+  expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "Unassigned work", pluginMetadata: { role: "unassigned-root" } });
+  expect(env.spawn.mock.calls[1]?.[0]).toMatchObject({ parentThreadId: "thr-context-1", pluginMetadata: { role: "context" } });
+  expect(env.metadata.get(created.threadId)).not.toHaveProperty("workEffortId");
 });
 
 it("keeps a stale controller binding intact while starting a linked diagnostic root", async () => {
@@ -173,7 +200,7 @@ it("keeps a stale controller binding intact while starting a linked diagnostic r
   expect(env.store.repoController(effort.id, REPO)?.threadId).toBe("thr-stale-controller");
   const args = env.spawn.mock.calls.at(-1)?.[0];
   expect(args?.parentThreadId).toBeUndefined();
-  expect(args?.prompt).toContain("Effort parent unavailable");
+  expect(args?.prompt).toContain("Repository parent unavailable");
   expect(args?.pluginMetadata).toMatchObject({ role: "context", linkedPrUrl: URL, workEffortId: effort.id });
   expect((await env.board()).prThreadLinks[URL]).toContain(created.threadId);
 });

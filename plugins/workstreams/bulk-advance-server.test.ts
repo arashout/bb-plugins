@@ -13,7 +13,7 @@ const HEAD = "a".repeat(40), BASE = "b".repeat(40);
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string } } = {}) {
+async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string }; misparentWorker?: boolean } = {}) {
   const repo = options.mixedCase ? "Example/Widget" : "example/widget";
   const url = `https://github.com/${repo}/pull/42`;
   const pr = { ...parsePrList(JSON.stringify([{ number: 42, url, state: options.terminal ?? "OPEN", title: "ABC-42 Fix account lookup", reviewDecision: "APPROVED",
@@ -41,10 +41,12 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const role = args.pluginMetadata?.role;
     const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" :
+      role === "unassigned-root" ? "thr-unassigned" : role === "unassigned-repo" ? "thr-unassigned-repo" :
       ++spawned === 1 ? "thr-rebasing" : `thr-repair-${spawned}`;
     const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
-      status: role === "coordinator" ? "idle" : "active" }), parentThreadId: args.parentThreadId ?? null,
-      environment: { hostId: args.environment.hostId } };
+      status: role === "coordinator" ? "idle" : "active" }), parentThreadId: options.misparentWorker && role === "rebase-worker" ? null : args.parentThreadId ?? null,
+      environment: { hostId: args.environment.hostId }, environmentPath: args.environment.workspace?.path ?? null,
+      environmentHostId: args.environment.hostId ?? null };
     threadMetadata.set(thread.id, args.pluginMetadata ?? {});
     threads.set(thread.id, thread); return thread;
   });
@@ -83,7 +85,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
   }
   await plugin(bb); cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { bb, harness, calls, spawn, send, facts, pr, url, threads, blockedParents, beforeWorkspace, savedBatch: (id: string) => bb.storage.database().prepare("SELECT id, body FROM advance_batches WHERE id = ?").get(id) as { id: string; body: string }, preview: async (prUrl = url) => await harness.callRpc("advance_preview", { prUrls: [prUrl] }) as AdvancePreview };
+  return { bb, harness, calls, spawn, send, facts, pr, unit, url, threads, blockedParents, beforeWorkspace, savedBatch: (id: string) => bb.storage.database().prepare("SELECT id, body FROM advance_batches WHERE id = ?").get(id) as { id: string; body: string }, preview: async (prUrl = url) => await harness.callRpc("advance_preview", { prUrls: [prUrl] }) as AdvancePreview };
 }
 
 async function failedBatch(env: Awaited<ReturnType<typeof setup>>) {
@@ -187,14 +189,126 @@ describe("bulk advance server integration", () => {
     expect(env.spawn).not.toHaveBeenCalled();
     expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
     await env.harness.callRpc("advance_start", { token: plan.token });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(3));
     expect(env.calls.find((call) => call.method === "advanceWorkspace")?.input).toMatchObject({ sourcePath: PATH, prUrl: env.url, expectedHeadOid: HEAD, expectedBaseOid: BASE });
-    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example",
+    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "Unassigned work", pluginMetadata: { role: "unassigned-root" } });
+    expect(env.spawn.mock.calls[1]?.[0]).toMatchObject({ title: "example/widget", parentThreadId: "thr-unassigned", pluginMetadata: { role: "unassigned-repo" } });
+    expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example", parentThreadId: "thr-unassigned-repo",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
       pluginMetadata: { role: "rebase-worker" } });
-    expect(env.spawn.mock.calls[0]?.[0]).not.toHaveProperty("model");
-    expect(env.spawn.mock.calls[0]?.[0]).not.toHaveProperty("providerId");
-    expect(env.spawn.mock.calls[0]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");
+    expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("model");
+    expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("providerId");
+    expect(env.spawn.mock.calls[2]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");
+  });
+
+  it("previews and starts an inferred-effort manual PR worker beneath its repository controller", async () => {
+    const env = await setup();
+    const plan = await env.harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" }) as
+      { recommendation: { mode: string; threadId: string | null } };
+    expect(plan.recommendation).toMatchObject({ mode: "new", threadId: null });
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null,
+      prompt: "Repair the checkout." })).toMatchObject({ ok: true, threadId: "thr-rebasing" });
+    expect(env.spawn.mock.calls.map((call) => call[0].pluginMetadata.role)).toEqual(["coordinator", "repo", "pr"]);
+    expect(env.spawn.mock.calls[2]?.[0].parentThreadId).toBe("thr-repo");
+    const again = await env.harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" }) as
+      { recommendation: { mode: string; threadId: string | null } };
+    expect(again.recommendation).toMatchObject({ mode: "subthread", threadId: "thr-repo" });
+  });
+
+  it("starts a ticketless manual PR worker beneath the shared unassigned repository parent", async () => {
+    const env = await setup();
+    env.pr.title = "Fix account lookup";
+    env.pr.headRefName = "fix-account-lookup";
+    env.unit.branch = "fix-account-lookup";
+    await env.harness.runCli(["refresh"]);
+    const plan = await env.harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" }) as
+      { recommendation: { mode: string; threadId: string | null } };
+    expect(plan.recommendation).toMatchObject({ mode: "new", threadId: null });
+    expect(await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null,
+      prompt: "Repair the checkout." })).toMatchObject({ ok: true });
+    expect(env.spawn.mock.calls.map((call) => call[0].pluginMetadata.role)).toEqual(["unassigned-root", "unassigned-repo", "pr"]);
+    expect(env.spawn.mock.calls[2]?.[0].parentThreadId).toBe("thr-unassigned-repo");
+    expect(await env.harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" })).toMatchObject({
+      recommendation: { mode: "subthread", threadId: "thr-unassigned-repo" } });
+  });
+
+  it("accepts the unassigned repository parent recommended after a context thread created it", async () => {
+    const env = await setup();
+    env.pr.title = "Fix account lookup";
+    env.pr.headRefName = "fix-account-lookup";
+    env.unit.branch = "fix-account-lookup";
+    await env.harness.runCli(["refresh"]);
+    expect(await env.harness.callRpc("card_thread_message", { target: { prUrl: env.url }, threadId: null,
+      message: "Inspect this PR." })).toMatchObject({ ok: true, created: true });
+    const plan = await env.harness.callRpc("agent_plan", { path: PATH, action: "resolve-conflicts" }) as
+      { recommendation: { mode: string; threadId: string | null } };
+    expect(plan.recommendation).toMatchObject({ mode: "subthread", threadId: "thr-unassigned-repo" });
+    const result = await env.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "subthread",
+      threadId: plan.recommendation.threadId, prompt: "Repair the checkout." });
+    expect(result).toMatchObject({ ok: true });
+    expect(env.spawn.mock.calls.at(-1)?.[0]).toMatchObject({ parentThreadId: "thr-unassigned-repo", pluginMetadata: { role: "pr" } });
+  });
+
+  it("keeps a ticketless checkout preview and manual launch under the same unassigned root", async () => {
+    const env = await setup();
+    env.unit.pr = null;
+    env.unit.branch = "draft";
+    env.unit.githubRepo = null;
+    await env.harness.runCli(["refresh"]);
+    expect(await env.harness.callRpc("agent_plan", { path: PATH, action: "investigate-ci" })).toMatchObject({
+      ok: true, recommendation: { mode: "new", threadId: null } });
+    expect(await env.harness.callRpc("agent_run", { path: PATH, action: "investigate-ci", mode: "new", threadId: null,
+      prompt: "Inspect this checkout." })).toMatchObject({ ok: true });
+    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "Unassigned work", pluginMetadata: { role: "unassigned-root" } });
+    expect(env.spawn.mock.calls[1]?.[0].parentThreadId).toBe("thr-unassigned");
+    expect(await env.harness.callRpc("agent_plan", { path: PATH, action: "investigate-ci" })).toMatchObject({
+      ok: true, recommendation: { mode: "subthread", threadId: "thr-unassigned" } });
+  });
+
+  it("places a pre-PR checkout with a known repository beneath its repository parent", async () => {
+    const env = await setup();
+    env.unit.pr = null;
+    env.unit.branch = "draft";
+    await env.harness.runCli(["refresh"]);
+    expect(await env.harness.callRpc("agent_plan", { path: PATH, action: "investigate-ci" })).toMatchObject({
+      ok: true, recommendation: { mode: "new", threadId: null } });
+    expect(await env.harness.callRpc("agent_run", { path: PATH, action: "investigate-ci", mode: "new", threadId: null,
+      prompt: "Inspect this checkout." })).toMatchObject({ ok: true });
+    expect(env.spawn.mock.calls.map((call) => call[0].pluginMetadata.role)).toEqual(["unassigned-root", "unassigned-repo", "checkout"]);
+    expect(env.spawn.mock.calls[2]?.[0].parentThreadId).toBe("thr-unassigned-repo");
+    expect(await env.harness.callRpc("agent_plan", { path: PATH, action: "investigate-ci" })).toMatchObject({
+      ok: true, recommendation: { mode: "subthread", threadId: "thr-unassigned-repo" } });
+  });
+
+  it("stops an unassigned Advance launch when the PR gains an effort during workspace creation", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const env = await setup({ remoteOnly: true });
+    env.beforeWorkspace.mockImplementationOnce(async () => {
+      createEffortStore(env.bb.storage.database()).establish({ sourceKey: "manual:widget", name: "Account lookup",
+        goal: "", projectId: "project-example", members: { tickets: [], prUrls: [env.url] }, coordinatorState: "none" });
+    });
+    const batch = await env.harness.callRpc("advance_start", { token: (await env.preview()).token }) as AdvanceBatch;
+    await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ id: batch.id,
+      jobs: [{ status: "needs-attention", uncertain: true, detail: expect.stringContaining("assigned to an effort") }] }]));
+    expect(env.spawn).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    vi.setSystemTime(Date.now() + 31_000);
+    expect(await env.harness.callRpc("advance_recheck", { batchId: batch.id })).toMatchObject({ jobs: [{
+      status: "needs-attention", uncertain: false, detail: expect.stringContaining("No worker exists") }] });
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a created worker recoverable when SDK readback reports the wrong parent", async () => {
+    const env = await setup({ remoteOnly: true, misparentWorker: true });
+    const batch = await env.harness.callRpc("advance_start", { token: (await env.preview()).token }) as AdvanceBatch;
+    await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ id: batch.id,
+      jobs: [{ status: "needs-attention", uncertain: true, detail: expect.stringContaining("parent differs") }] }]));
+    expect(env.spawn).toHaveBeenCalledTimes(3);
+    expect(env.threads.has("thr-rebasing")).toBe(true);
+    expect(await env.harness.callRpc("advance_recheck", { batchId: batch.id, jobId: batch.jobs[0]!.id }))
+      .toMatchObject({ jobs: [{ threadId: "thr-rebasing" }] });
+    expect(env.spawn).toHaveBeenCalledTimes(3);
   });
 
   it("launches a CI repair for an unapproved remote PR with a mapped repository", async () => {
@@ -204,8 +318,8 @@ describe("bulk advance server integration", () => {
     expect(plan.jobs[0]).toMatchObject({ eligible: true, needsPreparation: false, needsFeedback: false, needsChecks: true });
     expect(env.calls.some((call) => call.method === "advanceWorkspace")).toBe(false);
     await env.harness.callRpc("advance_start", { token: plan.token });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledOnce());
-    const prompt = env.spawn.mock.calls[0]![0].prompt as string;
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(3));
+    const prompt = env.spawn.mock.calls[2]![0].prompt as string;
     expect(prompt).toContain("Inspect the failing checks");
     expect(prompt).toContain("This preview did not authorize branch integration");
     expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
@@ -251,8 +365,8 @@ describe("bulk advance server integration", () => {
     const repair = await failing.preview();
     expect(repair.jobs[0]).toMatchObject({ eligible: true, needsChecks: true });
     await failing.harness.callRpc("advance_start", { token: repair.token });
-    await vi.waitFor(() => expect(failing.spawn).toHaveBeenCalledOnce());
-    expect(failing.spawn.mock.calls[0]![0].prompt).toContain("If this PR is a draft, keep it a draft");
+    await vi.waitFor(() => expect(failing.spawn).toHaveBeenCalledTimes(3));
+    expect(failing.spawn.mock.calls[2]![0].prompt).toContain("If this PR is a draft, keep it a draft");
   });
 
   it("requires a new preview when approval is lost before a ready PR starts", async () => {
@@ -320,9 +434,9 @@ describe("bulk advance server integration", () => {
     expect(plan.jobs[0]).toMatchObject({ eligible: true, needsPreparation: false, needsFeedback: true, workspace: "create",
       detail: feedback === "approval-note" ? expect.stringContaining("Approval feedback needs code") : env.facts.detail });
     await env.harness.callRpc("advance_start", { token: plan.token });
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(3));
     expect(env.calls.find((call) => call.method === "advanceWorkspace")?.input).toMatchObject({ sourcePath: PATH, prUrl: env.url, expectedHeadOid: HEAD, expectedBaseOid: BASE });
-    expect(env.spawn.mock.calls[0]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example",
+    expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example", parentThreadId: "thr-unassigned-repo",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } } });
   });
 
@@ -336,7 +450,7 @@ describe("bulk advance server integration", () => {
   it("preserves the current approval blocker when completed feedback work needs a new review", async () => {
     const env = await setup({ ready: true, remoteOnly: true, feedback: "threads" });
     const batch = await env.harness.callRpc("advance_start", { token: (await env.preview()).token }) as AdvanceBatch;
-    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(3));
     const pushedHead = "c".repeat(40);
     Object.assign(env.facts, { headOid: pushedHead, unresolvedThreads: 0, reviewDecision: "REVIEW_REQUIRED", readiness: "waiting-review", detail: "Waiting for approval on the current PR." });
     Object.assign(env.pr, { headRefOid: pushedHead, unresolvedReviewThreads: 0, reviewDecision: "REVIEW_REQUIRED" });
@@ -360,12 +474,12 @@ describe("bulk advance server integration", () => {
     expect(env.spawn).not.toHaveBeenCalled();
     const result = await env.harness.callRpc("advance_repair_run", { token: plan.token, mode: "new", threadId: null, instruction: "Address the remaining feedback and reply." }) as { batch: AdvanceBatch; threadId: string };
     expect(result.batch.jobs[0]).toMatchObject({ status: "running", dedicated: true, threadId: result.threadId });
-    const request = env.spawn.mock.calls[0]![0];
+    const request = env.spawn.mock.calls[2]![0];
     expect(request).toMatchObject({ projectId: "project-example", title: "widget #42: repair review feedback",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
       pluginMetadata: { role: "advance-repair", advanceJobId: result.batch.jobs[0]!.attemptId, prUrl: env.url } });
     expect(request).not.toHaveProperty("model");
-    expect(request).not.toHaveProperty("parentThreadId");
+    expect(request.parentThreadId).toBe("thr-unassigned-repo");
     expect(result.batch.jobs[0]!.attemptId).not.toBe(ids.jobId);
     expect(request.prompt).toContain("Address the remaining feedback and reply.");
     expect(request.prompt).toContain("do not reset");

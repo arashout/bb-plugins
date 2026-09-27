@@ -209,7 +209,7 @@ export function PipelinePrComposer({
         }
         setThreadId(result.threadId);
         setMessage("");
-        setNotice(result.created ? "Agent thread started. Message sent." : result.delivery === "queued" ? "Message queued for the agent." : "Message sent to the agent.");
+        setNotice(result.warning ?? (result.created ? "Agent thread started. Message sent." : result.delivery === "queued" ? "Message queued for the agent." : "Message sent to the agent."));
         setComposing(false);
         if (!result.created) refetchUpdate();
       } else setError(result.error);
