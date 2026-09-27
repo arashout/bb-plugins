@@ -132,10 +132,6 @@ export function PipelineView({
   const [queuedDirect, setQueuedDirect] = useState<PipelineCard[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const boardRootRef = useRef<HTMLDivElement | null>(null);
-  const scrollBehavior = () =>
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-      ? ("instant" as const)
-      : ("smooth" as const);
   const arrivedFocus = useRef<string | null>(null);
   useEffect(() => setDispatch(board.dispatch), [board.dispatch]);
 
@@ -204,6 +200,16 @@ export function PipelineView({
     search || prefs.approvedOnly
       ? `${filteredCounts[stage]}/${counts[stage]}`
       : String(counts[stage]);
+  const openCount = visible.filter(
+    (card) => card.stage !== "merged" && card.stage !== "released",
+  ).length;
+  const readyCount = visible.filter(
+    (card) => card.stage === "ready" && !card.hold,
+  ).length;
+  const holdCount = visible.filter(
+    (card) => card.stage !== "merged" && card.stage !== "released" && card.hold,
+  ).length;
+  const completedCount = visible.length - openCount;
   const selectedCard = cards.find((card) => card.key === selected) ?? null;
   const selectionUrl = (card: PipelineCard) => card.pr ? advancePrKey(canonicalPrUrl(card.pr.url) ?? card.pr.url) : null;
   const selectionPrs = cards.flatMap((card) => card.pr ? [{ url: selectionUrl(card)!, state: card.pr.state }] : []);
@@ -520,7 +526,7 @@ export function PipelineView({
         id={`pipeline-${card.key}`}
         data-pipeline-motion-key={card.key}
         className={cn(
-          "group relative min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
+          "group relative isolate min-w-0 rounded-lg border bg-card px-3 py-2.5 text-left shadow-sm transition-colors hover:border-foreground/30",
           card.hold && "opacity-55 hover:opacity-90",
           selected === card.key && "border-ring ring-1 ring-ring/40",
         )}
@@ -777,19 +783,6 @@ export function PipelineView({
         </button>
       );
     return null;
-  };
-  const scrollToStage = (stage: PipelineStage) => {
-    const target =
-      layout === "stage"
-        ? document.getElementById(`pipeline-column-${stage}`)
-        : document.querySelector<HTMLElement>(
-            `[data-pipeline-stage="${stage}"]`,
-          );
-    target?.scrollIntoView({
-      behavior: scrollBehavior(),
-      block: "nearest",
-      inline: "start",
-    });
   };
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
@@ -1052,51 +1045,53 @@ export function PipelineView({
         {advanceSelection.removed ? <span className="text-muted-foreground">{advanceSelection.removed} removed after hold, close, or disappearance</span> : null}
       </div>
       <div
-        aria-label="Pipeline stage counts"
-        className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 bg-muted/30 px-3 py-1"
+        aria-label="Pipeline summary"
+        className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/60 bg-muted/30 px-3 py-1 text-[11px]"
       >
-        {PIPELINE_STAGES.map((stage) => (
-          <button
-            key={stage}
-            type="button"
-            onClick={() => scrollToStage(stage)}
-            className="flex min-w-20 flex-1 items-center justify-between rounded bg-background px-2 py-1 text-[10.5px] hover:bg-foreground/[0.05]"
-          >
-            <span className="truncate">{LABEL[stage]}</span>
-            <b
-              className="ml-1 font-mono"
-              title={
-                search || prefs.approvedOnly ? "Matching / total" : "Total"
-              }
-            >
-              {stageCount(stage)}
-            </b>
-          </button>
-        ))}
+        <span className="font-medium text-foreground">
+          {search || prefs.approvedOnly ? "Matching" : "Overall"}
+        </span>
+        <span>{openCount} open</span>
+        <span aria-hidden="true" className="text-muted-foreground">·</span>
+        <span>{readyCount} ready to merge</span>
+        <span aria-hidden="true" className="text-muted-foreground">·</span>
+        <span>{holdCount} on hold</span>
+        <span aria-hidden="true" className="text-muted-foreground">·</span>
+        <span>{completedCount} completed</span>
       </div>
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div ref={boardRootRef} className="min-w-0 flex-1 overflow-auto p-3">
+        <div ref={boardRootRef} className="min-w-0 flex-1 overflow-auto">
           {layout === "stage" ? (
-            <div className="grid min-w-[1520px] grid-cols-6 gap-4">
-              {PIPELINE_STAGES.map((stage) => (
-                <section
-                  key={stage}
-                  id={`pipeline-column-${stage}`}
-                  className="flex min-w-0 flex-col gap-3"
-                >
-                  <header className="sticky top-0 z-10 flex min-h-12 items-center gap-2 border-b border-border bg-background py-2 text-[11px]">
+            <div className="min-w-[1520px]">
+              <div className="sticky top-0 z-10 grid grid-cols-6 gap-4 bg-background px-3">
+                {PIPELINE_STAGES.map((stage) => (
+                  <header
+                    key={stage}
+                    data-pipeline-stage-header={stage}
+                    className="flex min-h-12 items-center gap-2 border-b border-border py-2 text-[11px]"
+                  >
                     <h2 className="font-semibold">{LABEL[stage]}</h2>
                     <span className="font-mono text-muted-foreground">
                       {stageCount(stage)}
                     </span>
                     {bulkButton(stage)}
                   </header>
-                  {columnCards(stage)}
-                </section>
-              ))}
+                ))}
+              </div>
+              <div className="grid grid-cols-6 gap-4 px-3 pb-3">
+                {PIPELINE_STAGES.map((stage) => (
+                  <section
+                    key={stage}
+                    id={`pipeline-column-${stage}`}
+                    className="flex min-w-0 flex-col gap-3 pt-3"
+                  >
+                    {columnCards(stage)}
+                  </section>
+                ))}
+              </div>
             </div>
           ) : (
-            <div className="min-w-[1696px]">
+            <div className="min-w-[1696px] p-3">
               <p className="border-b border-border px-1 pb-1 text-[10.5px] text-muted-foreground">
                 Automatic actions run for one effort at a time
                 {dispatch.effortKey
@@ -1109,7 +1104,7 @@ export function PipelineView({
                   key={key}
                   className="grid grid-cols-[160px_repeat(6,minmax(240px,1fr))] gap-4 border-b border-border/70 py-3"
                 >
-                  <div className="sticky left-0 z-10 bg-background text-[12px] leading-4">
+                  <div className="sticky left-0 z-10 bg-background text-[12px] leading-4 after:absolute after:inset-y-0 after:-right-4 after:w-4 after:bg-background">
                     <b
                       className="overflow-hidden break-words"
                       title={name}
