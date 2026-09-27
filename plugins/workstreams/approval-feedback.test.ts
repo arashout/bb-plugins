@@ -32,11 +32,46 @@ describe("approval feedback verification", () => {
     const parsed = parseFeedbackReport(output, "attempt-1", snapshot, head);
     expect(parsed).not.toBeNull();
     store.save(url, "thread-1", parsed!, 1_000);
+    expect(store.get(url)?.provenance).toEqual({ kind: "worker" });
     expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
     expect(feedbackVerified(snapshot, "b".repeat(40), store.get(url))).toBe(false);
     expect(feedbackVerified({ ...snapshot, fingerprint: "c".repeat(64) }, head, store.get(url))).toBe(false);
     expect(feedbackVerified({ status: "none", fingerprint: null, sourceIds: [] }, head, null)).toBe(true);
     expect(feedbackVerified({ status: "unknown", fingerprint: null, sourceIds: [] }, head, store.get(url))).toBe(false);
+    db.close();
+  });
+
+  it("loads older worker records and keeps audited legacy provenance without weakening current-head checks", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const parsed = parseFeedbackReport(`${FEEDBACK_REPORT_PREFIX}${JSON.stringify(report("old-attempt", snapshot.fingerprint!))}`,
+      "old-attempt", snapshot, head);
+    if (!parsed) throw new Error("Synthetic report did not parse");
+    const db = new Database(":memory:");
+    db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    store.save(url, "old-thread", parsed, 1_000);
+    const row = db.prepare("SELECT body FROM approval_feedback_verifications WHERE pr_url = ?").get(url) as { body: string };
+    const { provenance: _provenance, ...older } = JSON.parse(row.body) as Record<string, unknown>;
+    db.prepare("UPDATE approval_feedback_verifications SET body = ? WHERE pr_url = ?").run(JSON.stringify(older), url);
+    expect(store.get(url)?.provenance).toEqual({ kind: "worker" });
+
+    const provenance = { kind: "legacy-reconciliation" as const, auditThreadId: "thr_audit",
+      evidenceRefs: ["thr_old", "https://github.com/example/widget/pull/42#discussion_r1"] };
+    const reconciled = store.save(url, "old-thread", parsed, 2_000, provenance);
+    expect(store.get(url)?.provenance).toEqual(provenance);
+    expect(reconciled).toMatchObject({ attemptId: "old-attempt", threadId: "old-thread", provenance });
+    expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
+    expect(feedbackVerified(snapshot, "b".repeat(40), store.get(url))).toBe(false);
+    expect(feedbackVerified({ ...snapshot, fingerprint: "c".repeat(64) }, head, store.get(url))).toBe(false);
+    expect(feedbackVerified({ ...snapshot, sourceIds: ["different-source"] }, head, store.get(url))).toBe(false);
+    for (const invalid of [
+      { ...provenance, auditThreadId: "  " },
+      { ...provenance, evidenceRefs: [] },
+      { ...provenance, evidenceRefs: ["  "] },
+    ]) expect(() => store.save(url, "old-thread", parsed, 3_000, invalid)).toThrow();
+    expect(store.get(url)?.verifiedAt).toBe(2_000);
     db.close();
   });
 

@@ -32,13 +32,22 @@ const reportSchema = z.object({
   findings: z.array(findingSchema).min(1).max(300),
   blockers: z.array(z.string().max(500)).max(20),
 }).strict();
+export const approvalFeedbackProvenanceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("worker") }).strict(),
+  z.object({ kind: z.literal("legacy-reconciliation"), auditThreadId: z.string().trim().min(1).max(200),
+    evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100) }).strict(),
+]);
+export type ApprovalFeedbackProvenance = z.infer<typeof approvalFeedbackProvenanceSchema>;
 const recordSchema = reportSchema.extend({
   prUrl: z.string().max(500),
   threadId: z.string().min(1).max(200),
   verifiedAt: z.number().int().nonnegative(),
+  // Older worker records predate explicit provenance; only audited recovery uses the legacy variant.
+  provenance: approvalFeedbackProvenanceSchema.default({ kind: "worker" }),
 });
 
-export type ApprovalFeedbackRecord = z.infer<typeof recordSchema>;
+// Callers may still construct pre-provenance records; parsing supplies the worker default.
+export type ApprovalFeedbackRecord = z.input<typeof recordSchema>;
 export const APPROVAL_FEEDBACK_MIGRATION =
   "CREATE TABLE IF NOT EXISTS approval_feedback_verifications (pr_url TEXT PRIMARY KEY, body TEXT NOT NULL)";
 export const FEEDBACK_REPORT_PREFIX = "Workstreams approval feedback evidence: ";
@@ -78,10 +87,11 @@ export function createApprovalFeedbackStore(db: RunDb) {
       if (!row) return null;
       try { return recordSchema.safeParse(JSON.parse(row.body)).data ?? null; } catch { return null; }
     },
-    save(prUrl: string, threadId: string, report: z.infer<typeof reportSchema>, verifiedAt: number): ApprovalFeedbackRecord {
+    save(prUrl: string, threadId: string, report: z.infer<typeof reportSchema>, verifiedAt: number,
+      provenance: ApprovalFeedbackProvenance = { kind: "worker" }): ApprovalFeedbackRecord {
       const key = canonicalPrUrl(prUrl);
       if (key === null) throw new Error("Invalid PR URL for feedback verification");
-      const record = recordSchema.parse({ ...report, prUrl: key, threadId, verifiedAt });
+      const record = recordSchema.parse({ ...report, prUrl: key, threadId, verifiedAt, provenance });
       db.prepare("INSERT OR REPLACE INTO approval_feedback_verifications (pr_url, body) VALUES (?, ?)").run(key, JSON.stringify(record));
       return record;
     },
