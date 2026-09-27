@@ -1,6 +1,6 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RawUnit } from "./contract.js";
+import type { Pr, RawUnit } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import plugin, { type Board } from "./server.js";
 import { createApprovalFeedbackStore } from "./approval-feedback.js";
@@ -44,11 +44,29 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
   await plugin(bb);
   cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { harness, calls, beforeLive, entries, feedbackStore: createApprovalFeedbackStore(bb.storage.database()),
+  return { harness, calls, beforeLive, entries, db: bb.storage.database(), feedbackStore: createApprovalFeedbackStore(bb.storage.database()),
     board: async () => await harness.callRpc("board_get", null) as Board };
 }
 
 describe("authored backlog server actions", () => {
+  it("keeps legacy cached approval replies visible without clearing missing or current feedback", async () => {
+    const env = await setup({ local: true });
+    const legacy = { ...env.entries[0]!.pr, approvalFeedback: undefined, approvalNoteFollowedUp: true };
+    const persist = (pr: Pr) => {
+      env.db.prepare(`UPDATE authored_prs SET entry = ? WHERE url = ?`)
+        .run(JSON.stringify({ repo: "inkwell/folio", pr }), URL.toLowerCase());
+      env.db.prepare(`UPDATE units SET unit = ? WHERE path = ?`).run(JSON.stringify({ ...UNIT, pr }), UNIT.path);
+    };
+    persist(legacy);
+    const unknown = await env.board();
+    expect(unknown.prInventory.entries).toMatchObject([{ pr: { approvalNoteFollowedUp: true, approvalFeedbackVerified: false } }]);
+    expect(unknown.groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).toBe("unverified");
+    persist({ ...legacy, approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-42"] } });
+    const current = await env.board();
+    expect(current.prInventory.entries).toMatchObject([{ pr: { approvalNoteFollowedUp: true, approvalFeedbackVerified: false } }]);
+    expect(current.groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).toBe("approved-with-note");
+  });
+
   it("uses current review evidence for local and remote Ready states and manual merge", async () => {
     const env = await setup({ local: true, approvalFeedback: true });
     expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(false);

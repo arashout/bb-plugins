@@ -33,6 +33,16 @@ describe("authored PR cache coverage", () => {
     expect(store.get(first.pr.url)).toBeUndefined();
   });
 
+  it("loads cached PRs with the retired approval reply field without treating it as feedback evidence", () => {
+    const { db, store } = setup();
+    const first = entry(1);
+    const legacy = { ...first, pr: { ...first.pr, reviewDecision: "APPROVED", approvalNoteFollowedUp: true } };
+    db.prepare(`INSERT INTO authored_prs (url, repo, entry, stale) VALUES (?, ?, ?, 0)`)
+      .run(first.pr.url.toLowerCase(), first.repo, JSON.stringify(legacy));
+    expect(store.read().entries).toMatchObject([{ pr: { number: 1, approvalNoteFollowedUp: true } }]);
+    expect(store.get(first.pr.url)?.pr.approvalFeedback).toBeUndefined();
+  });
+
   it("removes closed PRs in successful repositories while retaining failed repositories as stale", () => {
     const { store, tick } = setup();
     store.apply(result([entry(1), entry(2, "inkwell/spine")]));

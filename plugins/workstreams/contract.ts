@@ -81,7 +81,8 @@ export const prSchema = z
       .default([]),
     /** The latest approving review has body text; absent on older scans. */
     approvalHasBody: z.boolean().optional(),
-    /** Its inline threads were addressed, or the author explicitly replied to its standalone note after a newer head. */
+    /** Retained only so older cached PR rows load; readiness ignores this former reply heuristic. */
+    approvalNoteFollowedUp: z.boolean().optional(),
     /** Snapshot of approving-review feedback from a complete live review read. */
     approvalFeedback: approvalFeedbackSchema.optional(),
     /** Server comparison with the current head-bound verification record. */
