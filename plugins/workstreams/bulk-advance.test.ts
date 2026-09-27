@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import type { Recommendation, ThreadCandidate } from "./actions.js";
 import { ADVANCE_MIGRATIONS, createAdvanceService, preparationPrompt, type AdvanceFacts } from "./bulk-advance.js";
+import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerified } from "./approval-feedback.js";
 
 const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts => ({
   prUrl: `https://github.com/acme/app/pull/${number}`, number, repo: "acme/app", title: `Fix ${number}`,
@@ -14,6 +15,8 @@ const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
 function setup(facts = [fact()]) {
   const db = new Database(":memory:");
   for (const sql of ADVANCE_MIGRATIONS) db.exec(sql);
+  db.exec(APPROVAL_FEEDBACK_MIGRATION);
+  const feedbackStore = createApprovalFeedbackStore(db);
   const current = new Map(facts.map((f) => [f.prUrl, f]));
   let time = 1_000;
   const deps = {
@@ -29,13 +32,63 @@ function setup(facts = [fact()]) {
     spawn: vi.fn(async (_facts: AdvanceFacts, _path: string, _prompt: string, _jobId: string) => "thread"), send: vi.fn(async (_threadId: string, _prompt: string) => {}),
     thread: vi.fn(async () => ({ status: "idle", archivedAt: null, deletedAt: null, output: "" })),
     recover: vi.fn(async (): Promise<string[]> => []), changed: vi.fn(), verified: vi.fn(), now: () => time,
+    recordFeedback: vi.fn((prUrl: string, threadId: string, report: Parameters<typeof feedbackStore.save>[2]) => { feedbackStore.save(prUrl, threadId, report, time); }),
   };
   const service = createAdvanceService(db, deps);
   const start = async () => { const plan = await service.preview(facts.map((f) => f.prUrl)); const batch = await service.start(plan.token); await drain(); return batch; };
-  return { db, deps, service, current, start, time: (value: number) => { time = value; } };
+  return { db, deps, service, current, feedbackStore, start, time: (value: number) => { time = value; } };
 }
 
 describe("finite Advance preparation", () => {
+  it("records authorized no-change approval evidence and rechecks the same head as Ready", async () => {
+    const snapshot = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+    const facts = fact(1, { needsPreparation: false, needsFeedback: true, approvalFeedback: snapshot, detail: "Verify approval feedback" });
+    const t = setup([facts]);
+    t.deps.inspect.mockImplementation(async () => ({ ...facts,
+      readiness: feedbackVerified(snapshot, facts.headOid, t.feedbackStore.get(facts.prUrl)) ? "ready" as const : "needs-attention" as const }));
+    const batch = await t.start();
+    const job = batch.jobs[0]!;
+    const evidence = { attemptId: job.id, headOid: facts.headOid, fingerprint: snapshot.fingerprint,
+      findings: [{ sourceId: "review-1", resolution: "already-satisfied", evidence: "The current fallback already covers the reviewed case in src/fallback.ts.",
+        validation: { outcome: "not-needed", detail: "Static inspection confirms this copy-only request." } }], blockers: [] };
+    await t.service.signal("thread", "idle", `${FEEDBACK_REPORT_PREFIX}${JSON.stringify(evidence)}\nWorkstreams job ${job.id} complete: prepared`);
+    expect(t.feedbackStore.get(facts.prUrl)).toMatchObject({ headOid: facts.headOid, threadId: "thread", attemptId: job.id });
+    expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", checkedHeadOid: facts.headOid });
+  });
+
+  it("keeps a worker marker blocked when approval evidence or validation is incomplete", async () => {
+    const snapshot = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+    const facts = fact(1, { needsPreparation: false, needsFeedback: true, approvalFeedback: snapshot });
+    const t = setup([facts]);
+    const batch = await t.start();
+    await t.service.signal("thread", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: prepared`);
+    expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "needs-attention", checkedHeadOid: null });
+    expect(t.feedbackStore.get(facts.prUrl)).toBeNull();
+  });
+
+  it.each(["cancel", "replace"] as const)("cannot save approval evidence after an in-flight %s", async (change) => {
+    const snapshot = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+    const facts = fact(1, { needsPreparation: false, needsFeedback: true, approvalFeedback: snapshot });
+    const t = setup([facts]);
+    const batch = await t.start();
+    const job = batch.jobs[0]!;
+    let release!: (value: AdvanceFacts) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const delayed = new Promise<AdvanceFacts>((resolve) => { release = resolve; });
+    t.deps.inspect.mockImplementation(async () => { entered(); return delayed; });
+    const evidence = { attemptId: job.id, headOid: facts.headOid, fingerprint: snapshot.fingerprint,
+      findings: [{ sourceId: "review-1", resolution: "fixed", evidence: "The fallback now handles the reviewed input in src/fallback.ts.",
+        validation: { outcome: "passed", detail: "Focused fallback test passed." } }], blockers: [] };
+    const pending = t.service.signal("thread", "idle", `${FEEDBACK_REPORT_PREFIX}${JSON.stringify(evidence)}\nWorkstreams job ${job.id} complete: prepared`);
+    await started;
+    if (change === "cancel") t.service.cancel(batch.id);
+    else job.attemptId = "new-attempt";
+    release(facts);
+    await pending;
+    expect(t.deps.recordFeedback).not.toHaveBeenCalled();
+    expect(t.feedbackStore.get(facts.prUrl)).toBeNull();
+  });
   it("routes sequential PR attempts in one effort and repository through the same controller", async () => {
     const t = setup([fact(1, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl, fact(2).prUrl] } }),
       fact(2, { effortKey: "group-a", effortMembers: { tickets: [], prUrls: [fact().prUrl, fact(2).prUrl] } })]);
@@ -444,11 +497,13 @@ describe("finite Advance preparation", () => {
   });
   it("does not confuse GitHub's historical base snapshot with the live verified base tip", async () => {
     const t = setup([fact(1, { needsPreparation: false, readiness: "ready" })]); await t.start();
-    t.service.invalidate([{ url: fact().prUrl, headRefOid: fact().headOid, baseRefOid: "c".repeat(40) }]);
+    t.service.invalidate([{ url: fact().prUrl, headRefOid: fact().headOid, baseRefOid: "c".repeat(40),
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true }]);
     expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", checkedHeadOid: fact().headOid });
   });
   it("invalidates Ready when approval or comments change on the same head", async () => {
-    for (const change of [{ reviewDecision: "CHANGES_REQUESTED" }, { unresolvedReviewThreads: 1 }, { unresolvedReviewThreads: null }, { isDraft: true }, { approvalHasBody: true, approvalNoteFollowedUp: false }, { checkConclusions: ["FAILURE"] }]) {
+    for (const change of [{ reviewDecision: "CHANGES_REQUESTED" }, { unresolvedReviewThreads: 1 }, { unresolvedReviewThreads: null }, { isDraft: true },
+      { approvalFeedback: { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: false }, { checkConclusions: ["FAILURE"] }]) {
       const t = setup([fact(1, { needsPreparation: false, readiness: "ready" })]); await t.start();
       t.service.invalidate([{ url: fact().prUrl, headRefOid: fact().headOid, baseRefOid: fact().baseOid, ...change }]);
       expect(t.service.list()[0]!.jobs[0]!.status).toBe("needs-attention");
@@ -472,9 +527,8 @@ describe("finite Advance preparation", () => {
     expect(prompt).toContain("integrate the current PR base");
     expect(prompt).toContain("no new commit or push is required");
     expect(prompt).toContain("Never resolve unanswered disagreements");
-    expect(prompt).toContain('explicitly says "approval note"');
-    expect(prompt).toContain("actual @reviewer");
-    expect(prompt).toContain("current head SHA");
+    expect(prompt).toContain("no formulaic follow-up comment is required");
+    expect(prompt).toContain("record concrete code and validation evidence");
     expect(prompt).toContain("ask PTAL only when another review is needed");
     expect(prompt).not.toContain("do not make unrelated review fixes");
   });

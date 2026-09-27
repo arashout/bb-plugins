@@ -64,9 +64,15 @@ describe("bulk advance verification", () => {
     expect(result).toMatchObject({ ok: true, facts: { needsPreparation: true, readiness: "needs-attention", unresolvedThreads: 1 } });
   });
 
-  it("does not turn approved-with-note into ready when follow-up is unconfirmed", async () => {
-    const result = await readAdvancePr(fixture({ view: { latestReviews: [{ state: "APPROVED", body: "Fix the fallback" }] } }).run, url);
-    expect(result).toMatchObject({ ok: true, facts: { approvalNotePending: true, readiness: "needs-attention" } });
+  it("passes written approval feedback to the persisted-record gate independently of base readiness", async () => {
+    const review = { id: "approval-1", state: "APPROVED", body: "Fix the fallback", author: { login: "reviewer" },
+      submittedAt: "2026-09-24T12:00:00Z", commit: { oid: head } };
+    const result = await readAdvancePr(fixture({
+      view: { latestReviews: [{ state: "APPROVED", body: review.body }] },
+      review: { reviews: { pageInfo: { hasPreviousPage: false }, nodes: [review] } },
+    }).run, url);
+    expect(result).toMatchObject({ ok: true, facts: { readiness: "ready",
+      approvalFeedback: { status: "present", sourceIds: ["approval-1"] } } });
   });
 
   it("leaves empty pending conclusions waiting, and distinguishes lost approval", async () => {
@@ -102,10 +108,10 @@ describe("bulk advance verification", () => {
   });
 
   it("refuses readiness when approval history or check data is incomplete", async () => {
-    for (const options of [
-      { review: { reviews: { pageInfo: { hasPreviousPage: true }, nodes: [] } } },
-      { view: { statusCheckRollup: [{}] } },
-    ]) expect(await readAdvancePr(fixture(options).run, url)).toMatchObject({ ok: true, facts: { readiness: "needs-attention" } });
+    expect(await readAdvancePr(fixture({ review: { reviews: { pageInfo: { hasPreviousPage: true }, nodes: [] } } }).run, url))
+      .toMatchObject({ ok: true, facts: { approvalFeedback: { status: "unknown" } } });
+    expect(await readAdvancePr(fixture({ view: { statusCheckRollup: [{}] } }).run, url))
+      .toMatchObject({ ok: true, facts: { readiness: "needs-attention" } });
     expect(await readAdvancePr(fixture({ review: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [] } } }).run, url)).toMatchObject({ ok: false });
   });
 

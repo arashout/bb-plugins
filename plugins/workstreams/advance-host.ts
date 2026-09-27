@@ -1,6 +1,6 @@
 // Live preparation facts. Nothing in this reader writes to GitHub or a checkout.
 import { z } from "zod";
-import { approvalHasBody, parseMergeStateStatus } from "./gh.js";
+import { parseMergeStateStatus } from "./gh.js";
 import { prTarget, readReviewThreads, type GhRunner, type Run } from "./ghactions.js";
 import type { AdvanceFacts, AdvanceInspection } from "./advance-contract.js";
 
@@ -29,7 +29,8 @@ function terminalFacts(value: unknown, prUrl: string, repo: string, number: numb
     state: view.state, isDraft: false, isCrossRepository: raw.isCrossRepository === true,
     reviewDecision: null, mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN", needsPreparation: false,
     readiness: view.state === "MERGED" ? "merged" : "closed", detail: view.state === "MERGED" ? "PR merged." : "PR closed without merging.",
-    unresolvedThreads: 0, checks: "unknown", basePrNumber: null, approvalNotePending: false,
+    unresolvedThreads: 0, checks: "unknown", basePrNumber: null,
+    approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
   } };
 }
 const fields = Object.keys(viewSchema.shape).join(",");
@@ -112,7 +113,6 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
         reviewRefs.baseRef.target.oid !== refs.baseRef.target.oid) continue;
     const view = final.data;
     const checks = advanceChecks(view.statusCheckRollup);
-    const approvalNotePending = approvalHasBody(view.latestReviews) && threads.approvalNoteFollowedUp !== true;
     const mergeStateStatus = parseMergeStateStatus(view.mergeStateStatus);
     const needsPreparation = mergeStateStatus === "BEHIND" || mergeStateStatus === "DIRTY" || view.mergeable === "CONFLICTING";
     const basePrNumber = bases.data[0]?.number ?? null;
@@ -122,8 +122,6 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
     else if (needsPreparation) detail = mergeStateStatus === "DIRTY" || view.mergeable === "CONFLICTING" ? "Resolve conflicts, test, and push the prepared branch." : "Update the branch against its base, test, and push.";
     else if (threads.count > 0) detail = `${threads.count}${threads.hasNextPage ? "+" : ""} unresolved review threads need attention.`;
     else if (threads.hasNextPage) detail = "Review threads are incomplete; readiness needs another check.";
-    else if (threads.approvalNotesComplete !== true) detail = "Review history is incomplete; readiness needs another check.";
-    else if (approvalNotePending) detail = "An approving review includes a note without confirmed follow-up.";
     else if (checks === "failed") detail = "One or more checks failed.";
     else if (checks === "unknown") detail = "Check results are incomplete or unknown.";
     else if (basePrNumber !== null) detail = "The base branch belongs to another open PR; advance that dependency first.";
@@ -139,7 +137,8 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
       headRefName: view.headRefName, baseRefName: view.baseRefName, headOid: view.headRefOid, baseOid: refs.baseRef.target.oid,
       state: view.state, isDraft: view.isDraft, isCrossRepository: view.isCrossRepository,
       reviewDecision: view.reviewDecision || null, mergeStateStatus, mergeable: view.mergeable,
-      needsPreparation, readiness, detail, unresolvedThreads: threads.count, checks, basePrNumber, approvalNotePending,
+      needsPreparation, readiness, detail, unresolvedThreads: threads.count, checks, basePrNumber,
+      approvalFeedback: threads.approvalFeedback,
       ...(threads.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: threads.reviewFollowupPosted }),
     } };
   }

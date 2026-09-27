@@ -323,7 +323,7 @@ async function inspect(
     else {
       unit.pr.unresolvedReviewThreads = threads.count;
       unit.pr.resolvedReviewThreads = threads.resolvedCount;
-      unit.pr.approvalNoteFollowedUp = threads.approvalNoteFollowedUp;
+      unit.pr.approvalFeedback = threads.approvalFeedback;
       unit.pr.reviewFollowupPosted = threads.reviewFollowupPosted;
     }
   }

@@ -48,7 +48,7 @@ async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message:
   }
   pr.unresolvedReviewThreads = threads.count;
   pr.resolvedReviewThreads = threads.resolvedCount;
-  pr.approvalNoteFollowedUp = threads.approvalNoteFollowedUp;
+  pr.approvalFeedback = threads.approvalFeedback;
   pr.reviewFollowupPosted = threads.reviewFollowupPosted;
   if (threads.hasNextPage) warn(`${repo} #${pr.number}: more review threads remain unread.`);
 }

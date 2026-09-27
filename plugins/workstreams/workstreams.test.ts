@@ -72,6 +72,7 @@ function pr(overrides: Partial<Pr> = {}): Pr {
     latestReviews: [],
     unresolvedReviewThreads: 0,
     resolvedReviewThreads: 0,
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
     ...overrides,
   };
 }
@@ -200,11 +201,13 @@ describe("unitLifecycle", () => {
   });
 
   it("keeps a written approval in Respond even when GitHub reports zero inline threads", () => {
-    expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", approvalHasBody: true, unresolvedReviewThreads: 0 }) }))).toBe("approved-with-note");
+    expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, unresolvedReviewThreads: 0 }) }))).toBe("approved-with-note");
   });
 
-  it("lets resolved inline feedback supersede its approval summary without erasing the note's history", () => {
-    const reviewed = pr({ reviewDecision: "APPROVED", approvalHasBody: true, approvalNoteFollowedUp: true, unresolvedReviewThreads: 0, resolvedReviewThreads: 6 });
+  it("keeps approved feedback visible until current-head evidence is verified", () => {
+    const reviewed = pr({ reviewDecision: "APPROVED", approvalHasBody: true,
+      approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: true,
+      unresolvedReviewThreads: 0, resolvedReviewThreads: 6 });
     expect(unitLifecycle(unit({ pr: reviewed }))).toBe("awaiting-merge");
     expect(reviewed.approvalHasBody).toBe(true);
   });

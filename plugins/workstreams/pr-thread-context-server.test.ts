@@ -7,6 +7,7 @@ import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import { createRunStore } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
+import { FEEDBACK_REPORT_PREFIX } from "./approval-feedback.js";
 
 const HOST = "host-inkwell";
 const PROJECT = "proj-inkwell";
@@ -78,7 +79,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
 }
 
 describe("PR thread context and messaging", () => {
-  it("shows the final content line, skipping only Advance completion markers and bounding the preview", async () => {
+  it("shows the final prose line, skipping Advance markers and evidence, and bounding the preview", async () => {
     const env = await setup();
     env.add("thr-pr");
     env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
@@ -86,6 +87,10 @@ describe("PR thread context and messaging", () => {
     expect(await env.update("thr-pr")).toEqual({ lastLine: "The review is ready." });
     env.output.mockResolvedValue({ output: `The tests remain blocked.\nWorkstreams job attempt-1 complete: blocked` });
     expect(await env.update("thr-pr")).toEqual({ lastLine: "The tests remain blocked." });
+    env.output.mockResolvedValue({ output: `The fallback is verified.\n${FEEDBACK_REPORT_PREFIX}{"attemptId":"attempt-1"}\nWorkstreams job attempt-1 complete: prepared` });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: "The fallback is verified." });
+    env.output.mockResolvedValue({ output: `${FEEDBACK_REPORT_PREFIX}{"attemptId":"attempt-1"}\nWorkstreams job attempt-1 complete: prepared` });
+    expect(await env.update("thr-pr")).toEqual({ lastLine: null });
     env.output.mockResolvedValue({ output: "Workstreams job attempt-1 complete: prepared\n\n" });
     expect(await env.update("thr-pr")).toEqual({ lastLine: null });
     env.output.mockResolvedValue({ output: "A".repeat(400) });

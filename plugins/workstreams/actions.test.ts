@@ -185,12 +185,10 @@ describe("actionPrompt", () => {
     const prompt = actionPrompt("review-approval-note", FACTS);
     const preview = actionPreview("review-approval-note", { approvalHasBody: true, unresolvedReviewThreads: 0 });
     expect(prompt).toContain("leave informational points alone and explain why");
-    expect(prompt).toMatch(/Make focused fixes with relevant tests.*Fetch the PR's base branch.*rebase if behind, resolve any conflicts.*run the tests again.*Commit and push.*exact --force-with-lease/us);
-    expect(prompt).toContain("Reply on the PR to the approving review note, mention its reviewer, and state what changed or why a point needs no change.");
-    expect(prompt).toContain('Start that PR comment with "Approval note for @reviewer:" using the reviewer\'s actual login, and include the pushed head SHA');
-    expect(prompt).toMatch(/After the push and reply, wait for checks to settle, then re-read the live PR state, review decision, unresolved threads, checks, and mergeStateStatus.*Verify the PR is actually mergeable before reporting it ready/us);
-    expect(prompt).toContain("if any gate remains, name that gate and the next action. Do not merge.");
-    expect(preview.steps.join(" ")).toMatch(/Review each approval note.*rebase if behind and resolve conflicts.*Run relevant tests, commit, and push.*Reply on the PR.*Wait for checks, then re-read live approval, threads, checks, and mergeability/us);
+    expect(prompt).toMatch(/Make focused fixes with relevant tests.*Fetch the PR's base branch.*rebase if behind, resolve any conflicts.*run the tests again.*Commit and push code changes only when needed.*exact --force-with-lease/us);
+    expect(prompt).toContain("Advance must verify feedback against the current review and head before the PR is ready to merge.");
+    expect(prompt).toContain("Report the change or justified nonchange, branch state, test result, and remaining gates.");
+    expect(preview.steps.join(" ")).toMatch(/Review each approval note.*rebase if behind and resolve conflicts.*Run relevant tests; commit and push only code changes.*Re-read live approval, threads, checks, and mergeability.*Advance verifies feedback/us);
     expect(preview.lastScan).toEqual(["Written approval note present"]);
     expect(preview.steps.join(" ")).toContain("Report remaining gates; do not merge.");
   });
@@ -275,11 +273,26 @@ function live(overrides: Partial<LiveMergeFacts> = {}): LiveMergeFacts {
     approvalNotes: [],
     approvalNotesMore: 0,
     approvalNotesComplete: true,
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
     ...overrides,
   };
 }
 
 describe("mergeVerdict", () => {
+  it("requires current-head evidence for written or inline approval feedback", () => {
+    const approvalFeedback = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+    const pending = live({ approvalFeedback });
+    expect(mergeVerdict(pending).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
+    const record = { prUrl: "https://github.com/example/widget/pull/42", threadId: "thread-1", attemptId: "job-1",
+      headOid: pending.headRefOid!, fingerprint: approvalFeedback.fingerprint, verifiedAt: 1,
+      findings: [{ sourceId: "review-1", resolution: "fixed" as const, evidence: "The fallback is covered in src/fallback.ts.",
+        validation: { outcome: "passed" as const, detail: "Focused test passed." } }], blockers: [] };
+    expect(mergeVerdict(pending, record).refusals).toEqual([]);
+    expect(mergeVerdict(live({ ...pending, headRefOid: "b".repeat(40) }), record).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
+    expect(mergeVerdict(live({ ...pending, approvalFeedback: { ...approvalFeedback, fingerprint: "a".repeat(64) } }), record).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
+    expect(mergeVerdict(pending, { ...record, findings: [{ ...record.findings[0]!, validation: { outcome: "failed", detail: "Focused test failed." } }] }).refusals)
+      .toContain("Approval feedback needs verified follow-up on the current head.");
+  });
   it("allows an open, approved, clean PR", () => {
     expect(mergeVerdict(live())).toEqual({ refusals: [], warnings: [] });
     expect(mergeVerdict(live({ mergeStateStatus: "HAS_HOOKS" })).refusals).toEqual([]);

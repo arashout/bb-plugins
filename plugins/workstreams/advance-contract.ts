@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { approvalFeedbackSchema } from "./approval-feedback.js";
 
 export const advanceFactsSchema = z.object({
   prUrl: z.string().max(500), number: z.number().int().positive(), title: z.string().max(300), repo: z.string().max(160),
@@ -9,7 +10,8 @@ export const advanceFactsSchema = z.object({
   needsPreparation: z.boolean(), readiness: z.enum(["ready", "waiting-checks", "waiting-review", "needs-attention", "merged", "closed"]),
   detail: z.string().max(800), unresolvedThreads: z.number().int().nonnegative(),
   checks: z.enum(["passed", "pending", "failed", "unknown"]),
-  basePrNumber: z.number().int().positive().nullable(), approvalNotePending: z.boolean(), reviewFollowupPosted: z.boolean().optional(),
+  basePrNumber: z.number().int().positive().nullable(), reviewFollowupPosted: z.boolean().optional(),
+  approvalFeedback: approvalFeedbackSchema,
 }).strict().superRefine((facts, ctx) => {
   if (facts.state !== "OPEN") return;
   for (const key of ["headOid", "baseOid"] as const) if (facts[key] === "") {

@@ -138,6 +138,7 @@ import { PIN_AFTER, planClusterAsks, type AskMemory } from "./asks.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
 import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
+import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerified } from "./approval-feedback.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -654,8 +655,10 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
     REPO_CONTROLLER_MIGRATION,
     `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
+    APPROVAL_FEEDBACK_MIGRATION,
   ]);
   const runs = createRunStore(db);
+  const approvalFeedback = createApprovalFeedbackStore(db);
   const dispatch = createDispatchStore(db);
   const inventory = createInventoryStore(db);
   const prHolds = createPrHoldStore(db);
@@ -679,8 +682,14 @@ export default async function plugin(bb: BbPluginApi) {
     const rows = db.prepare(`SELECT unit FROM units`).all() as { unit: string }[];
     return rows.flatMap((row) => {
       const parsed = rawUnitSchema.safeParse(JSON.parse(row.unit));
-      return parsed.success ? [{ ...parsed.data, observed: parsed.data.observed ?? { status: false, pr: false } }] : [];
+      return parsed.success ? [{ ...parsed.data, pr: parsed.data.pr === null ? null : withApprovalFeedback(parsed.data.pr),
+        observed: parsed.data.observed ?? { status: false, pr: false } }] : [];
     });
+  }
+
+  function withApprovalFeedback(pr: Pr): Pr {
+    return { ...pr, approvalFeedbackVerified: pr.approvalFeedback === undefined ? false :
+      feedbackVerified(pr.approvalFeedback, pr.headRefOid ?? null, approvalFeedback.get(pr.url)) };
   }
 
   function writeUnits(units: RawUnit[]): void {
@@ -788,7 +797,7 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
       inventory.apply(result);
       intentEvidenceVersion++;
-      advance.invalidate(result.entries.map((entry) => entry.pr));
+      advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
         const repo = prTarget(job.prUrl)?.slug.toLowerCase();
@@ -825,7 +834,7 @@ export default async function plugin(bb: BbPluginApi) {
         const result = await host.call("inspectPrs", { prUrls: urls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: SCAN_TIMEOUT_MS });
         inventory.inspect(result);
         intentEvidenceVersion++;
-        advance.invalidate(result.entries.map((entry) => entry.pr));
+        advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
         const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         const closed = new Set(result.closed.map((url) => url.toLowerCase()));
         // The inventory reports closed URLs without distinguishing merged from
@@ -928,7 +937,7 @@ export default async function plugin(bb: BbPluginApi) {
       writeUnits(result.units);
       recordTransitions(result.units);
       inventory.observe(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
-      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
+      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [withApprovalFeedback(unit.pr)]));
       await refreshInventory(signal);
       warnings.push(...result.warnings);
 
@@ -1561,7 +1570,8 @@ export default async function plugin(bb: BbPluginApi) {
         return state === effort.coordinatorState ? effort : effortStore.save({ ...effort, coordinatorState: state });
       } catch { return { ...effort, coordinatorState: "unavailable" as const }; }
     }));
-    const storedInventory = inventory.read();
+    const scannedInventory = inventory.read();
+    const storedInventory = { ...scannedInventory, entries: scannedInventory.entries.map((entry) => ({ ...entry, pr: withApprovalFeedback(entry.pr) })) };
     const inventoryTickets = storedInventory.entries.flatMap((entry) => ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern));
     const ticketTitles = new Map([...linear.read(inventoryTickets)].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : []));
     const remoteEfforts = inventoryTicketEfforts(storedInventory.entries, wired, established, pattern, ticketTitles);
@@ -1578,7 +1588,8 @@ export default async function plugin(bb: BbPluginApi) {
     const prThreadLinks: Board["prThreadLinks"] = {};
     for (const url of context.items.keys()) {
       const ids = context.directThreadIds(url).filter((id) => threadFacts.has(id) || newContextThreads.has(id))
-        .sort((a, b) => Number(threadFacts.get(b)?.status === "active") - Number(threadFacts.get(a)?.status === "active") ||
+        .sort((a, b) => Number(newContextThreads.has(b)) - Number(newContextThreads.has(a)) ||
+          Number(threadFacts.get(b)?.status === "active") - Number(threadFacts.get(a)?.status === "active") ||
           (threadFacts.get(b)?.updatedAt ?? 0) - (threadFacts.get(a)?.updatedAt ?? 0))
         .slice(0, 20);
       if (ids.length) prThreadLinks[url] = ids;
@@ -2044,7 +2055,7 @@ export default async function plugin(bb: BbPluginApi) {
       intentEvidenceVersion++;
       recordTransitions(readUnits());
       inventory.observe(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
-      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
+      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [withApprovalFeedback(unit.pr)]));
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
       bb.log.info(`rescanned ${paths.length} checkout(s) after row actions finished`);
@@ -2760,7 +2771,7 @@ export default async function plugin(bb: BbPluginApi) {
     const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     for (let index = lines.length - 1; index >= 0; index--) {
       const line = lines[index]!;
-      if (!/^Workstreams job \S+ complete: (?:prepared|blocked)$/.test(line)) return line.slice(0, 280);
+      if (!/^Workstreams job \S+ complete: (?:prepared|blocked)$/.test(line) && !line.startsWith(FEEDBACK_REPORT_PREFIX)) return line.slice(0, 280);
     }
     return null;
   }
@@ -3167,14 +3178,19 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await host.call("advanceInspect", { prUrl }, { hostId, timeoutMs: 60_000, signal: disposal.signal });
       if (!result.ok) return { ...fallback, detail: result.error };
       const facts = result.facts;
-      const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalNotePending ||
+      const feedbackClear = feedbackVerified(facts.approvalFeedback, facts.headOid, approvalFeedback.get(prUrl));
+      const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalFeedback.status === "present" && !feedbackClear ||
         (facts.reviewDecision === "CHANGES_REQUESTED" && facts.reviewFollowupPosted === false);
       const needsChecks = facts.checks === "failed";
       const needsWriter = repair || facts.needsPreparation || needsFeedback || needsChecks;
       const held = holdMessage(prUrl);
-      const eligible = held === null && facts.state === "OPEN" && (!needsWriter || (!facts.isCrossRepository && !!source));
-      const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : facts.detail);
-      return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail, blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
+      const eligible = held === null && facts.state === "OPEN" && facts.approvalFeedback.status !== "unknown" && (!needsWriter || (!facts.isCrossRepository && !!source));
+      const feedbackDetail = facts.approvalFeedback.status === "unknown" ? "Approval feedback history is incomplete; refresh and verify the current review." :
+        facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." : facts.detail;
+      const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : feedbackDetail);
+      return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail,
+        readiness: facts.readiness === "ready" && !feedbackClear ? "needs-attention" : facts.readiness,
+        blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
     } catch (error) { return { ...fallback, detail: `Inspection failed: ${String(error).slice(0, 300)}` }; }
   }
   async function advanceRepairLinks(facts: AdvanceFacts, previousThreadId?: string | null) {
@@ -3229,6 +3245,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const advance = createAdvanceService(db, {
     inspect: advanceInspect,
+    recordFeedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
     controller: resolveRepoController,
     assertAdvanceAllowed: (prUrl) => {
       const held = holdMessage(prUrl);
@@ -4054,7 +4071,7 @@ export default async function plugin(bb: BbPluginApi) {
       const read = await liveOf(target.hostId)(target.prUrl);
       if (!read.ok) return read;
       const { mergeMethod, deleteBranchOnMerge } = await settings.get();
-      const verdict = mergeVerdict(read.live);
+      const verdict = mergeVerdict(read.live, approvalFeedback.get(target.prUrl));
       const held = holdMessage(target.prUrl);
       if (held) verdict.refusals.unshift(held);
       return {
@@ -4071,7 +4088,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (!target.ok) return target;
         const { mergeMethod, deleteBranchOnMerge } = await settings.get();
         return executeMerge(
-          { live: liveOf(target.hostId), write: writeOf(target.hostId) },
+          { live: liveOf(target.hostId), write: writeOf(target.hostId), feedbackRecord: approvalFeedback.get },
           { prUrl: target.prUrl, sha: input.sha, acknowledgeUnresolved: input.acknowledgeUnresolved, method: mergeMethodOf(mergeMethod), deleteBranchSetting: deleteBranchOnMerge },
         );
       }),

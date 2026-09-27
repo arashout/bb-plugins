@@ -11,7 +11,8 @@ function pr(number: number, patch: Partial<Pr> = {}): Pr {
   return prSchema.parse({ number, state: "OPEN", isDraft: false, reviewDecision: "APPROVED", checkConclusions: ["SUCCESS"],
     url: `https://github.com/inkwell/catalog/pull/${number}`, title: `Improve catalog ${number}`, mergeable: "MERGEABLE",
     baseRefName: "main", headRefName: `book-${number}`, latestReviewStates: ["APPROVED"], unresolvedReviewThreads: 0,
-    mergeStateStatus: "CLEAN", createdAt: "2026-09-01T00:00:00Z", ...patch });
+    mergeStateStatus: "CLEAN", createdAt: "2026-09-01T00:00:00Z",
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true, ...patch });
 }
 const entry = (value: Pr, extra: Partial<BacklogEntry> = {}): BacklogEntry => ({ repo: "inkwell/catalog", pr: value, stale: false, ...extra });
 function local(value: Pr | null, patch: Partial<Row> = {}): Row {

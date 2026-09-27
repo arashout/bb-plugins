@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import plugin, { type Board } from "./server.js";
+import { createApprovalFeedbackStore } from "./approval-feedback.js";
 
 const URL = "https://github.com/inkwell/folio/pull/42";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -13,10 +14,14 @@ const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githu
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean } = {}) {
+async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean; approvalFeedback?: boolean } = {}) {
   const calls: { method: string; input: unknown }[] = [];
   const beforeLive = vi.fn(async () => {});
-  const primary = options.cohort ? { ...PR, title: "EPD-42: Improve manuscript review", headRefName: "epd-42-review" } : PR;
+  const primary = { ...(options.cohort ? { ...PR, title: "EPD-42: Improve manuscript review", headRefName: "epd-42-review" } : PR),
+    headRefOid: SHA,
+    approvalFeedback: options.approvalFeedback
+      ? { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-42"] }
+      : { status: "none" as const, fingerprint: null, sourceIds: [] } };
   const entries = [{ repo: "inkwell/folio", pr: primary }, ...(options.cohort ? [{ repo: "inkwell/folio", pr: { ...primary, number: 43, url: URL.replace("/42", "/43"), title: "EPD-42: Improve manuscript review validation" } }] : [])];
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
@@ -29,7 +34,8 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
       repositories: [{ repo: "inkwell/folio", complete: true }], complete: true, warnings: [] };
     if (method === "checkoutState") return { ok: true, branch: "main", rebasing: options.rebasing ?? false };
     if (method === "prLive") { await beforeLive(); return { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN",
-      headRefOid: SHA, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true } }; }
+      headRefOid: SHA, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
+      approvalFeedback: primary.approvalFeedback } }; }
     if (method === "prReviewers") return options.closed ? { ok: false, error: "PR is no longer open." } : { ok: true, reviewers: options.reviewers ?? ["ada"] };
     if (method === "prWrite") return { ok: true, detail: "Done." };
     if (method === "inspectPrs") return { entries: [], closed: [URL], failed: [], warnings: [] };
@@ -38,10 +44,40 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
   await plugin(bb);
   cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { harness, calls, beforeLive, entries, board: async () => await harness.callRpc("board_get", null) as Board };
+  return { harness, calls, beforeLive, entries, feedbackStore: createApprovalFeedbackStore(bb.storage.database()),
+    board: async () => await harness.callRpc("board_get", null) as Board };
 }
 
 describe("authored backlog server actions", () => {
+  it("uses current review evidence for local and remote Ready states and manual merge", async () => {
+    const env = await setup({ local: true, approvalFeedback: true });
+    expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(false);
+    expect((await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).not.toBe("awaiting-merge");
+    expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({
+      ok: true, refusals: [expect.stringContaining("Approval feedback")],
+    });
+    expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: true })).toMatchObject({
+      ok: false, error: expect.stringContaining("Approval feedback"),
+    });
+    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
+
+    env.feedbackStore.save(URL, "thread-1", {
+      attemptId: "job-1", headOid: SHA, fingerprint: "f".repeat(64), blockers: [],
+      findings: [{ sourceId: "review-42", resolution: "no-change-needed", evidence: "The requested behavior is already covered.",
+        validation: { outcome: "not-needed", detail: "No code change is needed." } }],
+    }, Date.now());
+    expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(true);
+    expect((await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).toBe("awaiting-merge");
+    expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({ ok: true, refusals: [] });
+    expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: true });
+
+    env.entries[0]!.pr.approvalFeedback = { status: "present", fingerprint: "e".repeat(64), sourceIds: ["review-42"] };
+    await env.harness.runCli(["refresh"]);
+    expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(false);
+    expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({
+      ok: true, refusals: [expect.stringContaining("Approval feedback")],
+    });
+  });
   it("projects a repeated remote ticket into one effort without inventing checkouts", async () => {
     const env = await setup({ cohort: true });
     const board = await env.board();

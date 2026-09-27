@@ -6,7 +6,7 @@ import { workstreamAttention, hasBoardRows } from "./workstream-attention.js";
 import { prLifecycle, unitLifecycle } from "./workstreams.js";
 
 function pr(patch: Partial<Pr> = {}): Pr {
-  return prSchema.parse({ number: 1, state: "OPEN", isDraft: false, reviewDecision: "APPROVED", checkConclusions: ["SUCCESS"], url: "https://github.com/acme/app/pull/1", title: "Improve account settings", mergeable: "MERGEABLE", baseRefName: "main", headRefName: "settings", latestReviewStates: ["APPROVED"], unresolvedReviewThreads: 0, mergeStateStatus: "CLEAN", ...patch });
+  return prSchema.parse({ number: 1, state: "OPEN", isDraft: false, reviewDecision: "APPROVED", checkConclusions: ["SUCCESS"], url: "https://github.com/acme/app/pull/1", title: "Improve account settings", mergeable: "MERGEABLE", baseRefName: "main", headRefName: "settings", latestReviewStates: ["APPROVED"], unresolvedReviewThreads: 0, mergeStateStatus: "CLEAN", approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, ...patch });
 }
 const entry = (patch: Partial<Pr> = {}, stale = false): BacklogEntry => ({ repo: "acme/app", pr: pr(patch), stale });
 const now = Date.parse("2026-09-25T00:00:00Z");
@@ -33,7 +33,7 @@ describe("authored PR backlog", () => {
       [{ mergeStateStatus: "DIRTY" }, "Resolve conflicts"],
       [{ checkConclusions: ["FAILURE"] }, "CI failing"],
       [{ unresolvedReviewThreads: 1 }, "Approved, comments open"],
-      [{ approvalHasBody: true }, "Review approval note"],
+      [{ approvalHasBody: true, approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] } }, "Review approval note"],
     ] as [Partial<Pr>, string][]) {
       expect(prBacklog([entry(patch)], [], now)[0]).toMatchObject({ group: "approved", verb });
     }
@@ -44,6 +44,7 @@ describe("authored PR backlog", () => {
   it("separates stale or unverified reviews from actionable readiness", () => {
     expect(prBacklog([entry({}, true)], [], now)[0]).toMatchObject({ group: "unknown", action: null });
     expect(prBacklog([entry({ unresolvedReviewThreads: null })], [], now)[0]).toMatchObject({ group: "unknown", action: null });
+    expect(prBacklog([entry({ approvalFeedback: undefined })], [], now)[0]).toMatchObject({ group: "unknown", action: null });
   });
   it("waits for a known open stack parent in the same repository", () => {
     const parent = entry({ number: 2, url: "https://github.com/acme/app/pull/2", headRefName: "base-work", title: "Create account settings foundation" });

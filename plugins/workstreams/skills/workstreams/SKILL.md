@@ -75,7 +75,7 @@ before grouping, even when their checkouts are dirty or ahead of upstream.
 | Waiting | `awaiting-followup` | CHANGES_REQUESTED — the reviewer acted, the ball is with you |
 | Waiting | `awaiting-rereview` | CHANGES_REQUESTED remains in effect, but the author has pushed a newer head, resolved the inline threads, and posted PTAL to the reviewer; wait for another review |
 | Waiting | `approved-with-comments` | APPROVED, with unresolved review threads |
-| Waiting | `approved-with-note` | APPROVED with a written approval note and no unresolved inline comments; review the note before merging |
+| Waiting | `approved-with-note` | APPROVED with feedback in the current review that lacks verified resolution for this head; run Advance before merging |
 | Waiting | `awaiting-merge` | APPROVED, checks green, nothing outstanding |
 | Waiting | `awaiting-review` | Open PR with no review decision yet |
 | Waiting | `unverified` | Local or GitHub status could not be checked; rescan to verify it |
@@ -105,11 +105,12 @@ Precedence runs top to bottom in that table. Key distinctions:
   genuinely stuck.
 - `approved-with-note` means a reviewer wrote a note with approval. It is
   distinct from `approved-with-comments`, which has unresolved inline comments.
-  For a standalone note, the author replies on the PR with `Approval note for
-  @reviewer:` and the current head SHA. A later scan checks that reply against
-  the approving review and head commit. The row reads ready only when GitHub
-  still reports approval, checks pass, no review threads remain open, and the
-  merge state permits it.
+  Advance checks each current review point against the code and records its
+  worker's evidence, including justified decisions that need no code change.
+  The record applies only to the matching review and head commit. The row reads
+  ready when that evidence is verified, GitHub still reports approval, checks
+  pass, no review threads remain open, and the merge state permits it. The
+  approval gate requires no additional reviewer approval or formulaic PR reply.
 
 **In release tag** (`shipped` internally) is derived from **local git tags
 only**: the merge commit is tested for containment in the newest release tag

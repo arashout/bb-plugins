@@ -287,10 +287,12 @@ Closed pull requests that did not merge are omitted from the Map and Board,
 even when their checkouts are dirty or ahead of upstream. Merged work remains
 visible.
 
-**Approved · review note** means the approving review contains written feedback
-that may need action; it is distinct from unresolved inline threads. When the
-feedback's threads are resolved and a later fix is pushed, the row leads with
-the current **Approved · ready** state.
+**Approved · review note** means the current approving review includes written
+feedback that needs verification. Advance records how its worker addressed each
+point, including justified decisions that need no code change, and checks the
+result against the current PR head and review. Resolved threads or a later push
+alone do not clear the gate. The row shows **Approved · ready** after checks pass
+and GitHub reports no other merge blockers.
 
 Automatic dispatch starts from existing PRs with a scanned checkout. It does
 not create PRs from issues or checkouts, request review, or merge; those steps

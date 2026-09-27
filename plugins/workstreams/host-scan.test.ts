@@ -18,10 +18,19 @@ afterEach(async () => {
 async function commands(options: { statusFails?: boolean; dirty?: boolean; authFails?: boolean; prFails?: boolean; prMalformed?: boolean; approvedPr?: boolean; threadsFail?: boolean; threadsMore?: boolean; threadsOpen?: boolean; threadsResolved?: number }) {
   const directory = await mkdtemp(join(tmpdir(), "workstreams-scan-"));
   directories.push(directory);
-  const threadNodes = [
-    ...Array.from({ length: options.threadsResolved ?? 1 }, () => ({ isResolved: true })),
-    ...(options.threadsOpen ? [{ isResolved: false }] : []),
-  ];
+  const threadNodes = Array.from({ length: (options.threadsResolved ?? 1) + (options.threadsOpen ? 1 : 0) }, (_, index) => ({
+    id: `thread-${index}`, isResolved: index < (options.threadsResolved ?? 1),
+    comments: { pageInfo: { hasNextPage: false }, nodes: [{ id: `comment-${index}`, body: "Earlier review comment",
+      createdAt: "2026-09-24T00:00:00Z", updatedAt: "2026-09-24T00:00:00Z", author: { login: "reviewer" },
+      pullRequestReview: { id: "earlier-approval" } }] },
+  }));
+  const reviewData = { headRefOid: "a".repeat(40), author: { login: "author" },
+    reviews: { pageInfo: { hasPreviousPage: false }, nodes: [
+      { id: "earlier-approval", state: "APPROVED", body: "", submittedAt: "2026-09-23T00:00:00Z",
+        author: { login: "reviewer" }, commit: { oid: "a".repeat(40) } },
+      { id: "current-approval", state: "APPROVED", body: "", submittedAt: "2026-09-25T00:00:00Z",
+        author: { login: "reviewer" }, commit: { oid: "a".repeat(40) } },
+    ] }, reviewThreads: { pageInfo: { hasNextPage: options.threadsMore === true }, nodes: threadNodes } };
   await writeFile(join(directory, "git"), `#!/bin/sh
 case "$1" in
   remote) echo https://github.com/example/widget.git ;;
@@ -38,7 +47,7 @@ esac
 if [ "$1" = auth ]; then ${options.authFails ? "exit 1" : "exit 0"}; fi
 if [ "$1" = repo ]; then echo main; exit 0; fi
 if [ "$1" = pr ]; then ${options.prFails ? "exit 1" : options.prMalformed ? "echo malformed; exit 0" : options.approvedPr ? `echo '[{"number":42,"state":"OPEN","isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}],"url":"https://github.com/example/widget/pull/42","title":"ABC-123: Widget fix","latestReviews":[{"author":{"login":"reviewer"},"state":"APPROVED"},{"author":{"login":"bot"},"state":"COMMENTED"}],"mergeStateStatus":"CLEAN"}]'; exit 0` : "echo '[]'; exit 0"}; fi
-if [ "$1" = api ]; then echo checked >> '${directory}/gh-api-calls'; ${options.threadsFail ? "exit 1" : `echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":${options.threadsMore === true}},"nodes":${JSON.stringify(threadNodes)}}}}}}'; exit 0`}; fi
+if [ "$1" = api ]; then echo checked >> '${directory}/gh-api-calls'; ${options.threadsFail ? "exit 1" : `echo '${JSON.stringify({ data: { repository: { pullRequest: reviewData } } })}'; exit 0`}; fi
 exit 1
 `, { mode: 0o755 });
   process.env.PATH = `${directory}${delimiter}${originalPath ?? ""}`;

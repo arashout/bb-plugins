@@ -6,6 +6,8 @@
 // checkout. The runner is injected, so tests drive all of it against a fake.
 import { parseMergeStateStatus } from "./gh.js";
 import { SHA, type LiveMergeFacts, type MergeMethod } from "./actions.js";
+import { createHash } from "node:crypto";
+import { approvalFeedbackSchema, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 
 export type Run = { ok: true; stdout: string } | { ok: false; error: string };
 /** Runs `gh` with these arguments, optionally writing `stdin` to it. */
@@ -68,7 +70,15 @@ export function stackedArgv(target: PrTarget, headRefName: string): string[] {
 
 /** Constant: the only variables are passed as typed -f/-F fields, never spliced in. */
 export const REVIEW_THREADS_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!,$includeFollowup:Boolean!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid baseRefOid baseRefName baseRef{name target{oid}} author{login} reviews(last:100){pageInfo{hasPreviousPage}nodes{id state body submittedAt author{login} commit{oid}}} reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved comments(first:1){nodes{pullRequestReview{id}}}}} comments(last:100) @include(if:$includeFollowup){pageInfo{hasPreviousPage}nodes{body createdAt author{login}}} commits(last:1) @include(if:$includeFollowup){nodes{commit{oid committedDate}}}}}}";
+  "query($owner:String!,$name:String!,$number:Int!,$includeFollowup:Boolean!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid baseRefOid baseRefName baseRef{name target{oid}} author{login} reviews(last:100){pageInfo{hasPreviousPage startCursor}nodes{id state body submittedAt author{login} commit{oid}}} reviewThreads(first:100){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor}nodes{id body createdAt updatedAt author{login} pullRequestReview{id}}}}} comments(last:100) @include(if:$includeFollowup){pageInfo{hasPreviousPage}nodes{body createdAt author{login}}} commits(last:1) @include(if:$includeFollowup){nodes{commit{oid committedDate}}}}}}";
+
+const REVIEWS_PAGE_QUERY = "query($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviews(last:100,before:$cursor){pageInfo{hasPreviousPage startCursor}nodes{id state body submittedAt author{login} commit{oid}}}}}}";
+const THREADS_PAGE_QUERY = "query($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor}nodes{id body createdAt updatedAt author{login} pullRequestReview{id}}}}}}}}";
+const COMMENTS_PAGE_QUERY = "query($owner:String!,$name:String!,$number:Int!,$id:ID!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid}} node(id:$id){... on PullRequestReviewThread{id comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id body createdAt updatedAt author{login} pullRequestReview{id}}}}}}";
+
+export type { ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+const UNKNOWN_FEEDBACK: ApprovalFeedbackSnapshot = { status: "unknown", fingerprint: null, sourceIds: [] };
+const NONE_FEEDBACK: ApprovalFeedbackSnapshot = { status: "none", fingerprint: null, sourceIds: [] };
 
 export function threadsArgv(target: PrTarget, includeFollowup = false): string[] {
   return [
@@ -143,9 +153,175 @@ function approvalNotesOf(reviews: unknown): { notes: ApprovalNote[]; more: numbe
   return { notes: notes.slice(0, APPROVAL_NOTES_SHOWN), more: Math.max(0, notes.length - APPROVAL_NOTES_SHOWN), complete: !page.pageInfo.hasPreviousPage };
 }
 
-/** Read only the first page: a positive count is enough to block merge; an empty
- * page with more pages is unknown, never clear. */
-export async function readReviewThreads(run: GhRunner, target: PrTarget, includeFollowup = false, includeApprovalNotes = false): Promise<{ ok: true; count: number; resolvedCount: number | null; hasNextPage: boolean; approvalNoteFollowedUp?: boolean; reviewFollowupPosted?: boolean; approvalNotes?: ApprovalNote[]; approvalNotesMore?: number; approvalNotesComplete?: boolean } | { ok: false; error: string }> {
+type Page = { pageInfo?: { hasPreviousPage?: unknown; startCursor?: unknown; hasNextPage?: unknown; endCursor?: unknown }; nodes?: unknown };
+type Review = { id: string; state: string; body: string; submittedAt: string; author: { login: string }; commit: { oid: string } };
+type ThreadComment = { id: string; body: string; createdAt: string; updatedAt: string; author: { login: string }; pullRequestReview: { id: string } | null };
+type Thread = { id: string; isResolved: boolean; comments: Page };
+const MAX_PAGES = 20;
+
+function pageArgs(target: PrTarget, query: string, fields: string[]): string[] {
+  return ["api", "graphql", ...(target.host === "github.com" ? [] : ["--hostname", target.host]),
+    "-f", `query=${query}`, "-f", `owner=${target.owner}`, "-f", `name=${target.name}`, "-F", `number=${target.number}`, ...fields];
+}
+
+function connection(value: unknown, direction: "previous" | "next"): { nodes: unknown[]; more: boolean; cursor: string | null } | null {
+  if (value === null || typeof value !== "object") return null;
+  const page = value as Page;
+  const more = direction === "previous" ? page.pageInfo?.hasPreviousPage : page.pageInfo?.hasNextPage;
+  const cursor = direction === "previous" ? page.pageInfo?.startCursor : page.pageInfo?.endCursor;
+  if (!Array.isArray(page.nodes) || typeof more !== "boolean" || (more && (typeof cursor !== "string" || cursor === ""))) return null;
+  return { nodes: page.nodes, more, cursor: more ? cursor as string : null };
+}
+
+function isReview(value: unknown): value is Review {
+  if (value === null || typeof value !== "object") return false;
+  const review = value as Partial<Review>;
+  return typeof review.id === "string" && review.id !== "" && typeof review.state === "string" &&
+    typeof review.body === "string" && typeof review.submittedAt === "string" && !Number.isNaN(Date.parse(review.submittedAt)) &&
+    typeof review.author?.login === "string" && typeof review.commit?.oid === "string" && SHA.test(review.commit.oid);
+}
+
+function isComment(value: unknown): value is ThreadComment {
+  if (value === null || typeof value !== "object") return false;
+  const comment = value as Partial<ThreadComment>;
+  return typeof comment.id === "string" && comment.id !== "" && typeof comment.body === "string" &&
+    typeof comment.createdAt === "string" && !Number.isNaN(Date.parse(comment.createdAt)) &&
+    typeof comment.updatedAt === "string" && !Number.isNaN(Date.parse(comment.updatedAt)) &&
+    typeof comment.author?.login === "string" &&
+    (comment.pullRequestReview === null || typeof comment.pullRequestReview?.id === "string");
+}
+
+function isThread(value: unknown): value is Thread {
+  if (value === null || typeof value !== "object") return false;
+  const thread = value as Partial<Thread>;
+  return typeof thread.id === "string" && thread.id !== "" && typeof thread.isResolved === "boolean" &&
+    connection(thread.comments, "next") !== null;
+}
+
+async function approvalFeedbackOf(run: GhRunner, target: PrTarget, pr: Record<string, unknown>): Promise<{ snapshot: ApprovalFeedbackSnapshot; threadNodes?: Thread[] }> {
+  const head = pr.headRefOid;
+  if (typeof head !== "string" || !SHA.test(head)) return { snapshot: UNKNOWN_FEEDBACK };
+  const reviews = connection(pr.reviews, "previous");
+  const threads = connection(pr.reviewThreads, "next");
+  if (reviews === null || threads === null) return { snapshot: UNKNOWN_FEEDBACK };
+  const allReviews = [...reviews.nodes];
+  const allThreads = [...threads.nodes];
+  let paged = false;
+
+  async function extend(kind: "reviews" | "reviewThreads", first: { more: boolean; cursor: string | null }, nodes: unknown[]): Promise<boolean> {
+    let { more, cursor } = first;
+    const seen = new Set<string>();
+    for (let page = 1; more; page++) {
+      paged = true;
+      if (page >= MAX_PAGES || cursor === null || seen.has(cursor)) return false;
+      seen.add(cursor);
+      const query = kind === "reviews" ? REVIEWS_PAGE_QUERY : THREADS_PAGE_QUERY;
+      const result = await run(pageArgs(target, query, ["-f", `cursor=${cursor}`]));
+      const body = json(result) as { errors?: unknown; data?: { repository?: { pullRequest?: Record<string, unknown> } } } | undefined;
+      const nextPr = body?.data?.repository?.pullRequest;
+      if (body?.errors !== undefined || nextPr?.headRefOid !== head) return false;
+      const next = connection(nextPr?.[kind], kind === "reviews" ? "previous" : "next");
+      if (next === null || next.nodes.length === 0) return false;
+      nodes.push(...next.nodes);
+      more = next.more;
+      cursor = next.cursor;
+    }
+    return true;
+  }
+  if (!await extend("reviews", reviews, allReviews) || !await extend("reviewThreads", threads, allThreads)) return { snapshot: UNKNOWN_FEEDBACK };
+  if (!allReviews.every(isReview) || !allThreads.every(isThread)) return { snapshot: UNKNOWN_FEEDBACK };
+  const reviewIds = new Set<string>();
+  for (const review of allReviews) {
+    if (reviewIds.has(review.id)) return { snapshot: UNKNOWN_FEEDBACK };
+    reviewIds.add(review.id);
+  }
+  const byReviewer = new Map<string, Review[]>();
+  for (const review of allReviews) {
+    const history = byReviewer.get(review.author.login) ?? [];
+    history.push(review);
+    byReviewer.set(review.author.login, history);
+  }
+  const approvals: Review[] = [];
+  const followups: Review[] = [];
+  for (const history of byReviewer.values()) {
+    history.sort((a, b) => a.submittedAt.localeCompare(b.submittedAt));
+    if (history.some((review, index) => index > 0 && review.submittedAt === history[index - 1]!.submittedAt &&
+        (review.state !== "COMMENTED" || history[index - 1]!.state !== "COMMENTED"))) return { snapshot: UNKNOWN_FEEDBACK };
+    let approval: Review | null = null;
+    let laterComments: Review[] = [];
+    for (const review of history) {
+      if (review.state === "APPROVED") { approval = review; laterComments = []; }
+      else if (review.state === "CHANGES_REQUESTED" || review.state === "DISMISSED") { approval = null; laterComments = []; }
+      else if (review.state === "COMMENTED" && approval !== null) laterComments.push(review);
+      else if (review.state !== "COMMENTED") return { snapshot: UNKNOWN_FEEDBACK };
+    }
+    if (approval !== null) { approvals.push(approval); followups.push(...laterComments); }
+  }
+  approvals.sort((a, b) => a.id.localeCompare(b.id));
+  followups.sort((a, b) => a.id.localeCompare(b.id));
+  const approvalById = new Map([...approvals, ...followups].map((review) => [review.id, review]));
+  const prAuthor = (pr.author as { login?: unknown } | undefined)?.login;
+  const linked: { thread: Thread; review: Review; comments: ThreadComment[] }[] = [];
+  const threadIds = new Set<string>();
+  for (const thread of allThreads) {
+    if (threadIds.has(thread.id)) return { snapshot: UNKNOWN_FEEDBACK };
+    threadIds.add(thread.id);
+    const first = connection(thread.comments, "next");
+    if (first === null || first.nodes.length === 0 || !isComment(first.nodes[0])) return { snapshot: UNKNOWN_FEEDBACK };
+    if (first.nodes[0].pullRequestReview === null && approvals.length > 0) return { snapshot: UNKNOWN_FEEDBACK };
+    const review = approvalById.get(first.nodes[0].pullRequestReview?.id ?? "");
+    if (review === undefined) continue;
+    const comments = [...first.nodes];
+    let { more, cursor } = first;
+    const seen = new Set<string>();
+    for (let page = 1; more; page++) {
+      paged = true;
+      if (page >= MAX_PAGES || cursor === null || seen.has(cursor)) return { snapshot: UNKNOWN_FEEDBACK };
+      seen.add(cursor);
+      const result = await run(pageArgs(target, COMMENTS_PAGE_QUERY, ["-f", `id=${thread.id}`, "-f", `cursor=${cursor}`]));
+      const body = json(result) as { errors?: unknown; data?: { repository?: { pullRequest?: { headRefOid?: unknown } }; node?: { id?: unknown; comments?: unknown } } } | undefined;
+      if (body?.errors !== undefined || body?.data?.repository?.pullRequest?.headRefOid !== head || body?.data?.node?.id !== thread.id) return { snapshot: UNKNOWN_FEEDBACK };
+      const next = connection(body.data.node.comments, "next");
+      if (next === null || next.nodes.length === 0) return { snapshot: UNKNOWN_FEEDBACK };
+      comments.push(...next.nodes);
+      more = next.more;
+      cursor = next.cursor;
+    }
+    if (!comments.every(isComment) || new Set(comments.map((comment) => comment.id)).size !== comments.length) return { snapshot: UNKNOWN_FEEDBACK };
+    linked.push({ thread, review, comments: comments as ThreadComment[] });
+  }
+  if (paged) {
+    const repeated = json(await run(threadsArgv(target))) as { errors?: unknown; data?: { repository?: { pullRequest?: Record<string, unknown> } } } | undefined;
+    const current = repeated?.data?.repository?.pullRequest;
+    if (repeated?.errors !== undefined || current?.headRefOid !== head ||
+        JSON.stringify(current.reviews) !== JSON.stringify(pr.reviews) ||
+        JSON.stringify(current.reviewThreads) !== JSON.stringify(pr.reviewThreads) ||
+        JSON.stringify(current.author) !== JSON.stringify(pr.author)) return { snapshot: UNKNOWN_FEEDBACK };
+  }
+  const sourceIds = [...new Set([
+    ...[...approvals, ...followups].filter((review) => review.body.trim() !== "").map((review) => review.id),
+    ...linked.map(({ thread }) => thread.id),
+  ])].sort();
+  if (sourceIds.length === 0) return { snapshot: NONE_FEEDBACK, threadNodes: allThreads as Thread[] };
+  if (linked.length > 0 && typeof prAuthor !== "string") return { snapshot: UNKNOWN_FEEDBACK };
+  const canonical = {
+    approvals: approvals.map((review) => ({ id: review.id, body: review.body })),
+    followups: followups.filter((review) => review.body.trim() !== "" || linked.some(({ review: linkedReview }) => linkedReview.id === review.id))
+      .map((review) => ({ id: review.id, body: review.body })),
+    threads: linked.sort((a, b) => a.thread.id.localeCompare(b.thread.id)).map(({ thread, review, comments }) => ({
+      id: thread.id, reviewId: review.id, comments: comments.filter((comment) => comment.author.login === review.author.login).map((comment) => ({ id: comment.id,
+        body: comment.body, updatedAt: comment.updatedAt })),
+    })),
+  };
+  const contents = JSON.stringify(canonical);
+  const snapshot = { status: "present", fingerprint: createHash("sha256").update(contents).digest("hex"), sourceIds };
+  if (contents.length > 50_000 || !approvalFeedbackSchema.safeParse(snapshot).success) return { snapshot: UNKNOWN_FEEDBACK };
+  return { snapshot: snapshot as ApprovalFeedbackSnapshot,
+    threadNodes: allThreads as Thread[] };
+}
+
+/** Read all available review, thread, and linked comment pages before claiming feedback is clear. */
+export async function readReviewThreads(run: GhRunner, target: PrTarget, includeFollowup = false, includeApprovalNotes = false): Promise<{ ok: true; count: number; resolvedCount: number | null; hasNextPage: boolean; headOid: string | null; approvalFeedback: ApprovalFeedbackSnapshot; reviewFollowupPosted?: boolean; approvalNotes?: ApprovalNote[]; approvalNotesMore?: number; approvalNotesComplete?: boolean } | { ok: false; error: string }> {
   const result = await run(threadsArgv(target, includeFollowup));
   if (!result.ok) return { ok: false, error: result.error };
   const body = json(result) as { errors?: unknown; data?: { repository?: { pullRequest?: { reviewThreads?: unknown; reviews?: unknown; headRefOid?: unknown; author?: unknown; comments?: unknown; commits?: unknown } } } } | undefined;
@@ -157,18 +333,18 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
     return { ok: false, error: "GitHub did not return the PR's review threads." };
   }
   const threadNodes = threads.nodes as { isResolved: boolean; comments?: { nodes?: { pullRequestReview?: { id?: string } }[] } }[];
-  const count = threadNodes.filter((node) => node.isResolved === false).length;
-  if (count === 0 && threads.pageInfo.hasNextPage) {
-    return { ok: false, error: "More review thread pages remain unread." };
-  }
   const reviews = pr?.reviews as { pageInfo?: { hasPreviousPage?: unknown }; nodes?: unknown } | undefined;
   const approvalHistory = includeApprovalNotes ? approvalNotesOf(reviews) : undefined;
-  let approvalNoteFollowedUp: boolean | undefined;
+  const feedbackRead = await approvalFeedbackOf(run, target, pr as Record<string, unknown>);
+  const approvalFeedback = feedbackRead.snapshot;
+  const countedNodes = feedbackRead.threadNodes ?? threadNodes;
+  const count = countedNodes.filter((node) => node.isResolved === false).length;
+  const hasNextPage = feedbackRead.threadNodes === undefined && threads.pageInfo.hasNextPage;
+  if (count === 0 && hasNextPage) return { ok: false, error: "More review thread pages remain unread." };
   let reviewFollowupPosted: boolean | undefined;
   if (count === 0 && !threads.pageInfo.hasNextPage && SHA.test(String(pr?.headRefOid)) &&
       reviews?.pageInfo?.hasPreviousPage === false && Array.isArray(reviews.nodes)) {
-    // GitHub's latestReviews is per reviewer. Match that scope so a later
-    // empty review supersedes an old approval-body note from the same person.
+    // GitHub's latestReviews is per reviewer for changes-requested follow-up.
     const latest = new Map<string, { id?: string; state?: string; body?: string; submittedAt?: string; commit?: { oid?: string } }>();
     let complete = true;
     for (const review of reviews.nodes) {
@@ -182,32 +358,6 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
     }
     if (complete) {
       const latestReviews = [...latest.entries()];
-      const writtenApprovals = latestReviews.map(([, review]) => review).filter((review) =>
-        review.state === "APPROVED" && typeof review.body === "string" && review.body.trim() !== "");
-      if (writtenApprovals.length > 0) {
-        const comments = pr?.comments as { nodes?: unknown } | undefined;
-        const commits = pr?.commits as { nodes?: unknown } | undefined;
-        const author = (pr?.author as { login?: unknown } | undefined)?.login;
-        const headCommit = Array.isArray(commits?.nodes) ? commits.nodes[0]?.commit : undefined;
-        const commentNodes = Array.isArray(comments?.nodes) ? comments.nodes as { author?: { login?: string }; createdAt?: string; body?: string }[] : [];
-        approvalNoteFollowedUp = writtenApprovals.every((review) => {
-          if (typeof review.id !== "string" || typeof review.commit?.oid !== "string") return false;
-          if (review.commit.oid !== pr?.headRefOid &&
-              threadNodes.some((thread) => thread.comments?.nodes?.[0]?.pullRequestReview?.id === review.id)) return true;
-          if (!includeFollowup || typeof author !== "string" || typeof review.submittedAt !== "string" ||
-              headCommit?.oid !== pr?.headRefOid || typeof headCommit?.committedDate !== "string" ||
-              Number.isNaN(Date.parse(headCommit.committedDate))) return false;
-          const reviewer = latestReviews.find(([, value]) => value === review)?.[0];
-          if (reviewer === undefined) return false;
-          return commentNodes.some((comment) =>
-            comment.author?.login === author && typeof comment.createdAt === "string" &&
-            Date.parse(comment.createdAt) > Date.parse(review.submittedAt!) &&
-            Date.parse(comment.createdAt) >= Date.parse(headCommit.committedDate) &&
-            typeof comment.body === "string" && /\bapproval\s+note\b/iu.test(comment.body) &&
-            comment.body.toLowerCase().includes(`@${reviewer.toLowerCase()}`) &&
-            comment.body.toLowerCase().includes(String(pr?.headRefOid).slice(0, 7).toLowerCase()));
-        });
-      }
       if (includeFollowup) {
         const comments = pr?.comments as { nodes?: unknown } | undefined;
         const commits = pr?.commits as { nodes?: unknown } | undefined;
@@ -233,9 +383,10 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
   return {
     ok: true,
     count,
-    resolvedCount: threads.pageInfo.hasNextPage ? null : threadNodes.length - count,
-    hasNextPage: threads.pageInfo.hasNextPage,
-    ...(approvalNoteFollowedUp === undefined ? {} : { approvalNoteFollowedUp }),
+    resolvedCount: hasNextPage ? null : countedNodes.length - count,
+    hasNextPage,
+    headOid: typeof pr?.headRefOid === "string" && SHA.test(pr.headRefOid) ? pr.headRefOid : null,
+    approvalFeedback,
     ...(reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted }),
     ...(approvalHistory === undefined ? {} : { approvalNotes: approvalHistory.notes, approvalNotesMore: approvalHistory.more, approvalNotesComplete: approvalHistory.complete }),
   };
@@ -258,6 +409,7 @@ export async function readLiveMerge(run: GhRunner, target: PrTarget): Promise<Li
   ]);
   if (!stacked.ok) return { ok: false, error: `Could not check for stacked PRs: ${stacked.error}` };
   if (!threads.ok) return { ok: false, error: `Could not count unresolved review threads: ${threads.error}` };
+  if (threads.headOid !== view.headRefOid) return { ok: false, error: "The PR head changed during review verification." };
   const above = json(stacked);
   return {
     ok: true,
@@ -275,6 +427,7 @@ export async function readLiveMerge(run: GhRunner, target: PrTarget): Promise<Li
       approvalNotes: threads.approvalNotes ?? [],
       approvalNotesMore: threads.approvalNotesMore ?? 0,
       approvalNotesComplete: threads.approvalNotesComplete ?? false,
+      approvalFeedback: threads.approvalFeedback,
     },
   };
 }

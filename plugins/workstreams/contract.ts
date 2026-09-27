@@ -4,6 +4,7 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema } from "./advance-contract.js";
+import { approvalFeedbackSchema } from "./approval-feedback.js";
 
 /**
  * GitHub's authoritative "can this merge right now" signal
@@ -81,7 +82,10 @@ export const prSchema = z
     /** The latest approving review has body text; absent on older scans. */
     approvalHasBody: z.boolean().optional(),
     /** Its inline threads were addressed, or the author explicitly replied to its standalone note after a newer head. */
-    approvalNoteFollowedUp: z.boolean().optional(),
+    /** Snapshot of approving-review feedback from a complete live review read. */
+    approvalFeedback: approvalFeedbackSchema.optional(),
+    /** Server comparison with the current head-bound verification record. */
+    approvalFeedbackVerified: z.boolean().optional(),
     /** Changes requested remains GitHub's decision, but the author posted a verified PTAL after a newer head. */
     reviewFollowupPosted: z.boolean().optional(),
     /** Null until review threads are checked; zero means no unresolved threads. */
@@ -226,6 +230,7 @@ export const liveMergeSchema = z
     }).strict()).max(3),
     approvalNotesMore: z.number().int().min(0),
     approvalNotesComplete: z.boolean(),
+    approvalFeedback: approvalFeedbackSchema,
   })
   .strict();
 

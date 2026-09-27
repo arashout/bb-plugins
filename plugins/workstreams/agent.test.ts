@@ -132,6 +132,7 @@ function liveFacts(overrides: Partial<LiveMergeFacts> = {}): LiveMergeFacts {
     approvalNotes: [],
     approvalNotesMore: 0,
     approvalNotesComplete: true,
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
     ...overrides,
   };
 }
@@ -188,5 +189,13 @@ describe("executeMerge", () => {
     expect(refused.writes).toEqual([]);
     const acknowledged = mergeDeps({ ok: true, live: unresolved });
     expect((await executeMerge(acknowledged.deps, { ...MERGE, acknowledgeUnresolved: true })).ok).toBe(true);
+  });
+
+  it("does not let merge-anyway bypass unverified approval feedback at the write", async () => {
+    const pending = liveFacts({ unresolvedThreads: 1, approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] } });
+    const { deps, writes } = mergeDeps({ ok: true, live: pending });
+    const result = await executeMerge(deps, { ...MERGE, acknowledgeUnresolved: true });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Approval feedback needs verified follow-up") });
+    expect(writes).toEqual([]);
   });
 });

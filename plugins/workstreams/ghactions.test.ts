@@ -102,7 +102,7 @@ describe("parseReviewRequests", () => {
 describe("readLiveMerge", () => {
   const view = { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", headRefOid: SHA, headRefName: "dev/abc-101" };
   const threads = (nodes: { isResolved: boolean }[], hasNextPage = false) =>
-    JSON.stringify({ data: { repository: { pullRequest: { reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] }, reviewThreads: { pageInfo: { hasNextPage }, nodes } } } } });
+    JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] }, reviewThreads: { pageInfo: { hasNextPage }, nodes } } } } });
   const answers = (stacked: object[], nodes: { isResolved: boolean }[], more = false) => (args: readonly string[]): Run => {
     if (args[1] === "view") return { ok: true, stdout: JSON.stringify(view) };
     if (args[1] === "list") return { ok: true, stdout: JSON.stringify(stacked) };
@@ -126,6 +126,7 @@ describe("readLiveMerge", () => {
         approvalNotes: [],
         approvalNotesMore: 0,
         approvalNotesComplete: true,
+        approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
       },
     });
     expect(calls.find((call) => call.args[1] === "list")?.args).toEqual([
@@ -170,6 +171,7 @@ describe("readLiveMerge", () => {
   it("warns when approval history is incomplete, while keeping merge preflight available", async () => {
     const run = fakeGh((args) => args[0] === "api"
       ? { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: {
+        headRefOid: SHA,
         reviews: { pageInfo: { hasPreviousPage: true }, nodes: [{
           state: "APPROVED", body: "Newest request is still visible.", author: { login: "reviewer" },
           submittedAt: "2026-09-24T12:00:00Z",
@@ -185,6 +187,7 @@ describe("readLiveMerge", () => {
   it("bounds long approval bodies and reports omitted older notes", async () => {
     const run = fakeGh((args) => args[0] === "api"
       ? { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: {
+        headRefOid: SHA,
         reviews: { pageInfo: { hasPreviousPage: false }, nodes: Array.from({ length: 4 }, (_, index) => ({
           state: "APPROVED", body: "x".repeat(2_000), author: { login: `reviewer-${index}` },
           submittedAt: `2026-09-2${index}T12:00:00Z`,
@@ -223,56 +226,11 @@ describe("readReviewThreads", () => {
     expect(await read({ ...pr, commits: { nodes: [{ commit: { oid: pr.headRefOid, committedDate: "2026-09-18T16:00:00Z" } }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });
     expect(await read({ ...pr, comments: { nodes: [{ author: { login: "other" }, createdAt: "2026-09-25T02:00:23Z", body: "PTAL @shehabPH" }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });
   });
-  it("treats #2846-style approval text as followed up when its own threads resolve on a later head", async () => {
-    const approval = { id: "approval-2846", state: "APPROVED", body: "Two member-facing points to fix before merge.", author: { login: "reviewer" }, submittedAt: "2026-09-22T18:11:52Z", commit: { oid: "a".repeat(40) } };
-    const pullRequest = {
-      headRefOid: "b".repeat(40),
-      reviews: { pageInfo: { hasPreviousPage: false }, nodes: [approval] },
-      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [
-        { isResolved: true, comments: { nodes: [{ pullRequestReview: { id: approval.id } }] } },
-        { isResolved: true, comments: { nodes: [{ pullRequestReview: { id: approval.id } }] } },
-      ] },
-    };
-    const read = (pr: unknown) => readReviewThreads(fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: pr } } }) })).run, TARGET);
-    expect(await read(pullRequest)).toMatchObject({ ok: true, count: 0, resolvedCount: 2, approvalNoteFollowedUp: true });
-    expect(await read({ ...pullRequest, headRefOid: approval.commit.oid })).toMatchObject({ ok: true, approvalNoteFollowedUp: false });
-    expect(await read({ ...pullRequest, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } })).toMatchObject({ ok: true, approvalNoteFollowedUp: false });
-    const laterEmpty = { id: "approval-later", state: "APPROVED", body: "", author: { login: "reviewer" }, submittedAt: "2026-09-24T13:00:00Z", commit: { oid: "b".repeat(40) } };
-    expect(await read({ ...pullRequest, reviews: { pageInfo: { hasPreviousPage: false }, nodes: [approval, laterEmpty] } })).not.toHaveProperty("approvalNoteFollowedUp");
-  });
-
-  it("keeps #988-style standalone approval text actionable when there are no inline threads", async () => {
-    const head = "c".repeat(40);
-    const pr = { headRefOid: head, reviews: { pageInfo: { hasPreviousPage: false }, nodes: [{ id: "approval-988", state: "APPROVED", body: "Dependent name/DOB mismatch needs review.", author: { login: "reviewer" }, submittedAt: "2026-09-24T23:31:34Z", commit: { oid: head } }] }, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
-    const run = fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: pr } } }) }));
-    expect(await readReviewThreads(run.run, TARGET)).toMatchObject({ ok: true, count: 0, approvalNoteFollowedUp: false });
-  });
-
-  it("clears a standalone approval note only after a targeted author reply tied to the pushed head", async () => {
-    const head = "b".repeat(40);
-    const review = { id: "approval-988", state: "APPROVED", body: "Please fix the dependent name/DOB mismatch.", author: { login: "adriana" }, submittedAt: "2026-09-24T23:31:34Z", commit: { oid: "a".repeat(40) } };
-    const pr = {
-      headRefOid: head, author: { login: "author" },
-      reviews: { pageInfo: { hasPreviousPage: false }, nodes: [review] },
-      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
-      commits: { nodes: [{ commit: { oid: head, committedDate: "2026-09-25T01:00:00Z" } }] },
-      comments: { nodes: [{ author: { login: "author" }, createdAt: "2026-09-25T02:00:00Z", body: `Approval note for @adriana: fixed the dependent mismatch at ${head.slice(0, 7)}.` }] },
-    };
-    const read = (value: unknown) => readReviewThreads(fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET, true);
-    expect(await read(pr)).toMatchObject({ ok: true, count: 0, approvalNoteFollowedUp: true });
-    expect(await read({ ...pr, headRefOid: review.commit.oid,
-      commits: { nodes: [{ commit: { oid: review.commit.oid, committedDate: "2026-09-24T20:00:00Z" } }] },
-      comments: { nodes: [{ ...pr.comments.nodes[0], body: `Approval note for @adriana: informational; no code change needed at ${review.commit.oid.slice(0, 7)}.` }] },
-    })).toMatchObject({ ok: true, approvalNoteFollowedUp: true });
-    expect(await read({ ...pr, comments: { nodes: [{ ...pr.comments.nodes[0], body: "PTAL @adriana; fixes pushed." }] } })).toMatchObject({ ok: true, approvalNoteFollowedUp: false });
-    expect(await read({ ...pr, comments: { nodes: [{ ...pr.comments.nodes[0], body: `Approval note for @adriana: fixed at ${"c".repeat(7)}.` }] } })).toMatchObject({ ok: true, approvalNoteFollowedUp: false });
-    expect(await read({ ...pr, comments: { nodes: [{ ...pr.comments.nodes[0], createdAt: "2026-09-24T23:00:00Z" }] } })).toMatchObject({ ok: true, approvalNoteFollowedUp: false });
-  });
   it("counts resolved history only for a complete page, separately from open threads", async () => {
     const resolved = fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: Array.from({ length: 8 }, () => ({ isResolved: true })) } } } } }) }));
-    expect(await readReviewThreads(resolved.run, TARGET)).toEqual({ ok: true, count: 0, resolvedCount: 8, hasNextPage: false });
+    expect(await readReviewThreads(resolved.run, TARGET)).toMatchObject({ ok: true, count: 0, resolvedCount: 8, hasNextPage: false, approvalFeedback: { status: "unknown" } });
     const incomplete = fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [{ isResolved: true }, { isResolved: false }] } } } } }) }));
-    expect(await readReviewThreads(incomplete.run, TARGET)).toEqual({ ok: true, count: 1, resolvedCount: null, hasNextPage: true });
+    expect(await readReviewThreads(incomplete.run, TARGET)).toMatchObject({ ok: true, count: 1, resolvedCount: null, hasNextPage: true, approvalFeedback: { status: "unknown" } });
   });
 
   it("refuses an empty first page when later review thread pages are unread, so neither the Board nor merge dialog claims the PR is clear", async () => {
@@ -286,6 +244,144 @@ describe("readReviewThreads", () => {
     expect((await readReviewThreads(partial.run, TARGET)).ok).toBe(false);
     const malformed = fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{}] } } } } }) }));
     expect((await readReviewThreads(malformed.run, TARGET)).ok).toBe(false);
+  });
+});
+
+describe("current approval feedback snapshot", () => {
+  const review = (body: string, id = "approval-1") => ({ id, state: "APPROVED", body,
+    author: { login: "reviewer" }, submittedAt: "2026-09-24T12:00:00Z", commit: { oid: SHA } });
+  const comment = (id: string, body: string, author = "reviewer") => ({ id, body,
+    createdAt: "2026-09-24T12:01:00Z", updatedAt: "2026-09-24T12:01:00Z", author: { login: author },
+    pullRequestReview: { id: "approval-1" } });
+  const thread = (comments: unknown[], isResolved = true) => ({ id: "thread-1", isResolved,
+    comments: { pageInfo: { hasNextPage: false }, nodes: comments } });
+  const pr = (reviews: unknown[], threads: unknown[] = []) => ({ headRefOid: SHA,
+    baseRef: { target: { oid: "b".repeat(40) } }, author: { login: "author" },
+    reviews: { pageInfo: { hasPreviousPage: false }, nodes: reviews },
+    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: threads } });
+  const read = (value: unknown) => readReviewThreads(fakeGh(() => ({ ok: true,
+    stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET);
+
+  it("proves none only with complete approval and thread history", async () => {
+    expect(await read(pr([review("")]))).toMatchObject({ ok: true, approvalFeedback: {
+      status: "none", fingerprint: null, sourceIds: [] } });
+    expect(await read({ ...pr([review("")]), reviews: { pageInfo: { hasPreviousPage: true }, nodes: [review("")] } }))
+      .toMatchObject({ ok: true, approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } });
+  });
+
+  it("lets a later empty approval supersede an older written approval from the same reviewer", async () => {
+    const later = { ...review("", "approval-2"), submittedAt: "2026-09-25T12:00:00Z" };
+    expect(await read(pr([review("Fix the fallback"), later]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
+  });
+
+  it("treats feedback that exceeds the evidence bounds as unknown", async () => {
+    expect(await read(pr([review("x".repeat(50_001))]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } });
+    expect(await read(pr([review("Fix the fallback", "r".repeat(301))]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } });
+  });
+
+  it("fingerprints a written body and changes when the reviewer edits it", async () => {
+    const first = await read(pr([review("Fix the fallback") ]));
+    const edited = await read(pr([review("Fix the member fallback") ]));
+    expect(first).toMatchObject({ ok: true, approvalFeedback: { status: "present", sourceIds: ["approval-1"] } });
+    expect(edited).toMatchObject({ ok: true, approvalFeedback: { status: "present", sourceIds: ["approval-1"] } });
+    if (!first.ok || !edited.ok) throw new Error("Synthetic review read failed");
+    expect(first.approvalFeedback.fingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(edited.approvalFeedback.fingerprint).not.toBe(first.approvalFeedback.fingerprint);
+  });
+
+  it("keeps a resolved inline thread from an empty approval as feedback", async () => {
+    const base = pr([review("")], [thread([comment("comment-1", "Fix the copy")])]);
+    const first = await read(base);
+    expect(first).toMatchObject({ ok: true, count: 0, approvalFeedback: {
+      status: "present", sourceIds: ["thread-1"] } });
+    const reply = await read(pr([review("")], [thread([
+      comment("comment-1", "Fix the copy"), comment("reply-1", "Fixed", "author")], false)]));
+    if (!first.ok || !reply.ok) throw new Error("Synthetic thread read failed");
+    expect(reply.approvalFeedback.fingerprint).toBe(first.approvalFeedback.fingerprint);
+    const followup = await read(pr([review("")], [thread([
+      comment("comment-1", "Fix the copy"), comment("comment-2", "Also fix the label")])]));
+    if (!followup.ok) throw new Error("Synthetic follow-up read failed");
+    expect(followup.approvalFeedback.fingerprint).not.toBe(first.approvalFeedback.fingerprint);
+  });
+
+  it("preserves approval feedback after a later COMMENTED review", async () => {
+    const later = { ...review("", "commented-2"), state: "COMMENTED", submittedAt: "2026-09-25T12:00:00Z" };
+    expect(await read(pr([review("Fix the fallback"), later]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "present", sourceIds: ["approval-1"] } });
+    expect(await read(pr([review("Fix the fallback"), { ...later, body: "Also fix the label" }]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "present", sourceIds: ["approval-1", "commented-2"] } });
+  });
+
+  it("accepts same-time COMMENTED reviews after a later approval with resolved inline feedback", async () => {
+    const latest = { ...review("Fix the current fallback", "approval-2"), submittedAt: "2026-09-25T10:00:00Z" };
+    const comments = Array.from({ length: 3 }, (_, index) => ({ ...review("", `commented-${index}`),
+      state: "COMMENTED", submittedAt: "2026-09-25T12:00:00Z" }));
+    const threads = Array.from({ length: 3 }, (_, index) => ({ ...thread([
+      { ...comment(`reviewer-${index}`, "Fix this path"), pullRequestReview: { id: latest.id } },
+      { ...comment(`author-${index}`, "Addressed", "author"), pullRequestReview: { id: latest.id } },
+    ]), id: `thread-${index}` }));
+    expect(await read(pr([review("Old approval"), latest, ...comments], threads))).toMatchObject({ ok: true,
+      count: 0, resolvedCount: 3, approvalFeedback: {
+        status: "present", sourceIds: ["approval-2", "thread-0", "thread-1", "thread-2"],
+      } });
+  });
+
+  it("returns unknown for incomplete inline comments or missing reviewer identity", async () => {
+    const incomplete = thread([comment("comment-1", "Fix the copy")]);
+    incomplete.comments.pageInfo.hasNextPage = true;
+    expect(await read(pr([review("")], [incomplete]))).toMatchObject({ ok: true,
+      approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } });
+    expect(await read(pr([review("")], [{ ...thread([comment("comment-1", "Fix the copy")]), id: "" }])))
+      .toMatchObject({ ok: true, approvalFeedback: { status: "unknown" } });
+  });
+
+  it("traverses review, thread, and linked comment pages before fingerprinting", async () => {
+    const initial = { ...pr([{ ...review("", "later-comment"), state: "COMMENTED", submittedAt: "2026-09-25T12:00:00Z" }], [
+      { id: "unrelated", isResolved: true, comments: { pageInfo: { hasNextPage: false }, nodes: [
+        { ...comment("unrelated-comment", "Other review"), pullRequestReview: { id: "other-review" } }] } },
+    ]), reviews: { pageInfo: { hasPreviousPage: true, startCursor: "reviews-cursor" },
+      nodes: [{ ...review("", "later-comment"), state: "COMMENTED", submittedAt: "2026-09-25T12:00:00Z" }] },
+    reviewThreads: { pageInfo: { hasNextPage: true, endCursor: "threads-cursor" }, nodes: [
+      { id: "unrelated", isResolved: true, comments: { pageInfo: { hasNextPage: false }, nodes: [
+        { ...comment("unrelated-comment", "Other review"), pullRequestReview: { id: "other-review" } }] } },
+    ] } };
+    const linked = { ...thread([comment("comment-1", "Fix copy")]), comments: {
+      pageInfo: { hasNextPage: true, endCursor: "comments-cursor" }, nodes: [comment("comment-1", "Fix copy")],
+    } };
+    const fake = fakeGh((args) => {
+      const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      const body = query.includes("reviews(last:100,before")
+        ? { data: { repository: { pullRequest: { headRefOid: SHA, reviews: {
+          pageInfo: { hasPreviousPage: false }, nodes: [review("")] } } } } }
+        : query.includes("reviewThreads(first:100,after")
+          ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: {
+            pageInfo: { hasNextPage: false }, nodes: [linked] } } } } }
+          : query.includes("node(id:$id)")
+            ? { data: { repository: { pullRequest: { headRefOid: SHA } }, node: { id: "thread-1", comments: {
+              pageInfo: { hasNextPage: false }, nodes: [comment("comment-2", "Also fix the label")] } } } }
+            : { data: { repository: { pullRequest: initial } } };
+      return { ok: true, stdout: JSON.stringify(body) };
+    });
+    const result = await readReviewThreads(fake.run, TARGET);
+    expect(result).toMatchObject({ ok: true, count: 0, resolvedCount: 2, hasNextPage: false,
+      approvalFeedback: { status: "present", sourceIds: ["thread-1"] } });
+    expect(fake.calls).toHaveLength(5);
+  });
+
+  it("returns unknown when a later page describes another head", async () => {
+    const initial = { ...pr([review("")]), reviews: {
+      pageInfo: { hasPreviousPage: true, startCursor: "older" }, nodes: [review("")] } };
+    const fake = fakeGh((args) => {
+      const pullRequest = args.some((arg) => arg.includes("before:$cursor"))
+        ? { headRefOid: "c".repeat(40), reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] } }
+        : initial;
+      return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest } } }) };
+    });
+    expect(await readReviewThreads(fake.run, TARGET)).toMatchObject({ ok: true,
+      approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } });
   });
 });
 

@@ -97,6 +97,16 @@ it("starts a remote PR context only on Send, links it to the board, and keeps fo
   expect(env.send.mock.calls[0]?.[0].input[0].text).toContain("authorizes inspection and reporting, not a repair");
 });
 
+it("keeps a newly created PR context in the first twenty links while thread facts catch up", async () => {
+  const initialThreads = Array.from({ length: 24 }, (_, index) => ({ id: `thr-history-${index}`,
+    patch: { status: "active" }, metadata: { linkedPrUrl: URL } }));
+  const env = await setup({ remoteOnly: true, initialThreads });
+  const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string };
+  const links = (await env.board()).prThreadLinks[URL];
+  expect(links).toHaveLength(20);
+  expect(links?.[0]).toBe(created.threadId);
+});
+
 it("keeps a closed PR context available for diagnosis without creating a writer run", async () => {
   const env = await setup({ state: "MERGED" });
   const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string };

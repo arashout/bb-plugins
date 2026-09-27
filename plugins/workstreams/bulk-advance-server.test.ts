@@ -27,7 +27,10 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     state: options.terminal ?? "OPEN", isDraft: false, isCrossRepository: options.fork ?? false, reviewDecision: "APPROVED", mergeStateStatus: options.ready ? "CLEAN" : "DIRTY",
     mergeable: options.ready ? "MERGEABLE" : "CONFLICTING", needsPreparation: !options.ready, readiness: options.terminal === "MERGED" ? "merged" : options.terminal === "CLOSED" ? "closed" : options.ready && !options.feedback ? "ready" : "needs-attention",
     detail: options.feedback ? "Review feedback needs attention" : options.ready ? "Approved and ready to merge" : "Resolve branch conflicts",
-    unresolvedThreads: options.feedback === "threads" ? 1 : 0, checks: "passed", basePrNumber: null, approvalNotePending: options.feedback === "approval-note" };
+    unresolvedThreads: options.feedback === "threads" ? 1 : 0, checks: "passed", basePrNumber: null,
+    approvalFeedback: options.feedback === "approval-note"
+      ? { status: "present", fingerprint: "f".repeat(64), sourceIds: ["approval-42"] }
+      : { status: "none", fingerprint: null, sourceIds: [] } };
   const calls: { method: string; input: unknown }[] = [];
   const beforeWorkspace = vi.fn(async () => {});
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
@@ -314,7 +317,8 @@ describe("bulk advance server integration", () => {
   it.each(["threads", "approval-note"] as const)("launches feedback-only %s work even when the approved branch is clean", async (feedback) => {
     const env = await setup({ ready: true, remoteOnly: true, feedback });
     const plan = await env.preview();
-    expect(plan.jobs[0]).toMatchObject({ eligible: true, needsPreparation: false, needsFeedback: true, workspace: "create", detail: env.facts.detail });
+    expect(plan.jobs[0]).toMatchObject({ eligible: true, needsPreparation: false, needsFeedback: true, workspace: "create",
+      detail: feedback === "approval-note" ? expect.stringContaining("Approval feedback needs code") : env.facts.detail });
     await env.harness.callRpc("advance_start", { token: plan.token });
     await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
     expect(env.calls.find((call) => call.method === "advanceWorkspace")?.input).toMatchObject({ sourcePath: PATH, prUrl: env.url, expectedHeadOid: HEAD, expectedBaseOid: BASE });
@@ -417,7 +421,7 @@ describe("bulk advance server integration", () => {
   it.each(["closed", "fork"] as const)("refuses %s repairs even when the remaining task has no branch or feedback flag", async (blocker) => {
     const env = await setup({ failFirstWorkspace: true });
     const ids = await failedBatch(env);
-    Object.assign(env.facts, { needsPreparation: false, unresolvedThreads: 0, approvalNotePending: false, readiness: "ready", detail: "Current state needs attention" });
+    Object.assign(env.facts, { needsPreparation: false, unresolvedThreads: 0, readiness: "ready", detail: "Current state needs attention" });
     if (blocker === "closed") env.facts.state = "CLOSED";
     if (blocker === "fork") env.facts.isCrossRepository = true;
     await expect(env.harness.callRpc("advance_repair_plan", ids)).rejects.toThrow();

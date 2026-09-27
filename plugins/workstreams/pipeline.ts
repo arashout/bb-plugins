@@ -55,10 +55,11 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (pr.mergeStateStatus === "DIRTY") return { label: "Conflicts", tone: "bad" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && !pr.reviewFollowupPosted) return { label: "Changes requested", tone: "warn" };
   if (pr.unresolvedReviewThreads !== null && pr.unresolvedReviewThreads > 0) return { label: `${pr.unresolvedReviewThreads} open threads`, tone: "warn" };
-  if (pr.reviewDecision === "APPROVED" && pr.approvalHasBody && !pr.approvalNoteFollowedUp) return { label: "Review note", tone: "warn" };
+  if (pr.reviewDecision === "APPROVED" && pr.approvalFeedback?.status === "present" && !pr.approvalFeedbackVerified) return { label: "Review feedback", tone: "warn" };
   if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
   if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
   if (pr.isDraft) return { label: "Draft", tone: "wait" };
+  if (pr.reviewDecision === "APPROVED" && (!pr.approvalFeedback || pr.approvalFeedback.status === "unknown")) return { label: "Review history unknown", tone: "wait" };
   if (stage === "build") return { label: "In progress", tone: "wait" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && pr.reviewFollowupPosted) return { label: "Awaiting re-review", tone: "wait" };
   if (pr.reviewDecision === "APPROVED" && !checksGreen(pr.checkConclusions)) return { label: "Checks pending", tone: "wait" };
@@ -118,7 +119,7 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (blocker.label === "CI failing") return "Advance to investigate failing checks.";
   if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
   if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
-  if (blocker.label === "Changes requested" || blocker.label === "Review note" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
+  if (blocker.label === "Changes requested" || blocker.label === "Review feedback" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
   if (blocker.label === "Awaiting re-review") return "Wait for the reviewer to respond to the follow-up.";
   if (blocker.label === "Awaiting review") return "Nudge the requested reviewer or wait for review.";
   if (blocker.label === "No reviewer") return "Choose a reviewer on GitHub; Advance can recheck other gates.";

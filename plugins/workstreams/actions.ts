@@ -6,6 +6,7 @@ import type { MergeStateStatus } from "./contract.js";
 import { threadPrompt, waitingBehind, type InboxSection, type InboxUnitFacts, type PromptFacts } from "./workstreams.js";
 import type { ThreadTier } from "./threads.js";
 import { RESULT_INSTRUCTION } from "./runs.js";
+import { feedbackVerified } from "./approval-feedback.js";
 
 /** Actions that need judgement, so they go to an agent thread. */
 export const AGENT_ACTIONS = ["investigate-ci", "resolve-conflicts", "address-review", "address-comments", "review-approval-note"] as const;
@@ -192,7 +193,7 @@ function actionBody(action: AgentAction, facts: PromptFacts): string {
     case "address-comments":
       return `${pr} is approved but has open review comments, branch ${branch}, checkout ${facts.path}. ${REVIEW_STEPS} Report back with a summary per thread and whether the PR is ready to merge.`;
     case "review-approval-note":
-      return `${pr} is approved with a written review note, branch ${branch}, checkout ${facts.path}. Read the approving review body and decide which points need code changes; leave informational points alone and explain why. Make focused fixes with relevant tests. Fetch the PR's base branch and integrate it before finishing: rebase if behind, resolve any conflicts preserving both sides' intent, and run the tests again. Commit and push the resulting work; use an exact --force-with-lease if rebased. Reply on the PR to the approving review note, mention its reviewer, and state what changed or why a point needs no change. Start that PR comment with "Approval note for @reviewer:" using the reviewer's actual login, and include the pushed head SHA so the follow-up is tied to the code you checked. After the push and reply, wait for checks to settle, then re-read the live PR state, review decision, unresolved threads, checks, and mergeStateStatus. Verify the PR is actually mergeable before reporting it ready; if any gate remains, name that gate and the next action. Do not merge. Report the fix, branch update, reply, test result, and live merge readiness.`;
+      return `${pr} is approved with a written review note, branch ${branch}, checkout ${facts.path}. Read the approving review body and decide which points need code changes; leave informational points alone and explain why. Make focused fixes with relevant tests. Fetch the PR's base branch and integrate it before finishing: rebase if behind, resolve any conflicts preserving both sides' intent, and run the tests again. Commit and push code changes only when needed; use an exact --force-with-lease if rebased. Re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus. Report the change or justified nonchange, branch state, test result, and remaining gates. Advance must verify feedback against the current review and head before the PR is ready to merge. Do not merge.`;
     case "resolve-conflicts":
       return `${pr} has merge conflicts with its base. In checkout ${facts.path} on branch ${branch}, ${CONFLICT_STEPS} Report what conflicted and how you resolved it.`;
   }
@@ -259,9 +260,9 @@ export function actionPreview(
         steps: [
           "Review each approval note; fix actionable points and explain informational ones.",
           "Fetch and integrate the base; rebase if behind and resolve conflicts preserving intent.",
-          "Run relevant tests, commit, and push; use an exact --force-with-lease after a rebase.",
-          "Reply on the PR to the approving reviewer with what changed or why no change was needed; include the pushed head SHA.",
-          "Wait for checks, then re-read live approval, threads, checks, and mergeability. Report remaining gates; do not merge.",
+          "Run relevant tests; commit and push only code changes, using an exact --force-with-lease after a rebase.",
+          "Re-read live approval, threads, checks, and mergeability. Advance verifies feedback against the current review and head before Merge.",
+          "Report remaining gates; do not merge.",
         ],
         lastScan: scan?.approvalHasBody ? ["Written approval note present"] : [],
       };
@@ -290,6 +291,8 @@ export type LiveMergeFacts = {
   approvalNotesMore: number;
   /** False when GitHub could not provide the complete review history. */
   approvalNotesComplete: boolean;
+  /** Complete current approving-review feedback, independently of thread resolution. */
+  approvalFeedback: import("./approval-feedback.js").ApprovalFeedbackSnapshot;
 };
 
 export type MergeVerdict = { refusals: string[]; warnings: string[] };
@@ -304,7 +307,7 @@ const MERGE_STATE_REFUSAL: Partial<Record<MergeStateStatus, string>> = {
 };
 
 /** Refuse unless open, not a draft, approved, and CLEAN / HAS_HOOKS / UNSTABLE. */
-export function mergeVerdict(live: LiveMergeFacts): MergeVerdict {
+export function mergeVerdict(live: LiveMergeFacts, verification: import("./approval-feedback.js").ApprovalFeedbackRecord | null = null): MergeVerdict {
   const refusals: string[] = [];
   const warnings: string[] = [];
   if (live.state !== "OPEN") refusals.push(`The pull request is ${live.state.toLowerCase() || "not open"}.`);
@@ -318,6 +321,7 @@ export function mergeVerdict(live: LiveMergeFacts): MergeVerdict {
   if (status !== undefined) refusals.push(status);
   if (live.mergeStateStatus === "UNSTABLE") warnings.push("Some checks that are not required are failing.");
   if (live.headRefOid === null || !SHA.test(live.headRefOid)) refusals.push("GitHub did not report the head commit.");
+  if (!feedbackVerified(live.approvalFeedback, live.headRefOid, verification)) refusals.push("Approval feedback needs verified follow-up on the current head.");
   return { refusals, warnings };
 }
 

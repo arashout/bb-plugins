@@ -311,9 +311,10 @@ export function prLifecycle(pr: Pr): Lifecycle {
   // clear on their own.
   if (pr.reviewDecision === "CHANGES_REQUESTED") return pr.reviewFollowupPosted ? "awaiting-rereview" : "awaiting-followup";
   if (pr.reviewDecision === "APPROVED") {
+    if (!pr.approvalFeedback || pr.approvalFeedback.status === "unknown") return "unverified";
     if (pr.unresolvedReviewThreads === null) return "unverified";
     if (pr.unresolvedReviewThreads > 0) return "approved-with-comments";
-    if (pr.approvalHasBody && !pr.approvalNoteFollowedUp) return "approved-with-note";
+    if (pr.approvalFeedback.status === "present" && !pr.approvalFeedbackVerified) return "approved-with-note";
     if (checksGreen(pr.checkConclusions)) return "awaiting-merge";
   }
   return "awaiting-review";
