@@ -3,6 +3,7 @@ import { useBbNavigate, useRealtime, useRpc, type PluginSidebarThread } from "@g
 import type { rpcContract } from "./server";
 import type { PipelineCard } from "./pipeline";
 import { Icon } from "@/components/ui/icon";
+import { PipelineThreadIndicator } from "./pipeline-thread-indicator";
 
 type PrThread = {
   id: string;
@@ -107,18 +108,22 @@ export function PrThreadLinks({
   if (error) return <p role="alert" className="mt-1 text-destructive">{error}</p>;
   if (!context?.threads.length) return <p className="mt-1 text-muted-foreground">No linked threads for this PR.</p>;
   return (
-    <ul className="mt-1 space-y-1">
+    <ul className="mt-2 space-y-1">
       {context.threads.map((thread) => (
         <li key={thread.id}>
           <button
             type="button"
             onClick={() => onOpenThread(thread.id)}
-            className="max-w-full rounded text-left text-[11px] underline hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"
             title={thread.title}
             aria-label={`Open ${ROLE_LABEL[thread.role]} thread: ${thread.title}`}
           >
-            <span className="text-muted-foreground">{ROLE_LABEL[thread.role]} · </span>
-            {threadIsActive(thread, sidebarThreads) ? "● " : ""}{thread.title}
+            <span className="flex size-4 shrink-0 items-center justify-center"><PipelineThreadIndicator threadIds={[thread.id]} sidebarThreads={sidebarThreads} /></span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[10px] text-muted-foreground">{ROLE_LABEL[thread.role]}</span>
+              <span className="block truncate text-[12px] font-medium text-foreground">{thread.title}</span>
+            </span>
+            <Icon name="ArrowUpRight" className="size-3.5 shrink-0 text-muted-foreground" />
           </button>
         </li>
       ))}
