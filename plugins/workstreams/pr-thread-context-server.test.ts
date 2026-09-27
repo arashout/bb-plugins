@@ -6,7 +6,7 @@ import type { RawUnit } from "./contract.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import { createRunStore } from "./runstore.js";
-import plugin from "./server.js";
+import plugin, { type Board } from "./server.js";
 
 const HOST = "host-inkwell";
 const PROJECT = "proj-inkwell";
@@ -29,7 +29,7 @@ function pr(number: number, state: "OPEN" | "MERGED" = "OPEN") {
 type Context = { threads: { id: string; title: string; role: "coordinator" | "repo" | "pr" | "linked" }[]; recommendedThreadId: string | null };
 
 async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED"; metadata?: Record<string, Record<string, unknown>>;
-  initialThreads?: { id: string; title: string }[] } = {}) {
+  initialThreads?: { id: string; title: string; status?: "active" | "idle" }[] } = {}) {
   const currentPr = pr(42, options.state);
   const raw: RawUnit = { path: PATH, dirName: "folio-abc-42", repo: REPO, githubRepo: REPO,
     branch: "abc-42-review", dirty: false, ahead: 0, behind: 0, lastCommitAt: null,
@@ -41,7 +41,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
     threads.set(id, row);
     return row;
   };
-  for (const row of options.initialThreads ?? []) add(row.id, { title: row.title });
+  for (const row of options.initialThreads ?? []) add(row.id, { title: row.title, status: row.status ?? "idle" });
   const send = vi.fn(async () => ({ ok: true as const, delivery: "sent" as const }));
   const output = vi.fn(async () => ({ output: null as string | null }));
   const spawn = vi.fn(async () => add("thr-unexpected"));
@@ -148,6 +148,30 @@ describe("PR thread context and messaging", () => {
     expect(await env.harness.callRpc("runs_open", null)).toEqual([
       expect.objectContaining({ path: "", prUrl: URL, threadId: "thr-remote" }),
     ]);
+  });
+
+  it("shows one thread's two recorded PRs in both thread choices and board indicators", async () => {
+    const env = await setup({ remoteOnly: true, initialThreads: [{ id: "thr-shared", title: "Two PR review" }] });
+    const runs = createRunStore(env.bb.storage.database());
+    for (const [url, number] of [[URL, 42], [NEXT_URL, 43]] as const) runs.begin({ path: PATH, ticket: null,
+      prUrl: url, prNumber: number, action: "review", mode: "new", threadId: "thr-shared" });
+    expect((await env.context(URL)).threads).toEqual([expect.objectContaining({ id: "thr-shared", role: "pr" })]);
+    expect((await env.context(NEXT_URL)).threads).toEqual([expect.objectContaining({ id: "thr-shared", role: "pr" })]);
+    const board = await env.harness.callRpc("board_get", null) as Board;
+    expect(board.prThreadLinks[URL]).toContain("thr-shared");
+    expect(board.prThreadLinks[NEXT_URL]).toContain("thr-shared");
+  });
+
+  it("keeps an active linked thread visible when more than twenty historical threads exist", async () => {
+    const initialThreads = [{ id: "thr-active", title: "Current review", status: "active" as const },
+      ...Array.from({ length: 24 }, (_, index) => ({ id: `thr-old-${index}`, title: `Earlier review ${index}`, status: "idle" as const }))];
+    const env = await setup({ remoteOnly: true, initialThreads });
+    const runs = createRunStore(env.bb.storage.database());
+    for (const thread of initialThreads) runs.begin({ path: PATH, ticket: null, prUrl: URL, prNumber: 42,
+      action: "review", mode: "new", threadId: thread.id });
+    const board = await env.harness.callRpc("board_get", null) as Board;
+    expect(board.prThreadLinks[URL]).toHaveLength(20);
+    expect(board.prThreadLinks[URL]?.[0]).toBe("thr-active");
   });
 
   it("keeps merged PR history visible while refusing new instructions", async () => {

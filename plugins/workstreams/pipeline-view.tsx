@@ -54,7 +54,6 @@ import { Tip } from "@/components/ui/tooltip";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { PipelineCardEffortDialog } from "./pipeline-card-effort";
 import { PipelineThreadIndicator } from "./pipeline-thread-indicator";
-import { backlogThreads } from "./backlog-threads";
 
 const LABEL: Record<PipelineStage, string> = {
   build: "Build",
@@ -578,10 +577,7 @@ export function PipelineView({
   });
 
   const linkedThreadIds = (card: PipelineCard): string[] => card.pr
-    ? [...new Set([
-        ...backlogThreads(card.pr.url, card.local?.cluster.threads ?? [], board.runs, [...advance.batches.flatMap((batch) => batch.jobs), ...dispatch.attempts], sidebarThreads).map((thread) => thread.id),
-        ...(board.prThreadLinks[canonicalPrUrl(card.pr.url) ?? card.pr.url] ?? []),
-      ])]
+    ? board.prThreadLinks[canonicalPrUrl(card.pr.url) ?? card.pr.url] ?? []
     : card.local?.cluster.threads.map((thread) => thread.id) ?? [];
 
   const cardView = (card: PipelineCard) => {
