@@ -2,7 +2,7 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import type { AdvanceFacts } from "./advance-contract.js";
-import type { AdvanceBatch, AdvancePreview, AdvanceRepairPlan } from "./bulk-advance.js";
+import { advancePreviewJobSchema, type AdvanceBatch, type AdvancePreview, type AdvanceRepairPlan } from "./bulk-advance.js";
 import { parsePrList } from "./gh.js";
 import { createEffortStore } from "./effort-store.js";
 import plugin from "./server.js";
@@ -10,10 +10,13 @@ import plugin from "./server.js";
 const PATH = "/p/widget-checkout";
 const HOST = "host-example";
 const HEAD = "a".repeat(40), BASE = "b".repeat(40);
+const PLACEMENT_BATCH = "00000000-0000-4000-8000-000000000042";
+const PLACEMENT_JOB = "00000000-0000-4000-8000-000000000043";
+const PLACEMENT_ATTEMPT = "00000000-0000-4000-8000-000000000046";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string }; misparentWorker?: boolean } = {}) {
+async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string }; misparentWorker?: boolean; seedPlacementRepair?: boolean; seedPlacementRepairAttempt?: boolean; seedUncertainConflict?: boolean } = {}) {
   const repo = options.mixedCase ? "Example/Widget" : "example/widget";
   const url = `https://github.com/${repo}/pull/42`;
   const pr = { ...parsePrList(JSON.stringify([{ number: 42, url, state: options.terminal ?? "OPEN", title: "ABC-42 Fix account lookup", reviewDecision: "APPROVED",
@@ -33,17 +36,28 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
       : { status: "none", fingerprint: null, sourceIds: [] } };
   const calls: { method: string; input: unknown }[] = [];
   const beforeWorkspace = vi.fn(async () => {});
+  const beforeAnchor = vi.fn(async () => {});
+  const beforePlacementUpdate = vi.fn(async () => {});
+  const afterPlacementUpdate = vi.fn(async () => {});
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const threadMetadata = new Map<string, Record<string, unknown>>();
   if (options.author) threads.set("thr-author", makeThreadResponse({ id: "thr-author", title: "ABC-42 Fix account lookup", projectId: "project-example", status: "idle" }));
+  if (options.seedPlacementRepair) {
+    threads.set("thr-legacy", { ...makeThreadResponse({ id: "thr-legacy", projectId: "project-example", status: "idle", originPluginId: "workstreams" }),
+      environment: { hostId: HOST } } as ReturnType<typeof makeThreadResponse>);
+    threadMetadata.set("thr-legacy", options.seedPlacementRepairAttempt
+      ? { role: "advance-repair", advanceJobId: PLACEMENT_ATTEMPT, prUrl: url }
+      : { role: "rebase-worker", advanceJobId: PLACEMENT_JOB });
+  }
   const blockedParents = new Set<string>();
   let spawned = 0, workspaces = 0, contextWorkspaces = 0;
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const role = args.pluginMetadata?.role;
+    if (role === "unassigned-repo") await beforeAnchor();
     const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" :
       role === "unassigned-root" ? "thr-unassigned" : role === "unassigned-repo" ? "thr-unassigned-repo" :
       ++spawned === 1 ? "thr-rebasing" : `thr-repair-${spawned}`;
-    const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
+    const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title, originPluginId: "workstreams",
       status: role === "coordinator" ? "idle" : "active" }), parentThreadId: options.misparentWorker && role === "rebase-worker" ? null : args.parentThreadId ?? null,
       environment: { hostId: args.environment.hostId }, environmentPath: args.environment.workspace?.path ?? null,
       environmentHostId: args.environment.hostId ?? null };
@@ -55,8 +69,18 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     system: { config: async () => ({ primaryHostId: HOST }) as never },
     projects: { list: async () => (options.projectAvailable === false ? [] : [{ id: "project-example", name: "Example", sources: [{ hostId: HOST, path: "/p" }] }]) as never },
     threads: {
-      list: async () => (options.omitLaunchedThreadsFromList ? [] : [...threads.values()]) as never, spawn, send,
+      list: async () => (options.omitLaunchedThreadsFromList ? [] : [...threads.values()].map((thread) => ({ ...thread,
+        queuedWork: "none", hasPendingInteraction: false, activity: { activeBackgroundAgentCount: 0,
+          activeBackgroundCommandCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 } }))) as never, spawn, send,
       get: async ({ threadId }: { threadId: string }) => ({ ...threads.get(threadId)!, canSpawnChild: !blockedParents.has(threadId) }) as never,
+      update: async ({ threadId, parentThreadId, title }: { threadId: string; parentThreadId?: string | null; title?: string | null }) => {
+        await beforePlacementUpdate();
+        const thread = { ...threads.get(threadId)!, ...(parentThreadId !== undefined ? { parentThreadId } : {}),
+          ...(title !== undefined ? { title } : {}) };
+        threads.set(threadId, thread);
+        await afterPlacementUpdate();
+        return thread as never;
+      },
       getPluginMetadata: async ({ threadId }: { threadId: string }) => (threadMetadata.get(threadId) ?? {}) as never, output: async () => ({ output: "" }),
       context: async () => ({ usage: null }) as never, events: { list: async () => [] }, interactions: { list: async () => [] as never },
     },
@@ -67,6 +91,10 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     if (method === "authoredPrs") return { owners: [repo.split("/")[0]], entries: pr.state === "OPEN" ? [{ repo, pr }] : [], discoveryComplete: true,
       repositories: [{ repo, complete: true }], complete: true, warnings: [] };
     if (method === "advanceInspect") return { ok: true, facts };
+    if (method === "prLive") return { ok: true, live: { state: pr.state, isDraft: false, reviewDecision: pr.reviewDecision,
+      mergeStateStatus: pr.mergeStateStatus, headRefOid: pr.headRefOid, stackedAbove: [], unresolvedThreads: 0,
+      unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } };
     if (method === "inspectPrs") return facts.state === "OPEN"
       ? { entries: [{ repo, pr }], closed: [], failed: [], warnings: [] }
       : { entries: [], closed: [url], failed: [], warnings: [] };
@@ -83,9 +111,28 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
     db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(options.savedBatch.id, options.savedBatch.body);
   }
+  if (options.seedPlacementRepair) {
+    const db = bb.storage.database();
+    db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
+    const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: PLACEMENT_JOB, hiddenFromProgress: false,
+      status: "needs-attention", attemptId: options.seedPlacementRepairAttempt ? PLACEMENT_ATTEMPT : null,
+      dedicated: options.seedPlacementRepairAttempt ?? false, previousAttempts: [], threadId: "thr-legacy",
+      path: PATH, checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
+    const routing = { ...facts, eligible: true, workspace: "create", projectId: "project-example", hostId: HOST, sourcePath: PATH, path: PATH,
+      effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null };
+    const competingId = "00000000-0000-4000-8000-000000000045";
+    const competing = { ...job, id: competingId, threadId: "thr-other", uncertain: true };
+    db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(PLACEMENT_BATCH, JSON.stringify({ id: PLACEMENT_BATCH,
+      token: "00000000-0000-4000-8000-000000000044", createdAt: Date.now(), cancelled: false,
+      jobs: options.seedUncertainConflict ? [job, competing] : [job],
+      facts: { [PLACEMENT_JOB]: routing, ...(options.seedUncertainConflict ? { [competingId]: routing } : {}) },
+      pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
+  }
   await plugin(bb); cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { bb, harness, calls, spawn, send, facts, pr, unit, url, threads, blockedParents, beforeWorkspace, savedBatch: (id: string) => bb.storage.database().prepare("SELECT id, body FROM advance_batches WHERE id = ?").get(id) as { id: string; body: string }, preview: async (prUrl = url) => await harness.callRpc("advance_preview", { prUrls: [prUrl] }) as AdvancePreview };
+  return { bb, harness, calls, spawn, send, facts, pr, unit, url, threads, threadMetadata, blockedParents, beforeWorkspace,
+    beforeAnchor, beforePlacementUpdate, afterPlacementUpdate,
+    savedBatch: (id: string) => bb.storage.database().prepare("SELECT id, body FROM advance_batches WHERE id = ?").get(id) as { id: string; body: string }, preview: async (prUrl = url) => await harness.callRpc("advance_preview", { prUrls: [prUrl] }) as AdvancePreview };
 }
 
 async function failedBatch(env: Awaited<ReturnType<typeof setup>>) {
@@ -540,5 +587,79 @@ describe("bulk advance server integration", () => {
     if (blocker === "fork") env.facts.isCrossRepository = true;
     await expect(env.harness.callRpc("advance_repair_plan", ids)).rejects.toThrow();
     expect(env.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("bounded placement repair for saved unassigned workers", () => {
+  const request = (prUrl: string, apply: boolean) => ({ batchId: PLACEMENT_BATCH, jobId: PLACEMENT_JOB,
+    threadId: "thr-legacy", prUrl, expectedParentThreadId: null, apply });
+
+  it("previews without writes, places the saved worker under its repo, and safely repeats the request", async () => {
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true });
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, false))).toMatchObject({
+      threadId: "thr-legacy", parentThreadId: null, updated: false });
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).toMatchObject({
+      threadId: "thr-legacy", parentThreadId: "thr-unassigned-repo", updated: true });
+    expect(env.spawn.mock.calls.map((call) => call[0].pluginMetadata.role)).toEqual(["unassigned-root", "unassigned-repo"]);
+    expect(env.threads.get("thr-legacy")?.parentThreadId).toBe("thr-unassigned-repo");
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).toMatchObject({
+      parentThreadId: "thr-unassigned-repo", updated: false });
+    expect(env.spawn).toHaveBeenCalledTimes(2);
+    expect(env.beforePlacementUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the exact saved repair attempt without treating its older attempt as current", async () => {
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true, seedPlacementRepairAttempt: true });
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).toMatchObject({
+      parentThreadId: "thr-unassigned-repo", updated: true });
+    expect(env.threads.get("thr-legacy")?.parentThreadId).toBe("thr-unassigned-repo");
+  });
+
+  it("rejects missing direct evidence, busy workers, and a PR that GitHub closed", async () => {
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true });
+    env.threadMetadata.set("thr-legacy", { role: "rebase-worker", advanceJobId: "another-job" });
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("plugin evidence");
+    env.threadMetadata.set("thr-legacy", { role: "rebase-worker", advanceJobId: PLACEMENT_JOB });
+    env.threads.set("thr-legacy", { ...env.threads.get("thr-legacy")!, status: "active" });
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("active, queued");
+    env.threads.set("thr-legacy", { ...env.threads.get("thr-legacy")!, status: "idle" });
+    env.pr.state = "CLOSED";
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("GitHub no longer confirms");
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects an uncertain competing job, explicit effort intent, or an unexpected parent", async () => {
+    const conflict = await setup({ remoteOnly: true, seedPlacementRepair: true, seedUncertainConflict: true });
+    await expect(conflict.harness.callRpc("repair_unassigned_thread", request(conflict.url, true))).rejects.toThrow("Another Advance item");
+    expect(conflict.spawn).not.toHaveBeenCalled();
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true });
+    env.threadMetadata.set("thr-legacy", { role: "rebase-worker", advanceJobId: PLACEMENT_JOB, effortId: "effort-other" });
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("plugin evidence");
+    env.threadMetadata.set("thr-legacy", { role: "rebase-worker", advanceJobId: PLACEMENT_JOB });
+    env.threads.set("thr-legacy", { ...env.threads.get("thr-legacy")!, parentThreadId: "thr-other" });
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("parent changed");
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the worker after anchor creation and leaves a changed thread untouched", async () => {
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true });
+    env.beforeAnchor.mockImplementationOnce(async () => {
+      env.threads.set("thr-legacy", { ...env.threads.get("thr-legacy")!, status: "active" });
+    });
+    await expect(env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).rejects.toThrow("active, queued");
+    expect(env.spawn).toHaveBeenCalledTimes(2);
+    expect(env.threads.get("thr-legacy")?.parentThreadId).toBeNull();
+    expect(env.beforePlacementUpdate).not.toHaveBeenCalled();
+  });
+
+  it("reads back a timed-out update and never blindly moves the worker again", async () => {
+    const env = await setup({ remoteOnly: true, seedPlacementRepair: true });
+    env.afterPlacementUpdate.mockRejectedValueOnce(new Error("transport timed out"));
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).toMatchObject({
+      parentThreadId: "thr-unassigned-repo", updated: true });
+    expect(env.threads.get("thr-legacy")?.parentThreadId).toBe("thr-unassigned-repo");
+    expect(await env.harness.callRpc("repair_unassigned_thread", request(env.url, true))).toMatchObject({ updated: false });
+    expect(env.beforePlacementUpdate).toHaveBeenCalledOnce();
   });
 });

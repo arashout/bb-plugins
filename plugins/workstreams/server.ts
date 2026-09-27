@@ -350,6 +350,10 @@ export const rpcContract = defineRpcContract({
   advance_progress_visibility: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid(), hidden: z.boolean() }).strict(), output: advanceBatchSchema },
   advance_repair_plan: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid() }).strict(), output: advanceRepairPlanSchema },
   advance_repair_run: { input: advanceRepairRunSchema, output: advanceRepairResultSchema },
+  repair_unassigned_thread: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid(),
+    threadId: z.string().min(1).max(200), prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null),
+    expectedParentThreadId: z.null(), apply: z.boolean() }).strict(),
+    output: z.object({ threadId: z.string(), parentThreadId: z.string().nullable(), updated: z.boolean() }).strict() },
   inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean() }) },
   dispatch_set: {
     input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
@@ -3425,6 +3429,83 @@ export default async function plugin(bb: BbPluginApi) {
     scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => inventory.get(job.prUrl) === undefined && !scanned.has(canonicalPrUrl(job.prUrl))).map(({ job }) => job.prUrl));
   });
 
+  async function repairUnassignedThread(input: { batchId: string; jobId: string; threadId: string; prUrl: string;
+    expectedParentThreadId: null; apply: boolean }) {
+    const canonical = canonicalPrUrl(input.prUrl);
+    if (!canonical) throw new Error("Choose a valid GitHub PR URL.");
+    const target = prTarget(canonical)!;
+    const inspect = async () => {
+      const saved = db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(input.batchId) as { body: string } | undefined;
+      const batch = saved ? advanceBatchSchema.parse(JSON.parse(saved.body)) : null;
+      const job = batch?.jobs.find((entry) => entry.id === input.jobId);
+      if (!batch || batch.cancelled || !job || job.threadId !== input.threadId ||
+        canonicalPrUrl(job.prUrl) !== canonical || job.status !== "needs-attention" || job.uncertain) {
+        throw new Error("The saved Advance worker changed. Recheck its progress before repairing placement.");
+      }
+      const otherJobs = advance.list().flatMap((entry) => entry.jobs).filter((entry) => entry.id !== job.id);
+      if (otherJobs.some((entry) => (entry.threadId === input.threadId || canonicalPrUrl(entry.prUrl) === canonical) &&
+        (entry.uncertain || ["queued", "launching", "running", "verifying"].includes(entry.status)))) {
+        throw new Error("Another Advance item owns this thread or PR. Recheck progress before repairing placement.");
+      }
+      const current = await board();
+      const open = current.prInventory.entries.find((entry) => canonicalPrUrl(entry.pr.url) === canonical);
+      if (!open || open.stale || open.pr.state !== "OPEN" ||
+        !current.prThreadLinks[canonical]?.includes(input.threadId) ||
+        Object.entries(current.prThreadLinks).some(([url, ids]) => canonicalPrUrl(url) !== canonical && ids.includes(input.threadId) &&
+          current.prInventory.entries.some((entry) => canonicalPrUrl(entry.pr.url) === canonicalPrUrl(url) && entry.pr.state === "OPEN"))) {
+        throw new Error("The thread no longer has one current open PR card. Refresh the board before repairing placement.");
+      }
+      if (await effortScope(canonical)) throw new Error("This PR now belongs to an effort. Reopen its placement preview.");
+      const hostId = (await bb.sdk.system.config()).primaryHostId;
+      if (!hostId) throw new Error("No primary host is available to verify this PR.");
+      const live = await liveOf(hostId)(canonical);
+      if (!live.ok || live.live.state !== "OPEN") throw new Error("GitHub no longer confirms this PR is open. Refresh before repairing placement.");
+      const thread = await bb.sdk.threads.get({ threadId: input.threadId, include: "environment" });
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: input.threadId });
+      const expectedAttempt = job.attemptId ?? job.id;
+      if (thread.originPluginId !== bb.pluginId || metadata.advanceJobId !== expectedAttempt ||
+        (job.attemptId === null ? metadata.role !== "rebase-worker" :
+          metadata.role !== "advance-repair" || canonicalPrUrl(String(metadata.prUrl ?? "")) !== canonical) ||
+        metadata.workEffortId != null || metadata.effortId != null) {
+        throw new Error("The thread's plugin evidence no longer identifies this Advance PR worker.");
+      }
+      let listed: Awaited<ReturnType<typeof bb.sdk.threads.list>>[number] | undefined;
+      for (let offset = 0; offset < 2_000; offset += 100) {
+        const rows = await bb.sdk.threads.list({ projectId: thread.projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+        listed = rows.find((entry) => entry.id === input.threadId);
+        if (listed || rows.length < 100) break;
+      }
+      if (!listed || thread.status !== "idle" || listed.status !== "idle" ||
+        thread.archivedAt !== null || thread.deletedAt !== null || thread.visibility !== "visible" ||
+        thread.queuedMessageCount !== 0 || thread.activeBackgroundAgentCount !== 0 ||
+        listed.queuedWork !== "none" || listed.hasPendingInteraction ||
+        Object.values(listed.activity).some((count) => count !== 0)) {
+        throw new Error("The worker is active, queued, hidden, or unavailable. Inspect it before repairing placement.");
+      }
+      const recorded = unassignedPlacement.repo(target.slug);
+      if (thread.parentThreadId !== input.expectedParentThreadId &&
+        (recorded?.state !== "ready" || thread.parentThreadId !== recorded.threadId)) {
+        throw new Error("The thread's parent changed. Inspect it before repairing placement.");
+      }
+      const workerHostId = "environment" in thread ? thread.environment?.hostId ?? null : null;
+      if (!workerHostId) throw new Error("The worker's host cannot be verified. Inspect it before repairing placement.");
+      return { thread, recorded, workerHostId };
+    };
+    const first = await inspect();
+    if (!input.apply) return { threadId: input.threadId, parentThreadId: first.thread.parentThreadId, updated: false };
+    const parentThreadId = await unassignedPlacement.ensureRepo(target.slug, first.thread.projectId, first.workerHostId);
+    const current = await inspect();
+    if (current.thread.parentThreadId === parentThreadId) return { threadId: input.threadId, parentThreadId, updated: false };
+    if (current.thread.parentThreadId !== input.expectedParentThreadId) throw new Error("The thread's parent changed during repair. Inspect it before retrying.");
+    try { await bb.sdk.threads.update({ threadId: input.threadId, parentThreadId }); }
+    catch (error) {
+      const readback = await bb.sdk.threads.get({ threadId: input.threadId });
+      if (readback.parentThreadId !== parentThreadId) throw new Error(`Thread placement update is uncertain. Inspect it before retrying: ${String(error).slice(0, 200)}`);
+    }
+    await placedThread(input.threadId, parentThreadId);
+    return { threadId: input.threadId, parentThreadId, updated: true };
+  }
+
   const launchingCheckouts = new Set<string>();
   const agentSdkFor = (beforeSpawn?: () => void): AgentSdk => ({
     projects: { list: () => bb.sdk.projects.list() },
@@ -3684,6 +3765,7 @@ export default async function plugin(bb: BbPluginApi) {
     advance_progress_visibility: ({ batchId, jobId, hidden }) => advance.progressVisibility(batchId, jobId, hidden),
     advance_repair_plan: ({ batchId, jobId }) => advance.repairPlan(batchId, jobId),
     advance_repair_run: (input) => advance.repairRun(input),
+    repair_unassigned_thread: (input) => repairUnassignedThread(input),
     effort_plan: ({ groupKey }) => effortPlan(groupKey),
     effort_coordinate: async (input) => {
       const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
