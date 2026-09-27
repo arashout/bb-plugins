@@ -212,16 +212,15 @@ export function PipelineView({
     search || prefs.approvedOnly
       ? `${filteredCounts[stage]}/${counts[stage]}`
       : String(counts[stage]);
-  const openCount = visible.filter(
-    (card) => card.stage !== "merged" && card.stage !== "released",
-  ).length;
+  const openCount = visible.filter((card) => card.pr?.state === "OPEN").length;
+  const branchCount = visible.filter((card) => card.pr === null && card.stage !== "merged" && card.stage !== "released").length;
   const readyCount = visible.filter(
-    (card) => card.stage === "ready" && !card.hold,
+    (card) => card.action?.kind === "merge",
   ).length;
   const holdCount = visible.filter(
     (card) => card.stage !== "merged" && card.stage !== "released" && card.hold,
   ).length;
-  const completedCount = visible.length - openCount;
+  const completedCount = visible.filter((card) => card.stage === "merged" || card.stage === "released").length;
   const selectedCard = cards.find((card) => card.key === selected) ?? null;
   const selectionUrl = (card: PipelineCard) => card.pr ? advancePrKey(canonicalPrUrl(card.pr.url) ?? card.pr.url) : null;
   const selectionPrs = cards.flatMap((card) => card.pr ? [{ url: selectionUrl(card)!, state: card.pr.state }] : []);
@@ -1143,7 +1142,8 @@ export function PipelineView({
         <span className="font-medium text-foreground">
           {search || prefs.approvedOnly ? "Matching" : "Overall"}
         </span>
-        <span>{openCount} open</span>
+        <span>{openCount} open PRs</span>
+        {branchCount > 0 ? <><span aria-hidden="true" className="text-muted-foreground">·</span><span>{branchCount} branches without PRs</span></> : null}
         <span aria-hidden="true" className="text-muted-foreground">·</span>
         <span>{readyCount} ready to merge</span>
         <span aria-hidden="true" className="text-muted-foreground">·</span>
