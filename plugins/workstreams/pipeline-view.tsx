@@ -282,6 +282,29 @@ export function PipelineView({
     if (selectablePipelineCard(card) && (advanceSelection.urls.includes(selectionUrl(card)!) || advanceSelection.urls.length < ADVANCE_SELECTION_LIMIT))
       setAdvanceSelection((current) => togglePipelineSelection(current, card));
   };
+  const parentTarget = (card: PipelineCard) => {
+    const number = card.backlog?.parent?.pr.number ?? card.local?.unit.stack?.blockedBelow;
+    if (number == null) return null;
+    const childUrl = card.pr ? canonicalPrUrl(card.pr.url) : null;
+    const url = card.backlog?.parent?.pr.url ?? childUrl?.replace(/\/pull\/\d+$/u, `/pull/${number}`) ?? null;
+    const parent = cards.find((item) => item.pr && (
+      url ? selectionUrl(item) === advancePrKey(canonicalPrUrl(url) ?? url) : item.repo === card.repo && item.pr.number === number
+    )) ?? null;
+    return { number, url, card: parent };
+  };
+  const goToParent = (parent: PipelineCard) => {
+    setQuery("");
+    onPrefs({ approvedOnly: false });
+    if (HISTORY_LIMIT[parent.stage])
+      setShowHistory((current) => ({ ...current, [parent.stage]: true }));
+    choose(parent);
+  };
+  const openParent = (card: PipelineCard) => {
+    const target = parentTarget(card);
+    if (target?.card) goToParent(target.card);
+    else if (target?.url) window.open(target.url, "_blank", "noopener,noreferrer");
+    else toast.info("Parent PR is not available on this board");
+  };
   const directRow = (card: PipelineCard): DirectRow | null =>
     card.pr === null
       ? null
@@ -367,20 +390,7 @@ export function PipelineView({
       return;
     }
     if (action.kind === "open-parent") {
-      const repoOf = (item: PipelineCard) =>
-        item.pr?.url.replace(/\/pull\/\d+.*$/u, "") ??
-        item.repo.split("/").at(-1);
-      const parent = cards.find(
-        (item) =>
-          repoOf(item) === repoOf(card) && item.pr?.number === action.behind,
-      );
-      if (parent) {
-        setQuery("");
-        onPrefs({ approvedOnly: false });
-        setShowHistory({});
-        choose(parent);
-      } else if (card.pr)
-        window.open(card.pr.url, "_blank", "noopener,noreferrer");
+      openParent(card);
       return;
     }
     if (action.kind === "advance" || action.kind === "fix") {
@@ -568,6 +578,8 @@ export function PipelineView({
   const cardView = (card: PipelineCard) => {
     const repoName = card.repo.split("/").at(-1) ?? card.repo;
     const label = `${card.repo}${card.pr ? ` #${card.pr.number}` : ""}: ${card.title}`;
+    const parent = parentTarget(card);
+    const behindTag = parent !== null && card.blocker.label === `Behind #${parent.number}`;
     const selectable = selectablePipelineCard(card);
     const checked = selectable && advanceSelection.urls.includes(selectionUrl(card)!);
     const selectionFull = advanceSelection.urls.length >= ADVANCE_SELECTION_LIMIT && !checked;
@@ -640,14 +652,15 @@ export function PipelineView({
           {card.title}
         </button>
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-          <span
-            className={cn(
-              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
-              BLOCKER_COLOR[card.blocker.tone],
-            )}
-          >
-            {card.blocker.label}
-          </span>
+          {behindTag && parent.card ? (
+            <Tip label={`Go to parent PR #${parent.number} card: ${parent.card.title}`}>
+              <button type="button" onClick={() => goToParent(parent.card!)} aria-label={`Go to parent PR #${parent.number} card: ${parent.card.title}`} className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</button>
+            </Tip>
+          ) : behindTag && parent.url ? (
+            <UrlLink href={parent.url} aria-label={`Open parent PR #${parent.number} on GitHub${card.backlog?.parent ? `: ${card.backlog.parent.pr.title}` : ""}`} title="Parent card is not on this board; open the parent PR on GitHub" className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</UrlLink>
+          ) : (
+            <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</span>
+          )}
           <button
             type="button"
             onClick={() => setEffortEditing(card)}
@@ -853,6 +866,7 @@ export function PipelineView({
       );
     return null;
   };
+  const selectedParent = selectedCard ? parentTarget(selectedCard) : null;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
       <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
@@ -1318,19 +1332,16 @@ export function PipelineView({
                 {selectedCard.local?.unit.stack ? (
                   <p>Position {selectedCard.local.unit.stack.position + 1}</p>
                 ) : null}
-                {selectedCard.backlog?.parent ? (
+                {selectedParent ? (
                   <p className="mt-1">
                     Behind{" "}
-                    <UrlLink
-                      href={selectedCard.backlog.parent.pr.url}
-                      className="underline"
-                    >
-                      #{selectedCard.backlog.parent.pr.number} ·{" "}
-                      {selectedCard.backlog.parent.pr.title}
-                    </UrlLink>
+                    {selectedParent.card ? (
+                      <button type="button" onClick={() => goToParent(selectedParent.card!)} aria-label={`Go to parent PR #${selectedParent.number} card: ${selectedParent.card.title}`} className="rounded text-left underline outline-none focus-visible:ring-2 focus-visible:ring-ring">#{selectedParent.number} · {selectedParent.card.title}</button>
+                    ) : selectedParent.url ? (
+                      <UrlLink href={selectedParent.url} aria-label={`Open parent PR #${selectedParent.number} on GitHub${selectedCard.backlog?.parent ? `: ${selectedCard.backlog.parent.pr.title}` : ""}`} title="Parent card is not on this board; open the parent PR on GitHub" className="underline">#{selectedParent.number}{selectedCard.backlog?.parent ? ` · ${selectedCard.backlog.parent.pr.title}` : ""}</UrlLink>
+                    ) : <>#{selectedParent.number}</>}
+                    {selectedParent.card && selectedParent.url ? <>{" · "}<UrlLink href={selectedParent.url} className="underline" aria-label={`Open parent PR #${selectedParent.number} on GitHub`}>GitHub</UrlLink></> : null}
                   </p>
-                ) : selectedCard.action?.kind === "open-parent" ? (
-                  <p className="mt-1">Behind #{selectedCard.action.behind}</p>
                 ) : null}
               </section>
             ) : null}
