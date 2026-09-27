@@ -4,6 +4,7 @@ import type { Recommendation, ThreadCandidate } from "./actions.js";
 import { effortMembersSchema, normalizeMembers, type EffortMembers } from "./effort-store.js";
 import type { RunDb } from "./runstore.js";
 import { approvalFeedbackSchema, FEEDBACK_REPORT_PREFIX, parseFeedbackReport, type ApprovalFeedbackRecord, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+import { canonicalPrUrl } from "./pr-holds.js";
 
 export const advancePreviewJobSchema = z.object({
   prUrl: z.string(), repo: z.string(), number: z.number(), title: z.string(), headOid: z.string(),
@@ -88,9 +89,21 @@ export function createAdvanceService(db: RunDb, deps: {
   }));
   let working = false;
   let stopped = false;
-  let starting = false;
+  let admission: Promise<void> = Promise.resolve();
   const verifying = new Set<string>();
   const owns = (job: AdvanceJob) => ACTIVE.has(job.status) || job.uncertain;
+  const executing = (job: AdvanceJob) => ["launching", "running", "verifying"].includes(job.status) || job.uncertain;
+  const workerCapacityFull = () => [...batches.values()].flatMap((batch) => batch.jobs)
+    .filter((job) => ["launching", "running"].includes(job.status) || job.uncertain).length >= 2;
+  const capacityDetail = "Waiting for one of the two active or uncertain Advance workers to finish or be reconciled";
+  function waitForCapacity(batch: Saved, job: AdvanceJob) {
+    if (job.detail !== capacityDetail) update(batch, job, { detail: capacityDetail });
+  }
+  function admit<T>(run: () => Promise<T>): Promise<T> {
+    const result = admission.then(run);
+    admission = result.then(() => undefined, () => undefined);
+    return result;
+  }
   const attemptId = (job: AdvanceJob) => job.attemptId ?? job.id;
   const marker = (job: AdvanceJob) => `Workstreams job ${attemptId(job)} complete: prepared`;
   const finalLine = (text: string) => text.trim().split(/\r?\n/u).at(-1)?.trim() ?? "";
@@ -125,8 +138,31 @@ export function createAdvanceService(db: RunDb, deps: {
     const resurfaces = patch.status && (["queued", "launching", "running"].includes(patch.status) || (patch.status === "needs-attention" && job.status !== "needs-attention"));
     Object.assign(job, resurfaces ? { hiddenFromProgress: false } : {}, patch, { updatedAt: now() }); save(batch);
   }
-  function reserved(prUrl: string, path: string | null) {
-    return [...batches.values()].some((batch) => batch.jobs.some((job) => owns(job) && (job.prUrl.toLowerCase() === prUrl.toLowerCase() || (path !== null && job.path === path))));
+  function scopeConflict(facts: AdvanceFacts, other: AdvanceFacts, workerPath: string | null = null, otherWorkerPath: string | null = null,
+    candidateWorker = needsWorker(facts), ownerWorker = needsWorker(other)): string | null {
+    if ((canonicalPrUrl(facts.prUrl) ?? facts.prUrl.toLowerCase()) === (canonicalPrUrl(other.prUrl) ?? other.prUrl.toLowerCase())) return "PR";
+    if (facts.hostId === other.hostId && [facts.path, workerPath].some((path) => path !== null && [other.path, otherWorkerPath].includes(path))) return "checkout";
+    if (candidateWorker && ownerWorker && facts.effortKey !== null && facts.effortKey === other.effortKey && facts.repo.toLowerCase() === other.repo.toLowerCase()) return "repository controller";
+    return null;
+  }
+  function reservationConflict(facts: AdvanceFacts, workerPath: string | null = null, ignoreJobId?: string, activeOnly = false,
+    candidateWorker = needsWorker(facts), ignoreQueuedControllerBatchId?: string): { kind: string; owner: AdvanceJob } | null {
+    for (const batch of batches.values()) for (const job of batch.jobs) {
+      if (job.id === ignoreJobId || !(activeOnly ? executing(job) : owns(job))) continue;
+      const owner = batch.facts[job.id]!;
+      const conflict = scopeConflict(facts, owner, workerPath, job.path, candidateWorker, job.dedicated || needsWorker(owner));
+      if (conflict === "repository controller" && batch.id === ignoreQueuedControllerBatchId && job.status === "queued") continue;
+      if (conflict) return { kind: conflict, owner: job };
+    }
+    return null;
+  }
+  const conflictDetail = ({ kind, owner }: NonNullable<ReturnType<typeof reservationConflict>>) =>
+    `${kind} with ${owner.repo} #${owner.number} (${owner.title}; ${owner.uncertain ? "uncertain" : owner.status}). Recheck that item in Advance progress before retrying.`;
+  function reserved(prUrl: string, path: string | null): boolean {
+    const key = canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
+    return [...batches.values()].some((batch) => batch.jobs.some((job) => owns(job) &&
+      ((canonicalPrUrl(job.prUrl) ?? job.prUrl.toLowerCase()) === key ||
+        (path !== null && (batch.facts[job.id]!.path === path || job.path === path)))));
   }
   function finishTerminal(batch: Saved, job: AdvanceJob, facts: Pick<AdvanceFacts, "readiness" | "detail" | "headOid" | "baseOid">): boolean {
     if (facts.readiness !== "merged" && facts.readiness !== "closed") return false;
@@ -179,66 +215,80 @@ export function createAdvanceService(db: RunDb, deps: {
         const repositories = [...new Set(batch.jobs.map((job) => job.repo))];
         for (const repo of repositories) {
           if (stopped) return;
-          if ([...batches.values()].flatMap((entry) => entry.jobs).some((job) => job.repo === repo && (["launching", "running", "verifying"].includes(job.status) || job.uncertain))) continue;
-          if ([...batches.values()].flatMap((entry) => entry.jobs).filter((job) => ["launching", "running"].includes(job.status)).length >= 2) continue;
           const queued = batch.jobs.filter((job) => job.repo === repo && job.status === "queued");
-          // Base branches first. A cycle or an unprepared parent cannot be guessed through.
-          const job = queued.find((candidate) => !queued.some((parent) => parent.headRefName === candidate.baseRefName));
-          if (!job) {
-            for (const cycle of queued) update(batch, cycle, { status: "needs-attention", detail: "Stack dependency cycle; prepare this stack manually" });
-            continue;
-          }
-          progressed = true;
-          const failedParent = batch.jobs.find((parent) => parent.repo === repo && parent.headRefName === job.baseRefName && (parent.uncertain || parent.status === "cancelled" || (parent.status === "needs-attention" && !batch.prepared[parent.id] && (parent.dedicated || needsWorker(parent)))));
-          if (failedParent) { update(batch, job, { status: "needs-attention", detail: "The PR below this one needs attention first" }); continue; }
-          try {
-            const facts = await deps.inspect(job.prUrl);
+          while (queued.length > 0) {
+            // Base branches first. A cycle or an unprepared parent cannot be guessed through.
+            const job = queued.find((candidate) => !queued.some((parent) => parent.headRefName === candidate.baseRefName));
+            if (!job) {
+              for (const cycle of queued) update(batch, cycle, { status: "needs-attention", detail: "Stack dependency cycle; prepare this stack manually" });
+              break;
+            }
+            queued.splice(queued.indexOf(job), 1);
             if (interrupted(batch, job)) continue;
-            if (finishTerminal(batch, job, facts)) continue;
-            deps.assertAdvanceAllowed?.(job.prUrl);
-            // A selected parent may legitimately advance this child's base during this batch.
-            const completedParent = batch.jobs.find((parent) => parent.repo === repo && parent.headRefName === job.baseRefName && parent.checkedHeadOid === facts.baseOid);
-            if (completedParent) batch.facts[job.id]!.baseOid = facts.baseOid;
-            if (fingerprint(facts) !== fingerprint(batch.facts[job.id]!)) {
-              update(batch, job, { status: "needs-attention", detail: completedParent && !batch.facts[job.id]!.needsPreparation && facts.needsPreparation ? "Selected parent advanced; preview this PR again for branch preparation" : "PR head, approval, feedback, base, or workspace changed since preview. Preview it again." }); continue;
+            if (batch.jobs.some((parent) => parent !== job && parent.repo === repo && parent.headRefName === job.baseRefName && owns(parent))) continue;
+            if (reservationConflict(batch.facts[job.id]!, null, job.id, true)) continue;
+            if (batch.facts[job.id]!.effortKey === null && batch.jobs.some((other) => other !== job && other.repo === repo &&
+                batch.facts[other.id]!.effortKey === null && executing(other))) continue;
+            if (needsWorker(job) && workerCapacityFull()) { waitForCapacity(batch, job); continue; }
+            progressed = true;
+            const failedParent = batch.jobs.find((parent) => parent.repo === repo && parent.headRefName === job.baseRefName && (parent.uncertain || parent.status === "cancelled" || (parent.status === "needs-attention" && !batch.prepared[parent.id] && (parent.dedicated || needsWorker(parent)))));
+            if (failedParent) { update(batch, job, { status: "needs-attention", detail: "The PR below this one needs attention first" }); continue; }
+            try {
+              const facts = await deps.inspect(job.prUrl);
+              if (interrupted(batch, job)) continue;
+              if (finishTerminal(batch, job, facts)) continue;
+              deps.assertAdvanceAllowed?.(job.prUrl);
+              // A selected parent may legitimately advance this child's base during this batch.
+              const completedParent = batch.jobs.find((parent) => parent.repo === repo && parent.headRefName === job.baseRefName && parent.checkedHeadOid === facts.baseOid);
+              if (completedParent) batch.facts[job.id]!.baseOid = facts.baseOid;
+              if (fingerprint(facts) !== fingerprint(batch.facts[job.id]!)) {
+                update(batch, job, { status: "needs-attention", detail: completedParent && !batch.facts[job.id]!.needsPreparation && facts.needsPreparation ? "Selected parent advanced; preview this PR again for branch preparation" : "PR head, approval, feedback, base, or workspace changed since preview. Preview it again." }); continue;
+              }
+              if (reservationConflict(facts, null, job.id, true)) continue;
+              if (!needsWorker(facts)) { batch.prepared[job.id] = true; await verify(batch, job); continue; }
+              const previous = facts.effortKey === null ? [...batch.jobs].reverse().find((entry) => entry.repo === repo && batch.facts[entry.id]!.effortKey === null && entry.threadId !== null && !entry.dedicated && !ACTIVE.has(entry.status)) : undefined;
+              if (previous && (batch.facts[previous.id]!.projectId !== facts.projectId || batch.facts[previous.id]!.hostId !== facts.hostId)) throw new Error("This PR maps to a different BB project than the repository worker. Prepare it in a separate batch.");
+              let threadId = previous?.threadId ?? null;
+              if (threadId) {
+                const thread = await deps.thread(threadId);
+                if (thread.status !== "idle" && thread.status !== "error") throw new Error("Repository worker is still active; inspect it before continuing this queue");
+                if (thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) threadId = null;
+              }
+              if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) {
+                update(batch, job, { status: "needs-attention", detail: "Another thread or action is working on this PR or checkout" }); continue;
+              }
+              if (interrupted(batch, job)) continue;
+              const { path, workerPath } = await deps.workspace(facts, batch.id, job.id);
+              if (interrupted(batch, job)) continue;
+              const conflict = reservationConflict(facts, path, job.id, true);
+              if (conflict) throw new Error(`Another Advance item owns this ${conflictDetail(conflict)}`);
+              deps.assertAdvanceAllowed?.(job.prUrl);
+              if (facts.effortKey !== null) threadId = await deps.controller(facts);
+              if (facts.effortKey !== null && threadId === null) throw new Error("The effort's repository controller could not be resolved. Refresh the preview.");
+              if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) throw new Error("Another writer started before launch");
+              if (interrupted(batch, job)) continue;
+              const launchConflict = reservationConflict(facts, path, job.id, true);
+              if (launchConflict) throw new Error(`Another Advance item owns this ${conflictDetail(launchConflict)}`);
+              if (threadId && facts.effortKey === null) {
+                const thread = await deps.thread(threadId);
+                if (thread.status !== "idle" || thread.archivedAt !== null || thread.deletedAt !== null) throw new Error("Repository worker changed while preparing the workspace. Inspect it before continuing this queue.");
+              }
+              const prompt = preparationPrompt(job, path) + `\nIf all requested work and validation succeeded, finish with the exact line: ${marker(job)}\nIf tests fail, work is incomplete, or you stop for any blocker, finish with: ${blockedMarker(job)}`;
+              deps.assertAdvanceAllowed?.(job.prUrl);
+              if (threadId && otherOwner(job, threadId)) throw new Error("Another Advance item owns this repository thread. Recheck its progress before retrying.");
+              if (workerCapacityFull()) { waitForCapacity(batch, job); continue; }
+              // Persist intent before the SDK write. A timeout never triggers an automatic duplicate.
+              update(batch, job, { status: "launching", path, threadId, detail: `Starting ${workLabel(job)}` });
+              if (threadId) {
+                await deps.send(threadId, prompt);
+                if (job.status === "launching") update(batch, job, { status: "running", detail: `Working on ${workLabel(job)} in the repository controller` });
+              } else {
+                const id = await deps.spawn(facts, workerPath, prompt, job.id);
+                update(batch, job, job.status === "launching" ? { threadId: id, status: "running", detail: `Working on ${workLabel(job)} in the repository thread` } : { threadId: id });
+              }
+            } catch (error) {
+              update(batch, job, { status: "needs-attention", uncertain: job.status === "launching", detail: `${job.status === "launching" ? "Launch outcome is uncertain; inspect the worker before retrying. " : ""}${String(error).slice(0, 300)}` });
             }
-            if (!needsWorker(facts)) { batch.prepared[job.id] = true; await verify(batch, job); continue; }
-            const previous = facts.effortKey === null ? [...batch.jobs].reverse().find((entry) => entry.repo === repo && batch.facts[entry.id]!.effortKey === null && entry.threadId !== null && !entry.dedicated && !ACTIVE.has(entry.status)) : undefined;
-            if (previous && (batch.facts[previous.id]!.projectId !== facts.projectId || batch.facts[previous.id]!.hostId !== facts.hostId)) throw new Error("This PR maps to a different BB project than the repository worker. Prepare it in a separate batch.");
-            let threadId = previous?.threadId ?? null;
-            if (threadId) {
-              const thread = await deps.thread(threadId);
-              if (thread.status !== "idle" && thread.status !== "error") throw new Error("Repository worker is still active; inspect it before continuing this queue");
-              if (thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) threadId = null;
-            }
-            if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) {
-              update(batch, job, { status: "needs-attention", detail: "Another thread or action is working on this PR or checkout" }); continue;
-            }
-            if (interrupted(batch, job)) continue;
-            const { path, workerPath } = await deps.workspace(facts, batch.id, job.id);
-            if (interrupted(batch, job)) continue;
-            deps.assertAdvanceAllowed?.(job.prUrl);
-            if (facts.effortKey !== null) threadId = await deps.controller(facts);
-            if (facts.effortKey !== null && threadId === null) throw new Error("The effort's repository controller could not be resolved. Refresh the preview.");
-            if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) throw new Error("Another writer started before launch");
-            if (interrupted(batch, job)) continue;
-            if (threadId && facts.effortKey === null) {
-              const thread = await deps.thread(threadId);
-              if (thread.status !== "idle" || thread.archivedAt !== null || thread.deletedAt !== null) throw new Error("Repository worker changed while preparing the workspace. Inspect it before continuing this queue.");
-            }
-            const prompt = preparationPrompt(job, path) + `\nIf all requested work and validation succeeded, finish with the exact line: ${marker(job)}\nIf tests fail, work is incomplete, or you stop for any blocker, finish with: ${blockedMarker(job)}`;
-            deps.assertAdvanceAllowed?.(job.prUrl);
-            // Persist intent before the SDK write. A timeout never triggers an automatic duplicate.
-            update(batch, job, { status: "launching", path, threadId, detail: `Starting ${workLabel(job)}` });
-            if (threadId) {
-              await deps.send(threadId, prompt);
-              if (job.status === "launching") update(batch, job, { status: "running", detail: `Working on ${workLabel(job)} in the repository controller` });
-            } else {
-              const id = await deps.spawn(facts, workerPath, prompt, job.id);
-              update(batch, job, job.status === "launching" ? { threadId: id, status: "running", detail: `Working on ${workLabel(job)} in the repository thread` } : { threadId: id });
-            }
-          } catch (error) {
-            update(batch, job, { status: "needs-attention", uncertain: job.status === "launching", detail: `${job.status === "launching" ? "Launch outcome is uncertain; inspect the worker before retrying. " : ""}${String(error).slice(0, 300)}` });
           }
         }
       }
@@ -256,9 +306,8 @@ export function createAdvanceService(db: RunDb, deps: {
   function otherOwner(job: AdvanceJob, threadId: string) {
     return [...batches.values()].some((batch) => batch.jobs.some((entry) => entry.id !== job.id && entry.threadId === threadId && owns(entry)));
   }
-  function conflictingJob(job: AdvanceJob, path: string | null) {
-    return [...batches.values()].some((batch) => batch.jobs.some((entry) => entry.id !== job.id && owns(entry) &&
-      (entry.prUrl.toLowerCase() === job.prUrl.toLowerCase() || (path !== null && (entry.path === path || batch.facts[entry.id]!.path === path)))));
+  function conflictingJob(batch: Saved, job: AdvanceJob, facts: AdvanceFacts, workerPath: string | null = job.path) {
+    return reservationConflict(facts, workerPath, job.id, false, true, batch.id);
   }
   async function repairAvailability(batch: Saved, job: AdvanceJob) {
     if (job.status !== "needs-attention") throw new Error("This item is not awaiting a repair. Refresh its current state.");
@@ -277,14 +326,16 @@ export function createAdvanceService(db: RunDb, deps: {
   async function repairPlan(batchId: string, jobId: string): Promise<AdvanceRepairPlan> {
     const { batch, job } = findJob(batchId, jobId);
     const version = snapshot(job);
-    if (conflictingJob(job, batch.facts[job.id]!.path)) throw new Error("Another batch already owns this PR or checkout");
+    const priorConflict = conflictingJob(batch, job, batch.facts[job.id]!);
+    if (priorConflict) throw new Error(`Another batch already owns this ${conflictDetail(priorConflict)}`);
     const availability = await repairAvailability(batch, job);
     const facts = await deps.inspect(job.prUrl, true);
     if (finishTerminal(batch, job, facts) || !facts.eligible) throw new Error(facts.detail);
     if (!facts.projectId || !facts.sourcePath) throw new Error("No matching repository workspace is available for a repair");
     if (await deps.busy(job.prUrl, facts.path, job.threadId ?? undefined)) throw new Error("Another writer owns this PR or checkout. Let it finish before repairing this item.");
     const routing = await deps.repairCandidates(facts, job);
-    if (conflictingJob(job, facts.path)) throw new Error("Another batch already owns this PR or checkout");
+    const freshConflict = conflictingJob(batch, job, facts);
+    if (freshConflict) throw new Error(`Another batch already owns this ${conflictDetail(freshConflict)}`);
     if (snapshot(job) !== version) throw new Error("This item changed while planning. Open its repair preview again.");
     const candidates = routing.candidates.map((candidate) => ({ ...candidate, canContinue: availability.canContinue && candidate.id === job.threadId }));
     const modes: AdvanceRepairPlan["modes"] = ["new"];
@@ -324,7 +375,9 @@ export function createAdvanceService(db: RunDb, deps: {
     if (!preview.plan.modes.includes(input.mode)) throw new Error("That repair route is not available");
     const selected = preview.plan.candidates.find((candidate) => candidate.id === input.threadId);
     if (input.mode === "new" ? input.threadId !== null : !selected || (input.mode === "continue" ? !selected.canContinue : !selected.canSpawnChild)) throw new Error("Choose an available thread from the repair preview");
-    if (conflictingJob(job, preview.facts.path)) throw new Error("Another batch already owns this PR or checkout");
+    const conflict = conflictingJob(batch, job, preview.facts);
+    if (conflict) throw new Error(`Another batch already owns this ${conflictDetail(conflict)}`);
+    if (workerCapacityFull()) throw new Error("Two Advance workers may still be active. Recheck their progress before retrying this repair.");
     const previous = advanceJobSchema.parse(job);
     const attempt = randomUUID();
     const oldFacts = batch.facts[job.id]!;
@@ -351,7 +404,7 @@ export function createAdvanceService(db: RunDb, deps: {
       const routing = await deps.repairCandidates(facts, previous);
       if (input.mode === "subthread" && !routing.candidates.some((candidate) => candidate.id === input.threadId && candidate.canSpawnChild)) throw new Error("The selected parent is no longer linked or available");
       deps.assertAdvanceAllowed?.(job.prUrl);
-      if (stopped || await deps.busy(job.prUrl, facts.path, previous.threadId ?? undefined) || conflictingJob(job, facts.path)) throw new Error("Another writer started before the repair launch");
+      if (stopped || await deps.busy(job.prUrl, facts.path, previous.threadId ?? undefined) || conflictingJob(batch, job, facts, workspace.path)) throw new Error("Another writer started before the repair launch");
       // Do not mutate or discard the previous worktree; retain it as evidence.
       batch.facts[job.id] = facts;
       batch.prepared[job.id] = false;
@@ -409,13 +462,20 @@ export function createAdvanceService(db: RunDb, deps: {
         }
       }
     },
-    list: () => [...batches.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 10).map(publicBatch),
+    list: () => {
+      const ordered = [...batches.values()].sort((a, b) => b.createdAt - a.createdAt);
+      let completed = 0;
+      return ordered.filter((batch) => batch.jobs.some(owns) || completed++ < 10).map(publicBatch);
+    },
     async preview(prUrls: string[]): Promise<AdvancePreview> {
       const urls = [...new Set(prUrls.map((url) => url.toLowerCase()))];
       if (!urls.length || urls.length > 100) throw new Error("Select between 1 and 100 open PRs.");
       const facts: AdvanceFacts[] = [];
       for (let offset = 0; offset < urls.length; offset += 4) for (const fact of await Promise.all(urls.slice(offset, offset + 4).map((url) => deps.inspect(url)))) {
-        if (reserved(fact.prUrl, fact.path) || await deps.busy(fact.prUrl, fact.path)) { fact.eligible = false; fact.detail = "Another action or batch already owns this PR"; }
+        const conflict = reservationConflict(fact);
+        if (conflict || await deps.busy(fact.prUrl, fact.path)) { fact.eligible = false; fact.detail = conflict
+          ? `Another Advance batch owns this ${conflictDetail(conflict)}`
+          : "Another action or batch already owns this PR"; }
         facts.push(fact);
       }
       const plan = { token: randomUUID(), expiresAt: now() + 5 * 60_000, jobs: facts.map((fact) => advancePreviewJobSchema.parse(fact)), facts };
@@ -423,31 +483,40 @@ export function createAdvanceService(db: RunDb, deps: {
       plans.set(plan.token, plan);
       return advancePreviewSchema.parse(plan);
     },
-    async start(token: string): Promise<AdvanceBatch> {
-      const existing = [...batches.values()].find((batch) => batch.token === token);
-      if (existing) return publicBatch(existing);
-      if ([...batches.values()].some((batch) => batch.jobs.some(owns))) throw new Error("Finish or reconcile the current batch before starting another.");
-      if (starting) throw new Error("Another batch is starting. Try again.");
-      const plan = plans.get(token);
-      if (!plan || plan.expiresAt < now()) throw new Error("This preview expired. Preview the selection again.");
-      starting = true;
-      try {
+    start(token: string): Promise<AdvanceBatch> {
+      return admit(async () => {
+        const existing = [...batches.values()].find((batch) => batch.token === token);
+        if (existing) return publicBatch(existing);
+        const plan = plans.get(token);
+        if (!plan || plan.expiresAt < now()) throw new Error("This preview expired. Preview the selection again.");
         const fresh: AdvanceFacts[] = [];
         for (let offset = 0; offset < plan.facts.length; offset += 4) {
           fresh.push(...await Promise.all(plan.facts.slice(offset, offset + 4).map(async (fact) => {
             if (!fact.eligible) return fact;
             const current = await deps.inspect(fact.prUrl);
             if (fingerprint(current) !== fingerprint(fact)) throw new Error("A PR or workspace changed since preview. Preview the selection again.");
-            if (reserved(current.prUrl, current.path) || await deps.busy(current.prUrl, current.path)) throw new Error("Another action started on this selection. Preview again.");
+            const conflict = reservationConflict(current);
+            if (conflict) throw new Error(`Another Advance batch owns this ${conflictDetail(conflict)} Preview again.`);
+            if (await deps.busy(current.prUrl, current.path)) throw new Error("Another action started on this selection. Preview again.");
             return current;
           })));
         }
-        if (stopped || fresh.some((fact) => fact.eligible && deps.busyNow(fact.prUrl, fact.path))) throw new Error("Another action started on this selection. Preview again.");
+        if (stopped) throw new Error("The plugin reloaded during admission. Preview again.");
+        for (const fact of fresh.filter((entry) => entry.eligible)) {
+          const conflict = reservationConflict(fact);
+          if (conflict) throw new Error(`Another Advance batch owns this ${conflictDetail(conflict)} Preview again.`);
+          if (deps.busyNow(fact.prUrl, fact.path)) throw new Error("Another action started on this selection. Preview again.");
+        }
+        for (let index = 0; index < fresh.length; index++) for (const other of fresh.slice(0, index)) {
+          if (!fresh[index]!.eligible || !other.eligible) continue;
+          const conflict = scopeConflict(fresh[index]!, other);
+          if (conflict && conflict !== "repository controller") throw new Error(`Selected PRs share a ${conflict}. Preview them separately.`);
+        }
         const id = randomUUID();
         const jobs = fresh.map((facts): AdvanceJob => ({ ...advancePreviewJobSchema.parse(facts), id: randomUUID(), hiddenFromProgress: facts.readiness === "merged" || facts.readiness === "closed", status: facts.readiness === "merged" || facts.readiness === "closed" ? facts.readiness : facts.eligible ? "queued" : "needs-attention", attemptId: null, dedicated: false, previousAttempts: [], threadId: null, path: facts.path, checkedHeadOid: null, updatedAt: now(), uncertain: false }));
         const batch: Saved = { id, token, createdAt: now(), cancelled: false, jobs, facts: Object.fromEntries(jobs.map((job, index) => [job.id, fresh[index]!])), pollUntil: now() + 30 * 60_000, prepared: {}, repairs: {} };
         batches.set(id, batch); save(batch); queueMicrotask(() => void pump()); return publicBatch(batch);
-      } finally { starting = false; }
+      });
     },
     cancel(id: string): AdvanceBatch {
       const batch = batches.get(id); if (!batch) throw new Error("Batch not found");

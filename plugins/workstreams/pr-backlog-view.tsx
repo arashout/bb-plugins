@@ -20,7 +20,7 @@ import { advanceStatus, advanceResultForPr } from "./bulk-advance-results";
 import { AdvancePreviewButton } from "./bulk-advance-view";
 import { ADVANCE_SELECTION_LIMIT, isAdvanceEligible, advancePrKey, clearVisibleSelection, eligibleAdvanceSelection, reconcileAdvanceSelection, selectVisibleOpen, type AdvanceSelection } from "./bulk-advance-selection";
 
-export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onCheckout, onStart, onOpenThread, threadsOf, unassignedQuery, embeddedEffortKey, checkoutFiltersActive = false, approvedOnly = false, onClearApproved, advanceActive = false, advanceJobs = [], onAdvanceStarted, onRepair, heldOnly = false }: {
+export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onCheckout, onStart, onOpenThread, threadsOf, unassignedQuery, embeddedEffortKey, checkoutFiltersActive = false, approvedOnly = false, onClearApproved, advanceJobs = [], onAdvanceStarted, onRepair, heldOnly = false }: {
   board: Board; locals: Row[]; now: number; width: number;
   /** Embed inventory-only PRs under Efforts without adding another set of controls. */
   unassignedQuery?: string;
@@ -30,7 +30,6 @@ export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onC
   checkoutFiltersActive?: boolean;
   approvedOnly?: boolean;
   onClearApproved: () => void;
-  advanceActive?: boolean;
   advanceJobs?: AdvanceJob[];
   onAdvanceStarted?: () => void;
   onRepair?: (jobId: string) => void;
@@ -98,12 +97,11 @@ export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onC
         <ArchivedThreadsButton />
       </div>}
       {embedded ? null : <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border/60 px-4 py-2 text-[11.5px]">
-        <button type="button" disabled={advanceActive || visibleOpen.length === 0 || selected.length >= ADVANCE_SELECTION_LIMIT} onClick={() => setSelectedUrls(selectVisibleOpen(selected, shown.map((row) => row.pr), board.prHolds))} className="rounded text-muted-foreground underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Select visible open · {visibleOpen.length}</button>
+        <button type="button" disabled={visibleOpen.length === 0 || selected.length >= ADVANCE_SELECTION_LIMIT} onClick={() => setSelectedUrls(selectVisibleOpen(selected, shown.map((row) => row.pr), board.prHolds))} className="rounded text-muted-foreground underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Select visible open · {visibleOpen.length}</button>
         <span className="text-muted-foreground">{selected.length} selected{hiddenSelected > 0 ? ` · ${hiddenSelected} hidden by search` : ""}</span>
         {selectedUrls.length > 0 || removed > 0 ? <button type="button" onClick={() => setSelectedUrls([])} className="rounded text-muted-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring">Clear</button> : null}
         <span className="flex-1" />
-        <AdvancePreviewButton prUrls={selected} disabled={advanceActive} onStarted={() => { setSelectedUrls([]); onAdvanceStarted?.(); }} />
-        {advanceActive ? <p className="basis-full text-muted-foreground">An advance batch is active or awaiting reconciliation. Follow its progress above.</p> : null}
+        <AdvancePreviewButton prUrls={selected} onStarted={() => { setSelectedUrls([]); onAdvanceStarted?.(); }} />
         {removed > 0 ? <p role="status" className="basis-full text-amber-700 dark:text-amber-300">{removed} {removed === 1 ? "selection removed" : "selections removed"}: these PRs closed, were put on hold, or are no longer in the backlog.</p> : null}
         {selected.length >= ADVANCE_SELECTION_LIMIT ? <p role="status" className="basis-full text-muted-foreground">Up to {ADVANCE_SELECTION_LIMIT} PRs per batch. Advance this selection before selecting more.</p> : null}
       </div>}
@@ -137,8 +135,8 @@ export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onC
               {embeddedEffortKey === undefined ? <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-2 pb-1.5">
                 <h2 className="flex items-baseline gap-2 text-[13px] font-semibold">{foldHeld ? <button type="button" aria-expanded={unassignedHeldOpen} onClick={() => setUnassignedHeldOpen((open) => !open)} className="rounded text-[11.5px] font-normal text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">{unassignedHeldOpen ? "▾" : "▸"} {label}</button> : label}<span className="font-mono text-[11px] font-normal text-muted-foreground">{items.length}</span></h2>
                 {!embedded && sectionEligible.length > 0 ? <div className="flex items-baseline gap-2 text-[10.5px] text-muted-foreground">
-                  <button type="button" aria-label={`Select all open PRs in ${label}`} title="Select open PRs currently shown in this section" disabled={advanceActive || sectionSelected === sectionEligible.length || selected.length >= ADVANCE_SELECTION_LIMIT} onClick={() => setSelectedUrls(selectVisibleOpen(selected, sectionEligible, board.prHolds))} className="rounded underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Select all</button>
-                  {sectionSelected > 0 ? <button type="button" aria-label={`Clear selected PRs in ${label}`} disabled={advanceActive} onClick={() => setSelectedUrls(clearVisibleSelection(selected, sectionEligible))} className="rounded underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Clear section</button> : null}
+                  <button type="button" aria-label={`Select all open PRs in ${label}`} title="Select open PRs currently shown in this section" disabled={sectionSelected === sectionEligible.length || selected.length >= ADVANCE_SELECTION_LIMIT} onClick={() => setSelectedUrls(selectVisibleOpen(selected, sectionEligible, board.prHolds))} className="rounded underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Select all</button>
+                  {sectionSelected > 0 ? <button type="button" aria-label={`Clear selected PRs in ${label}`} onClick={() => setSelectedUrls(clearVisibleSelection(selected, sectionEligible))} className="rounded underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">Clear section</button> : null}
                   <span>{sectionSelected}/{sectionEligible.length} selected</span>
                 </div> : null}
               </div> : null}
@@ -156,7 +154,7 @@ export function PrBacklog({ board, locals, now, width, onRequest, onMessage, onC
                 const detail = [row.pr.title, row.hold ? `On hold${row.hold.reason ? `: ${row.hold.reason}` : ""}` : null, row.local === null ? `${row.effortName === undefined ? "" : `Effort: ${row.effortName}\n`}No scanned checkout. Advance can create an isolated checkout when a matching repository source is available; preview verifies the live PR before work.` : `Effort: ${row.local.effort}`, row.parent === null ? null : `Waiting on ${row.parent.repo} #${row.parent.pr.number} (${row.parent.pr.title})`, row.pr.resolvedReviewThreads ? `${row.pr.resolvedReviewThreads} review threads resolved` : null].filter(Boolean).join("\n");
                 return <li key={row.pr.url} data-pr-backlog-row id={`backlog-${row.pr.url}`} className={cn("grid min-w-0 items-center gap-x-3 gap-y-1 rounded-md border-b border-border/40 px-2 py-2 text-[12px] hover:bg-foreground/[0.035]", compact ? tight ? "grid-cols-[minmax(0,1fr)_3rem_6.5rem]" : "grid-cols-[minmax(9rem,1fr)_minmax(10rem,1fr)_3rem_6.5rem]" : "grid-cols-[11rem_minmax(0,1fr)_12rem_3rem_8rem_5.5rem]")}>
                   <span className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
-                    {!embedded ? <input type="checkbox" aria-label={`Select ${row.repo} #${row.pr.number} (${row.pr.title}) for advance`} checked={selectedSet.has(advancePrKey(row.pr.url))} disabled={advanceActive || !isAdvanceEligible(row.pr, board.prHolds) || (!selectedSet.has(advancePrKey(row.pr.url)) && selected.length >= ADVANCE_SELECTION_LIMIT)} onChange={(event) => setSelectedUrls(event.target.checked ? [...selected, advancePrKey(row.pr.url)] : selected.filter((url) => url !== advancePrKey(row.pr.url)))} className="size-3.5 shrink-0 accent-current disabled:opacity-25" title={row.hold ? "Release hold to include this PR in Advance" : isAdvanceEligible(row.pr, board.prHolds) ? "Select to diagnose blockers, repair confirmed work, and verify readiness" : "Advance starts with open PRs"} /> : null}
+                    {!embedded ? <input type="checkbox" aria-label={`Select ${row.repo} #${row.pr.number} (${row.pr.title}) for advance`} checked={selectedSet.has(advancePrKey(row.pr.url))} disabled={!isAdvanceEligible(row.pr, board.prHolds) || (!selectedSet.has(advancePrKey(row.pr.url)) && selected.length >= ADVANCE_SELECTION_LIMIT)} onChange={(event) => setSelectedUrls(event.target.checked ? [...selected, advancePrKey(row.pr.url)] : selected.filter((url) => url !== advancePrKey(row.pr.url)))} className="size-3.5 shrink-0 accent-current disabled:opacity-25" title={row.hold ? "Release hold to include this PR in Advance" : isAdvanceEligible(row.pr, board.prHolds) ? "Select to diagnose blockers, repair confirmed work, and verify readiness" : "Advance starts with open PRs"} /> : null}
                     <UrlLink href={row.pr.url} title={detail} className="flex min-w-0 items-baseline gap-1.5 text-foreground underline-offset-2 hover:underline"><span className="truncate font-semibold">{row.repo.split("/").at(-1)}</span><span className="shrink-0 font-mono text-[11.5px]">#{row.pr.number}</span></UrlLink>
                   </span>
                   <Tip label={detail}><span tabIndex={0} className={cn("min-w-0 truncate text-foreground/80 outline-none focus-visible:ring-2 focus-visible:ring-ring", compact ? tight ? "col-span-2 col-start-1 row-start-2" : "col-span-3 col-start-1 row-start-2" : "col-start-2 row-start-1")}>{row.pr.title}</span></Tip>

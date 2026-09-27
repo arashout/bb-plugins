@@ -11,6 +11,176 @@ const fact = (number = 1, overrides: Partial<AdvanceFacts> = {}): AdvanceFacts =
   hostId: "host", sourcePath: "/source", path: `/checkout/${number}`, effortId: null, effortKey: null, effortMembers: null,
   reviewDecision: "APPROVED", isDraft: false, readiness: "needs-attention", blockedBy: null, ...overrides,
 });
+
+describe("scoped Advance admissions", () => {
+  it("admits disjoint starts concurrently and runs separate effort controllers in the same repository", async () => {
+    const one = fact(1, { effortKey: "effort-one" });
+    const two = fact(2, { effortKey: "effort-two" });
+    const t = setup([one, two]);
+    t.deps.controller.mockImplementation(async (facts) => `controller-${facts.effortKey}`);
+    const [first, second] = await Promise.all([t.service.preview([one.prUrl]), t.service.preview([two.prUrl])]);
+    const [a, b] = await Promise.all([t.service.start(first.token), t.service.start(second.token)]);
+    await drain();
+    expect(a.id).not.toBe(b.id);
+    expect(t.service.list().flatMap((batch) => batch.jobs).map((job) => job.status)).toEqual(["running", "running"]);
+    expect(t.deps.send.mock.calls.map(([thread]) => thread).sort()).toEqual(["controller-effort-one", "controller-effort-two"]);
+  });
+
+  it("rejects another batch for the same PR, original checkout, or effort controller with an owner hint", async () => {
+    for (const [second, kind] of [
+      [fact(1), "PR"],
+      [fact(1, { prUrl: "https://GITHUB.com/ACME/app/pull/1/" }), "PR"],
+      [fact(2, { path: fact(1).path }), "checkout"],
+      [fact(2, { effortKey: "effort-one" }), "repository controller"],
+    ] as const) {
+      const first = fact(1, { effortKey: kind === "repository controller" ? "effort-one" : null });
+      const t = setup([first, second]);
+      t.current.set(second.prUrl.toLowerCase(), second);
+      if (kind === "repository controller") t.deps.controller.mockResolvedValue("controller-one");
+      const old = await t.service.preview([first.prUrl]);
+      const stale = await t.service.preview([second.prUrl]);
+      await t.service.start(old.token); await drain();
+      const detail = (await t.service.preview([second.prUrl])).jobs[0]!.detail;
+      expect(detail).toContain(kind);
+      expect(detail).toContain("acme/app #1");
+      await expect(t.service.start(stale.token)).rejects.toThrow(kind);
+    }
+  });
+
+  it("treats identical checkout paths on different hosts as separate work", async () => {
+    const one = fact(1, { path: "/checkout/shared", hostId: "host-one", effortKey: "effort-one" });
+    const two = fact(2, { path: "/checkout/shared", hostId: "host-two", effortKey: "effort-two" });
+    const t = setup([one, two]);
+    t.deps.controller.mockImplementation(async (facts) => `controller-${facts.hostId}`);
+    const first = await t.service.preview([one.prUrl]);
+    const second = await t.service.preview([two.prUrl]);
+    await Promise.all([t.service.start(first.token), t.service.start(second.token)]); await drain();
+    expect(t.deps.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps one controller queue sequential and progresses its next PR after completion", async () => {
+    const one = fact(1, { effortKey: "effort-one" });
+    const two = fact(2, { effortKey: "effort-one" });
+    const t = setup([one, two]);
+    t.deps.controller.mockResolvedValue("controller-one");
+    const batch = await t.start();
+    expect(batch.jobs.map((job) => job.status)).toEqual(["running", "queued"]);
+    expect(t.deps.send).toHaveBeenCalledTimes(1);
+    t.current.set(one.prUrl, { ...one, needsPreparation: false, readiness: "ready" });
+    await t.service.signal("controller-one", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: prepared`); await drain();
+    expect(t.service.list()[0]!.jobs.map((job) => job.status)).toEqual(["ready", "running"]);
+    expect(t.deps.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a failed parent repair while a same-controller sibling is still queued", async () => {
+    const one = fact(1, { effortKey: "effort-one" });
+    const two = fact(2, { effortKey: "effort-one" });
+    const t = setup([one, two]);
+    t.deps.controller.mockResolvedValue("controller-one");
+    const batch = await t.start();
+    let release!: (facts: AdvanceFacts) => void;
+    const waiting = new Promise<AdvanceFacts>((resolve) => { release = resolve; });
+    t.deps.inspect.mockImplementation(async (url) => url === two.prUrl ? waiting : { ...t.current.get(url)! });
+    await t.service.signal("controller-one", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: blocked`);
+    const plan = await t.service.repairPlan(batch.id, batch.jobs[0]!.id);
+    const repair = await t.service.repairRun({ token: plan.token, mode: "new", threadId: null, instruction: "" });
+    expect(repair.batch.jobs.map((job) => job.status)).toEqual(["running", "queued"]);
+    release(two); await drain();
+    expect(t.deps.send).toHaveBeenCalledTimes(1);
+    t.current.set(one.prUrl, { ...one, needsPreparation: false, readiness: "ready" });
+    await t.service.signal("repair-thread", "idle", `Workstreams job ${repair.batch.jobs[0]!.attemptId} complete: prepared`); await drain();
+    expect(t.service.list()[0]!.jobs[1]!.status).toBe("running");
+    expect(t.deps.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an uncertain launch scoped after reload while admitting unrelated work", async () => {
+    const one = fact(1, { effortKey: "effort-one" });
+    const two = fact(2, { effortKey: "effort-two" });
+    const t = setup([one, two]);
+    t.deps.controller.mockImplementation(async (facts) => `controller-${facts.effortKey}`);
+    t.deps.send.mockRejectedValueOnce(new Error("Delivery timed out"));
+    await t.service.start((await t.service.preview([one.prUrl])).token); await drain();
+    expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "needs-attention", uncertain: true });
+    t.service.dispose();
+    const restored = createAdvanceService(t.db, t.deps);
+    expect((await restored.preview([one.prUrl])).jobs[0]).toMatchObject({ eligible: false, detail: expect.stringContaining("Fix 1; uncertain") });
+    await restored.start((await restored.preview([two.prUrl])).token); await drain();
+    expect(restored.list().flatMap((batch) => batch.jobs).find((job) => job.prUrl === two.prUrl)?.status).toBe("running");
+    expect(t.deps.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts uncertain launches against the two-worker capacity without rejecting disjoint admission", async () => {
+    const facts = [fact(1), fact(2), fact(3)];
+    const t = setup(facts);
+    t.deps.spawn.mockRejectedValueOnce(new Error("First launch timed out")).mockRejectedValueOnce(new Error("Second launch timed out"));
+    for (const item of facts) { await t.service.start((await t.service.preview([item.prUrl])).token); await drain(); }
+    expect(t.service.list().flatMap((batch) => batch.jobs).filter((job) => job.uncertain)).toHaveLength(2);
+    expect(t.service.list().flatMap((batch) => batch.jobs).find((job) => job.prUrl === facts[2]!.prUrl)).toMatchObject({
+      status: "queued", detail: expect.stringContaining("two active or uncertain Advance workers"),
+    });
+    expect(t.deps.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("rechecks capacity after workspace creation when an unrelated repair starts", async () => {
+    const first = fact(1), second = fact(2), third = fact(3);
+    const t = setup([first, second, third]);
+    const failed = await t.service.start((await t.service.preview([first.prUrl])).token); await drain();
+    await t.service.signal("thread", "idle", `Workstreams job ${failed.jobs[0]!.id} complete: blocked`);
+    await t.service.start((await t.service.preview([second.prUrl])).token); await drain();
+    let entered!: () => void;
+    let release!: (workspace: { path: string; workerPath: string }) => void;
+    const waiting = new Promise<{ path: string; workerPath: string }>((resolve) => { release = resolve; });
+    const inWorkspace = new Promise<void>((resolve) => { entered = resolve; });
+    t.deps.workspace.mockImplementation(async (facts, _batch, id) => {
+      if (facts.prUrl === third.prUrl) { entered(); return waiting; }
+      return { path: `/isolated/${id}`, workerPath: "/isolated" };
+    });
+    const queued = await t.service.start((await t.service.preview([third.prUrl])).token);
+    await inWorkspace;
+    const plan = await t.service.repairPlan(failed.id, failed.jobs[0]!.id);
+    await t.service.repairRun({ token: plan.token, mode: "new", threadId: null, instruction: "" });
+    release({ path: `/isolated/${queued.jobs[0]!.id}`, workerPath: "/isolated" }); await drain();
+    expect(t.service.list().flatMap((batch) => batch.jobs).find((job) => job.prUrl === third.prUrl)).toMatchObject({
+      status: "queued", detail: expect.stringContaining("two active or uncertain Advance workers"),
+    });
+    expect(t.deps.spawn).toHaveBeenCalledTimes(2);
+    expect(t.deps.repairSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists every active batch even when more than ten are queued", async () => {
+    const facts = Array.from({ length: 11 }, (_, index) => fact(index + 1));
+    const t = setup(facts);
+    for (const item of facts) await t.service.start((await t.service.preview([item.prUrl])).token);
+    await drain();
+    expect(t.service.list()).toHaveLength(11);
+    expect(t.service.list().flatMap((batch) => batch.jobs).filter((job) => job.status === "queued")).toHaveLength(9);
+  });
+
+  it("recovers its admission lane after a failed preflight and keeps same-token starts idempotent", async () => {
+    const one = fact(1), two = fact(2);
+    const t = setup([one, two]);
+    const first = await t.service.preview([one.prUrl]);
+    const [a, b] = await Promise.all([t.service.start(first.token), t.service.start(first.token)]);
+    expect(a.id).toBe(b.id);
+    await drain();
+    const second = await t.service.preview([two.prUrl]);
+    t.deps.inspect.mockRejectedValueOnce(new Error("Synthetic read failed"));
+    await expect(t.service.start(second.token)).rejects.toThrow("Synthetic read failed");
+    const next = await t.service.start(second.token); await drain();
+    expect(next.id).not.toBe(a.id);
+    expect(t.service.list()).toHaveLength(2);
+  });
+
+  it("reserves a launched worker checkout as well as its original checkout", async () => {
+    const one = fact(1);
+    const two = fact(2, { path: "/isolated/worker-one" });
+    const t = setup([one, two]);
+    t.deps.workspace.mockResolvedValueOnce({ path: two.path!, workerPath: "/isolated" });
+    await t.service.start((await t.service.preview([one.prUrl])).token); await drain();
+    expect((await t.service.preview([two.prUrl])).jobs[0]).toMatchObject({ eligible: false,
+      detail: expect.stringContaining("checkout with acme/app #1") });
+  });
+});
 const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 function setup(facts = [fact()]) {
   const db = new Database(":memory:");

@@ -236,8 +236,10 @@ implemented.
   cancels only that item; removing a finished item hides its progress record,
   which you can restore without requeueing it. Running items cannot be removed,
   and removal never deletes the PR, thread, or history. The batch never
-  merges PRs. Worktrees remain available for inspection. One batch runs at a
-  time, with up to two active repositories. Saved batches keep their original
+  merges PRs. Worktrees remain available for inspection. Independent batches
+  can run together, with up to two active workers. A PR, checkout, or effort's
+  repository controller remains reserved until its job finishes or its
+  uncertain outcome is reconciled. Saved batches keep their original
   scope; start a new preview to authorize feedback work on an earlier result.
   If a parent update makes a verification-only child need edits, preview that
   child again to authorize the added work. Fork writes and mixed BB project

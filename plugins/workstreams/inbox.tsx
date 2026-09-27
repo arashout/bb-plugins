@@ -515,7 +515,7 @@ export function InboxBoard({
         <button type="button" disabled={dispatchBusy} onClick={() => void setDispatchMode("off", dispatch.effortKey)} className="rounded text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">Turn off</button>
         {dispatchError === null ? null : <span role="alert" className="text-destructive">{dispatchError}</span>}
       </div> : null}
-      {backlogVisible ? <PrBacklog advanceJobs={advanceJobs} onRepair={repairJob} advanceActive={advance.active} onAdvanceStarted={advance.refresh} onClearApproved={() => onPrefs({ approvedOnly: false })} approvedOnly={prefs.approvedOnly} board={board} locals={[...all.values()].flat()} now={now} width={boardWidth} onRequest={setRequest} onMessage={setMessaging} onCheckout={openCheckout} onStart={setStarting} onOpenThread={openThread} threadsOf={threadsOf} /> : <>
+      {backlogVisible ? <PrBacklog advanceJobs={advanceJobs} onRepair={repairJob} onAdvanceStarted={advance.refresh} onClearApproved={() => onPrefs({ approvedOnly: false })} approvedOnly={prefs.approvedOnly} board={board} locals={[...all.values()].flat()} now={now} width={boardWidth} onRequest={setRequest} onMessage={setMessaging} onCheckout={openCheckout} onStart={setStarting} onOpenThread={openThread} threadsOf={threadsOf} /> : <>
       <InboxHeader
         searchRef={searchRef}
         query={query}
