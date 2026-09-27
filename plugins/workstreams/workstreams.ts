@@ -578,7 +578,7 @@ export function mostUrgent(lifecycles: Lifecycle[]): Lifecycle {
   return lifecycles.reduce(
     (best, candidate) =>
       (URGENCY.get(candidate) ?? 99) < (URGENCY.get(best) ?? 99) ? candidate : best,
-    lifecycles[0] ?? "local",
+    lifecycles[0] ?? "merged",
   );
 }
 

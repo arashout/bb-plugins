@@ -323,6 +323,9 @@ describe("lifecycle groups", () => {
 });
 
 describe("mostUrgent", () => {
+  it("keeps an empty aggregate in the completed lifecycle taxonomy", () => {
+    expect(mostUrgent([])).toBe("merged");
+  });
   it("surfaces the blocked member of a cluster, because that is the one thing the cluster needs from you", () => {
     expect(mostUrgent(["merged", "awaiting-merge", "blocked", "up-next"])).toBe("blocked");
   });
@@ -1432,6 +1435,13 @@ describe("the hierarchy and its collapse rules", () => {
     effortOf("Gift cards", ["ABC-2"]),
     effortOf("Homepage", ["ABC-9"]),
   ];
+
+  it("gives a program of empty established efforts a valid completed lifecycle", () => {
+    const empty = ["Empty A", "Empty B"].map((key) => ({ ...effortOf(key, []), lifecycle: "merged" as const }));
+    const groups = buildHierarchy({ efforts: [...efforts, ...empty],
+      programOf: (effort) => effort.key.startsWith("Empty") ? "Planning" : effort.key });
+    expect(groups.find((group) => group.key === "program:Planning")?.lifecycle).toBe("merged");
+  });
 
   it("renders no program wrapper around a single effort, because a group that restates its only child is noise the reader has to look past", () => {
     const groups = buildHierarchy({
