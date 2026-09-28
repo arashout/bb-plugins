@@ -81,6 +81,11 @@ transcript every summary, so it has strictly more to go on. With this on the
 name lands everywhere bb shows a title: sidebar, header, command palette,
 `bb thread list`.
 
+Where bb ended up with no title at all, the row falls back to its raw opening
+prompt, and the first brief names the thread without waiting for the first turn
+to finish. A thread bb *did* name keeps that name until the turn ends and the
+better-informed summary arrives.
+
 It will not clobber a name you chose. The plugin remembers the title it last
 wrote, and finding anything else on the thread means you renamed it — so that
 thread is never renamed again. Nothing is stored to record the stop: the skipped

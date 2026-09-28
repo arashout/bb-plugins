@@ -83,12 +83,19 @@ running — rather than waiting for that turn to end:
 The delay is capped at `quietSeconds`, so setting that below five seconds makes
 first briefs faster rather than slower.
 
-A pre-turn brief **never renames the thread**, even with `renameThreads` on: a
-title chosen from the opening prompt is only as good as the one bb already
-guessed from that same prompt, the post-turn summary will choose better, and
-applying both would rename the thread twice in a minute — each rename also
-dispatching a command into the thread's environment. So a new thread keeps bb's
-title until its first turn ends.
+With `renameThreads` on, a pre-turn brief renames the thread **only if bb never
+named it** — a null `title`, where the sidebar falls back to the opening prompt
+clamped to 80 characters. Four words read off that prompt beat the prompt itself,
+and a first turn can run for ten minutes.
+
+Where bb did guess a name, the rename waits for the turn to end: that guess came
+from the same opening prompt, so a pre-turn title is no better than what is
+already there, the post-turn summary will choose better, and applying both would
+rename the thread twice in a minute — each rename also dispatching a command into
+the thread's environment.
+
+Either way the name is recorded as the plugin's own, so the summary after the
+turn is free to improve on it rather than reading it as a name you chose.
 
 None of this backfills anything: a briefless thread still needs activity, and
 `thread.active` *is* activity. See below.
@@ -540,10 +547,14 @@ no preference writes.
   one that predates the last few turns is expected rather than broken;
   **Re-summarize** forces it. Note this does not apply to a *first* brief, which
   does not wait.
-- A brand-new thread whose brief reads as though the work has not started, and
-  whose title is still bb's: also expected. That is the pre-turn brief, written
-  from the opening prompt while the first turn runs, and the summary after that
-  turn replaces it and names the thread.
+- A brand-new thread whose brief reads as though the work has not started: also
+  expected. That is the pre-turn brief, written from the opening prompt while the
+  first turn runs, and the summary after that turn replaces it.
+- A brand-new thread still showing bb's title: expected only while bb gave it
+  one. A thread bb left with a null `title` — the row showing its raw opening
+  prompt — is named by the pre-turn brief instead of waiting. If such a row keeps
+  its prompt, the rename failed: check `bb plugin logs thread-briefs` for
+  `could not rename`.
 - A thread stuck on **Waiting on you** whose next step you have already carried
   out: expected if the step happened outside the thread, because nothing in the
   transcript can record that. Pin the status to **Done** in the Brief panel —

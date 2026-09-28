@@ -415,12 +415,18 @@ export default async function plugin(bb: BbPluginApi) {
    * Returns true when a brief was written (so callers know to announce).
    *
    * `beforeFirstTurn` marks a brief written from the opening prompt while the
-   * first turn is still running. It is summarized like any other, but the thread
-   * is **not** renamed: a title chosen from the opening prompt alone is only as
-   * good as the one bb already guessed from it, and the summary that follows the
-   * turn will choose a better one — so applying it here would rename the thread
-   * twice within a minute, and each rename also dispatches a command into the
-   * thread's environment.
+   * first turn is still running. It is summarized like any other, and it renames
+   * the thread only where bb left it unnamed — a null `title`, so the row is
+   * showing `titleFallback`: the opening prompt clamped to 80 characters. A
+   * four-word name read off that prompt beats the prompt itself, and waiting for
+   * the turn to end means a long first turn spends its whole length under a
+   * truncated sentence.
+   *
+   * Where bb did guess a name the wait still applies, because that guess came
+   * from the same opening prompt: a pre-turn title is no better than what is
+   * already there, the summary after the turn will choose better, and applying
+   * this one would rename the thread twice within a minute — each rename also
+   * dispatching a command into the thread's environment.
    */
   async function summarizeThread(
     threadId: string,
@@ -495,7 +501,10 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const summary = parseSummary(reply, stagePin.value);
 
-    const appliedTitle = beforeFirstTurn
+    // A thread bb has already named waits for its first turn to end before this
+    // plugin renames it; one showing nothing but its own opening prompt does
+    // not. See {@link summarizeThread}.
+    const appliedTitle = beforeFirstTurn && thread.title !== null
       ? (stored?.appliedTitle ?? null)
       : await applyTitle({
           threadId,

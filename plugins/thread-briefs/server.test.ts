@@ -1184,7 +1184,7 @@ describe("renaming threads", () => {
     await current.harness.lifecycle.dispose();
   });
 
-  it("does not name a thread from a brief written before its first turn ended", async () => {
+  it("leaves a name bb chose alone until the first turn has ended", async () => {
     const current = renameHost({});
     await plugin(current.bb);
     vi.useFakeTimers();
@@ -1214,6 +1214,31 @@ describe("renaming threads", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(current.live.title).toBe("Sidebar grouping by status");
+    } finally {
+      vi.useRealTimers();
+      await current.harness.lifecycle.dispose();
+    }
+  });
+
+  it("names an unnamed thread from its pre-turn brief, without waiting", async () => {
+    // Nothing to wait for: with no title of bb's own the row falls back to the
+    // opening prompt clamped to 80 characters, and four words off that prompt
+    // are better than the prompt. A first turn can run for ten minutes.
+    const current = renameHost({ title: null });
+    await plugin(current.bb);
+    vi.useFakeTimers();
+    try {
+      await current.harness.behavior.emitThreadEvent("thread.active", {
+        thread: current.live,
+      });
+      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(current.live.title).toBe("Sidebar grouping by status");
+      const preTurn = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      // Recorded as ours, so the post-turn summary is free to improve on it
+      // rather than reading it as a name someone chose by hand.
+      expect(preTurn?.appliedTitle).toBe("Sidebar grouping by status");
     } finally {
       vi.useRealTimers();
       await current.harness.lifecycle.dispose();
