@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
-import { EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
 import { PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
@@ -49,6 +49,21 @@ const latestDeployedMigrations = [
   PR_OBSERVATIONS_MIGRATION,
   ...WORK_CONVERSATION_MIGRATIONS,
 ];
+// Everything the installed build has recorded. New statements append after
+// index 34; an insertion or edit anywhere in this prefix fails the next reload.
+const pinnedMigrations = [
+  ...latestDeployedMigrations,
+  `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
+];
+const statementHash = (statement: string) => createHash("sha256").update(statement).digest("hex");
+const hostOptions = {
+  pluginId: "workstreams",
+  settings: { scanRoots: "/p" },
+  sdk: {
+    system: { config: async () => ({ primaryHostId: "host-synthetic" }) as never },
+    threads: { list: async () => [] as never, getPluginMetadata: async () => ({}) as never, events: { list: async () => [] } },
+  },
+};
 
 describe("deployed Workstreams database upgrade", () => {
   it("appends effort admin storage after every previously deployed migration", async () => {
@@ -91,6 +106,27 @@ describe("deployed Workstreams database upgrade", () => {
       .toEqual({ name: "effort_repo_controllers" });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get("thread_pr_link_ids"))
       .toEqual({ name: "thread_pr_link_ids" });
+    await upgraded.harness.lifecycle.dispose();
+  });
+  it("pins all 35 deployed statements through effort admin sync", () => {
+    expect(pinnedMigrations).toHaveLength(35);
+    expect(statementHash(JSON.stringify(pinnedMigrations))).toBe("18aa85a49a1a58c9c28261030e7a54c3d21c5fe93eb73ec6daa5bdee23b11ffa");
+  });
+  it("records the pinned statements at their deployed indexes on a fresh load", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    const recorded = bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id < 35 ORDER BY id").all();
+    expect(recorded).toEqual(pinnedMigrations.map((statement, id) => ({ id, hash: statementHash(statement) })));
+    await harness.lifecycle.dispose();
+  });
+  it("reloads the pinned prefix without losing established efforts", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    bb.storage.migrate(bb.storage.database(), pinnedMigrations);
+    const effort = createEffortStore(bb.storage.database()).establish({ sourceKey: "ticket:ABC-101", name: "Gift cards", goal: "Sell gift cards at checkout",
+      projectId: "proj-inkwell", members: { tickets: ["ABC-101"], prUrls: ["https://github.com/inkwell/folio/pull/7"] } });
+
+    const upgraded = await harness.lifecycle.reload(plugin);
+    expect(createEffortStore(upgraded.bb.storage.database()).get(effort.id)).toEqual(effort);
     await upgraded.harness.lifecycle.dispose();
   });
 });
