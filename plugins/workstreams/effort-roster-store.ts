@@ -79,6 +79,13 @@ export function createEffortRosterStore(db: RosterDb, efforts: Pick<EffortStore,
       return new Map((db.prepare(`SELECT ordinal, target FROM effort_roster_numbers WHERE effort_id = ?`).all(resolve(effortId)) as { ordinal: number; target: string }[])
         .map((row) => [row.ordinal, row.target]));
     },
+    /** The efforts whose rosters number each PR: the rosters an observation of that PR can change. */
+    numbered(): Map<string, string[]> {
+      const byTarget = new Map<string, string[]>();
+      for (const { target, effortId } of db.prepare(`SELECT target, effort_id AS effortId FROM effort_roster_numbers`).all() as { target: string; effortId: string }[])
+        byTarget.set(target, [...byTarget.get(target) ?? [], effortId]);
+      return byTarget;
+    },
     /** The snapshot the effort's roster last showed. */
     latest(effortId: string): string | null {
       return (db.prepare(`SELECT id FROM effort_roster_snapshots WHERE effort_id = ? ORDER BY created_at DESC LIMIT 1`).get(resolve(effortId)) as { id: string } | undefined)?.id ?? null;

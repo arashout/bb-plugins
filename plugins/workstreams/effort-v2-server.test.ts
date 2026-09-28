@@ -194,6 +194,55 @@ describe("effort roster read model", () => {
   });
 });
 
+describe("roster change signals", () => {
+  const signals = (env: Awaited<ReturnType<typeof setup>>) => env.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "effort-roster-changed")
+    .map((signal) => signal.payload);
+
+  it("tells a roster once when the board reads a change to one of its PRs, and says nothing when a read finds none", async () => {
+    const catalog96 = "https://github.com/inkwell/catalog/pull/96";
+    const state = { units: [...INKWELL_ROSTER.units], inventory: [...INKWELL_ROSTER.inventory] };
+    /** GitHub now shows catalog/96's checks this way, to the scan and the authored-PR list alike. */
+    const checks = (checkConclusions: string[]) => {
+      state.units = state.units.map((unit) => unit.pr?.url === catalog96 ? { ...unit, pr: { ...unit.pr, checkConclusions } } : unit);
+      state.inventory = state.inventory.map((entry) => entry.pr.url === catalog96 ? { ...entry, pr: { ...entry.pr, checkConclusions } } : entry);
+    };
+    checks(["PENDING"]);
+    const env = await setup(state);
+    const catalog = env.efforts["Catalog follow-ups"]!.id;
+    for (const effort of Object.values(env.efforts)) await env.roster(effort.id);
+    await env.harness.runCli(["refresh"]);
+    const before = signals(env).length;
+    await env.harness.runCli(["refresh"]);
+    expect(signals(env).length).toBe(before);
+    checks(["SUCCESS"]);
+    await env.harness.runCli(["refresh"]);
+    // Only Catalog numbers catalog/96, and the scan and the authored-PR list saw one change between them.
+    expect(signals(env).slice(before)).toEqual([{ effortId: catalog }]);
+    expect((await env.roster(catalog)).rows.find((row) => row.target === catalog96)).toMatchObject({ checkCounts: { done: 1, total: 1, failed: 0 } });
+  });
+
+  it("tells each roster at the first read after a start, since a pane may have read it before the start", async () => {
+    const env = await setup();
+    for (const effort of Object.values(env.efforts)) await env.roster(effort.id);
+    await env.harness.runCli(["refresh"]);
+    const restarted = await env.harness.lifecycle.reload(plugin);
+    cleanups.push(() => restarted.harness.lifecycle.dispose());
+    await restarted.harness.runCli(["refresh"]);
+    const heard = restarted.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "effort-roster-changed").map((signal) => signal.payload);
+    expect(new Set(heard.map((payload) => (payload as { effortId: string }).effortId))).toEqual(new Set(Object.values(env.efforts).map((effort) => effort.id)));
+  });
+
+  it("tells a roster when its effort moves between legacy launchers and its roster, though no row changes", async () => {
+    const env = await setup();
+    const vault = env.efforts["Vault audits"]!;
+    createEffortWorkStore(env.db).setMode(vault.id, "v2", 0, () => []);
+    const before = signals(env).length;
+    await env.harness.callRpc("effort_v2_set", { effortId: vault.id, mode: "legacy", expectedRevision: 1 });
+    expect(signals(env).slice(before)).toEqual([{ effortId: vault.id }]);
+    expect((await env.roster(vault.id)).execution).toEqual({ mode: "legacy", revision: 2 });
+  });
+});
+
 describe("roster dry-run script", () => {
   async function copy() {
     const env = await setup();

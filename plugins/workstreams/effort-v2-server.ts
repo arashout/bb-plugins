@@ -1324,6 +1324,7 @@ export function createEffortV2(deps: EffortV2Deps) {
         const execution = await deps.execution.set(effortId, "legacy", input.expectedRevision);
         // Its rows pause as v2-off, keeping every record, until it opts in again.
         await settle(effortId, "mode");
+        deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId });
         return { execution, parentThreadId: current.effort.coordinatorThreadId, cancelled: [], draining: [] };
       }
       if (current.blockers.length) throw new Error(current.blockers.join(" "));
@@ -1337,6 +1338,8 @@ export function createEffortV2(deps: EffortV2Deps) {
       // Read again once fenced: a queued job may have launched while the parent was linked or started, and none can launch now.
       const legacy = legacyJobs(targets);
       const cancelled = legacy.queued.filter((job) => deps.legacy.cancelQueued(job.batchId, job.jobId));
+      // The roster's execution mode and parent thread changed, whether or not any row did.
+      deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId });
       return { execution, parentThreadId: parent.coordinatorThreadId, cancelled, draining: legacy.draining };
     } finally { changing.delete(effortId); }
   }

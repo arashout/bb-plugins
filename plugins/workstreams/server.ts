@@ -1030,6 +1030,8 @@ export default async function plugin(bb: BbPluginApi) {
       intentEvidenceVersion++;
       advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
       effortV2.reconciler.observed(result.entries.map((entry) => entry.pr.url));
+      // The whole list: a PR it no longer lists changed too.
+      rosterObserved();
       await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
@@ -1062,6 +1064,7 @@ export default async function plugin(bb: BbPluginApi) {
     intentEvidenceVersion++;
     advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
     effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...result.closed]);
+    rosterObserved([...result.entries.map((entry) => entry.pr.url), ...result.closed, ...result.failed]);
     await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
     const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
     const closed = new Set(result.closed.map((url) => url.toLowerCase()));
@@ -1242,6 +1245,7 @@ export default async function plugin(bb: BbPluginApi) {
       const previous = previousAdvanceObservations(observedPrs);
       inventory.observe(observedPrs);
       advance.invalidate(observedPrs.map(withApprovalFeedback));
+      rosterObserved(observedPrs.map((pr) => pr.url));
       await recheckObservedAdvanceJobs(observedPrs, previous, []);
       await refreshInventory(signal);
       warnings.push(...result.warnings);
@@ -2394,6 +2398,7 @@ export default async function plugin(bb: BbPluginApi) {
       const previous = previousAdvanceObservations(observedPrs);
       inventory.observe(observedPrs);
       advance.invalidate(observedPrs.map(withApprovalFeedback));
+      rosterObserved(observedPrs.map((pr) => pr.url));
       await recheckObservedAdvanceJobs(observedPrs, previous, []);
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
@@ -4523,6 +4528,12 @@ export default async function plugin(bb: BbPluginApi) {
    * failed read keeps the last success.
    */
   async function observePr(prUrl: string, paths: readonly string[]): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
+    // Its caller, a refresh or a command, tells the roster itself.
+    refreshingPrs.add(prWorkItemKey(prUrl));
+    try { return await observeNow(prUrl, paths); }
+    finally { refreshingPrs.delete(prWorkItemKey(prUrl)); }
+  }
+  async function observeNow(prUrl: string, paths: readonly string[]): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
     const failed = (error: string) => {
       prFacts.failed(prUrl, error, Date.now());
       return { status: "failed" as const, error };
@@ -4553,6 +4564,31 @@ export default async function plugin(bb: BbPluginApi) {
       return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
     }
   }
+  /** What each roster PR showed when an observation last read it: its board read's signature, its full read, and its read failures. */
+  const rosterSeen = new Map<string, string>();
+  /** PRs a refresh or command is reading now; it tells their rosters itself. */
+  const refreshingPrs = new Set<string>();
+  /**
+   * After an observation: tell each effort whose roster numbers a PR that changed, once. A change is a new cheap signature, full read,
+   * or read failure, so a read that finds nothing new tells no one. The first read of a PR after a start tells its rosters too, since a
+   * pane may have read it before the start. Without `prUrls`, every numbered PR is checked, for a read of the whole list.
+   */
+  function rosterObserved(prUrls?: readonly string[]): void {
+    const numbered = rosterStore.numbered();
+    const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
+    const changed = new Set<string>();
+    for (const target of prUrls ? new Set(prUrls.map(prWorkItemKey)) : numbered.keys()) {
+      const efforts = numbered.get(target);
+      if (!efforts) continue;
+      const stored = prFacts.get(target);
+      const seen = JSON.stringify([cheapSignature(inventory.get(target)?.pr ?? scanned.get(target) ?? null), stored?.facts ?? null, stored?.failedAt ?? null,
+        inventory.observation(target)?.failedAt ?? null]);
+      const before = rosterSeen.get(target);
+      rosterSeen.set(target, seen);
+      if (before !== seen && !refreshingPrs.has(target)) for (const effortId of efforts) changed.add(effortId);
+    }
+    for (const effortId of changed) bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId });
+  }
   /** The newest cheap read of each PR here: a full read that follows it is kept with its signature, so a later cheap read that differs supersedes it. */
   const cheapReads = new Map<string, { signature: string; at: number }>();
   /**
@@ -4564,6 +4600,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function fullRead(prUrl: string, hostId: string): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
     const failed = (error: string) => {
       prFacts.failed(prUrl, error, Date.now());
+      rosterObserved([prUrl]);
       return { status: "failed" as const, error };
     };
     try {
@@ -4580,6 +4617,7 @@ export default async function plugin(bb: BbPluginApi) {
       const cheap = board && boardAt >= (read?.at ?? 0) ? { signature: cheapSignature(board.pr), at: boardAt } : read;
       const current = cheap && cheap.at > (v2WroteAt.get(prWorkItemKey(prUrl)) ?? -Infinity) ? cheap : null;
       prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: current?.signature ?? null, cheapAt: cheap?.at ?? null });
+      rosterObserved([prUrl]);
       if (knownPrUrl(prUrl) !== null && previous && JSON.stringify(previous) !== JSON.stringify(full.facts)) scheduleInventoryUrls([prUrl]);
       return { status: "checked" };
     } catch (error) {
