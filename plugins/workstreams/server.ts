@@ -49,8 +49,10 @@ import { createRepoControllerService } from "./repo-controller.js";
 import { cardThreadPrompt, type CardThreadSnapshot } from "./card-thread.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldFor, prHoldsSchema } from "./pr-holds.js";
-import { INVENTORY_QUESTIONS, inventoryRow, inventoryText, inventoryView, inventoryViewSchema, type InventoryQuestion, type InventoryView } from "./inventory-view.js";
-import { DEFAULT_ATTENTION_THRESHOLDS, prAttention } from "./pr-attention.js";
+import { INVENTORY_QUESTIONS, inventoryRow, inventoryRowSchema, inventoryText, inventoryView, inventoryViewSchema, type InventoryQuestion, type InventoryView }
+  from "./inventory-view.js";
+import { createInventoryActions, suggestReviewers, type ActionRecord } from "./inventory-actions.js";
+import { DEFAULT_ATTENTION_THRESHOLDS, prAttention, type AttentionClock } from "./pr-attention.js";
 import { stackParent } from "./pr-backlog.js";
 import { pipelineCards } from "./pipeline.js";
 import { inboxRows } from "./inbox-rows.js";
@@ -411,6 +413,15 @@ export const rpcContract = defineRpcContract({
   inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean() }) },
   /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
   inventory_get: { input: z.object({ attention: z.enum(INVENTORY_QUESTIONS).optional() }).strict(), output: inventoryViewSchema },
+  /**
+   * One click, one GitHub write, on facts read again first: refused under a hold, a v2 claim, or another writer, and when the facts it
+   * depends on changed since the row was shown. Each sends those facts back from its row: mark ready its `head`, a request its `reviewers`,
+   * a nudge the reviewers its attention reason names. Merge opens action_merge_preview instead.
+   */
+  inventory_mark_ready: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(), output: writeResult },
+  inventory_request_review: { input: prUrlInput.extend({ logins: z.array(z.string().max(140)).min(1).max(20), shown: inventoryRowSchema.shape.reviewers }).strict(),
+    output: writeResult },
+  inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
   dispatch_set: {
     input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
     output: boardSchema.shape.dispatch,
@@ -1133,8 +1144,12 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Write one targeted GitHub read through the board's stores: inventory, checkout PRs, and Advance jobs. */
-  async function applyInspection(result: InventoryInspection, hostId: string): Promise<void> {
+  /**
+   * Write one targeted GitHub read through the board's stores: inventory, checkout PRs, and Advance jobs. `legacy` false only writes: it
+   * rechecks no Advance job and rescans no closed PR's checkout, since both end by pumping queued legacy work, and leaves what it saw
+   * change to the next pass that rechecks.
+   */
+  async function applyInspection(result: InventoryInspection, hostId: string, legacy = true): Promise<void> {
     const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
     const carried: string[] = [];
     for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
@@ -1143,6 +1158,10 @@ export default async function plugin(bb: BbPluginApi) {
     advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
     effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...result.closed]);
     rosterObserved([...result.entries.map((entry) => entry.pr.url), ...result.closed, ...result.failed]);
+    if (!legacy) {
+      oweAdvanceRechecks(result.entries.map((entry) => entry.pr), previous, carried);
+      return writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
+    }
     await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
     const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
     const closed = new Set(result.closed.map((url) => url.toLowerCase()));
@@ -1971,6 +1990,13 @@ export default async function plugin(bb: BbPluginApi) {
       } });
   }
 
+  /** Now, the attention thresholds in settings, and the server's UTC offset, which business days count by. */
+  async function attentionClock(): Promise<AttentionClock> {
+    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = await settings.get();
+    const now = Date.now();
+    return { now, thresholds: { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays }, utcOffsetMinutes: -new Date(now).getTimezoneOffset() };
+  }
+
   async function board(): Promise<Board> {
     const { groups, mode, surfaces, warnings } = await hierarchy();
     const { rules } = await surfaceRules();
@@ -2044,10 +2070,7 @@ export default async function plugin(bb: BbPluginApi) {
         staleness: freshest(members.map((entry) => stalenessOf(entry.pr.createdAt ?? null, Date.now()))), surfaces: [], risk: "none" };
     });
     const context = readWorkContext({ groups: [...wired, ...remoteGroups], prInventory: { entries: storedInventory.entries } }, pattern);
-    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = await settings.get();
-    const attentionAt = Date.now();
-    const attentionClock = { now: attentionAt, thresholds: { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays },
-      utcOffsetMinutes: -new Date(attentionAt).getTimezoneOffset() };
+    const clock = await attentionClock();
     const holds = prHolds.list();
     const statesSince = inventory.statesSince();
     const prThreadLinks: Board["prThreadLinks"] = {};
@@ -2079,7 +2102,7 @@ export default async function plugin(bb: BbPluginApi) {
       prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
         ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
         attention: prAttention({ ...entry.pr, stackedOn: stackParent(entry, storedInventory.entries)?.pr.number ?? null },
-          { holds, effort: context.ownerForPr(entry.pr.url), since: statesSince.get(entry.pr.url.toLowerCase()) ?? {} }, attentionClock),
+          { holds, effort: context.ownerForPr(entry.pr.url), since: statesSince.get(entry.pr.url.toLowerCase()) ?? {} }, clock),
       })), refreshing: inventoryRefreshing || inventoryTargeting },
       warnings: [
         ...((await bb.storage.kv.get<string[]>("warnings")) ?? []),
@@ -5080,11 +5103,15 @@ export default async function plugin(bb: BbPluginApi) {
     const shared = (prUrl: string) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
       links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
     const entries = current.prInventory.entries;
+    const scannedPrs = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [{ repo: unit.githubRepo ?? "", pr: unit.pr }] : [])));
+    const actions = await actionRecords();
+    const lastAction = (prUrl: string) => actions.find((entry) => entry.prUrl === prUrl) ?? null;
     const rows = entries.map((entry) => {
       const effort = entry.attention?.effort ?? owner(entry.pr.url);
+      const repository = [...entries, ...scannedPrs].filter((other) => other.repo.toLowerCase() === entry.repo.toLowerCase() && other.pr.url !== entry.pr.url);
       return { effort, ...inventoryRow({ prUrl: prWorkItemKey(entry.pr.url), pr: entry.pr, authored: true, stale: entry.stale, read: null,
         reasons: entry.attention?.reasons ?? [], observation: inventory.observation(entry.pr.url), stackedOn: stackParent(entry, entries)?.pr.number ?? null,
-        ...shared(entry.pr.url) }) };
+        suggestedReviewers: suggestReviewers(entry.pr, repository.map((other) => other.pr)), lastAction: lastAction(prWorkItemKey(entry.pr.url)), ...shared(entry.pr.url) }) };
     });
     const listed = new Set(rows.map((row) => row.prUrl));
     const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
@@ -5100,13 +5127,69 @@ export default async function plugin(bb: BbPluginApi) {
       // finding it merged or closed settles it over an older checkout or roster read that still says open.
       if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;
       const effort = owner(prUrl);
-      rows.push({ effort, ...inventoryRow({ prUrl, pr, authored: false, stale: false, reasons: [], observation, stackedOn: null,
+      rows.push({ effort, ...inventoryRow({ prUrl, pr, authored: false, stale: false, reasons: [], observation, stackedOn: null, suggestedReviewers: [], lastAction: null,
         read: kept?.facts ? { title: kept.facts.title, isDraft: kept.facts.isDraft, headOid: kept.facts.headOid } : null, ...shared(prUrl) }) });
     }
     return inventoryView(rows, { checkedAt: current.prInventory.lastSuccessAt, attemptedAt: current.prInventory.lastAttemptAt,
       refreshing: current.prInventory.refreshing, rateLimitedUntil: (pollLimitedUntil ?? 0) > Date.now() ? pollLimitedUntil : null,
       warnings: current.prInventory.warnings }, only);
   }
+
+  const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge"]),
+    ok: z.boolean(), detail: z.string(), reviewers: z.array(z.string()) })).catch([]);
+  /** What each inventory action did, newest first: the last 200 clicks, refusals included. */
+  const actionRecords = async (): Promise<ActionRecord[]> => actionRecordsSchema.parse((await bb.storage.kv.get<unknown>("inventoryActions")) ?? []);
+  let recording: Promise<unknown> = Promise.resolve();
+  /** The inventory's one-click GitHub writes. Each is one click's authorization, checked again on fresh facts; see inventory-actions.ts. */
+  const inventoryActions = createInventoryActions({
+    now: Date.now,
+    listed: (prUrl) => inventory.get(prUrl) !== undefined,
+    hold: (prUrl) => prHolds.get(prUrl),
+    writer: (prUrl) => {
+      const paths = readUnits().flatMap((unit) => unit.pr && prWorkItemKey(unit.pr.url) === prWorkItemKey(prUrl) ? [unit.path] : []);
+      for (const path of [null, ...paths]) { const claimed = v2Claimed(prUrl, path); if (claimed) return `${claimed} Nothing was written.`; }
+      return [null, ...paths].some((path) => advance.reserved(prUrl, path) || (path !== null && launchingCheckouts.has(path)))
+        ? "A batch or another action owns this PR; nothing was written." : null;
+    },
+    lock: (prUrl) => {
+      const key = prWorkItemKey(prUrl);
+      if (manualPrWrites.has(key)) return null;
+      manualPrWrites.add(key);
+      return () => { manualPrWrites.delete(key); };
+    },
+    // A read-only write-through: it rechecks no Advance job, since a recheck ends by pumping queued legacy work.
+    read: async (prUrl) => {
+      const hostId = (await bb.sdk.system.config()).primaryHostId;
+      if (hostId === null) return { ok: false, error: "No primary BB host is available to read GitHub." };
+      const began = ++githubReads;
+      let result: InventoryInspection;
+      try { result = await host.call("inspectPrs", { prUrls: [prUrl] }, { hostId, signal: disposal.signal, timeoutMs: HOST_ACTION_TIMEOUT_MS }); }
+      catch (error) { return { ok: false, error: String(error).slice(0, 300) }; }
+      const pr = result.entries[0]?.pr ?? (result.closed.length ? null : undefined);
+      if (pr !== undefined) refreshes.set(prUrl, { began, pr });
+      await applyInspection(result, hostId, false);
+      recordTransitions(readUnits());
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
+      // As the inventory keeps it, which carries the ages a failed dates read left out, as the row does.
+      return pr === undefined ? { ok: false, error: result.warnings[0] ?? "GitHub did not return the PR." }
+        : { ok: true, pr: pr && withApprovalFeedback(inventory.get(prUrl)?.pr ?? pr) };
+    },
+    attention: async (pr) => prAttention({ ...pr, stackedOn: stackParent<InventoryEntry>({ repo: prTarget(pr.url)?.slug ?? "", pr }, inventory.read().entries)?.pr.number ?? null },
+      { holds: {}, effort: null, since: inventory.statesSince().get(pr.url.toLowerCase()) ?? {} }, await attentionClock()).reasons,
+    write: async (request) => {
+      const hostId = (await bb.sdk.system.config()).primaryHostId;
+      return hostId === null ? { ok: false, error: "No primary BB host is available to write to GitHub." } : writeOf(hostId)(request);
+    },
+    record: (entry) => {
+      const next = recording.then(async () => {
+        await bb.storage.kv.set("inventoryActions", [entry, ...await actionRecords()].slice(0, 200));
+        inventoryChanged();
+      });
+      recording = next.catch(() => undefined);
+      return next;
+    },
+  });
 
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     ...effortV2.handlers,
@@ -5430,6 +5513,9 @@ export default async function plugin(bb: BbPluginApi) {
       return threadEffortContext(threadId);
     },
     inventory_get: ({ attention }) => inventoryGet(attention),
+    inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
+    inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
+    inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };
       void refreshInventory();

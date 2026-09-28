@@ -37,6 +37,11 @@ export const inventoryRowSchema = z.object({
   /** The thread the work started in, and the one working on it now or last. */
   threads: z.object({ origin: threadSchema.nullable(), executor: threadSchema.nullable() }).strict(),
   managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
+  /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
+  suggestedReviewers: z.array(z.string()),
+  /** What the last inventory action on the PR did, or why it was refused. */
+  lastAction: z.object({ at: z.number(), action: z.enum(["mark-ready", "request-review", "nudge"]), ok: z.boolean(), detail: z.string(),
+    reviewers: z.array(z.string()) }).strict().nullable(),
 }).strict();
 export type InventoryRow = z.infer<typeof inventoryRowSchema>;
 const effortSchema = z.object({ id: z.string(), name: z.string() }).strict();
@@ -65,6 +70,8 @@ export type InventoryRowInput = {
   /** The thread of this PR's newest v2 attempt. */
   attemptThread: string | null;
   threads: ReadonlyMap<string, ThreadRef>;
+  suggestedReviewers: readonly string[];
+  lastAction: NonNullable<InventoryRow["lastAction"]> | null;
 };
 
 const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
@@ -98,6 +105,9 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     stale: input.stale, hold: input.hold,
     threads: { origin: thread(origin?.threadId), executor: thread(executor) },
     managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
+    suggestedReviewers: [...input.suggestedReviewers],
+    lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,
+      reviewers: input.lastAction.reviewers },
   };
 }
 
@@ -137,7 +147,8 @@ export function inventoryText(view: InventoryView, now: number): string {
       lines.push(`  ${[`${row.repo} #${row.number}`, row.title || "—", reviewers, row.status, ...steps,
         row.failure ? `read failed ${relativeTime(row.failure.at, now)}${row.failure.error ? `: ${row.failure.error}` : ""}` : `checked ${relativeTime(row.checkedAt, now)}`,
         ...row.hold ? [row.hold.reason ? `held: ${row.hold.reason}` : "held"] : [],
-        ...row.managed ? [`roster ${row.managed.effortName}${row.managed.n === null ? "" : ` #${row.managed.n}`}`] : []].join(" · ")}`);
+        ...row.managed ? [`roster ${row.managed.effortName}${row.managed.n === null ? "" : ` #${row.managed.n}`}`] : [],
+        ...row.lastAction ? [`last ${row.lastAction.action}${row.lastAction.ok ? "" : " refused"} ${relativeTime(new Date(row.lastAction.at).toISOString(), now)}`] : []].join(" · ")}`);
     }
   }
   if (view.groups.length === 0) lines.push("Nothing to show.");

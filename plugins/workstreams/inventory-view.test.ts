@@ -24,7 +24,7 @@ const threads = new Map<string, ThreadRef>([
 ]);
 const input = (number: number, extra: Partial<InventoryRowInput> = {}): InventoryRowInput => ({ prUrl: url(number), pr: pr(number), authored: true, stale: false,
   read: null, reasons: [], hold: null, observation: { checkedAt: "2026-09-28T21:00:00.000Z", failedAt: null, error: null },
-  managed: null, stackedOn: null, links: [], attemptThread: null, threads, ...extra });
+  managed: null, stackedOn: null, links: [], attemptThread: null, threads, suggestedReviewers: [], lastAction: null, ...extra });
 const META = { checkedAt: "2026-09-28T21:00:00.000Z", attemptedAt: "2026-09-28T21:00:00.000Z", refreshing: false, rateLimitedUntil: null, warnings: [] };
 const shelf = { id: "effort-shelf", name: "Shelf order" }, atlas = { id: "effort-atlas", name: "Atlas maps" };
 
