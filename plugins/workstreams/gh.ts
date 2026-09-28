@@ -67,9 +67,9 @@ export function checkConclusions(rollup: unknown): string[] {
       const record = entry as Record<string, unknown>;
       // Checks report `conclusion`; commit statuses report `state`.
       const value = record.conclusion ?? record.state;
-      return typeof value === "string" && value !== ""
-        ? [value.toUpperCase()]
-        : [];
+      if (typeof value === "string" && value !== "") return [value.toUpperCase()];
+      // A check run's conclusion stays empty until it completes: still running, not green.
+      return typeof record.status === "string" && record.status.toUpperCase() !== "COMPLETED" ? ["PENDING"] : [];
     })
     .slice(0, 100);
 }

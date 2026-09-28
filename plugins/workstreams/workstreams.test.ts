@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Pr, RawUnit } from "./contract.js";
+import { checkConclusions } from "./gh.js";
 import {
   ALL_LENSES,
   DAY_MS,
@@ -234,6 +235,16 @@ describe("unitLifecycle", () => {
         }),
       ),
     ).toBe("awaiting-review");
+  });
+
+  it("calls an approved PR with a check still running awaiting-review, because gh leaves a conclusion empty until the check completes", () => {
+    const rollup = [
+      { __typename: "CheckRun", name: "test", status: "IN_PROGRESS", conclusion: "" },
+      { __typename: "CheckRun", name: "build", status: "QUEUED", conclusion: "" },
+      { __typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "SUCCESS" },
+    ];
+    expect(checkConclusions(rollup)).toEqual(["PENDING", "PENDING", "SUCCESS"]);
+    expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", checkConclusions: checkConclusions(rollup) }) }))).toBe("awaiting-review");
   });
 
   it("calls an approved PR with no checks at all awaiting-merge, because plenty of repos run no CI and calling those permanently unmergeable would be wrong", () => {

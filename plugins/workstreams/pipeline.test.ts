@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prSchema, type Pr } from "./contract.js";
+import { checkConclusions } from "./gh.js";
 import type { Row } from "./inbox-rows.js";
 import type { BacklogEntry } from "./pr-backlog.js";
 import { activityFor, blockerFor, orderPipelineCards, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, pipelineStackGraph, primaryPipelineAction, stageFor, togglePipelineSelection } from "./pipeline.js";
@@ -135,6 +136,11 @@ describe("pipeline position and gates", () => {
     expect(noReviewer).toMatchObject({ blocker: { label: "No reviewer" }, action: { kind: "open-pr", label: "Choose reviewer" }, nextStep: "Choose a reviewer on GitHub; Advance can recheck other gates." });
     const review = pipelineCards([entry(pr(20, { reviewDecision: "REVIEW_REQUIRED", reviewRequests: ["reviewer"] }))], [], now)[0]!;
     expect(review).toMatchObject({ blocker: { label: "Awaiting review" }, action: { kind: "nudge" }, nextStep: "Nudge the requested reviewer or wait for review." });
+  });
+
+  it("keeps an approved PR out of Ready while its only check is still running", () => {
+    const running = pr(8, { checkConclusions: checkConclusions([{ __typename: "CheckRun", name: "test", status: "IN_PROGRESS", conclusion: "" }]) });
+    expect(pipelineCards([entry(running)], [], now)[0]).toMatchObject({ stage: "review", blocker: { label: "Checks pending" } });
   });
 
   it("shows requested review while thread details have not been fetched before a decision", () => {
