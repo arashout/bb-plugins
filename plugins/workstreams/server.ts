@@ -366,6 +366,8 @@ export const rpcContract = defineRpcContract({
   conversation_get: { input: z.union([z.object({ conversationId: z.string().uuid(), recoverThread: z.boolean().optional() }).strict(), z.object({ prUrls: conversationScopeSchema }).strict()]),
     output: z.object({ conversation: workConversationSchema.nullable(), scopeItems: z.array(conversationScopeItemSchema),
       batches: z.array(advanceBatchSchema), warning: z.string().nullable() }).strict() },
+  conversation_list: { input: z.object({ offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(100) }).strict(),
+    output: z.object({ items: z.array(workConversationSchema), total: z.number().int().nonnegative() }).strict() },
   conversation_open: { input: z.object({ prUrls: conversationScopeSchema, instruction: z.string().trim().min(1).max(8_000) }).strict(),
     output: z.object({ conversation: workConversationSchema, created: z.boolean(), warning: z.string().nullable() }).strict() },
   conversation_propose: { input: z.object({ conversationId: z.string().uuid(), expectedRevision: z.number().int().nonnegative(),
@@ -3705,7 +3707,7 @@ export default async function plugin(bb: BbPluginApi) {
       mergeState: item.pr?.mergeStateStatus ?? null,
       approvalFeedback: item.pr?.approvalFeedback ?? null,
     }));
-    const { record, created } = conversations.create(scope, projectId);
+    const { record, created } = conversations.create(scope, projectId, instruction);
     if (!created) {
       const recovered = await recoverConversation(record);
       return { conversation: recovered, created: false, warning: await conversationWarning(recovered) };
@@ -4140,6 +4142,7 @@ export default async function plugin(bb: BbPluginApi) {
     advance_preview: ({ prUrls }) => advance.preview(prUrls),
     advance_start: ({ token }) => advance.start(token),
     conversation_get: (input) => conversationGet(input),
+    conversation_list: ({ offset, limit }) => conversations.list(offset, limit),
     conversation_open: ({ prUrls, instruction }) => conversationOpen(prUrls, instruction),
     conversation_propose: (input) => conversationPropose(input),
     conversation_preview: ({ conversationId }) => conversationPreview(conversationId),

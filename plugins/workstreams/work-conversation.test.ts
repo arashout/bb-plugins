@@ -43,4 +43,37 @@ describe("work conversation scope", () => {
     expect(store.get(record.id)?.threadId).toBe("thr-conversation");
     db.close();
   });
+
+  it("lists saved conversations by creation time with stable pages and preserves the original instruction", () => {
+    const db = new Database(":memory:");
+    for (const migration of WORK_CONVERSATION_MIGRATIONS) db.exec(migration);
+    let clock = 100;
+    const store = createWorkConversationStore(db, () => clock);
+    const oldest = store.create([first], "project-a", "Review the first PR.").record;
+    clock = 200;
+    const newest = store.create([second], "project-b", "Review the second PR.").record;
+    const tied = store.create(["https://github.com/example/widget/pull/56"], "project-c", "Review the third PR.").record;
+    expect(store.create([first], "project-other", "A later instruction.")).toEqual({ record: oldest, created: false });
+    clock = 300;
+    store.update({ ...oldest, threadId: "thr-existing" }, oldest.revision);
+    const sameTime = [newest, tied].sort((a, b) => a.id.localeCompare(b.id));
+    expect(store.list(0, 1)).toEqual({ items: [sameTime[0]], total: 3 });
+    expect(store.list(1, 1)).toEqual({ items: [sameTime[1]], total: 3 });
+    expect(store.list(2, 1)).toEqual({ items: [store.get(oldest.id)], total: 3 });
+    expect(store.list(3, 1)).toEqual({ items: [], total: 3 });
+    db.close();
+  });
+
+  it("reads old saved records with an empty initial instruction", () => {
+    const db = new Database(":memory:");
+    for (const migration of WORK_CONVERSATION_MIGRATIONS) db.exec(migration);
+    const store = createWorkConversationStore(db);
+    const record = store.create([first], "project-example").record;
+    const oldBody = { ...record } as Record<string, unknown>;
+    delete oldBody.instruction;
+    db.prepare("UPDATE work_conversations SET body = ? WHERE id = ?").run(JSON.stringify(oldBody), record.id);
+    expect(store.get(record.id)?.instruction).toBe("");
+    expect(store.list(0, 10).items[0]?.instruction).toBe("");
+    db.close();
+  });
 });

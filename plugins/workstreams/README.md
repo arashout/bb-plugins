@@ -2,7 +2,8 @@
 
 Workstreams connects git checkouts that belong to the same ticket, even across
 repositories. Its Map groups tickets into efforts, programs, and domains when
-the evidence supports those levels. Its Pipeline places pull requests and
+the evidence supports those levels. Its Work view follows saved planning
+conversations and preparation runs. Its Pipeline places pull requests and
 checkout work in six stages. The legacy Board groups checkouts by next action
 or effort.
 
@@ -89,8 +90,8 @@ automatic dispatch enabled.
 
 Workstreams combines scanned checkouts, GitHub pull request inventory, and
 thread links into work context. Explicit effort membership for a ticket, pull
-request, or checkout path takes precedence over inferred grouping. Map and
-Pipeline read the resulting board without starting threads.
+request, or checkout path takes precedence over inferred grouping. Map,
+Pipeline, and Work read the resulting board without starting threads.
 
 ```mermaid
 flowchart LR
@@ -100,6 +101,8 @@ flowchart LR
   members["Explicit effort membership: ticket, PR URL, checkout path"] --> context
   context --> map["Map: efforts, programs, domains"]
   context --> pipeline["Pipeline: stages, cards, actions"]
+  context --> work["Work: requests, current facts, execution results"]
+  requests["Saved conversations and preparation runs"] --> work
   change["Change effort from a card"] --> members
 ```
 
@@ -145,6 +148,15 @@ implemented.
 
 ## Use the views
 
+- **Work:** Follow saved planning conversations and preparation runs in a
+  vertical list. Expand a request to inspect its exact PR scope, current
+  facts, and execution history. Working, waiting, results to inspect, and
+  merge candidates remain distinct. A completed thread does not establish
+  merge readiness. Plan selected work through the existing conversation
+  flow, or review a preparation preview before starting workers. Opening
+  Work does not start agents. This view uses the existing scheduler; it does
+  not automatically authorize another preparation attempt after a result
+  needs inspection. Pipeline and Map remain available alongside it.
 - **Pipeline:** Track each open pull request once across **Build**, **Review**,
   **Feedback**, **Ready**, **Merged**, and **Released**. A draft stays in Build,
   even when its checks fail. Switch between stage columns and effort swimlanes;

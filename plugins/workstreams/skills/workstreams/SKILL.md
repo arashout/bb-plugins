@@ -426,6 +426,20 @@ that thread has newer activity.
 
 ## Views
 
+**Work** follows saved planning conversations and preparation runs in a
+vertical list, alongside Map and Pipeline. It preserves each conversation's
+original instruction and PR scope, shows current PR facts separately from
+attempt results, and links to the planning and worker threads. Opening the
+view does not start agents. Use its selection to plan work or review an
+existing preparation preview. Preparation still uses the existing scheduler;
+this view does not grant ongoing permission for new repair attempts.
+
+List saved conversations with `conversation_list` using
+`{"offset":0,"limit":50}`. The read-only result contains `items` and `total`;
+increase the offset to read later pages. A page accepts at most 100 records.
+Older conversations without a saved initial instruction return an empty
+instruction; their thread and scope remain unchanged.
+
 The **Effort** control above a thread's composer assigns the thread to an
 effort before it has a PR. Confirmed, unassigned PR work inherits that effort
 from exact checkout links, recorded actions, or explicit PR links. Title and

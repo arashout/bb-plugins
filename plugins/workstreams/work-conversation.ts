@@ -14,7 +14,7 @@ export const conversationProposalSchema = z.object({
 }).strict();
 export const workConversationSchema = z.object({
   id: z.string().uuid(), scopePrUrls: conversationScopeSchema, threadId: z.string().nullable(),
-  projectId: z.string(), revision: z.number().int().nonnegative(),
+  projectId: z.string(), instruction: z.string().max(8_000).default(""), revision: z.number().int().nonnegative(),
   proposal: conversationProposalSchema.nullable(), batchIds: z.array(z.string().uuid()),
   createdAt: z.number(), updatedAt: z.number(),
 }).strict();
@@ -78,11 +78,17 @@ export function createWorkConversationStore(db: RunDb, now = Date.now) {
   };
   return {
     get, byScope, update,
-    create(scope: string[], projectId: string): { record: WorkConversation; created: boolean } {
+    list(offset: number, limit: number): { items: WorkConversation[]; total: number } {
+      const total = (db.prepare("SELECT COUNT(*) AS count FROM work_conversations").get() as { count: number }).count;
+      const rows = db.prepare("SELECT body FROM work_conversations ORDER BY json_extract(body, '$.createdAt') DESC, id ASC LIMIT ? OFFSET ?")
+        .all(limit, offset) as { body: string }[];
+      return { items: rows.map((row) => parse(row)!), total };
+    },
+    create(scope: string[], projectId: string, instruction = ""): { record: WorkConversation; created: boolean } {
       const existing = byScope(scope);
       if (existing) return { record: existing, created: false };
       const record = workConversationSchema.parse({ id: randomUUID(), scopePrUrls: scope, threadId: null,
-        projectId, revision: 0, proposal: null, batchIds: [], createdAt: now(), updatedAt: now() });
+        projectId, instruction, revision: 0, proposal: null, batchIds: [], createdAt: now(), updatedAt: now() });
       try { db.prepare("INSERT INTO work_conversations (id, scope_key, revision, body) VALUES (?, ?, ?, ?)")
         .run(record.id, scopeKey(scope), 0, JSON.stringify(record)); }
       catch (error) {

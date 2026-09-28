@@ -51,7 +51,7 @@ const MAP_KEYS: [string, string][] = [
 ];
 
 const BOTH_KEYS: [string, string][] = [
-  ["v", "Switch between Map and Board"],
+  ["v", "Cycle through Map, Pipeline, and Work"],
   ["?", "Open this panel"],
 ];
 
@@ -154,7 +154,7 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <Pairs rows={BOARD_KEYS} mono />
         <p className="pt-1 text-foreground">Map</p>
         <Pairs rows={MAP_KEYS} mono />
-        <p className="pt-1 text-foreground">Both</p>
+        <p className="pt-1 text-foreground">All views</p>
         <Pairs rows={BOTH_KEYS} mono />
       </Section>
 

@@ -22,6 +22,7 @@ import { EASE_CSS } from "./layout";
 import { MapView } from "./map";
 import { InboxBoard } from "./inbox";
 import { PipelineView } from "./pipeline-view";
+import { WorkView } from "./work-view";
 import { countApprovedOpenPrs } from "./approval-filter";
 import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
@@ -223,7 +224,7 @@ function Warnings({ warnings }: { warnings: string[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// The page: one fetch, two views of it.
+// The page: one fetch, three primary views of it.
 // ---------------------------------------------------------------------------
 
 /**
@@ -233,6 +234,7 @@ function Warnings({ warnings }: { warnings: string[] }) {
 const VIEWS = [
   { id: "map", title: "Map", icon: "GridView" },
   { id: "pipeline", title: "Pipeline", icon: "Columns2" },
+  { id: "work", title: "Work", icon: "List" },
 ] as const;
 
 /** Typing in a field is never a view switch. */
@@ -334,7 +336,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.clearTimeout(timer);
   }, [view]);
 
-  // `V` toggles Map and Pipeline from anywhere on the page. The Map's own keys are
+  // `V` cycles Map, Pipeline, and Work from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
   // `?` opens How this works from any view.
   useEffect(() => {
@@ -343,7 +345,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
       event.preventDefault();
       if (event.key === "?") openHow();
-      else navigate.toPluginPanel("board", { subPath: view === "map" ? "pipeline" : "map" });
+      else navigate.toPluginPanel("board", { subPath: view === "map" ? "pipeline" : view === "pipeline" ? "work" : "map" });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -353,6 +355,9 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     id === "pipeline" ? (
       board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
         <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />
+    ) : id === "work" ? (
+      board === null ? <div className="p-4"><Notice>Loading work…</Notice></div> :
+        <WorkView board={board} now={now} onPipeline={() => navigate.toPluginPanel("board", { subPath: "pipeline" })} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} />
     ) : id === "board" ? (
       board === null ? (
         <div className="p-4">
@@ -381,8 +386,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   return (
     <div className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
-      {view === "pipeline" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
-        {/* Map, Pipeline, and the legacy Board share one fetch. */}
+      {view === "pipeline" || view === "work" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
+        {/* Map, Pipeline, Work, and the legacy Board share one fetch. */}
         <div role="tablist" aria-label="Workstreams views" className="flex shrink-0 items-center gap-3">
           {VIEWS.map((entry) => (
             <button
@@ -390,7 +395,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
               type="button"
               role="tab"
               aria-selected={view === entry.id}
-              title={`${entry.title} (V toggles)`}
+              title={`${entry.title} (V cycles Map, Pipeline, and Work)`}
               onClick={() => navigate.toPluginPanel("board", { subPath: entry.id })}
               className={cn(
                 "text-xs transition-colors duration-150",
@@ -455,7 +460,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(["map", "pipeline", "board"] as const).map((id) =>
+        {(["map", "pipeline", "work", "board"] as const).map((id) =>
           id === view || id === leaving ? (
             <ViewLayer key={id} leaving={id !== view}>
               {render(id)}

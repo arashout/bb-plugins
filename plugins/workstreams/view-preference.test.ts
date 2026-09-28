@@ -7,6 +7,7 @@ describe("Workstreams view preference", () => {
   it("keeps explicit view links independent of the remembered view", () => {
     expect(viewFromSubPath("map")).toBe("map");
     expect(viewFromSubPath("pipeline/details")).toBe("pipeline");
+    expect(viewFromSubPath("work/details")).toBe("work");
     expect(viewFromSubPath("board/details")).toBe("board");
     expect(viewFromSubPath("board-v2/details")).toBe("board");
     expect(viewFromSubPath("")).toBeNull();
@@ -28,6 +29,8 @@ describe("Workstreams view preference", () => {
     expect(readLastView()).toBe("board");
     storeLastView("pipeline");
     expect(readLastView()).toBe("pipeline");
+    storeLastView("work");
+    expect(readLastView()).toBe("work");
     values.set(VIEW_STORAGE_KEY, "board-v2");
     expect(readLastView()).toBe("board");
     storeLastView("map");

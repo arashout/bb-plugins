@@ -119,6 +119,7 @@ describe("work conversation server integration", () => {
     const [first, second] = await Promise.all([env.open(), env.open([...URLS].reverse())]);
     expect(first.conversation.id).toBe(second.conversation.id);
     expect(first.conversation.scopePrUrls).toEqual(URLS);
+    expect(first.conversation.instruction).toBe("Review both PRs.");
     expect(env.spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "work-conversation")).toHaveLength(1);
     expect(env.spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "rebase-worker")).toHaveLength(0);
     expect(env.calls).not.toContain("advanceWorkspace");
@@ -132,6 +133,23 @@ describe("work conversation server integration", () => {
     expect((await env.get(first.conversation.id)).warning).toContain("archived");
     expect((await env.open()).created).toBe(false);
     expect(env.spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "work-conversation")).toHaveLength(1);
+    expect((await env.open(URLS, "A different follow-up.")).conversation.instruction).toBe("Review both PRs.");
+  });
+
+  it("lists saved conversations without reading threads or starting work", async () => {
+    const env = await setup();
+    const { conversation } = await env.open();
+    const spawnCount = env.spawn.mock.calls.length;
+    const hostCalls = env.calls.length;
+    const sdkCalls = env.harness.inspection.sdk.calls.length;
+    const page = await env.rpc("conversation_list", { offset: 0, limit: 1 }) as { items: WorkConversation[]; total: number };
+    expect(page).toEqual({ items: [conversation], total: 1 });
+    expect(await env.rpc("conversation_list", { offset: 1, limit: 1 })).toEqual({ items: [], total: 1 });
+    expect(env.spawn).toHaveBeenCalledTimes(spawnCount);
+    expect(env.calls).toHaveLength(hostCalls);
+    expect(env.harness.inspection.sdk.calls).toHaveLength(sdkCalls);
+    await expect(env.rpc("conversation_list", { offset: -1, limit: 1 })).rejects.toThrow();
+    await expect(env.rpc("conversation_list", { offset: 0, limit: 101 })).rejects.toThrow();
   });
 
   it("recovers a later materialized planning thread only when explicitly requested", async () => {
