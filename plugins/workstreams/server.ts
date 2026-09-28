@@ -49,6 +49,8 @@ import { createRepoControllerService } from "./repo-controller.js";
 import { cardThreadPrompt, type CardThreadSnapshot } from "./card-thread.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
+import { DEFAULT_ATTENTION_THRESHOLDS, prAttention } from "./pr-attention.js";
+import { stackParent } from "./pr-backlog.js";
 import { pipelineCards } from "./pipeline.js";
 import { inboxRows } from "./inbox-rows.js";
 import { canonicalConversationScope, conversationExclusionSchema, conversationScopeItemSchema, conversationScopeSchema, createWorkConversationStore, validateConversationProposal, workConversationSchema, WORK_CONVERSATION_MIGRATIONS } from "./work-conversation.js";
@@ -688,6 +690,27 @@ export default async function plugin(bb: BbPluginApi) {
       description: "The most v2 worker turns that run at once. A launch whose outcome is uncertain keeps its claim but takes no slot.",
       experimental_schema: z.number().int().min(1).max(8),
       default: 2,
+    },
+    draftIdleDays: {
+      type: "number",
+      label: "Forgotten draft after (days)",
+      description: "A draft PR with no push for this many days shows as forgotten in draft. A draft with green checks and no conflict shows at once, as ready to mark ready.",
+      experimental_schema: z.number().int().min(1).max(60),
+      default: DEFAULT_ATTENTION_THRESHOLDS.draftIdleDays,
+    },
+    nudgeAfterBusinessDays: {
+      type: "number",
+      label: "Nudge reviewers after (business days)",
+      description: "A requested review with no answer for this many weekdays needs a nudge. Saturdays and Sundays don't count.",
+      experimental_schema: z.number().int().min(1).max(60),
+      default: DEFAULT_ATTENTION_THRESHOLDS.nudgeAfterBusinessDays,
+    },
+    stuckAfterDays: {
+      type: "number",
+      label: "Nudge stuck PRs after (days)",
+      description: "An approved, green, mergeable PR left unmerged, or failing checks or a conflict left standing, for this many days needs a nudge.",
+      experimental_schema: z.number().int().min(1).max(60),
+      default: DEFAULT_ATTENTION_THRESHOLDS.stuckAfterDays,
     },
   });
   const modelFor = async (role: ModelRole): Promise<ModelChoice> => {
@@ -1900,6 +1923,11 @@ export default async function plugin(bb: BbPluginApi) {
         staleness: freshest(members.map((entry) => stalenessOf(entry.pr.createdAt ?? null, Date.now()))), surfaces: [], risk: "none" };
     });
     const context = readWorkContext({ groups: [...wired, ...remoteGroups], prInventory: { entries: storedInventory.entries } }, pattern);
+    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = await settings.get();
+    const attentionAt = Date.now();
+    const attentionClock = { now: attentionAt, thresholds: { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays },
+      utcOffsetMinutes: -new Date(attentionAt).getTimezoneOffset() };
+    const holds = prHolds.list();
     const prThreadLinks: Board["prThreadLinks"] = {};
     for (const url of context.items.keys()) {
       const ids = context.directThreadIds(url).filter((id) => threadFacts.has(id) || newContextThreads.has(id))
@@ -1910,7 +1938,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (ids.length) prThreadLinks[url] = ids;
     }
     return {
-      prHolds: prHolds.list(),
+      prHolds: holds,
       efforts: established,
       prThreadLinks,
       groups: [...wired, ...remoteGroups],
@@ -1928,6 +1956,8 @@ export default async function plugin(bb: BbPluginApi) {
       scanning,
       prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
         ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
+        attention: prAttention({ ...entry.pr, stackedOn: stackParent(entry, storedInventory.entries)?.pr.number ?? null },
+          { holds, effort: context.ownerForPr(entry.pr.url), since: {} }, attentionClock),
       })), refreshing: inventoryRefreshing || inventoryTargeting },
       warnings: [
         ...((await bb.storage.kv.get<string[]>("warnings")) ?? []),

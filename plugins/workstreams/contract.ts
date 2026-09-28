@@ -5,6 +5,7 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema, checkoutInspectionInputSchema, checkoutInspectionSchema } from "./advance-contract.js";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
+import { prAttentionSchema } from "./pr-attention.js";
 
 /**
  * GitHub's authoritative "can this merge right now" signal
@@ -162,7 +163,9 @@ export const inventoryInspectionSchema = z.object({
 }).strict();
 export const inventoryBoardSchema = z.object({
   owners: z.array(z.string()),
-  entries: z.array(inventoryEntrySchema.extend({ stale: z.boolean(), effortKey: z.string().optional(), effortName: z.string().optional() })),
+  entries: z.array(inventoryEntrySchema.extend({ stale: z.boolean(), effortKey: z.string().optional(), effortName: z.string().optional(),
+    /** What the PR waits on, who acts, and for how long; absent on a board built before attention existed. */
+    attention: prAttentionSchema.optional() })),
   complete: z.boolean(),
   lastSuccessAt: z.string().nullable(),
   lastAttemptAt: z.string().nullable(),

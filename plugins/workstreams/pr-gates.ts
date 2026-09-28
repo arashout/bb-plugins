@@ -28,33 +28,59 @@ export type GateInput = {
   reviewers: Pick<Pr, "reviewRequests" | "latestReviews"> | null;
 };
 
+type MergeFacts = { mergeable: string | null; mergeStateStatus: string };
+type ReviewerFacts<T> = { reviewRequests: readonly string[]; latestReviews: readonly T[] };
+
+/** A conflict GitHub reported; mergeability it hasn't computed yet is not one. */
+export function conflicted(facts: MergeFacts): boolean {
+  return facts.mergeable === "CONFLICTING" || facts.mergeStateStatus === "DIRTY";
+}
+
+/** GitHub would merge this now; null while it is still computing. */
+export function mergeClean(facts: MergeFacts): boolean | null {
+  return facts.mergeable === "UNKNOWN" || facts.mergeStateStatus === "UNKNOWN" ? null :
+    facts.mergeable === "MERGEABLE" && ["CLEAN", "HAS_HOOKS"].includes(facts.mergeStateStatus);
+}
+
+/** Someone was asked to review, or reviewed. gh's latestReviews carries no commit, so any submitted review counts as engagement. */
+export function reviewEngaged(reviewers: ReviewerFacts<{ state: string }>): boolean {
+  return reviewers.reviewRequests.length > 0 || reviewers.latestReviews.some((review) => review.state !== "PENDING");
+}
+
+/** GitHub no longer asks for changes, or the author's verified follow-up answers them on a newer head. */
+export function changesAddressed(facts: { reviewDecision: string | null; reviewFollowupPosted?: boolean }): boolean {
+  return facts.reviewDecision !== "CHANGES_REQUESTED" || facts.reviewFollowupPosted === true;
+}
+
+/** Reviewers who requested changes or had their review dismissed, and haven't been asked again. */
+export function awaitingRerequest<T extends { login: string; state: string }>(reviewers: ReviewerFacts<T>): T[] {
+  const requested = new Set(reviewers.reviewRequests.map((login) => login.toLowerCase()));
+  return reviewers.latestReviews.filter((review) =>
+    ["CHANGES_REQUESTED", "DISMISSED"].includes(review.state) && !requested.has(review.login.toLowerCase()));
+}
+
 export function prGates({ facts, observedAt, now, held, feedback, reviewers }: GateInput): Gates {
   const approved = facts.reviewDecision === "APPROVED";
-  const requested = new Set(reviewers?.reviewRequests.map((login) => login.toLowerCase()));
   const feedbackState = feedbackVerificationState(facts.approvalFeedback, facts.headOid || null, feedback);
   return {
     open: facts.state === "OPEN",
     unheld: !held,
     fresh: now - observedAt <= FRESH_MS,
     "not-fork": !facts.isCrossRepository,
-    "no-conflict": facts.mergeable !== "CONFLICTING" && facts.mergeStateStatus !== "DIRTY",
+    "no-conflict": !conflicted(facts),
     "base-current": facts.mergeStateStatus !== "BEHIND",
     // Unknown results wait like pending ones; only a known failure asks for a check fix.
     "checks-settled": facts.checks === "passed" || facts.checks === "failed",
     "checks-green": facts.checks === "passed",
     "threads-resolved": facts.unresolvedThreads === 0 && facts.threadsComplete,
     "feedback-verified": feedbackState === "unknown" ? null : feedbackState === "none" || feedbackState === "verified",
-    "changes-addressed": facts.reviewDecision !== "CHANGES_REQUESTED" || facts.reviewFollowupPosted === true,
-    "rereview-requested": approved || (reviewers === null ? null : reviewers.latestReviews.every((review) =>
-      !["CHANGES_REQUESTED", "DISMISSED"].includes(review.state) || requested.has(review.login.toLowerCase()))),
-    // gh's latestReviews carries no commit, so any submitted review counts as engagement.
-    "review-requested": approved || (reviewers === null ? null :
-      reviewers.reviewRequests.length > 0 || reviewers.latestReviews.some((review) => review.state !== "PENDING")),
+    "changes-addressed": changesAddressed(facts),
+    "rereview-requested": approved || (reviewers === null ? null : awaitingRerequest(reviewers).length === 0),
+    "review-requested": approved || (reviewers === null ? null : reviewEngaged(reviewers)),
     approved,
     "not-draft": !facts.isDraft,
     "parent-merged": facts.basePrNumber === null,
-    "merge-clean": facts.mergeable === "UNKNOWN" || facts.mergeStateStatus === "UNKNOWN" ? null :
-      facts.mergeable === "MERGEABLE" && ["CLEAN", "HAS_HOOKS"].includes(facts.mergeStateStatus),
+    "merge-clean": mergeClean(facts),
   };
 }
 

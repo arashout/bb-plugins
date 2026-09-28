@@ -18,6 +18,14 @@ export type BacklogRow = BacklogEntry & {
   hold?: PrHold | null; group: BacklogGroup; lifecycle: Lifecycle; section: InboxSection; verb: string; action: PrimaryAction | null; local: Row | null;
   parent: { repo: string; pr: Pr } | null;
 };
+/** The open PR an entry is stacked on: another in its repository whose head branch is the entry's base. */
+export function stackParent<T extends { repo: string; pr: Pick<Pr, "number" | "baseRefName" | "headRefName"> }>(entry: T, open: readonly T[]): T | null {
+  const { pr } = entry;
+  return pr.baseRefName === null ? null : open.find((candidate) =>
+    candidate.repo.toLowerCase() === entry.repo.toLowerCase() && candidate.pr.number !== pr.number && candidate.pr.headRefName === pr.baseRefName,
+  ) ?? null;
+}
+
 /** Inventory owns membership and remote facts; a real checkout only adds local context. */
 export function prBacklog(entries: readonly BacklogEntry[], locals: readonly Row[], now: number, holds: PrHolds = {}): BacklogRow[] {
   // A rebase in any checkout must not disappear behind a second clean checkout.
@@ -30,9 +38,7 @@ export function prBacklog(entries: readonly BacklogEntry[], locals: readonly Row
     const { pr } = entry;
     const hold = prHoldFor(pr.url, holds);
     const original = items.get(prWorkItemKey(pr.url))?.locals[0] ?? null;
-    const parent = pr.baseRefName === null ? null : unique.find((candidate) =>
-      candidate.repo.toLowerCase() === entry.repo.toLowerCase() && candidate.pr.number !== pr.number && candidate.pr.headRefName === pr.baseRefName,
-    ) ?? null;
+    const parent = stackParent(entry, unique);
     const lifecycle = original === null ? prLifecycle(pr) : unitLifecycle({ ...original.unit, pr });
     const stack = parent === null ? original?.unit.stack ?? null : { blockedBelow: parent.pr.number };
     const facts = { ticket: original?.unit.ticket ?? null, pr, lifecycle, stack, rebasing: original?.unit.rebasing };
