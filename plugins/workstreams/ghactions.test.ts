@@ -146,7 +146,7 @@ describe("readLiveMerge", () => {
   });
 
   it("shows a mixed approval note even after its inline thread is resolved and code moves on", async () => {
-    const body = "The inline change is good. Also update the member-facing copy before merge.";
+    const body = "The inline change is good. Also update the reader-facing copy before merge.";
     const run = fakeGh((args) => {
       if (args[1] === "view") return { ok: true, stdout: JSON.stringify(view) };
       if (args[1] === "list") return { ok: true, stdout: "[]" };
@@ -219,8 +219,8 @@ describe("readReviewThreads", () => {
     expect(await read({ ...pr, commits: { nodes: [{ commit: { oid: pr.headRefOid, committedDate: "2026-09-18T16:00:00Z" } }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });
     expect(await read({ ...pr, comments: { nodes: [{ author: { login: "other" }, createdAt: "2026-09-25T02:00:23Z", body: "PTAL @shehabPH" }] } })).toMatchObject({ ok: true, reviewFollowupPosted: false });
   });
-  it("treats #2846-style approval text as followed up when its own threads resolve on a later head", async () => {
-    const approval = { id: "approval-2846", state: "APPROVED", body: "Two member-facing points to fix before merge.", author: { login: "reviewer" }, submittedAt: "2026-09-22T18:11:52Z", commit: { oid: "a".repeat(40) } };
+  it("treats #412-style approval text as followed up when its own threads resolve on a later head", async () => {
+    const approval = { id: "approval-412", state: "APPROVED", body: "Two reader-facing points to fix before merge.", author: { login: "reviewer" }, submittedAt: "2026-09-22T18:11:52Z", commit: { oid: "a".repeat(40) } };
     const pullRequest = {
       headRefOid: "b".repeat(40),
       reviews: { pageInfo: { hasPreviousPage: false }, nodes: [approval] },
