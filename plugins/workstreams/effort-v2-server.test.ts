@@ -945,6 +945,52 @@ describe("effort instructions", () => {
     });
   });
 
+  describe("acknowledgment parts, the last command, and the contract", () => {
+    it("keeps the newest command with the surface it came from, and a replayed request changes neither its result nor the last command", async () => {
+      const env = await instructed();
+      expect((await env.roster(env.effort.id)).lastCommand).toBeNull();
+      const first = await env.admit("move 1-3 forward", { source: "banner", requestId: "banner-1" });
+      const expected = { requestId: "banner-1", text: "move 1-3 forward", origin: "banner", at: expect.any(Number), revision: 1, snapshotId: env.first.snapshotId, result: first };
+      expect((await env.roster(env.effort.id)).lastCommand).toEqual(expected);
+      expect(await env.command("move 4 forward", { requestId: "banner-1" })).toEqual(first);
+      expect((await env.roster(env.effort.id)).lastCommand).toEqual(expected);
+      await env.admit("hold 2");
+      expect((await env.roster(env.effort.id)).lastCommand).toMatchObject({ text: "hold 2", origin: "panel", revision: 1 });
+    });
+
+    it("serves the criteria the rollup is written from, from the same contract", async () => {
+      const env = await instructed();
+      await env.admit("move 1-3 forward");
+      await env.admit("done when 2: the follow-up link opens its catalog entry");
+      const roster = await env.roster(env.effort.id);
+      const c1 = roster.contract!.criteria.find((item) => item.id === "c1")!;
+      expect(c1).toMatchObject({ source: "user", label: "the follow-up link opens its catalog entry", status: "missing", affected: [{ target: env.first.rows[1]!.target, n: 2 }] });
+      expect(roster.rollup![2]).toContain(`c1: ${c1.next!.action} · ${c1.next!.owner} · wake: ${c1.next!.wake}`);
+      expect(roster.contract).toMatchObject({ outcomeValidated: false, completed: false });
+    });
+
+    it("names where each row's next step runs and why, from a launch the dry run planned for a step the command leaves as it was", async () => {
+      const env = await instructed("Catalog follow-ups", github({ [catalog96]: () => facts(catalog96, { checks: "failed" }) }));
+      const n = env.n(catalog96);
+      await env.admit(`move ${n} forward`);
+      await env.admit(`recheck ${n}`);
+      // The reconciler's dry-run launch pass read the checkouts and planned a new worker.
+      const row = env.work.row(catalog96)!;
+      const reason = "the only catalog thread is busy on #95";
+      env.work.commit({ effortId: env.effort.id, baseRevision: env.work.lastRevision(env.effort.id), source: "launch", instruction: null, journal: null, rows: [{ target: catalog96,
+        expectedRevision: row.revision, phase: row.phase, dueAt: null, body: { ...row.body, plan: { recipes: ["fix_failing_checks"], role: "code", launchKey: "key",
+          resource: { kind: "spawn", threadId: null, path: "/Users/reader/src/catalog-96", hostId: "host-inkwell", reason } } } }] });
+      // Adding 1 re-plans 7 from the same facts, so its planned launch stands; 1 has no place until the reconciler reads it.
+      const added = await env.admit("move 1 forward");
+      expect(added.parts).toMatchObject({ added: [{ verb: "move forward", targets: [{ target: env.first.rows[0]!.target, n: 1 }] }],
+        starting: [{ targets: [{ target: env.first.rows[0]!.target, n: 1 }], step: "read GitHub", resource: null },
+          { targets: [{ target: catalog96, n }], step: "fix_failing_checks", resource: { kind: "spawn", reason } }], merge: false });
+      // A recheck reads GitHub again, which re-plans 7, so no launch is planned for it until the next pass.
+      expect((await env.admit(`recheck ${n}`)).parts).toMatchObject({ interventions: [{ action: "recheck", release: false, targets: [{ target: catalog96, n }] }],
+        starting: [{ targets: [{ target: catalog96, n }], step: "fix_failing_checks", resource: null }] });
+    });
+  });
+
   describe("decisions", () => {
     const heads = new Map(INKWELL_ROSTER.inventory.map(({ pr }) => [pr.url, pr.headRefOid!]));
     const draft = { isDraft: true, reviewDecision: null };

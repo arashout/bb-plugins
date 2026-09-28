@@ -84,7 +84,7 @@ describe("effort roster rows", () => {
     const targets = [first!, second!, third!, fourth!];
     const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
-      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, decisions: [] } });
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, contract: null, decisions: [] } });
     // Details that differ only in each PR's own facts label the issue by its cause; a detail every PR shares labels it.
     expect(result.issues).toEqual([{ cause: "ci-infrastructure", label: "ci-infrastructure", numbers: [1, 3] },
       { cause: "report-unrepairable", label: unrepairable, numbers: [2, 4] }]);
@@ -186,7 +186,7 @@ describe("roster presentation facts", () => {
     return effortRoster({ effort: effort(targets), redirectedFrom: null, sources, execution: { mode: "v2", revision: 1 }, v2Execution: "dry-run",
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
       v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), claims: new Map((options.claims ?? []).map((item) => [item.target, item])), active: null,
-        rollup: null, decisions: [], scope: { revision: 1, include: targets.map((target, index) => ({ target, n: index + 1, outsideMembership: false, work: [], effects: [], reviewers: [],
+        rollup: null, contract: null, decisions: [], scope: { revision: 1, include: targets.map((target, index) => ({ target, n: index + 1, outsideMembership: false, work: [], effects: [], reviewers: [],
           addedInRevision: 1 })), exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] } } });
   }
 

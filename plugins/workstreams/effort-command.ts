@@ -85,12 +85,51 @@ export type CommandContext = {
   ownerOf(target: string): { effortId: string; name: string } | null;
 };
 export type CommandTarget = { target: string; n: number | null };
-export type Intervention = CommandTarget & { action: "stop" | "retry" | "refresh" | "recheck" | "reset"; release: boolean };
+const INTERVENTIONS = ["refresh", "recheck", "reset", "stop", "retry"] as const;
+export type Intervention = CommandTarget & { action: (typeof INTERVENTIONS)[number]; release: boolean };
 export type DecisionAnswer = { decision: number } & ({ option: string } | { numbers: number[] } | { text: string });
+const targetsSchema = z.array(z.object({ target: z.string(), n }).strict());
+/**
+ * The acknowledgment as parts, for a surface that draws it: the text lines say the same for the thread and the CLI. `kept` rows a range
+ * reached were already included and keep their effects; `stillIncluded` rows weren't named; `leftAlone` rows are out for this instruction
+ * only; `held` rows are skipped until released, whatever the instruction. `starting` is each row's next step and where it would run.
+ */
+export const ackPartsSchema = z.object({
+  added: z.array(z.object({ verb: z.string(), targets: targetsSchema }).strict()), kept: targetsSchema, stillIncluded: targetsSchema, leftAlone: targetsSchema,
+  held: targetsSchema, holds: z.array(z.object({ targets: targetsSchema, reason: z.string() }).strict()), released: targetsSchema, superseded: targetsSchema,
+  dropped: targetsSchema, effects: z.array(z.object({ targets: targetsSchema, effects: z.array(z.enum(EFFECTS)) }).strict()),
+  /** What no row this command added may do: a lifecycle effect it didn't grant, or one a narrowing took off. */
+  notGranted: z.array(z.enum(EFFECTS)),
+  interventions: z.array(z.object({ action: z.enum(INTERVENTIONS), release: z.boolean(), targets: targetsSchema }).strict()),
+  answers: z.array(z.object({ n: z.number().int().positive(), answer: z.string() }).strict()),
+  starting: z.array(z.object({ targets: targetsSchema, step: z.string(), resource: z.object({ kind: z.string(), reason: z.string().nullable() }).strict().nullable() }).strict()),
+  /** A command never merges: merge has its own fresh preview. */
+  merge: z.literal(false),
+}).strict();
+export type AckParts = z.infer<typeof ackPartsSchema>;
+/** A command that answers only: its parts are its answers and what they start. */
+export const NO_PARTS: Omit<AckParts, "answers" | "starting"> = { added: [], kept: [], stillIncluded: [], leftAlone: [], held: [], holds: [], released: [],
+  superseded: [], dropped: [], effects: [], notGranted: [], interventions: [], merge: false };
+/** What a command or an answer returns to the surface that sent it. */
+export const effortCommandResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("clarify"), message: z.string(), normalized: z.string().nullable() }),
+  z.object({ kind: z.literal("admit"), normalized: z.string(), acknowledgment: z.array(z.string()),
+    /** Absent from a result journaled before parts existed. */
+    parts: ackPartsSchema.optional(),
+    /** Outcome, Validated, Still needed, and Needs a decision; null with no active instruction. */
+    rollup: z.array(z.string()).nullable(),
+    /** The active instruction's revision after the command. */
+    revision: z.number().nullable(),
+    /** Ready rows whose fresh merge preview the surface opens; the command grants no merge. */
+    mergePreviews: z.array(z.object({ target: z.string(), n: z.number().nullable() })) }),
+]);
+export type EffortCommandResult = z.infer<typeof effortCommandResultSchema>;
 export type CommandResult =
   | { kind: "clarify"; message: string; normalized: string | null }
   | {
     kind: "admit"; normalized: string; acknowledgment: string[];
+    /** The acknowledgment as parts, less the answers and next steps its admission adds. */
+    parts: Omit<AckParts, "answers" | "starting">;
     /** The next instruction revision, or null when the command leaves the instruction as it was. */
     instruction: InstructionScope | null;
     cancel: boolean;
@@ -657,14 +696,12 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
   // What a range reached and left as it was, unless another clause in the command changed it.
   const keptAsIs = unchanged.filter((item) => inScope(item) && !addedTargets.some((other) => other.target === item.target));
   const stillOut = leftAlone.filter((item) => !inScope(item));
+  const stillIncluded = revised && prev ? prev.include.filter((grant) => inScope(grant) && ![...addedTargets, ...unchanged].some((item) => item.target === grant.target)) : [];
   const lines = [
     cancel ? `Cancelled instruction r${prev!.revision}. Running turns finish; nothing new starts.`
       : revised ? `Instruction r${revision} · ${next.include.length} PRs · stops at Ready · reports ${REPORT_LABEL[next.reportMode]}` : null,
     ...addedBy.map(([verb, refs]) => `Added: ${formatTargets(refs)} (${verb})`),
-    revised && prev ? (() => {
-      const kept = prev.include.filter((grant) => inScope(grant) && ![...addedTargets, ...unchanged].some((item) => item.target === grant.target));
-      return kept.length ? `Still included: ${formatTargets(kept)}` : null;
-    })() : null,
+    stillIncluded.length ? `Still included: ${formatTargets(stillIncluded)}` : null,
     keptAsIs.length ? `Already included, keeping their effects; name them to change them: ${formatTargets(keptAsIs)}` : null,
     stillOut.length ? `Still left alone this instruction; name them to include them: ${formatTargets(stillOut)}` : null,
     superseded.length ? `Superseded: ${formatTargets(superseded)}${draining.length ? ` (${formatTargets(draining)} ${draining.length === 1 ? "finishes its" : "finish their"} current turn first)` : ""}` : null,
@@ -692,8 +729,24 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
     postRoster ? "Post roster" : null,
     mergePreviews.length ? `Merge ${formatTargets(mergePreviews)}: open the fresh merge preview from the Ready list. This command grants no merge.` : null,
   ].filter((line): line is string => line !== null);
+  const listed = (items: readonly CommandTarget[]) => [...new Map(items.map(({ target, n: number }) => [target, { target, n: number }])).values()]
+    .sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity) || a.target.localeCompare(b.target));
+  const addedGrants = next.include.filter((grant) => addedTargets.some((item) => item.target === grant.target));
+  const parts: Omit<AckParts, "answers" | "starting"> = {
+    added: addedBy.map(([verb, refs]) => ({ verb, targets: listed(refs) })), kept: listed(keptAsIs), stillIncluded: listed(stillIncluded),
+    leftAlone: listed([...excludedHere, ...stillOut]), held: listed(held),
+    holds: [...new Set(holds.map((item) => item.reason))].map((reason) => ({ targets: listed(holds.filter((item) => item.reason === reason)), reason })),
+    released: listed(releases), superseded: listed(superseded), dropped: listed(dropped),
+    effects: revised && !cancel ? [...effectGroups.values()].map((grants) => ({ targets: listed(grants), effects: [...grants[0]!.effects] })) : [],
+    notGranted: addedGrants.length ? EFFECTS.filter((effect) => !addedGrants.some((grant) => grant.effects.includes(effect))) : [],
+    interventions: INTERVENTIONS.flatMap((action) => [false, true].flatMap((release) => {
+      const targets = interventions.filter((item) => item.action === action && item.release === release);
+      return targets.length ? [{ action, release, targets: listed(targets) }] : [];
+    })),
+    merge: false,
+  };
   return {
-    kind: "admit", normalized, acknowledgment: lines,
+    kind: "admit", normalized, acknowledgment: lines, parts,
     instruction: revised && !cancel ? { ...next, revision } : null, cancel, holds, releases, interventions, recheckLaunches, postRoster, mergePreviews, answers,
   };
 }

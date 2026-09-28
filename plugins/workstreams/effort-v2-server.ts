@@ -24,8 +24,8 @@ import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { AdvanceJob } from "./bulk-advance.js";
-import { capAcknowledgment, dryRunStopRefusal, EFFECTS, formatTargets, interpretEffortCommand, legacyRefusal, WORK_RECIPES, type CommandResult, type CommandRow,
-  type CommandTarget, type DecisionAnswer, type InstructionScope } from "./effort-command.js";
+import { capAcknowledgment, dryRunStopRefusal, EFFECTS, effortCommandResultSchema, formatTargets, interpretEffortCommand, legacyRefusal, NO_PARTS, WORK_RECIPES,
+  type AckParts, type CommandResult, type CommandRow, type CommandTarget, type DecisionAnswer, type EffortCommandResult, type InstructionScope } from "./effort-command.js";
 import { decide, PLANNED_POLL, PREPARED, RECOVERING_CAUSES, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
 import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
 import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
@@ -42,6 +42,8 @@ import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type C
 import { prGates, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor } from "./pr-holds.js";
 import { prWorkItemKey } from "./work-item-index.js";
+
+export type { EffortCommandResult } from "./effort-command.js";
 
 /** Realtime: `{ effortId, prUrl }` names the one row a refresh recomputed. */
 export const EFFORT_ROSTER_CHANGED = "effort-roster-changed";
@@ -90,17 +92,6 @@ export const effortV2PreviewSchema = z.object({
 export type EffortV2Preview = z.infer<typeof effortV2PreviewSchema>;
 const effortV2SetResultSchema = z.object({ execution: executionSchema, parentThreadId: z.string().nullable(),
   cancelled: z.array(legacyJobSchema), draining: z.array(legacyJobSchema) });
-const commandResultSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("clarify"), message: z.string(), normalized: z.string().nullable() }),
-  z.object({ kind: z.literal("admit"), normalized: z.string(), acknowledgment: z.array(z.string()),
-    /** Outcome, Validated, Still needed, and Needs a decision; null with no active instruction. */
-    rollup: z.array(z.string()).nullable(),
-    /** The active instruction's revision after the command. */
-    revision: z.number().nullable(),
-    /** Ready rows whose fresh merge preview the surface opens; the command grants no merge. */
-    mergePreviews: z.array(z.object({ target: z.string(), n: z.number().nullable() })) }),
-]);
-export type EffortCommandResult = z.infer<typeof commandResultSchema>;
 /** An open decision as a surface showed it. */
 const shownDecisionSchema = z.object({ n: z.number().int().positive(), revision: z.number().int().positive() }).strict();
 const parentContextSchema = z.object({
@@ -129,14 +120,14 @@ export const effortV2Contract = {
    */
   effort_command: { input: z.object({ effortId: z.string().min(1).max(500), snapshotId: z.string().max(100).nullable(), text: z.string().min(1).max(4_000),
     requestId: z.string().min(1).max(200), source: z.enum(["panel", "banner"]), expectedRevision: z.number().int().nonnegative().optional(),
-    decisions: z.array(shownDecisionSchema).max(1_000).optional() }).strict(), output: commandResultSchema },
+    decisions: z.array(shownDecisionSchema).max(1_000).optional() }).strict(), output: effortCommandResultSchema },
   /**
    * Answer one decision by id, as the roster showed it at `expectedRevision`: an option, the row numbers a lifecycle
    * question applies to (empty for none), or your own words. The same as `Dn …` in a command.
    */
   effort_decision_answer: { input: z.object({ decisionId: z.string().min(1).max(600), optionId: z.string().min(1).max(100).optional(),
     numbers: z.array(z.number().int().positive()).max(1_000).optional(), text: z.string().min(1).max(4_000).optional(),
-    expectedRevision: z.number().int().positive(), requestId: z.string().min(1).max(200) }).strict(), output: commandResultSchema },
+    expectedRevision: z.number().int().positive(), requestId: z.string().min(1).max(200) }).strict(), output: effortCommandResultSchema },
   /** What the composer banner shows in an effort's parent thread; null in any other thread. */
   effort_parent_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: parentContextSchema.nullable() },
 };
@@ -357,7 +348,8 @@ export type EffortV2Deps = {
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
-    | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction" | "journal" | "asked">;
+    | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction" | "journal" | "asked"
+    | "lastCommand">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
@@ -438,10 +430,13 @@ export function createEffortV2(deps: EffortV2Deps) {
     const rows = deps.work.rows(effort.id);
     if (!active && rows.length === 0) return undefined;
     const decisions = deps.work.decisions(effort.id);
+    // One contract gives the rollup and its criteria, so they can't disagree.
+    const contract = active ? rowContract(effort, active.scope, rows, sources.work, decisions, evidenceOf(rows.map((row) => row.target))) : null;
     return { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target))),
       scope: active?.scope ?? null, claims: new Map(deps.work.claims(effort.id).map((attempt) => [attempt.target, attempt])),
       active: active && { id: active.id, revision: active.revision, text: active.text, reportMode: active.scope.reportMode, outcome: active.scope.outcome },
-      rollup: active ? rowContract(effort, active.scope, rows, sources.work, decisions, evidenceOf(rows.map((row) => row.target))).rollup : null,
+      rollup: contract?.rollup ?? null,
+      contract: contract && { criteria: contract.criteria, outcomeValidated: contract.outcomeValidated, completed: contract.completed },
       decisions: decisions.map(({ id, n, revision, body }) => ({ id, n, revision, kind: body.kind, subkind: body.subkind, question: body.question, options: body.options,
         targets: body.targets.map(({ target, n: number }) => ({ target, n: number })) })) };
   }
@@ -450,7 +445,14 @@ export function createEffortV2(deps: EffortV2Deps) {
     const sources = await deps.sources();
     const read = effortRoster({ effort, redirectedFrom, sources, number: (targets) => deps.numbers(effort.id, targets, { assign: true }),
       execution: deps.execution.get(effort.id), v2Execution: await deps.launches.execution(), v2: instructionView(effort, sources) });
-    return { ...read, ...changesSince(effort.id, read.rows, since) };
+    return { ...read, lastCommand: lastCommand(effort.id), ...changesSince(effort.id, read.rows, since) };
+  }
+  /** The newest admitted command, with the revision it left active. */
+  function lastCommand(effortId: string): EffortRoster["lastCommand"] {
+    const entry = deps.work.lastCommand(effortId);
+    if (!entry) return null;
+    const result = effortCommandResultSchema.parse(entry.result);
+    return { ...entry, result, revision: result.kind === "admit" ? result.revision : null };
   }
   /**
    * The journal after `since`: each roster row's first and last phase since then, the decisions asked since that are still open,
@@ -598,6 +600,24 @@ export function createEffortV2(deps: EffortV2Deps) {
       groups.set(stepPhrase(row.step).action, [...groups.get(stepPhrase(row.step).action) ?? [], { target: row.target, n: row.body.n }]);
     return [...groups].map(([action, targets]) => `${formatTargets(targets)} ${action}`).join("; ");
   }
+  /**
+   * The same groups as `steps`, each with where its work would run and why there, once that is known: the step's own resource, or the
+   * launch a dry run already planned for a step this command leaves as it was.
+   */
+  function starting(rows: readonly PlannedRow[], written: ReadonlySet<string>): AckParts["starting"] {
+    const groups = new Map<string, AckParts["starting"][number]>();
+    for (const row of [...rows].sort((a, b) => (a.body.n ?? Infinity) - (b.body.n ?? Infinity))) {
+      const resource = row.step.resource ?? (written.has(row.target) ? null : deps.work.row(row.target)?.body.plan?.resource ?? null);
+      const place = resource && ["reuse", "spawn", "worktree", "same-thread"].includes(resource.kind)
+        ? { kind: resource.kind, reason: "reason" in resource ? resource.reason ?? null : null } : null;
+      const step = stepPhrase(row.step).action;
+      const key = JSON.stringify([step, place]);
+      const group = groups.get(key) ?? { targets: [], step, resource: place };
+      group.targets.push({ target: row.target, n: row.body.n });
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  }
   /** Recheck names exactly what keeps a PR from Ready, from the read it just took. */
   function recheckLine(item: CommandTarget, read: Awaited<ReturnType<EffortV2Deps["observe"]>>, row: PlannedRow | undefined, sources: RosterSources): string {
     const name = formatTargets([item]);
@@ -614,7 +634,7 @@ export function createEffortV2(deps: EffortV2Deps) {
   function request(effort: EstablishedEffort, requestId: string, run: () => Promise<EffortCommandResult>): Promise<EffortCommandResult> {
     return serial(effort.id, async () => {
       const replay = deps.work.command(effort.id, requestId);
-      if (replay !== null) return commandResultSchema.parse(replay);
+      if (replay !== null) return effortCommandResultSchema.parse(replay);
       if (deps.execution.get(effort.id).mode !== "v2") return refuse(legacyRefusal(effort.name));
       return run();
     });
@@ -663,7 +683,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       if (decision.revision !== input.expectedRevision) return refuse(`${name} changed since you read it; it now asks about ${formatTargets(decision.body.targets)}. Read it again, then answer.`);
       const reply = given[0]!;
       const text = `${name} ${"option" in reply ? reply.option : "numbers" in reply ? reply.numbers.join(", ") || "none" : reply.text}`;
-      return admit(effort, { kind: "admit", normalized: text, acknowledgment: [], instruction: null, cancel: false, holds: [], releases: [], interventions: [],
+      return admit(effort, { kind: "admit", normalized: text, acknowledgment: [], parts: NO_PARTS, instruction: null, cancel: false, holds: [], releases: [], interventions: [],
         recheckLaunches: false, postRoster: false, mergePreviews: [], answers: [reply] }, { requestId: input.requestId, text, source: "panel", snapshotId: null }, await deps.sources());
     });
   }
@@ -690,6 +710,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const open = deps.work.decisions(effort.id);
     const answered: DecisionWrite[] = [];
     const answerLines: string[] = [];
+    const answerParts: AckParts["answers"] = [];
     const asked = new Set<string>();
     for (const reply of result.answers) {
       const decision = open.find((item) => item.n === reply.decision);
@@ -700,6 +721,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       answered.push({ id: decision.id, n: decision.n, key: decision.key, status: "answered", expectedRevision: decision.revision,
         body: { ...decision.body, answer: applied.answer, answeredVia: input.source } });
       answerLines.push(`D${decision.n}: ${applied.answer}`);
+      answerParts.push({ n: decision.n, answer: applied.answer });
       for (const target of applied.targets) asked.add(target);
     }
     // The revision holds the command's changes and its answers together.
@@ -740,6 +762,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const after = [...decisions, ...open.filter((item) => ![...answered, ...decisions].some((other) => other.id === item.id))].filter((item) => item.status === "open");
     const answer: EffortCommandResult = {
       kind: "admit", normalized: result.normalized, revision: scope?.revision ?? null, mergePreviews: result.mergePreviews,
+      parts: { ...result.parts, answers: answerParts, starting: starting(next, new Set(writes.map((write) => prWorkItemKey(write.target)))) },
       acknowledgment: capAcknowledgment([...result.acknowledgment, ...answerLines,
         ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
         ...result.recheckLaunches ? [`Readback: ${readback.join("; ") || "no launch is unfinished"}`] : [],
@@ -751,7 +774,7 @@ export function createEffortV2(deps: EffortV2Deps) {
         source: { kind: input.source, threadId: null, eventId: null }, snapshotId: input.snapshotId, requestId: input.requestId },
       // An answered decision closes before any row asks a new one.
       decisions: [...answered, ...decisions],
-      journal: { requestId: input.requestId, text: input.text, result: answer },
+      journal: { requestId: input.requestId, text: input.text, result: answer, origin: input.source, snapshotId: input.snapshotId },
       also: () => {
         for (const item of result.holds) deps.holds.set(item.target, true, item.reason);
         for (const item of result.releases) deps.holds.set(item.target, false);

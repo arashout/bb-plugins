@@ -112,7 +112,8 @@ describe("effort instructions and rows", () => {
     const { db, work } = open();
     // folio is written with its transition before quill's stale revision throws.
     expect(() => work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: revise(1, [folio, quill]),
-      rows: [write(folio, 0, "verifying", "observe"), write(quill, 3, "verifying", "observe")], journal: { requestId: "req-1", text: "move 1, 2 forward", result: {} } }))
+      rows: [write(folio, 0, "verifying", "observe"), write(quill, 3, "verifying", "observe")],
+      journal: { requestId: "req-1", text: "move 1, 2 forward", result: {}, origin: "panel", snapshotId: null } }))
       .toThrow("changed while this command was read");
     expect(counts(db)).toEqual([0, 0, 0]);
     expect(() => work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: revise(1, [folio]), rows: [write(folio, 0, "verifying", "observe")],
@@ -124,7 +125,8 @@ describe("effort instructions and rows", () => {
     const { db, work } = open();
     const result = { kind: "admit", acknowledgment: ["Instruction r1 · 1 PRs · stops at Ready · reports changes"] };
     work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: revise(1, [folio]), rows: [write(folio, 0, "verifying", "observe")],
-      journal: { requestId: "req-1", text: "move 1 forward", result } });
+      journal: { requestId: "req-1", text: "move 1 forward", result, origin: "banner", snapshotId: "S-00000000000a" } });
+    expect(work.lastCommand("returns")).toEqual({ at: expect.any(Number), requestId: "req-1", text: "move 1 forward", origin: "banner", snapshotId: "S-00000000000a", result });
     work.commit({ effortId: "returns", baseRevision: 1, source: "archive", instruction: null, rows: [write("https://github.com/Inkwell/Folio/pull/12/", 1, "paused", "archived")], journal: null });
     expect(work.row(folio)).toMatchObject({ effortId: "returns", instructionId: "I-returns-r1", phase: "paused", revision: 2, body: { cause: "archived" } });
     expect(db.prepare(`SELECT target, row_revision AS revision, from_phase AS "from", to_phase AS "to", cause, source FROM effort_transitions ORDER BY seq`).all()).toEqual([
@@ -133,6 +135,11 @@ describe("effort instructions and rows", () => {
       { target: folio, revision: 2, from: "verifying", to: "paused", cause: "archived", source: "archive" }]);
     expect(work.command("returns", "req-1")).toEqual(result);
     expect([work.command("returns", "req-2"), work.command("gifts", "req-1")]).toEqual([null, null]);
+    // A command an earlier build journaled kept no origin or snapshot; it reads as from an unknown surface.
+    db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES ('returns', 5, 'command', ?, 'command')`)
+      .run(JSON.stringify({ requestId: "req-old", text: "hold 1", result }));
+    expect(work.lastCommand("returns")).toEqual({ at: 5, requestId: "req-old", text: "hold 1", origin: null, snapshotId: null, result });
+    expect(work.lastCommand("gifts")).toBeNull();
     expect(() => work.commit({ effortId: "returns", baseRevision: 1, source: "command", instruction: null, rows: [write(folio, 1, "waiting", "ci")], journal: null }))
       .toThrow("changed while this command was read");
   });

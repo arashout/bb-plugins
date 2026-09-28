@@ -345,6 +345,27 @@ describe("command grammar golden table", () => {
     expect(clarify("reset 8 release", ctx).message).toBe("8 has no uncertain launch to release. Send: reset 8");
   });
 
+  it("gives a surface the acknowledgment as parts that say what its text lines say", () => {
+    // Revision 3 includes 1, 2, and 8 (without push), and 8 is held.
+    const [, , rev3] = sequence(["move 1, 2 forward", "move 8 forward", "no push for 8"]);
+    const result = admit("move 1-6 forward, leave 3 alone", context({ instruction: rev3!.scope, holds: { [at(8)]: { reason: "waiting on catalog team copy", heldAt: 1 } } }));
+    const t = (...ns: number[]) => ns.map((n) => ({ target: at(n), n }));
+    expect(result.parts).toEqual({
+      added: [{ verb: "move forward", targets: t(4, 5, 6) }], kept: t(1, 2), stillIncluded: t(8), leftAlone: t(3), held: t(8), holds: [], released: [],
+      superseded: [], dropped: [],
+      effects: [{ targets: t(1, 2, 4, 5, 6), effects: DEFAULT_EFFECTS }, { targets: t(8), effects: DEFAULT_EFFECTS.filter((effect) => effect !== "push") }],
+      // move forward never grants marking ready or requesting review; merge has its own preview.
+      notGranted: ["mark-ready", "request-review"], interventions: [], merge: false,
+    });
+    expect(result.acknowledgment).toEqual(expect.arrayContaining(["Added: 4-6 (move forward)", "Still included: 8",
+      "Already included, keeping their effects; name them to change them: 1, 2", "Left alone this instruction, not a hold: 3",
+      "Held, skipped until released (a hold outlasts every instruction): 8"]));
+    const rows = admit("hold 4, 5 because waiting on copy; release 6; recheck 7; reset 8 release", context({ rows: new Map([[at(8), row({ claim: { status: "uncertain", threadId: null } })]]),
+      instruction: rev3!.scope }));
+    expect(rows.parts).toMatchObject({ holds: [{ targets: t(4, 5), reason: "waiting on copy" }], released: t(6), notGranted: [],
+      interventions: [{ action: "recheck", release: false, targets: t(7) }, { action: "reset", release: true, targets: t(8) }] });
+  });
+
   it("hold 5 then move 1..6 forward except 3 names 5 as held and skipped", () => {
     const hold = admit("hold 5");
     expect(hold.acknowledgment).toEqual(["Now held: 5"]);
@@ -356,6 +377,8 @@ describe("command grammar golden table", () => {
       "Left alone this instruction, not a hold: 3",
       "Held, skipped until released (a hold outlasts every instruction): 5",
     ]));
+    // The parts keep the two apart the same way: 5 is in the instruction and held, 3 is left alone.
+    expect(result.parts).toMatchObject({ held: [{ target: at(5), n: 5 }], leftAlone: [{ target: at(3), n: 3 }] });
   });
 
   it("fix ci N authorizes only the failing-checks recipe on N", () => {

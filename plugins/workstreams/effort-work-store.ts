@@ -465,6 +465,16 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
         AND json_extract(detail, '$.requestId') = ?`).get(effortId, requestId) as { detail: string } | undefined;
       return row ? (JSON.parse(row.detail) as { result: unknown }).result : null;
     },
+    /** The effort's newest admitted command: its request, text, the surface it came from, when, the snapshot it read, and its result. */
+    lastCommand(effortId: string): { at: number; requestId: string; text: string; origin: CommandSource["kind"] | null; snapshotId: string | null; result: unknown } | null {
+      const row = db.prepare(`SELECT at, detail FROM effort_transitions WHERE effort_id = ? AND target IS NULL AND cause = 'command' ORDER BY seq DESC LIMIT 1`)
+        .get(effortId) as { at: number; detail: string } | undefined;
+      if (!row) return null;
+      // A command journaled before its origin and snapshot were kept reads as from an unknown surface.
+      const { requestId, text, result, origin = null, snapshotId = null } = JSON.parse(row.detail) as
+        { requestId: string; text: string; result: unknown; origin?: CommandSource["kind"]; snapshotId?: string | null };
+      return { at: row.at, requestId, text, origin, snapshotId, result };
+    },
     /**
      * One command or event: a new revision or a cancellation, the rows it changed, each row's transition,
      * and the command's journal entry, all at the revisions it read. `also` runs inside the same transaction.
@@ -472,7 +482,7 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
     commit(input: { effortId: string; baseRevision: number; source: string; rows: readonly RowWrite[];
       instruction: { scope: InstructionScope; text: string; source: CommandSource; snapshotId: string | null; requestId: string } | "cancel" | null;
       decisions?: readonly DecisionWrite[];
-      journal: { requestId: string; text: string; result: unknown } | null; also?: () => void }): void {
+      journal: { requestId: string; text: string; result: unknown; origin: CommandSource["kind"]; snapshotId: string | null } | null; also?: () => void }): void {
       db.transaction(() => {
         const at = now();
         if (lastRevision(input.effortId) !== input.baseRevision) throw new StaleWriteError("The instruction changed while this command was read. Reload the roster and send it again.");

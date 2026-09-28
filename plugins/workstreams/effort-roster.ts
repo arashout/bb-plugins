@@ -10,7 +10,7 @@ import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
 import type { DispatchAttempt } from "./dispatch.js";
-import { dryRunStopRefusal, formatTargets, interventionRefusal, legacyRefusal, type CommandRow, type InstructionScope } from "./effort-command.js";
+import { dryRunStopRefusal, effortCommandResultSchema, formatTargets, interventionRefusal, legacyRefusal, type CommandRow, type InstructionScope } from "./effort-command.js";
 import { PLANNED_POLL, wakePoll } from "./effort-phase.js";
 import { recipe } from "./effort-recipes.js";
 import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
@@ -81,6 +81,11 @@ export const effortRosterSchema = z.object({
     included: z.array(z.number()), excluded: z.array(z.object({ target: z.string(), n: z.number().nullable(), reason: z.string() })) }).nullable(),
   /** Outcome, Validated, Still needed, and Needs a decision; null without an active instruction. */
   rollup: z.array(z.string()).nullable(),
+  /** The evidence contract the rollup is written from: each criterion, the rows still short of it, and what moves it next; null without an active instruction. */
+  contract: z.object({
+    criteria: z.array(z.object({ id: z.string(), source: z.enum(["gate", "ticket", "user"]), label: z.string(), status: z.enum(["satisfied", "missing", "invalidated", "blocked"]),
+      affected: z.array(z.object({ target: z.string(), n: z.number().nullable() })), next: z.object({ action: z.string(), owner: z.string(), wake: z.string() }).nullable() })),
+    outcomeValidated: z.boolean(), completed: z.boolean() }).nullable(),
   observedAt: z.number(),
   rows: z.array(rosterRowSchema),
   issues: z.array(z.object({ cause: z.string(), label: z.string(), numbers: z.array(z.number()) })),
@@ -92,6 +97,9 @@ export const effortRosterSchema = z.object({
   /** Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. */
   decisions: z.array(z.object({ id: z.string(), n: z.number(), revision: z.number(), kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(),
     question: z.string(), options: z.array(z.object({ id: z.string(), label: z.string() })), targets: z.array(z.object({ target: z.string(), n: z.number().nullable() })) })),
+  /** The newest admitted command: its text, the surface it came from (null when journaled before surfaces were kept), when, the revision after it, the snapshot it read, and its result. */
+  lastCommand: z.object({ requestId: z.string(), text: z.string(), origin: z.enum(["panel", "banner", "thread", "cli"]).nullable(), at: z.number(), revision: z.number().nullable(),
+    snapshotId: z.string().nullable(), result: effortCommandResultSchema }).nullable(),
   /** The effort's newest journal sequence: pass it back as `since` to read what changed after this roster. */
   through: z.number(),
   /**
@@ -351,7 +359,7 @@ export function effortRoster(input: {
   execution?: Execution; v2Execution?: V2Execution;
   /** The active instruction, its rows, its rollup, and its open decisions; absent for a legacy effort or a copy without them. */
   v2?: RosterInstruction & { active: Omit<NonNullable<EffortRoster["instruction"]>, "included" | "excluded"> | null; rollup: string[] | null;
-    decisions: EffortRoster["decisions"] };
+    contract: EffortRoster["contract"]; decisions: EffortRoster["decisions"] };
 }): EffortRoster {
   const { effort, sources, v2 = null } = input;
   const execution = input.execution ?? { mode: "legacy", revision: 0 };
@@ -394,10 +402,10 @@ export function effortRoster(input: {
     snapshotId: numbered.snapshotId, execution, v2Execution,
     instruction: v2?.active ? { ...v2.active, included: rows.filter((row) => row.membership === "included").map((row) => row.n),
       excluded: (v2.scope?.exclude ?? []).map(({ target, reason }) => ({ target: prWorkItemKey(target), n: numberOf.get(prWorkItemKey(target)) ?? null, reason })) } : null,
-    rollup: v2?.rollup ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
+    rollup: v2?.rollup ?? null, contract: v2?.contract ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
     suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
-    through: 0, since: null,
+    lastCommand: null, through: 0, since: null,
   };
 }
 
