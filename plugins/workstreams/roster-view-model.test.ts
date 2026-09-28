@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { interpretEffortCommand, type CommandContext } from "./effort-command.js";
 import { effortRosterSchema, type EffortRoster } from "./effort-roster.js";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures.js";
-import { ackChips, ackDetails, ackRows, ackView, clock, commandInput, composeNumber, nextWake, rosterKey, rosterView, settle, type AckParts, type RosterGroup,
+import { ANSWER_DELAY } from "./effort-v2-server.js";
+import { ackChips, ackDetails, ackRows, ackView, answerCommand, answerInput, answerKey, askCards, clock, commandInput, composeNumber, fieldAnswerInput, firstAsk, latestUndo, nextWake,
+  paneKey, rosterKey, rosterView, settle, shownCommand, UNDO_WINDOW, type AckParts, type CommandRecord, type DecisionAsk, type KeyEvent, type PaneEffect, type PaneState, type RosterGroup,
   type RosterOrder } from "./roster-view-model.js";
 
 const view = (order: RosterOrder = "number", roster: EffortRoster = ROSTER, settled = settle(roster)) =>
@@ -244,7 +246,134 @@ describe("roster command box", () => {
     expect(composeNumber("hold ", 8, true)).toBe("hold 8");
   });
 
+  it("shows a held answer as waiting only until the server journals what became of it, and this visit's newer command over an older one", () => {
+    const journaled = ROSTER.lastCommand!;
+    const held: CommandRecord = { requestId: "req-d1", text: "D1 A", origin: "panel", at: journaled.at + 60_000, revision: 4, snapshotId: journaled.snapshotId,
+      result: { kind: "pending", requestId: "req-d1", text: "D1 A", decisions: [1], until: journaled.at + 70_000 }, fresh: true };
+    expect(shownCommand(held, journaled)).toBe(held);
+    // Admitted or refused when it fell due, it is journaled under the same request: that result replaces "Waits for Undo".
+    const refused = { ...journaled, requestId: "req-d1", text: "D1 A", at: journaled.at + 71_000, result: { kind: "clarify" as const, message: "D1 changed since you read it.", normalized: null } };
+    expect(shownCommand(held, refused)).toEqual({ ...refused, fresh: true });
+    expect(ackView(shownCommand(held, refused)!, NOW).message).toBe("D1 changed since you read it.");
+    // A command this visit sent at once stays as sent; a newer one from another surface wins.
+    const admitted: CommandRecord = { ...journaled, fresh: true };
+    expect(shownCommand(admitted, journaled)).toBe(admitted);
+    expect(shownCommand({ ...admitted, requestId: "req-old", at: journaled.at - 1 }, journaled)).toEqual({ ...journaled, fresh: false });
+    expect(shownCommand(null, journaled)).toEqual({ ...journaled, fresh: false });
+  });
+
   it("puts you in the command box on /", () => {
     expect(rosterKey({ key: "/", shiftKey: false, metaKey: false, ctrlKey: false, altKey: false }, { control: false, held: false })).toEqual({ kind: "command" });
+  });
+});
+
+describe("roster decisions", () => {
+  const { asks } = askCards(ROSTER);
+  const ask = (id: string) => asks.find((item) => item.id === id) as DecisionAsk;
+  const key = (name: string): KeyEvent => ({ key: name, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false });
+  const start: PaneState = { focus: firstAsk(asks), open: null, picks: new Map(), subsets: new Map(), hint: null };
+  /** Press keys in order through the same step the pane runs, collecting what each asks the pane to do. */
+  function press(keys: string[], wide = true, state = start) {
+    const effects: (PaneEffect | null)[] = [];
+    for (const name of keys) {
+      const step = paneKey(view(), asks, state, key(name), { control: false, wide });
+      effects.push(step?.effect ?? null);
+      if (step) state = step.state;
+    }
+    return { effects, state };
+  }
+  const sends = (effects: readonly (PaneEffect | null)[]) => effects.filter((effect) => effect?.kind === "answer")
+    .map((effect) => answerCommand((effect as Extract<PaneEffect, { kind: "answer" }>).ask, (effect as Extract<PaneEffect, { kind: "answer" }>).reply));
+
+  it("offers D1's options without preselecting its recommendation, and preselects D2's recommended drafts with the reason for leaving 14 out", () => {
+    expect(asks.map((item) => [item.id, item.answer])).toEqual([["D1", "option"], ["D2", "subset"]]);
+    expect(ask("D1").options.map((option) => [option.key, option.id, option.recommended])).toEqual([["a", "A", true], ["b", "B", false]]);
+    expect(ask("D1").recommended).toEqual([]);
+    expect(ask("D2").recommended).toEqual([13, 15]);
+    expect(ask("D2").targets.find((item) => item.n === 14)).toMatchObject({ note: "TODO left in the threshold", recommended: false, repo: "atlas", number: 85 });
+    expect(start.focus).toEqual({ ask: "D1" });
+  });
+
+  it("does nothing on Enter at a product decision until you pick an option, at any width", () => {
+    const wide = press(["Enter", "Enter", "Enter"]);
+    expect(wide.effects).toEqual(Array(3).fill({ kind: "hint", text: "Pick A or B: product decisions need an explicit choice" }));
+    expect(wide.state).toMatchObject({ focus: { ask: "D1" }, picks: new Map(), hint: { id: "D1", text: "Pick A or B: product decisions need an explicit choice" } });
+    // Narrow, the first Enter opens the one-line ask, and the next still asks for an option.
+    const narrow = press(["Enter", "Enter"], false);
+    expect(narrow.effects).toEqual([null, { kind: "hint", text: "Pick A or B: product decisions need an explicit choice" }]);
+    expect(narrow.state.open).toBe("D1");
+  });
+
+  it("answers D1 with the option you picked, then accepts D2's subset on Enter, and then rests on nothing", () => {
+    const { effects, state } = press(["b", "a", "Enter", "Enter", "Enter", "Enter"]);
+    expect(sends(effects)).toEqual(["D1 A", "D2 13 15"]);
+    expect(state.focus).toBeNull();
+    // A subset you changed is the one Enter accepts; a letter picks nothing on a lifecycle ask.
+    const changed = press(["j", "a", "Enter"], true, { ...start, subsets: new Map([[answerKey(ask("D2")), [13]]]) });
+    expect(changed.state.picks.has(answerKey(ask("D2")))).toBe(false);
+    expect(sends(changed.effects)).toEqual(["D2 13"]);
+  });
+
+  it("drops a pick or a subset once its question changes, so Enter can't send it to a question you never answered", () => {
+    const picked = press(["b"]).state;
+    const withSubset = { ...picked, subsets: new Map([[answerKey(ask("D2")), [13]]]) };
+    // D1 and D2 come back at revision 2, D1 with a new question and relabelled options.
+    const revised = { ...ROSTER, decisions: ROSTER.decisions.map((decision) => ({ ...decision, revision: 2,
+      ...decision.n === 1 ? { question: "Out-of-print ISBNs: allow, block, or ask the Rare desk?", options: [...decision.options, { id: "C", label: "Ask the Rare desk", consequence: null }] } : {} })) };
+    const cards = askCards(revised).asks;
+    const step = (state: PaneState, focus: string) => paneKey(view("number", revised), cards, { ...state, focus: { ask: focus } }, key("Enter"), { control: false, wide: true });
+    expect(step(withSubset, "D1")?.effect).toEqual({ kind: "hint", text: "Pick A, B, or C: product decisions need an explicit choice" });
+    const d2 = step(withSubset, "D2")?.effect;
+    expect(d2?.kind === "answer" && answerCommand(d2.ask, d2.reply)).toBe("D2 13 15");
+    expect(d2?.kind === "answer" && answerInput(d2.ask, d2.reply, "req").expectedRevision).toBe(2);
+  });
+
+  it("asks for your words on a question asked without options, and names a worker's question for what it is", () => {
+    const worker = (options: EffortRoster["decisions"][number]["options"]): EffortRoster => ({ ...ROSTER,
+      decisions: ROSTER.decisions.map((decision) => decision.n === 1 ? { ...decision, kind: "worker-question", options, recommendation: null } : decision) });
+    const enter = (roster: EffortRoster) => {
+      const cards = askCards(roster).asks;
+      return paneKey(view("number", roster), cards, { ...start, focus: { ask: "D1" } }, key("Enter"), { control: false, wide: true })?.effect;
+    };
+    const free = worker([{ id: "text", label: "Answer in your own words", consequence: null }]);
+    expect((askCards(free).asks[0] as DecisionAsk).options).toEqual([]);
+    expect(enter(free)).toEqual({ kind: "hint", text: "D1 has no options to pick: type your answer in its field, then Enter" });
+    expect(enter(worker(ROSTER.decisions[0]!.options))).toEqual({ kind: "hint", text: "Pick A or B: worker questions need an explicit choice" });
+  });
+
+  it("sends a card's answer at the revision it showed, held for the server's Undo window", () => {
+    expect(UNDO_WINDOW).toBe(ANSWER_DELAY);
+    expect(answerInput(ask("D1"), { optionId: "A" }, "req-a")).toEqual({ decisionId: "dec-shelving-1", optionId: "A", expectedRevision: 1, requestId: "req-a", delayMs: 10_000 });
+    expect(answerCommand(ask("D2"), { numbers: [13, 15] })).toBe("D2 13 15");
+    expect(answerCommand(ask("D2"), { numbers: [] })).toBe("D2 none");
+  });
+
+  it("sends the number field through the grammar, so all but 14 marks exactly 13 and 15", () => {
+    const input = fieldAnswerInput(ROSTER, ask("D2"), " all but 14 ", "req-f");
+    expect(input).toEqual({ effortId: ROSTER.effort.id, snapshotId: ROSTER.snapshotId, text: "D2 all but 14", requestId: "req-f", source: "panel", expectedRevision: 4,
+      decisions: [{ n: 2, revision: 1 }], delayMs: 10_000 });
+    const read = interpretEffortCommand(input.text, { effortId: ROSTER.effort.id, issued: new Map(ROSTER.rows.map((row) => [row.n, row.target])), rows: new Map(), holds: {},
+      snapshot: { id: ROSTER.snapshotId!, effortId: ROSTER.effort.id, stale: false, rows: ROSTER.rows.map(({ n, target }) => ({ n, target })) }, instruction: null, lastRevision: 4,
+      decisions: [{ n: 2, options: [], targets: [13, 14, 15] }], ownerOf: () => ({ effortId: ROSTER.effort.id, name: ROSTER.effort.name }) });
+    expect(read.kind === "admit" && read.answers).toEqual([{ decision: 2, numbers: [13, 15] }]);
+  });
+
+  it("shows an answer waiting for Undo as a receipt in place of its card, and takes back the newest on u", () => {
+    const waiting = { ...ROSTER, pending: [{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000 }] };
+    const cards = askCards(waiting);
+    expect(cards.asks.map((item) => item.id)).toEqual(["D2"]);
+    expect(cards.receipts).toEqual([{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000, id: "D1", numbers: [7, 12] }]);
+    const later = { ...cards.receipts[0]!, requestId: "req-d2", id: "D2", until: NOW + 9_000 };
+    expect(latestUndo([cards.receipts[0]!, later], NOW)?.requestId).toBe("req-d2");
+    expect(latestUndo([cards.receipts[0]!], NOW + 8_000)).toBeNull();
+    expect(press(["u"]).effects).toEqual([{ kind: "undo" }]);
+  });
+
+  it("keeps row keys off an ask, so c picks option C there and rechecks only on a row", () => {
+    expect(rosterKey(key("c"), { control: false, held: false, ask: true })).toEqual({ kind: "option", index: 2 });
+    expect(rosterKey(key("r"), { control: false, held: false, ask: true })).toBeNull();
+    expect(rosterKey(key("c"), { control: false, held: false })).toEqual({ kind: "row", id: "recheck" });
+    // j walks from the asks into the rows.
+    expect(press(["j", "j"]).state.focus).toEqual({ row: 1 });
   });
 });

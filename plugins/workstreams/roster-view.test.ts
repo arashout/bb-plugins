@@ -4,17 +4,20 @@ import { describe, expect, it } from "vitest";
 import { interpretEffortCommand, type CommandContext } from "./effort-command";
 import type { EffortRoster } from "./effort-roster";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures";
-import { ackView, holdCommand, rosterKey, rosterView, rowCommandInput, rowIntent, settle } from "./roster-view-model";
+import { ackView, askCards, firstAsk, holdCommand, rosterKey, rosterView, rowCommandInput, rowIntent, settle, type PaneState } from "./roster-view-model";
 import type { CommandBoxProps } from "./roster-command";
-import { keyRow, RosterPane, RosterPicker, typing } from "./roster-view";
+import { keyFocus, RosterPane, RosterPicker, typing } from "./roster-view";
 
 const noop = () => {};
+const idle: PaneState = { focus: null, open: null, picks: new Map(), subsets: new Map(), hint: null };
+const asks = (roster: EffortRoster, wide: boolean, state: PaneState = { ...idle, focus: firstAsk(askCards(roster).asks) }) => ({ ...askCards(roster), state, wide, now: NOW,
+  onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onOpenThread: noop, onOpenUrl: noop });
 const box = (command: Partial<CommandBoxProps> = {}): CommandBoxProps =>
   ({ value: "", onValue: noop, onSubmit: noop, ack: null, open: false, onToggle: noop, onLeave: noop, note: null, ...command });
 function pane(wide: boolean, roster: EffortRoster = ROSTER, order: "number" | "state" = "number", command: Partial<CommandBoxProps> = {}) {
   const view = rosterView(roster, { order, now: NOW, settled: settle(roster), seen: { seq: 400, at: NOW - 60 * 60_000 } });
   return renderToStaticMarkup(createElement(RosterPane, {
-    view, wide, mount: "tab", live: true, order, focusN: null, menuN: null, liveThreads: new Set(["thr_folio_entry"]), command: box(command), history: roster.history,
+    view, wide, mount: "tab", live: true, order, focusN: null, menuN: null, liveThreads: new Set(["thr_folio_entry"]), command: box(command), asks: asks(roster, wide), history: roster.history,
     hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop, onToggleGroup: noop, onOpenUrl: noop,
   }));
 }
@@ -155,11 +158,12 @@ describe("roster pane commands and keys", () => {
     expect(rosterKey({ key: "r", shiftKey: false, metaKey: true, ctrlKey: false, altKey: false }, { control: false, held: false })).toBeNull();
   });
 
-  it("acts on the row keyboard focus is in, not the one highlighted before you opened another row's menu", () => {
-    const inRow = (n: number) => ({ closest: (selector: string) => selector === "[data-roster-row]" ? { getAttribute: () => String(n) } : null }) as unknown as EventTarget;
-    expect(keyRow(inRow(9), 5)).toBe(9);
-    expect(keyRow({ closest: () => null } as unknown as EventTarget, 5)).toBe(5);
-    expect(keyRow(null, null)).toBeNull();
+  it("acts on the ask or row keyboard focus is in, not the one highlighted before you opened another row's menu", () => {
+    const inside = (name: string, value: string) => ({ closest: () => ({ getAttribute: (attribute: string) => attribute === name ? value : null }) }) as unknown as EventTarget;
+    expect(keyFocus(inside("data-roster-row", "9"), { row: 5 })).toEqual({ row: 9 });
+    expect(keyFocus(inside("data-roster-ask", "D2"), { row: 5 })).toEqual({ ask: "D2" });
+    expect(keyFocus({ closest: () => null } as unknown as EventTarget, { ask: "D1" })).toEqual({ ask: "D1" });
+    expect(keyFocus(null, null)).toBeNull();
   });
 
   it("pauses its keys while you type in a field, a dialog, or a menu", () => {

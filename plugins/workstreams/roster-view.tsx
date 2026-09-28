@@ -22,12 +22,14 @@ import { Icon } from "./components/ui/icon";
 import { EASE_CSS } from "./layout";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
+import { AsksBlock, type AsksProps } from "./roster-asks";
 import { CommandBox, type CommandBoxProps, type RosterNote } from "./roster-command";
 import type { RosterListEntry } from "./roster-parents";
 import { HATCH, RosterList, RosterTable, TONE_CLASS, type RowActions } from "./roster-rows";
 import { ROSTER_CHANGED } from "./roster-shared";
-import { ackRows, ackView, commandInput, composeNumber, holdCommand, liveGroup, ROSTER_KEYS, rosterKey, rosterView, rowCommandInput, rowIntent, settle, type CommandRecord,
-  type GroupKey, type MenuItem, type RosterLine, type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
+import { ackRows, ackView, afterAnswer, answerCommand, answerInput, answerKey, askCards, commandInput, composeNumber, fieldAnswerInput, firstAsk, holdCommand, latestUndo, liveGroup,
+  paneKey, ROSTER_KEYS, rosterView, rowCommandInput, rowIntent, settle, shownCommand, type AnswerReply, type CommandRecord, type DecisionAsk, type GroupKey, type MenuItem,
+  type PaneEffect, type PaneFocus, type PaneState, type RosterLine, type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
 
 export type RosterPaneProps = RowActions & {
   view: View;
@@ -41,6 +43,8 @@ export type RosterPaneProps = RowActions & {
   liveThreads: ReadonlySet<string>;
   /** The command box, pinned to the bottom, with the last command and any note. */
   command: CommandBoxProps;
+  /** Decisions and the answers waiting for Undo, above the rows. */
+  asks: AsksProps;
   history: EffortRoster["history"];
   hasParent: boolean;
   onOrder(order: RosterOrder): void;
@@ -186,6 +190,7 @@ export function RosterPane(props: RosterPaneProps) {
       <NumberRibbon view={view} onFocus={props.onFocus} />
       <RollupBlock view={view} wide={wide} />
       <SinceLine view={view} onMarkSeen={props.onMarkSeen} />
+      <AsksBlock {...props.asks} />
       {view.empty ? <EmptyAsks text={view.empty} /> : null}
       <div data-roster-rows className="mt-2">{wide ? <RosterTable {...rows} /> : <RosterList {...rows} />}</div>
     </div>
@@ -237,10 +242,12 @@ export function typing(target: EventTarget | null): boolean {
     || element.closest("input, textarea, select, [contenteditable], [role=dialog], [role=menu], [role=alertdialog]") !== null);
 }
 
-/** The row a key acts on: the one holding keyboard focus, such as a row's ⋯ once its menu closes, else the focused row. */
-export function keyRow(target: EventTarget | null, focusN: number | null): number | null {
-  const own = (target as Partial<HTMLElement> | null)?.closest?.("[data-roster-row]")?.getAttribute("data-roster-row");
-  return own == null ? focusN : Number(own);
+/** What a key acts on: the ask or row holding keyboard focus, such as a row's ⋯ once its menu closes, else the remembered focus. */
+export function keyFocus(target: EventTarget | null, focus: PaneFocus): PaneFocus {
+  const element = (target as Partial<HTMLElement> | null)?.closest?.("[data-roster-ask], [data-roster-row]");
+  const ask = element?.getAttribute("data-roster-ask");
+  const row = element?.getAttribute("data-roster-row");
+  return ask ? { ask } : row ? { row: Number(row) } : focus;
 }
 
 function useNow(ms: number): number {
@@ -336,14 +343,16 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const navigate = useBbNavigate();
   const connection = useRealtimeConnectionState();
   const sidebar = experimental_useSidebarThreads();
-  const now = useNow(30_000);
   const [seen, setSeen] = useState<Seen | null>(() => readStored(seenKey(effortId), parseSeen));
   const { roster, error, load, patchRow } = useEffortRoster(effortId, seen?.seq);
+  // An answer's Undo counts down by the second; otherwise ages move every 30 seconds.
+  const now = useNow(roster?.pending.length ? 1_000 : 30_000);
   const [order, setOrder] = useState<RosterOrder>(() => readStored(ORDER_KEY, (value) => value === "state" ? "state" : "number") ?? "number");
   const [settled, setSettled] = useState<Map<number, GroupKey> | null>(null);
   const [settleCount, setSettleCount] = useState(0);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const [focusN, setFocusN] = useState<number | null>(focus);
+  const [pane, setPane] = useState<PaneState>(() => ({ focus: focus === null ? null : { row: focus }, open: null, picks: new Map(), subsets: new Map(), hint: null }));
+  const focusN = pane.focus && "row" in pane.focus ? pane.focus.row : null;
   const [menuN, setMenuN] = useState<number | null>(null);
   const [note, setNote] = useState<RosterNote | null>(null);
   const [commandText, setCommandText] = useState("");
@@ -389,7 +398,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const lineOf = useCallback((n: number | null) => view?.groups.flatMap((group) => group.lines).find((line) => line.n === n) ?? null, [view]);
   // Focusing a row in a collapsed group, from the ribbon or a deep link, opens the group first.
   const focusRow = useCallback((n: number) => {
-    setFocusN(n);
+    setPane((current) => ({ ...current, focus: { row: n }, hint: null }));
     const collapsed = view?.groups.find((group) => group.collapsed && group.lines.some((line) => line.n === n));
     if (collapsed) setExpanded((current) => new Set([...current, collapsed.key]));
     window.requestAnimationFrame(() => {
@@ -399,12 +408,24 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     });
   }, [view]);
   // A deep link to row n focuses it once the roster is on screen.
+  // Otherwise focus starts on the first ask, without taking DOM focus from wherever you are.
   const focused = useRef(false);
+  const { asks, receipts } = useMemo(() => roster ? askCards(roster) : { asks: [], receipts: [] }, [roster]);
   useEffect(() => {
-    if (focus === null || focused.current || view === null) return;
+    if (focused.current || view === null) return;
     focused.current = true;
-    focusRow(focus);
-  }, [focus, view, focusRow]);
+    if (focus !== null) focusRow(focus);
+    else setPane((current) => ({ ...current, focus: firstAsk(asks) }));
+  }, [focus, view, focusRow, asks]);
+  /** Put DOM focus where the pane's focus is, so the next key acts there; with nowhere to go, the pane root keeps the keys. */
+  const domFocus = useCallback((target: PaneFocus) => {
+    if (target && "row" in target) { focusRow(target.row); return; }
+    window.requestAnimationFrame(() => {
+      const node = target ? rootRef.current?.querySelector<HTMLElement>(`[data-roster-ask="${target.ask}"]`) : null;
+      (node ?? rootRef.current)?.focus({ preventScroll: true });
+      node?.scrollIntoView({ block: "nearest" });
+    });
+  }, [focusRow]);
 
   const markSeen = useCallback(() => {
     if (!roster) return;
@@ -437,11 +458,49 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     }
     if (result.kind === "admit") for (const n of [...rows, ...result.parts ? ackRows(result.parts) : []]) ownChanges.current.add(n);
     setNote(null);
+    keep(text, requestId, result);
+    return result;
+  }, [roster, rpc, load]);
+  /** Show what a command from this pane got back, and read the roster again. */
+  const keep = useCallback((text: string, requestId: string, result: CommandRecord["result"]) => {
+    if (!roster) return;
     setRecord({ requestId, text, origin: "panel", at: Date.now(), revision: result.kind === "admit" ? result.revision : roster.instruction?.revision ?? null,
       snapshotId: roster.snapshotId, result, fresh: true });
     setAckOpen(null);
     load();
-    return result;
+  }, [roster, load]);
+  /** Answer a decision from its card: held ten seconds for Undo, from a button, a key, or the lifecycle card's number field. */
+  const answer = useCallback(async (ask: DecisionAsk, reply: AnswerReply | { field: string }) => {
+    if (!roster) return;
+    const requestId = crypto.randomUUID();
+    const text = "field" in reply ? `${ask.id} ${reply.field.trim()}` : answerCommand(ask, reply);
+    let result: CommandRecord["result"];
+    try {
+      result = "field" in reply ? await rpc.call("effort_command", fieldAnswerInput(roster, ask, reply.field, requestId))
+        : await rpc.call("effort_decision_answer", answerInput(ask, reply, requestId));
+    } catch (cause) {
+      result = { kind: "error", message: message(cause) };
+    }
+    keep(text, requestId, result);
+  }, [roster, rpc, keep]);
+  /** A click answers, like Enter does: focus moves to the next ask you can answer, never onto a merge. */
+  const answered = useCallback((ask: DecisionAsk) => {
+    const next = afterAnswer(asks, pane, ask.id, wide);
+    setPane(next);
+    domFocus(next.focus);
+  }, [asks, pane, wide, domFocus]);
+  const undo = useCallback(async (receipt: { id: string; requestId: string } | null) => {
+    if (!roster) return;
+    if (!receipt) { setNote({ command: "undo", lines: ["Nothing is waiting to send"], tone: "info" }); return; }
+    try {
+      const result = await rpc.call("effort_command_undo", { effortId: roster.effort.id, requestId: receipt.requestId });
+      setNote({ command: `undo ${receipt.id}`, lines: [result.message], tone: result.undone ? "info" : "error" });
+      // A taken-back answer never runs, so the last-command line goes back to the last command that did.
+      if (result.undone) setRecord((current) => current?.requestId === receipt.requestId ? null : current);
+    } catch (cause) {
+      setNote({ command: `undo ${receipt.id}`, lines: [message(cause)], tone: "error" });
+    }
+    load();
   }, [roster, rpc, load]);
   const submit = useCallback(async () => {
     const text = commandText.trim();
@@ -450,8 +509,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     if (result?.kind === "admit" || result?.kind === "pending") setCommandText((current) => current.trim() === text ? "" : current);
   }, [commandText, send]);
   const ack = useMemo(() => {
-    const journaled = roster?.lastCommand ? { ...roster.lastCommand, fresh: false } : null;
-    const latest = record && (!journaled || record.requestId === journaled.requestId || record.at >= journaled.at) ? record : journaled;
+    const latest = shownCommand(record, roster?.lastCommand ?? null);
     return latest && ackView(latest, now);
   }, [roster, record, now]);
 
@@ -475,26 +533,28 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     }
   }, [roster, rpc, navigate, patchRow, send]);
 
+  const run = useCallback((effect: PaneEffect) => {
+    const line = "n" in effect ? lineOf(effect.n) : null;
+    if (effect.kind === "answer") void answer(effect.ask, effect.reply);
+    else if (effect.kind === "row" && line) act(line, effect.id);
+    else if (effect.kind === "menu") setMenuN(effect.n);
+    else if (effect.kind === "order") toggleOrder();
+    else if (effect.kind === "seen") markSeen();
+    else if (effect.kind === "keys") setKeysOpen(true);
+    else if (effect.kind === "command") inputRef.current?.focus();
+    else if (effect.kind === "undo") void undo(latestUndo(receipts, Date.now()));
+  }, [lineOf, answer, act, toggleOrder, markSeen, undo, receipts]);
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (typing(event.target) || !view) return;
-    const n = keyRow(event.target, focusN);
-    const line = lineOf(n);
     const control = event.target instanceof Element && event.target.closest("button, a") !== null;
-    const action = rosterKey(event, { control, held: line?.held ?? false });
-    if (!action) return;
+    const step = paneKey(view, asks, pane, event, { control, wide, focus: keyFocus(event.target, pane.focus) });
+    if (!step) return;
     event.preventDefault();
-    if (n !== focusN) setFocusN(n);
-    if (action.kind === "move") {
-      const index = n === null ? -1 : view.order.indexOf(n);
-      const next = view.order[Math.min(view.order.length - 1, Math.max(0, index + action.step))];
-      if (next !== undefined) focusRow(next);
-    } else if (action.kind === "order") toggleOrder();
-    else if (action.kind === "seen") markSeen();
-    else if (action.kind === "keys") setKeysOpen(true);
-    else if (action.kind === "command") inputRef.current?.focus();
-    else if (line && action.kind === "menu") setMenuN(line.n);
-    else if (line && action.kind === "row") act(line, action.id);
-  }, [view, focusN, lineOf, focusRow, toggleOrder, markSeen, act]);
+    const moved = JSON.stringify(step.state.focus) !== JSON.stringify(keyFocus(event.target, pane.focus));
+    setPane(step.state);
+    if (moved) domFocus(step.state.focus);
+    if (step.effect) run(step.effect);
+  }, [view, asks, pane, wide, domFocus, run]);
 
   if (error && !roster) return <div className="p-4 text-[12px] text-destructive" role="alert">Could not read the roster: {error}
     <button type="button" onClick={load} className="ml-2 underline">Retry</button></div>;
@@ -508,6 +568,12 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
       history={roster.history} hasParent={parent !== null}
       rootRef={rootRef} onKeyDown={onKeyDown} onOrder={toggleOrder} onMarkSeen={markSeen} onFocus={focusRow} onMenu={setMenuN} onAction={act}
       onCompose={(n, shift) => { setCommandText((text) => composeNumber(text, n, shift)); inputRef.current?.focus(); }}
+      asks={{ asks, receipts, state: pane, wide, now,
+        onFocusAsk: (id) => setPane((current) => ({ ...current, focus: { ask: id }, open: id, hint: null })), onFocus: focusRow,
+        onAnswer: (ask, reply) => { answered(ask); void answer(ask, reply); }, onField: (ask, field) => { answered(ask); void answer(ask, { field }); },
+        onSubset: (ask, numbers) => setPane((current) => ({ ...current, subsets: new Map([...current.subsets, [answerKey(ask), numbers]]) })),
+        onCompose: (text) => { setCommandText(text); inputRef.current?.focus(); }, onUndo: (receipt) => void undo(receipt),
+        onOpenThread: (id) => navigate.toThread(id), onOpenUrl: (url) => navigate.openUrl(url) }}
       onOpenUrl={(url) => navigate.openUrl(url)}
       onToggleGroup={(key) => setExpanded((current) => { const next = new Set(current); if (!next.delete(key)) next.add(key); return next; })}
       onHeader={(action) => {

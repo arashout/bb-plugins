@@ -309,6 +309,17 @@ export function ackView(record: CommandRecord, now: number): AckView {
   return { ...base, chips: ackChips(result.parts, result.mergePreviews), details: ackDetails(result.parts, result.revision, result.acknowledgment) };
 }
 
+/**
+ * The command the last-command line shows: this visit's, until the journal has a newer one. A held answer reads as waiting for Undo only
+ * until the server journals what became of it under the same request, admitted or refused.
+ */
+export function shownCommand(record: CommandRecord | null, journaled: EffortRoster["lastCommand"]): CommandRecord | null {
+  const last = journaled && { ...journaled, fresh: false };
+  if (!record || !last) return record ?? last;
+  if (record.requestId === last.requestId) return record.result.kind === "pending" ? { ...last, fresh: record.fresh } : record;
+  return record.at >= last.at ? record : last;
+}
+
 /** The rows an admitted command named, which settle into their new groups at once: you caused the move, so it isn't news. */
 export function ackRows(parts: AckParts): number[] {
   const lists = [...parts.added.map((added) => added.targets), parts.kept, parts.leftAlone, ...parts.holds.map((hold) => hold.targets), parts.released, parts.superseded,
@@ -530,16 +541,24 @@ export function rosterView(roster: EffortRoster, options: { order: RosterOrder; 
   };
 }
 
-/** A roster key: move, toggle the order, Mark seen, list the keys, type a command, open the row's menu, or run one of its items. */
-export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" | "command" } | { kind: "row"; id: MenuItem["id"] };
+/**
+ * A roster key: move, toggle the order, Mark seen, list the keys, type a command, take back the latest answer, open the row's menu, or
+ * run one of its items; on an ask, pick one of its options or accept it.
+ */
+export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" | "command" | "undo" | "accept" } | { kind: "row"; id: MenuItem["id"] }
+  | { kind: "option"; index: number };
+export type KeyEvent = { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean };
 /**
  * What a key does on the roster, or null for a key it leaves alone. Shift, never a letter's case, picks ⇧R and ⇧S, so Caps Lock can't
- * turn Refresh into Reset or the order toggle into Stop. Space and Enter on a button or link stay that control's own.
+ * turn Refresh into Reset or the order toggle into Stop. Space and Enter on a button or link stay that control's own. On an ask, a, b,
+ * and c pick an option and Enter accepts; row keys do nothing there.
  */
-export function rosterKey(event: { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean },
-  on: { control: boolean; held: boolean }): KeyAction | null {
+export function rosterKey(event: KeyEvent, on: { control: boolean; held: boolean; ask?: boolean }): KeyAction | null {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   const key = /^[a-z]$/iu.test(event.key) ? event.shiftKey ? event.key.toUpperCase() : event.key.toLowerCase() : event.key;
+  if (on.ask && ["a", "b", "c"].includes(key)) return { kind: "option", index: key.charCodeAt(0) - 97 };
+  if (on.ask && key === "Enter") return on.control ? null : { kind: "accept" };
+  if (on.ask && ["o", "r", "c", "h", "R", "t", "S", "."].includes(key)) return null;
   switch (key) {
     case "j": case "ArrowDown": return { kind: "move", step: 1 };
     case "k": case "ArrowUp": return { kind: "move", step: -1 };
@@ -547,6 +566,7 @@ export function rosterKey(event: { key: string; shiftKey: boolean; metaKey: bool
     case " ": return on.control ? null : { kind: "seen" };
     case "?": return { kind: "keys" };
     case "/": return { kind: "command" };
+    case "u": return { kind: "undo" };
     case ".": return { kind: "menu" };
     case "Enter": return on.control ? null : { kind: "row", id: "thread" };
     case "o": return { kind: "row", id: "pr" };
@@ -562,8 +582,10 @@ export function rosterKey(event: { key: string; shiftKey: boolean; metaKey: bool
 
 /** The keys the pane answers while focus is on it, never while you type in a field or the thread's composer. */
 export const ROSTER_KEYS: [string, string][] = [
-  ["j / k", "Next / previous row"],
-  ["Enter", "Open the row's thread"],
+  ["j / k", "Next / previous ask, then row"],
+  ["a / b / c", "Pick an option on a product decision; Enter sends it"],
+  ["Enter", "Accept a lifecycle ask's subset, or open the row's thread; a product decision needs an option first"],
+  ["u", "Undo the latest answer within its 10 seconds"],
   [".", "Open the row's menu"],
   ["r", "Refresh the row from GitHub"],
   ["c", "Recheck it"],
@@ -577,3 +599,162 @@ export const ROSTER_KEYS: [string, string][] = [
   ["/", "Type a command; Esc leaves the box"],
   ["?", "These keys"],
 ];
+
+// ---------------------------------------------------------------------------
+// Asks: the decisions, system issues, and merge candidates that need you.
+// ---------------------------------------------------------------------------
+
+/** How long a roster answer waits for Undo before the server admits it; the server's own window, which a test holds them to. */
+export const UNDO_WINDOW = 10_000 as const;
+type Decision = EffortRoster["decisions"][number];
+export type PendingAnswer = EffortRoster["pending"][number];
+/** A drafted PR a lifecycle decision asks about, with the row that shows it. */
+export type AskTarget = { n: number | null; target: string; repo: string; number: number | null; title: string; note: string | null; recommended: boolean };
+export type DecisionAsk = {
+  kind: "decision"; id: string; decision: Decision;
+  /**
+   * How it's answered: product, authority, and worker questions take an explicit option (A9 call 3); a lifecycle question takes a subset
+   * of its PRs; a worker's own interaction is answered in the worker's thread.
+   */
+  answer: "option" | "subset" | "thread";
+  /** Options you can pick, keyed a, b, c; the "in your own words" placeholder a worker question carries is the words field instead. */
+  options: { id: string; key: string; label: string; consequence: string | null; recommended: boolean }[];
+  targets: AskTarget[];
+  /** The rows the question holds up. */
+  numbers: number[];
+  /** A lifecycle question's preselected subset. */
+  recommended: number[];
+};
+export type Ask = DecisionAsk;
+/** An answer the server holds for Undo, in place of its card. */
+export type Receipt = PendingAnswer & { id: string; numbers: number[] };
+export type AnswerReply = { optionId: string } | { numbers: number[] } | { text: string };
+
+const numbersOf = (targets: readonly { n: number | null }[]) => targets.flatMap((item) => item.n === null ? [] : [item.n]);
+function decisionAsk(decision: Decision, rows: readonly RosterRow[]): DecisionAsk {
+  const options = decision.options.filter((option) => option.id !== "text").map((option, index) => ({ id: option.id, key: String.fromCharCode(97 + index),
+    label: option.label, consequence: option.consequence, recommended: decision.recommendation?.optionId === option.id }));
+  const targets = decision.targets.map((item) => {
+    const row = rows.find((other) => other.target === item.target);
+    return { n: item.n, target: item.target, repo: row?.repo.split("/").at(-1) ?? "", number: row?.number ?? null, title: row?.title ?? item.target, note: item.note,
+      recommended: item.recommended ?? false };
+  });
+  const numbers = numbersOf(decision.targets);
+  return { kind: "decision", id: `D${decision.n}`, decision, options, targets, numbers,
+    answer: decision.answer === "open-thread" ? "thread" : decision.subkind ? "subset" : "option",
+    recommended: decision.subkind ? (decision.recommendation?.numbers ?? numbersOf(decision.targets.filter((item) => item.recommended))).filter((n) => numbers.includes(n)) : [] };
+}
+
+/** The asks in the order you clear them: decisions by number. A decision whose answer waits for Undo shows as its receipt instead. */
+export function askCards(roster: EffortRoster, pending: readonly PendingAnswer[] = roster.pending): { asks: Ask[]; receipts: Receipt[] } {
+  const waiting = new Set(pending.flatMap((item) => item.decisions));
+  const decisions = [...roster.decisions].sort((a, b) => a.n - b.n);
+  return {
+    asks: decisions.filter((decision) => !waiting.has(decision.n)).map((decision) => decisionAsk(decision, roster.rows)),
+    receipts: pending.map((item) => ({ ...item, id: item.decisions.map((n) => `D${n}`).join(" "),
+      numbers: numbersOf(decisions.filter((decision) => item.decisions.includes(decision.n)).flatMap((decision) => decision.targets)) })),
+  };
+}
+
+/** The same answer as thread text: `D1 A`, `D2 13 15`, `D2 none`, or `D1` and your words. */
+export function answerCommand(ask: DecisionAsk, reply: AnswerReply): string {
+  return `${ask.id} ${"optionId" in reply ? reply.optionId : "numbers" in reply ? reply.numbers.join(" ") || "none" : reply.text}`;
+}
+
+/** Which question a decision card asks: a product decision, an authority grant, a worker's question, or a lifecycle subset. */
+export const askKind = (ask: DecisionAsk): "product" | "authority" | "worker" | "lifecycle" => ask.answer === "subset" ? "lifecycle"
+  : ask.decision.kind === "authority" ? "authority" : ask.decision.kind.startsWith("worker") ? "worker" : "product";
+/** What a pick or a subset is kept under: the decision at the revision you read, so neither carries over to a question that changed. */
+export const answerKey = (ask: DecisionAsk) => `${ask.decision.id}@${ask.decision.revision}`;
+
+/** effort_decision_answer for a card's answer, at the revision the card showed, held for Undo. */
+export function answerInput(ask: DecisionAsk, reply: AnswerReply, requestId: string) {
+  return { decisionId: ask.decision.id, ...reply, expectedRevision: ask.decision.revision, requestId, delayMs: UNDO_WINDOW };
+}
+
+/** A lifecycle card's number field (`all but 14`) parses on the server, as `D2 all but 14` against only this decision, held for Undo. */
+export function fieldAnswerInput(roster: Pick<EffortRoster, "effort" | "snapshotId" | "instruction">, ask: DecisionAsk, field: string, requestId: string) {
+  return { ...rowCommandInput(roster, `${ask.id} ${field.trim()}`, requestId), decisions: [{ n: ask.decision.n, revision: ask.decision.revision }], delayMs: UNDO_WINDOW };
+}
+
+/** The answer `u` takes back: the newest still inside its window. */
+export function latestUndo(receipts: readonly Receipt[], now: number): Receipt | null {
+  return receipts.filter((item) => item.until > now).sort((a, b) => b.until - a.until)[0] ?? null;
+}
+
+/** Where keyboard focus is: an ask by id, a row by number, or nowhere. */
+export type PaneFocus = { ask: string } | { row: number } | null;
+/** The asks' client state: focus, the one ask open in a narrow pane, each product decision's picked option and each lifecycle subset by answerKey, and a hint. */
+export type PaneState = { focus: PaneFocus; open: string | null; picks: ReadonlyMap<string, string>; subsets: ReadonlyMap<string, readonly number[]>;
+  hint: { id: string; text: string } | null };
+/** What a key asks the container to do. Only `answer` and `subset` send, and nothing here merges. */
+export type PaneEffect = { kind: "answer"; ask: DecisionAsk; reply: AnswerReply } | { kind: "hint"; text: string }
+  | { kind: "row"; n: number; id: MenuItem["id"] } | { kind: "menu"; n: number } | { kind: "order" | "seen" | "keys" | "command" | "undo" };
+
+/** Asks an answer moves focus to: decisions and system issues, never merge candidates, so a run of Enter can't reach a merge. */
+const answerable = (ask: Ask) => ask.kind === "decision";
+/** The first ask focus rests on: the first one you can answer, or nothing. */
+export function firstAsk(asks: readonly Ask[]): PaneFocus {
+  const first = asks.find(answerable);
+  return first ? { ask: first.id } : null;
+}
+/**
+ * After an answer, focus moves on to the next ask you can answer and rests on nothing after the last, so a run of Enter never comes back
+ * to one it just answered while the server holds that answer; a narrow pane opens the next one.
+ */
+export function afterAnswer(asks: readonly Ask[], state: PaneState, id: string, wide: boolean): PaneState {
+  const next = asks.slice(asks.findIndex((ask) => ask.id === id) + 1).find(answerable);
+  return { ...state, focus: next ? { ask: next.id } : null, open: wide ? state.open : next?.id ?? null, hint: null };
+}
+
+/** What Enter does on an ask: a one-line ask opens first; then only a lifecycle subset accepts without an explicit choice. */
+function accept(asks: readonly Ask[], ask: Ask, state: PaneState, wide: boolean): { state: PaneState; effect: PaneEffect | null } {
+  if (!wide && state.open !== ask.id) return { state: { ...state, open: ask.id, hint: null }, effect: null };
+  const hint = (text: string) => ({ state: { ...state, hint: { id: ask.id, text } }, effect: { kind: "hint" as const, text } });
+  if (ask.answer === "thread") return hint(`${ask.id} is answered in its worker's thread: open it from the card`);
+  if (ask.answer === "option") {
+    const picked = state.picks.get(answerKey(ask));
+    const ids = ask.options.map((option) => option.id);
+    // A question asked without options takes only your words, in its card's field.
+    if (!ids.length) return hint(`${ask.id} has no options to pick: type your answer in its field, then Enter`);
+    const kind = askKind(ask) === "authority" ? "authority decisions" : askKind(ask) === "worker" ? "worker questions" : "product decisions";
+    if (!picked) return hint(`Pick ${ids.length > 2 ? `${ids.slice(0, -1).join(", ")}, or ${ids.at(-1)}` : ids.join(" or ")}: ${kind} need an explicit choice`);
+    return { state: afterAnswer(asks, state, ask.id, wide), effect: { kind: "answer", ask, reply: { optionId: picked } } };
+  }
+  if (ask.decision.subkind === "request-review")
+    return hint(`Name the reviewers: request review ${formatTargets(ask.targets)} from @login, or choose Don't request review`);
+  return { state: afterAnswer(asks, state, ask.id, wide), effect: { kind: "answer", ask, reply: { numbers: [...state.subsets.get(answerKey(ask)) ?? ask.recommended] } } };
+}
+
+/**
+ * The pane's keys as one pure step: from the asks, the rows, the client state, and a key, the next state and at most one effect. The
+ * container runs the effect and nothing else, so the rules here (a product decision needs an option; Enter never merges) hold for it too.
+ * `on.focus` is where DOM focus is, which wins over the remembered focus. Null leaves the key to the browser.
+ */
+export function paneKey(view: RosterView, asks: readonly Ask[], state: PaneState, event: KeyEvent, on: { control: boolean; wide: boolean; focus?: PaneFocus })
+  : { state: PaneState; effect: PaneEffect | null } | null {
+  const focus = on.focus === undefined ? state.focus : on.focus;
+  const ask = focus && "ask" in focus ? asks.find((item) => item.id === focus.ask) ?? null : null;
+  const line = focus && "row" in focus ? view.groups.flatMap((group) => group.lines).find((item) => item.n === focus.row) ?? null : null;
+  const action = rosterKey(event, { control: on.control, held: line?.held ?? false, ask: ask !== null });
+  if (!action) return null;
+  const here: PaneState = { ...state, focus, hint: null };
+  const done = (next: PaneState, effect: PaneEffect | null = null) => ({ state: next, effect });
+  switch (action.kind) {
+    case "move": {
+      const order: NonNullable<PaneFocus>[] = [...asks.map((item) => ({ ask: item.id })), ...view.order.map((n) => ({ row: n }))];
+      const index = order.findIndex((item) => JSON.stringify(item) === JSON.stringify(focus));
+      const next = order[Math.min(order.length - 1, Math.max(0, index + action.step))] ?? null;
+      return done({ ...here, focus: next, open: !on.wide && next && "ask" in next ? next.ask : here.open });
+    }
+    case "option": {
+      const decision = ask?.kind === "decision" && ask.answer === "option" ? ask : null;
+      const option = decision?.options[action.index];
+      return decision && option ? done({ ...here, picks: new Map([...here.picks, [answerKey(decision), option.id]]), open: decision.id }) : done(here);
+    }
+    case "accept": return ask ? accept(asks, ask, here, on.wide) : done(here);
+    case "row": return done(here, line ? { kind: "row", n: line.n, id: action.id } : null);
+    case "menu": return done(here, line ? { kind: "menu", n: line.n } : null);
+    default: return done(here, { kind: action.kind });
+  }
+}

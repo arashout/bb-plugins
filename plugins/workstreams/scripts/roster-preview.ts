@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "../inkwell-fixtures.js";
-import { ackView, rosterView, settle, type RosterOrder } from "../roster-view-model.js";
+import { ackView, askCards, rosterView, settle, type RosterOrder } from "../roster-view-model.js";
 import { RosterPane } from "../roster-view.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -20,6 +20,8 @@ const pane = (wide: boolean, order: RosterOrder) => renderToStaticMarkup(createE
   wide, mount: wide ? "nav" : "tab", live: true, order, focusN: 5, menuN: null, liveThreads: new Set(["thr_folio_entry"]),
   command: { value: wide ? "" : "hold 8 because ", onValue: noop, onSubmit: noop, ack: ackView({ ...ROSTER.lastCommand!, fresh: wide }, NOW), open: wide, onToggle: noop,
     onLeave: noop, note: null },
+  asks: { ...askCards(ROSTER), wide, now: NOW, state: { focus: { ask: "D1" }, open: wide ? null : "D1", picks: new Map(), subsets: new Map(), hint: null },
+    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onOpenThread: noop, onOpenUrl: noop },
   history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop,
   onToggleGroup: noop, onOpenUrl: noop,
 }));
