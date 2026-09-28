@@ -44,10 +44,14 @@ export type Attempt = ResourceAttempt & {
   /** Readbacks in a row that couldn't read BB. */
   readbackFailures: number;
 };
-/** A code action on this PR: its key is written before the GitHub write, and its result after. */
-export type CodeAction = { recipe: CodeRecipeId; headOid: string } & ({ status: "pending" | "done" | "write-refused" }
-  /** When it may run again: GitHub's reset time plus 30 s, or the secondary-limit backoff. */
-  | { status: "rate-limited"; retryAt: number });
+/** A code action on this PR, once per head and retry epoch: its key is written before the GitHub write, and its result after. */
+export type CodeAction = { recipe: CodeRecipeId; headOid: string; retryEpoch: number; status: "pending" | "done" | "write-refused" | "rate-limited";
+  /** When a rate-limited action may run again: GitHub's reset time plus 30 s, or the secondary-limit backoff. */
+  retryAt?: number | null;
+  /** What GitHub answered: why it refused, or what the action did. */
+  detail?: string | null;
+  /** When GitHub answered. */
+  at?: number };
 /** `grants` is exactly what answering allow (or, for a lifecycle question, naming a PR) adds to that PR's grant; null when an answer grants nothing. */
 export type RowDecision = { key: string; kind: string; subkind: Lifecycle | null; question: string; options: Option[]; grants: { work: WorkRecipe[]; effects: Effect[] } | null };
 
@@ -269,18 +273,22 @@ export function decide(input: DecideInput): Next {
   if (claim) return claimed(claim);
 
   const gates = full && prGates({ facts: full.facts, observedAt: full.at, now, held: input.held, feedback: input.feedback, reviewers: input.reviewers });
+  /** A code action runs once per head within the row's retry epoch, so `retry N` may run it once more. */
+  const codeAction = (id: CodeRecipeId, headOid: string) =>
+    input.codeActions.find((action) => action.recipe === id && action.headOid === headOid && action.retryEpoch === input.retryEpoch) ?? null;
   const effects = (id: CodeRecipeId): Effect[] => id === "request_review" && grant.reviewers.length === 0 ? grant.effects.filter((effect) => effect !== "request-review") : grant.effects;
   /** One code action per head: run it, read it back, route its result, or ask for the effect it needs. Null once done. */
   const code = (id: CodeRecipeId): Next | null => {
     if (!facts || !gates) return observe("No full read yet");
-    const previous = input.codeActions.find((action) => action.recipe === id && action.headOid === facts.headOid);
-    if (previous?.status === "pending") return next("executing", "code-action", `${CODE_LABEL[id]}: reading GitHub back`, { nextAction: [id], owner: { kind: "github", ref: null } });
+    const previous = codeAction(id, facts.headOid);
+    if (previous?.status === "pending") return next("executing", "code-action", `${CODE_LABEL[id]}: waiting for GitHub's answer, or reading it back`,
+      { nextAction: [id], owner: { kind: "github", ref: null } });
     // A rate limit stays a wait until it resets; then the action runs again.
-    if (previous && previous.status !== "done" && !(previous.status === "rate-limited" && now >= previous.retryAt)) {
+    if (previous && previous.status !== "done" && !(previous.status === "rate-limited" && now >= (previous.retryAt ?? 0))) {
       const [kind, value] = (recipe(id) as CodeRecipe).otherwise[previous.status]!.split(":") as [string, string];
       return kind === "wait" ? waiting(value, `${CODE_LABEL[id]}: GitHub rate limit`, { kind: "github", ref: null },
-        previous.status === "rate-limited" ? { wake: { event: WAKES[value]![0], ref: null, dueAt: previous.retryAt } } : {})
-        : issue(value, `${CODE_LABEL[id]}: GitHub refused the write`);
+        previous.status === "rate-limited" ? { wake: { event: WAKES[value]![0], ref: null, dueAt: previous.retryAt ?? now } } : {})
+        : issue(value, `${CODE_LABEL[id]}: GitHub refused the write${previous.detail ? `: ${previous.detail}` : ""}`);
     }
     if (previous?.status === "done") return null;
     const need = authorityNeed(id, effects(id));
@@ -294,6 +302,10 @@ export function decide(input: DecideInput): Next {
     const busy = prWriter(input.resources);
     return busy ? fromResource(busy) : next("queued", "code-action", CODE_LABEL[id], { nextAction: [id] });
   };
+
+  // Our own GitHub write landed after the last full read, so that read no longer shows the PR: read it again before judging it.
+  const wrote = facts && full ? input.codeActions.find((action) => action.status === "done" && action.headOid === facts.headOid && (action.at ?? 0) > full.at) : null;
+  if (wrote) return observe(`${CODE_LABEL[wrote.recipe]}: reading GitHub after it`);
 
   // 5. Verifying: a finished attempt's report routes through its recipes, within its retry epoch.
   if (latest && latest.retryEpoch === input.retryEpoch) {
@@ -342,8 +354,8 @@ export function decide(input: DecideInput): Next {
       } else if (kind === "code" && latest.headOid === facts?.headOid && gates?.["checks-settled"] && gates["checks-green"] === false) {
         // An environment blocker on failing checks reruns them once on the head it reported; failing again is a CI issue.
         // A new head or checks still running go back to fresh gates.
-        if (input.codeActions.some((action) => action.recipe === "rerun_failed_checks" && action.headOid === latest.headOid && action.status === "done"))
-          return issue("ci-infrastructure", "Checks failed again after one rerun on this head");
+        const rerun = codeAction("rerun_failed_checks", latest.headOid);
+        if (rerun?.status === "done") return issue("ci-infrastructure", `Checks still fail on this head after its one rerun${rerun.detail ? ` (${rerun.detail})` : ""}`);
         const step = code("rerun_failed_checks");
         if (step) return step;
       } else if (kind === "repair") return issue(value!, latest.blocker?.summary ?? `The worker reported ${key}`);

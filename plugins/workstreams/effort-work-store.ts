@@ -20,7 +20,7 @@ import { z } from "zod";
 import { envelopeSchema } from "./completion-envelope.js";
 import { EFFECTS, instructionScopeSchema, WORK_RECIPES, type InstructionScope } from "./effort-command.js";
 import type { Attempt, Phase } from "./effort-phase.js";
-import { RECIPE_IDS, WORKER_RECIPE_IDS, WORKER_RESULTS } from "./effort-recipes.js";
+import { CODE_RECIPE_IDS, RECIPE_IDS, WORKER_RECIPE_IDS, WORKER_RESULTS } from "./effort-recipes.js";
 import type { CriterionEvidence } from "./outcome-evidence.js";
 import { GATE_IDS } from "./pr-gates.js";
 import type { RunDb } from "./runstore.js";
@@ -70,6 +70,16 @@ export type UserState = (typeof USER_STATES)[number];
 const PHASES = ["queued", "executing", "verifying", "waiting", "paused", "decision-needed", "repair-needed", "prepared", "finished"] as const satisfies readonly Phase[];
 const optionSchema = z.object({ id: z.string(), label: z.string() }).strict();
 const grantsSchema = z.object({ work: z.array(z.enum(WORK_RECIPES)), effects: z.array(z.enum(EFFECTS)) }).strict().nullable();
+/**
+ * One code action on the PR, once per head and retry epoch. Its key is in the row before the GitHub write; `pending`
+ * until GitHub answers, or until a read shows whether an unclear answer landed. `tries` counts its writes.
+ */
+const codeActionSchema = z.object({ recipe: z.enum(CODE_RECIPE_IDS), headOid: z.string(), retryEpoch: z.number().int().nonnegative(), key: z.string(),
+  status: z.enum(["pending", "done", "write-refused", "rate-limited"]), retryAt: z.number().nullable(), tries: z.number().int().nonnegative(), at: z.number(),
+  detail: z.string().max(800).nullable() }).strict();
+export type StoredCodeAction = z.infer<typeof codeActionSchema>;
+/** A row keeps its newest code actions, which are all decide() reads: those on the current head. */
+export const CODE_ACTIONS_KEPT = 20;
 /** One PR's current row: decide()'s step, the facts it read, and the retry epoch its attempts count in. */
 export const workRowBodySchema = z.object({
   n: z.number().int().positive().nullable(),
@@ -86,6 +96,8 @@ export const workRowBodySchema = z.object({
   observedHead: z.string().nullable(), observedAt: z.number().nullable(),
   gates: z.record(z.enum(GATE_IDS), z.boolean().nullable()).nullable(),
   tickets: z.array(z.object({ id: z.string(), title: z.string().nullable(), url: z.string().nullable() }).strict()),
+  /** Code actions, newest first; absent until the first one. */
+  codeActions: z.array(codeActionSchema).max(CODE_ACTIONS_KEPT).optional(),
   /** In a dry run, the launch a queued step would make: its work, where it would run, and the key that would claim it. Nothing holds it. */
   plan: z.object({ recipes: z.array(z.enum(WORKER_RECIPE_IDS)), role: z.enum(["code", "planning"]), launchKey: z.string(),
     resource: z.object({ kind: z.string(), threadId: z.string().nullable(), path: z.string().nullable(), hostId: z.string().nullable(), reason: z.string().nullable() }).strict() })

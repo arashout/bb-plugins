@@ -111,6 +111,8 @@ function setup(options: Options = {}) {
     spawned: (projectId, attemptId) => sdk.spawned(projectId, attemptId), marked: (threadId, marker) => sdk.marked(threadId, marker),
     turn: (threadId) => sdk.turn(threadId), interactions: (threadId) => sdk.interactions(threadId), retrying: (threadId, requestId) => sdk.retrying(threadId, requestId),
     retry: (args) => sdk.retry(args), read: (prUrl) => sdk.read(prUrl), feedback: (prUrl, threadId, report) => sdk.feedback(prUrl, threadId, report), publish: () => {},
+    // No code action runs here; the reconciler's tests drive them through the host.
+    requested: async () => { throw new Error("unexpected review read"); }, write: async () => { throw new Error("unexpected GitHub write"); }, rateLimit: async () => null,
   });
   const first = runner();
   /** A BB event, then the reconciler's next tick for the attempt that heard it, which takes the attempt's next step. */

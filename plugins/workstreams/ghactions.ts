@@ -113,6 +113,21 @@ export function rerequestArgv(target: PrTarget, reviewers: readonly string[]): s
   return ["pr", "edit", ...repoArgs(target), "--add-reviewer", valid.join(",")];
 }
 
+export function readyArgv(target: PrTarget): string[] {
+  return ["pr", "ready", ...repoArgs(target)];
+}
+
+/** The GitHub Actions runs on one head commit, with each run's attempt number, so a rerun that already happened shows. */
+export function headRunsArgv(target: PrTarget, headOid: string): string[] {
+  if (!SHA.test(headOid)) throw new Error("Reading a head's runs needs its exact commit.");
+  return ["run", "list", "--repo", target.slug, "--commit", headOid, "--json", "databaseId,attempt,status,conclusion", "--limit", "100"];
+}
+
+export function rerunFailedArgv(target: PrTarget, runId: number): string[] {
+  if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error("A rerun needs a GitHub Actions run id.");
+  return ["run", "rerun", String(runId), "--failed", "--repo", target.slug];
+}
+
 /** The body is NOT in here: it goes on stdin. */
 export function commentArgv(target: PrTarget): string[] {
   return ["pr", "comment", ...repoArgs(target), "--body-file", "-"];
@@ -476,6 +491,54 @@ export async function runNudge(
   }
   if (done.length === 0) return { ok: false, error: "Nothing to do: choose re-request, a comment, or both." };
   return { ok: true, detail: `${target.slug} #${target.number}: ${done.join(" and ")}.` };
+}
+
+/** A write refused because the PR's head is no longer the one it was confirmed on: nothing was written, and the PR must be read again. */
+export const HEAD_MOVED = "The PR head moved since it was read; nothing was written.";
+
+/** Mark a draft ready for review, only on the head it was confirmed on. A PR already ready is left alone. */
+export async function runReady(run: GhRunner, target: PrTarget, headOid: string): Promise<WriteResult> {
+  if (!SHA.test(headOid)) throw new Error("Marking a PR ready needs the exact head it was confirmed on.");
+  const viewed = await run(["pr", "view", ...repoArgs(target), "--json", "state,isDraft,headRefOid"]);
+  if (!viewed.ok) return { ok: false, error: `gh pr view failed: ${viewed.error}` };
+  const view = json(viewed) as { state?: unknown; isDraft?: unknown; headRefOid?: unknown } | undefined;
+  if (view?.headRefOid !== headOid) return { ok: false, error: HEAD_MOVED };
+  if (view.state !== "OPEN") return { ok: false, error: "This pull request is no longer open." };
+  if (view.isDraft === false) return { ok: true, detail: `${target.slug} #${target.number} is already ready for review.` };
+  const marked = await run(readyArgv(target));
+  return marked.ok ? { ok: true, detail: `Marked ${target.slug} #${target.number} ready for review.` }
+    : { ok: false, error: `GitHub refused to mark the PR ready: ${marked.error}` };
+}
+
+/**
+ * Rerun only the failed jobs of each failed GitHub Actions run on this head, and never twice: once any run on the
+ * head was rerun, by anyone, nothing is rerun again. A head with no failed Actions run has nothing to rerun.
+ */
+export async function runRerunFailed(run: GhRunner, target: PrTarget, headOid: string): Promise<WriteResult> {
+  const listed = await run(headRunsArgv(target, headOid));
+  if (!listed.ok) return { ok: false, error: `Could not list the head's GitHub Actions runs: ${listed.error}` };
+  const runs = json(listed);
+  if (!Array.isArray(runs) || !runs.every((entry) => typeof entry?.databaseId === "number" && typeof entry.attempt === "number"))
+    return { ok: false, error: "GitHub did not return the head's GitHub Actions runs." };
+  const head = headOid.slice(0, 7);
+  if (runs.some((entry) => entry.attempt > 1)) return { ok: true, detail: `A GitHub Actions run on ${head} was already rerun, so nothing was rerun again.` };
+  const failed = runs.filter((entry) => entry.status === "completed" && ["failure", "timed_out"].includes(entry.conclusion));
+  if (failed.length === 0) return { ok: true, detail: `No GitHub Actions run failed on ${head}, so there was nothing to rerun.` };
+  for (const entry of failed) {
+    const rerun = await run(rerunFailedArgv(target, entry.databaseId));
+    if (!rerun.ok) return { ok: false, error: `GitHub refused to rerun run ${entry.databaseId}: ${rerun.error}` };
+  }
+  return { ok: true, detail: `Reran the failed jobs of ${failed.length} GitHub Actions ${failed.length === 1 ? "run" : "runs"} on ${head}.` };
+}
+
+/**
+ * How a failed GitHub write ended: at a rate limit; unclear, so it may have landed (a timeout, a dropped connection,
+ * a server error) or the facts it was confirmed on moved; or refused.
+ */
+export function writeFailure(error: string): "rate-limited" | "unclear" | "refused" {
+  if (githubRateLimit(error)) return "rate-limited";
+  return error.includes(HEAD_MOVED) || /stopped before it finished|timed? ?out|deadline exceeded|connection (?:reset|refused|closed)|socket hang up|unexpected EOF|HTTP 50[0234]|bad gateway|service unavailable|could not resolve host/iu.test(error)
+    ? "unclear" : "refused";
 }
 
 /** How a failed GitHub read hit a rate limit: the primary limit, whose reset GitHub reports, or a secondary limit, which names none. */

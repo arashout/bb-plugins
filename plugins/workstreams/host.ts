@@ -18,7 +18,7 @@ import {
   parsePrList,
   repoFromRemote,
 } from "./gh.js";
-import { prTarget, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runUpdateBranch, type GhRunner } from "./ghactions.js";
+import { prTarget, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runRerunFailed, runUpdateBranch, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs } from "./inventory.js";
@@ -70,7 +70,10 @@ function ghRunner(signal: AbortSignal): GhRunner {
         { cwd: homedir(), timeout: GH_WRITE_TIMEOUT_MS, signal, maxBuffer: 4 * 1024 * 1024 },
         (error, stdout, stderr) => {
           if (error) {
-            resolve({ ok: false, error: (stderr || error.message).replace(/\s+/gu, " ").trim().slice(0, 600) });
+            const detail = (stderr || error.message).replace(/\s+/gu, " ").trim().slice(0, 600);
+            // A gh killed at its timeout or by a stop may have reached GitHub first; say so, so a write's answer reads as unclear.
+            const stopped = (error as { killed?: boolean }).killed === true || error.name === "AbortError";
+            resolve({ ok: false, error: stopped ? `gh stopped before it finished: ${detail}` : detail });
             return;
           }
           resolve({ ok: true, stdout: stdout.toString() });
@@ -625,6 +628,10 @@ export default experimental_defineHostEntry({
           return runUpdateBranch(gh, target);
         case "nudge":
           return runNudge(gh, target, request.reviewers, request.comment);
+        case "ready":
+          return runReady(gh, target, request.headOid);
+        case "rerun-failed":
+          return runRerunFailed(gh, target, request.headOid);
       }
     },
     linkbacks: async ({ prUrls }, context) => {

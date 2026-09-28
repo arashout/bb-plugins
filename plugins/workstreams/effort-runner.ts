@@ -15,16 +15,24 @@
 // is then read against a fresh full read of the PR. The worker never declares
 // readiness: its report only routes the next step, and decide() judges the PR
 // on fresh facts.
+//
+// Code actions are GitHub writes no model takes a turn for: re-requesting or
+// requesting review, marking a draft ready, and rerunning failed checks, each
+// once per head and retry epoch. The action's key goes into its row before the
+// write; an unclear answer keeps it pending until a read of GitHub shows
+// whether it landed, and a rate limit is a wait until GitHub's reset.
 import { createHash } from "node:crypto";
 import type { AdvanceFacts, AdvanceWorkspace, AdvanceWorkspaceInput } from "./advance-contract.js";
 import type { FeedbackReport } from "./approval-feedback.js";
+import type { PrWrite } from "./contract.js";
 import { parseCompletion, RAW_LIMIT } from "./completion-envelope.js";
 import { TURN_RETRIES, type Attempt, type Next, type Phase } from "./effort-phase.js";
-import { buildWorkOrder, recipe, type WorkerRecipe, type WorkerRecipeId, type WorkOrderInput } from "./effort-recipes.js";
+import { buildWorkOrder, recipe, type CodeRecipeId, type WorkerRecipe, type WorkerRecipeId, type WorkOrderInput } from "./effort-recipes.js";
 import type { ResourceWriter } from "./effort-resources.js";
-import { ClaimConflictError, decideAttempt, instructionId, sameBody, StaleWriteError, type AttemptBody, type AttemptStatus, type createEffortWorkStore,
-  type StoredAttempt, type WorkRowBody } from "./effort-work-store.js";
+import { ClaimConflictError, CODE_ACTIONS_KEPT, decideAttempt, instructionId, sameBody, StaleWriteError, type AttemptBody, type AttemptStatus, type createEffortWorkStore,
+  type StoredAttempt, type StoredCodeAction, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
+import { githubRateLimit, REVIEWER, writeFailure, type WriteResult } from "./ghactions.js";
 import { bbConflict } from "./scratch-placement.js";
 import { prWorkItemKey } from "./work-item-index.js";
 
@@ -57,7 +65,7 @@ type SpawnArgs = ModelChoice & { projectId: string; title: string; prompt: strin
   environment: { type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } };
   pluginMetadata: { workAttemptId: string; role: "v2-worker"; prUrl: string; effortId: string } };
 export type SendArgs = { threadId: string; mode: "queue-if-active"; input: [{ type: "text"; text: string; mentions: [] }] };
-type Store = Pick<ReturnType<typeof createEffortWorkStore>, "attempts" | "attempt" | "claims" | "launches" | "claim" | "recordAttempt" | "commit" | "row">;
+type Store = Pick<ReturnType<typeof createEffortWorkStore>, "attempts" | "attempt" | "claims" | "launches" | "claim" | "recordAttempt" | "commit" | "row" | "lastRevision">;
 
 export type EffortRunnerDeps = {
   now(): number;
@@ -71,8 +79,8 @@ export type EffortRunnerDeps = {
   writer(prUrl: string, path: string | null): ResourceWriter | null;
   /** A thread's last observed status, or null when unknown. */
   threadStatus(threadId: string): string | null;
-  /** One row planned as decide() plans it from stored facts, with these attempts and any writer or admission found at claim time. */
-  plan(effortId: string, target: string, change: { attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission }):
+  /** One row planned as decide() plans it from stored facts, with these attempts and code actions, and any writer or admission found at claim time. */
+  plan(effortId: string, target: string, change: { attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission; codeActions?: readonly StoredCodeAction[] }):
     Promise<{ phase: Phase; body: WorkRowBody; dueAt: number | null } | null>;
   /** Re-plan one row once its attempt changed. */
   settle(effortId: string, target: string): Promise<void>;
@@ -102,6 +110,12 @@ export type EffortRunnerDeps = {
   read(prUrl: string): Promise<AdvanceFacts | null>;
   /** Save feedback evidence a report proved on fresh facts, with worker provenance. */
   feedback(prUrl: string, threadId: string, report: FeedbackReport): void;
+  /** The reviewers GitHub shows requested on the PR now. It throws GitHub's error when GitHub can't be read. */
+  requested(prUrl: string): Promise<string[]>;
+  /** One GitHub write through the host's prWrite, which builds and validates its argv. A throw leaves unclear whether it landed. */
+  write(request: PrWrite): Promise<WriteResult>;
+  /** A write that hit GitHub's rate limit: when it may run again (and GitHub is read again); null when the error is no rate limit. */
+  rateLimit(error: string): Promise<number | null>;
   publish(effortId: string): void;
 };
 
@@ -128,6 +142,28 @@ export type Launch = {
   order: Omit<WorkOrderInput, "attemptId" | "recipes" | "checkout">;
 };
 export type LaunchOutcome = "planned" | "launched" | "uncertain" | "failed" | "waiting" | "stale";
+
+/** A code action the reconciler planned: one GitHub write, once per head and retry epoch. */
+export type CodeRun = {
+  effortId: string;
+  target: string;
+  baseRevision: number;
+  /** The row's revision the step was planned from. */
+  expectedRevision: number;
+  step: Next;
+  body: WorkRowBody;
+  /** The full read the step was planned on, under two minutes old. */
+  facts: AdvanceFacts;
+  /** Whom a review request names: for a re-request, each reviewer whose latest review asks for changes or was dismissed; for a new request, the granted logins. */
+  reviewers: readonly string[];
+};
+/**
+ * `planned`: a dry run writes nothing. `done`, `refused`, `waiting` (a rate limit): GitHub answered. `unclear`: it may have
+ * landed, so it is read back at the next pass. `stale`: the row moved on before the key was written.
+ */
+export type CodeOutcome = "planned" | "done" | "refused" | "waiting" | "unclear" | "stale";
+/** A write whose answer stays unclear through this many tries is a refused write, a system issue that `retry N` starts over. */
+const CODE_TRIES = 6;
 
 /** Where a work order runs: an existing thread to message, or a new thread in a checkout, prepared first when it is a worktree. */
 type Place = { via: AttemptBody["resource"]["kind"]; mode: "spawn" | "send"; threadId: string | null; path: string | null; kind: "author" | "worktree"; hostId: string; projectId: string | null;
@@ -180,7 +216,8 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
     return admitted((await deps.settings()).concurrency);
   }
   /** Write one planned row at the revision it was planned from; false when the row or instruction moved on first. */
-  function write(input: Launch, row: { phase: Phase; body: WorkRowBody; dueAt: number | null }, also?: () => void, attemptId?: string): boolean {
+  function write(input: Pick<Launch, "effortId" | "target" | "baseRevision" | "expectedRevision">, row: { phase: Phase; body: WorkRowBody; dueAt: number | null },
+    also?: () => void, attemptId?: string): boolean {
     const current = deps.work.row(input.target);
     if (!also && current?.revision === input.expectedRevision && current.phase === row.phase && sameBody(current.body, row.body)) return true;
     try {
@@ -531,5 +568,130 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
   /** Whether this process is making a launch on the PR now, which settles its claim when BB answers. */
   const launching = (target: string) => flights.has(`launch:${prWorkItemKey(target)}`);
 
-  return { launch, recover, admission: open, launching, signal, advance, recheck };
+  /** A code action's key or result, written into its row re-planned with it, at `expectedRevision` or else the row's current one. False when the row moved on. */
+  async function recordCode(run: CodeRun, entry: StoredCodeAction, expectedRevision?: number, also?: () => void): Promise<boolean> {
+    const current = deps.work.row(run.target);
+    if (!current || current.effortId !== run.effortId || (expectedRevision !== undefined && current.revision !== expectedRevision)) return false;
+    const codeActions = [entry, ...(current.body.codeActions ?? []).filter((item) => item.key !== entry.key)].slice(0, CODE_ACTIONS_KEPT);
+    const row = await deps.plan(run.effortId, run.target, { attempts: deps.work.attempts(run.target).map(decideAttempt), codeActions });
+    // Only while the row still asks for this action: a hold, a merge, or a new head since the step was planned writes nothing to GitHub.
+    if (!row || (entry.status === "pending" && (row.phase !== "executing" || JSON.stringify(row.body.nextAction) !== JSON.stringify([entry.recipe])))) return false;
+    try {
+      deps.work.commit({ effortId: run.effortId, baseRevision: deps.work.lastRevision(run.effortId), source: "code-action", instruction: null, journal: null, ...also ? { also } : {},
+        rows: [{ target: run.target, expectedRevision: current.revision, ...row }] });
+    } catch (error) {
+      if (error instanceof StaleWriteError) return false;
+      throw error;
+    }
+    deps.publish(run.effortId);
+    return true;
+  }
+  /**
+   * Record GitHub's answer. An action done changed the PR, so it is read again first, and no step is judged on the facts from before it.
+   * A result that can't be recorded leaves the key pending, so the next pass reads GitHub back instead of writing blind.
+   */
+  async function answered(run: CodeRun, entry: StoredCodeAction, patch: Pick<StoredCodeAction, "status" | "tries" | "detail"> & { retryAt?: number }): Promise<CodeOutcome> {
+    const at = deps.now();
+    if (patch.status === "done") await deps.read(run.target).catch(() => null);
+    await recordCode(run, { ...entry, retryAt: null, ...patch, detail: patch.detail?.slice(0, 800) ?? null, at });
+    return patch.status === "done" ? "done" : patch.status === "write-refused" ? "refused" : patch.status === "rate-limited" ? "waiting" : "unclear";
+  }
+  /**
+   * The GitHub write. A review request first reads whom GitHub already shows requested and names only the rest, so a re-request
+   * never repeats and an unclear one that landed reads as done. Marking ready and the rerun check the head on the host first.
+   */
+  async function writeCode(run: CodeRun, entry: StoredCodeAction): Promise<CodeOutcome> {
+    const tries = entry.tries + 1;
+    let request: PrWrite;
+    if (entry.recipe === "request_rereview" || entry.recipe === "request_review") {
+      let live: string[];
+      try { live = await deps.requested(run.target); }
+      catch (error) {
+        // Nothing was written, but a read GitHub didn't answer counts as a try, as an unclear write does, and a rate limit on it waits for the reset.
+        const failure = `GitHub couldn't read whom review is requested from: ${message(error)}`;
+        return failed(run, entry, tries, failure, githubRateLimit(failure) ? "rate-limited" : "unclear");
+      }
+      const requested = new Set(live.map((login) => login.toLowerCase()));
+      // Only a login or team GitHub accepts a request for; a bot's review can't be re-requested.
+      const valid = run.reviewers.filter((login) => REVIEWER.test(login));
+      const missing = valid.filter((login) => !requested.has(login.toLowerCase()));
+      if (missing.length === 0) return answered(run, entry, { status: "done", tries: entry.tries,
+        detail: valid.length ? `Review is requested from ${valid.map((login) => `@${login}`).join(", ")}` : "No reviewer GitHub accepts a request for" });
+      request = { kind: "nudge", prUrl: run.facts.prUrl, reviewers: missing, comment: null };
+    } else request = { kind: entry.recipe === "mark_ready_for_review" ? "ready" : "rerun-failed", prUrl: run.facts.prUrl, headOid: entry.headOid };
+    let failure: string;
+    let unclear = false;
+    try {
+      const result = await deps.write(request);
+      if (result.ok) return answered(run, entry, { status: "done", tries, detail: result.detail });
+      failure = result.error;
+    } catch (error) {
+      failure = message(error);
+      unclear = true;
+    }
+    const kind = unclear ? "unclear" : writeFailure(failure);
+    if (kind === "unclear") {
+      // It may have landed: read GitHub back once now, and until a read settles it the key stays pending for the next pass to read back.
+      const landed = await readBack(run, entry);
+      if (landed) return answered(run, entry, { status: "done", tries, detail: landed });
+    }
+    return failed(run, entry, tries, failure, kind);
+  }
+  /** A read or write GitHub didn't carry out: a rate limit waits for its reset, a refusal is a system issue, and anything unclear stays pending, within CODE_TRIES. */
+  async function failed(run: CodeRun, entry: StoredCodeAction, tries: number, failure: string, kind: ReturnType<typeof writeFailure>): Promise<CodeOutcome> {
+    if (kind === "rate-limited") return answered(run, entry, { status: "rate-limited", tries, detail: failure, retryAt: await deps.rateLimit(failure) ?? deps.now() + MINUTE });
+    if (kind === "refused") return answered(run, entry, { status: "write-refused", tries, detail: failure });
+    if (tries >= CODE_TRIES) return answered(run, entry, { status: "write-refused", tries, detail: `GitHub's answer stayed unclear through ${tries} tries: ${failure}` });
+    return answered(run, entry, { status: "pending", tries, detail: failure });
+  }
+  /** Whether GitHub shows the action in effect now; null when it can't tell yet. A review request reads back in writeCode, which names only whom GitHub lacks. */
+  async function readBack(run: CodeRun, entry: StoredCodeAction): Promise<string | null> {
+    if (entry.recipe === "request_rereview" || entry.recipe === "request_review") {
+      const live = await deps.requested(run.target).catch(() => null);
+      const requested = new Set(live?.map((login) => login.toLowerCase()));
+      return live !== null && run.reviewers.every((login) => !REVIEWER.test(login) || requested.has(login.toLowerCase())) ? "GitHub shows the review requested" : null;
+    }
+    const facts = await deps.read(run.target).catch(() => null);
+    if (!facts || facts.headOid !== entry.headOid) return null;
+    return entry.recipe === "mark_ready_for_review" ? (!facts.isDraft ? "GitHub shows the PR ready for review" : null)
+      : facts.checks === "pending" ? "GitHub shows the failed checks running again" : null;
+  }
+
+  /**
+   * Run one planned code action with v2 execution on: write its key into the row, then write to GitHub and record the answer.
+   * A key already pending is an answer that was unclear, or a write a restart cut short: it passes the same checks as a first
+   * write, then GitHub is read back first, and written again only when the read shows the action didn't land. A dry run writes nothing.
+   */
+  function code(run: CodeRun): Promise<CodeOutcome> {
+    const target = prWorkItemKey(run.target);
+    return once(`code:${target}`, async () => {
+      const [id] = run.step.nextAction as CodeRecipeId[];
+      if (!id || recipe(id).executor !== "code") throw new Error(`${target} has no code action to run.`);
+      if ((await deps.settings()).execution !== "on") return "planned";
+      const epoch = run.body.retryEpoch;
+      const key = createHash("sha256").update(JSON.stringify([target, id, run.facts.headOid, epoch])).digest("hex");
+      const found = run.body.codeActions?.find((item) => item.key === key);
+      // A rate-limited action runs again after its reset, and a pending one is read back; anything else already answered.
+      if (found && found.status !== "pending" && found.status !== "rate-limited") return "stale";
+      const entry: StoredCodeAction = found?.status === "pending" ? found
+        : { recipe: id, headOid: run.facts.headOid, retryEpoch: epoch, key, status: "pending", retryAt: null, tries: found?.tries ?? 0, at: deps.now(), detail: null };
+      // The key goes into the row before GitHub is written, at the revision the step was planned from, in the same transaction that reads
+      // every writer outside v2: nothing on the PR writes between the check and the key. A pending key is written again the same way, so a
+      // hold, a new head, or another writer since the pass stops a retry as it stops a first write.
+      try {
+        if (!await recordCode(run, entry, run.expectedRevision, () => { const writer = deps.writer(target, null); if (writer) throw new WriterBusy(writer); })) return "stale";
+      } catch (error) {
+        if (!(error instanceof WriterBusy)) throw error;
+        const row = await deps.plan(run.effortId, target, { attempts: deps.work.attempts(target).map(decideAttempt), writer: error.writer });
+        return row && write(run, row) ? (deps.publish(run.effortId), "waiting") : "stale";
+      }
+      if (found?.status === "pending" && (id === "mark_ready_for_review" || id === "rerun_failed_checks")) {
+        const landed = await readBack(run, entry);
+        if (landed) return answered(run, entry, { status: "done", tries: entry.tries, detail: landed });
+      }
+      return writeCode(run, entry);
+    });
+  }
+
+  return { launch, recover, admission: open, launching, signal, advance, recheck, code };
 }

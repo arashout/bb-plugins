@@ -212,7 +212,7 @@ describe("decide()", () => {
     const environment = { summary: "Runner lost its cache", question: null, options: [], prUrl: null };
     const reported = row({ attempts: [attempt({ recipes: ["fix_failing_checks"], result: "blocked:environment", blocker: environment })] }, { checks: "failed" });
     expect(decide(reported)).toMatchObject({ phase: "queued", cause: "code-action", nextAction: ["rerun_failed_checks"] });
-    expect(state(decide({ ...reported, codeActions: [{ recipe: "rerun_failed_checks", headOid: HEAD, status: "done" }] }))).toBe("repair-needed:ci-infrastructure");
+    expect(state(decide({ ...reported, codeActions: [{ recipe: "rerun_failed_checks", headOid: HEAD, retryEpoch: 0, status: "done" }] }))).toBe("repair-needed:ci-infrastructure");
     // In a composed order, the recipe's own route wins over the shared backoff.
     const composed = row({ attempts: [attempt({ recipes: ["integrate_base", "fix_failing_checks"], result: "blocked:environment", blocker: environment })] },
       { checks: "failed", mergeStateStatus: "BEHIND" });
@@ -249,7 +249,7 @@ describe("decide()", () => {
     const granted = scope([grant({ effects: [...DEFAULT_EFFECTS, "request-review"], reviewers: ["ada"] })]);
     expect(decide(row({ reviewers: none, instruction: granted }, { reviewDecision: null }))).toMatchObject({ phase: "queued", nextAction: ["request_review"] });
     // Once requested, the row waits on the reviewer even before a read shows the request.
-    expect(decide(row({ reviewers: none, instruction: granted, codeActions: [{ recipe: "request_review", headOid: HEAD, status: "done" }] }, { reviewDecision: null })))
+    expect(decide(row({ reviewers: none, instruction: granted, codeActions: [{ recipe: "request_review", headOid: HEAD, retryEpoch: 0, status: "done" }] }, { reviewDecision: null })))
       .toMatchObject({ phase: "waiting", cause: "review", detail: "Waiting for review from @ada", owner: { kind: "reviewer", ref: "ada" } });
   });
 
@@ -261,11 +261,16 @@ describe("decide()", () => {
     expect(state(decide(row({ reviewers, admission: { capacityFull: true, breakerOpen: true } }, changes)))).toBe("queued:code-action");
     expect(state(decide(row({ reviewers, instruction: scope([grant({ effects: DEFAULT_EFFECTS.filter((effect) => effect !== "request-rereview") })]) }, changes))))
       .toBe("decision-needed:authority");
-    const done = decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, status: "done" }] }, changes));
+    const done = decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "done" }] }, changes));
     expect(done).toMatchObject({ phase: "waiting", cause: "review" });
-    expect(state(decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, status: "pending" }] }, changes)))).toBe("executing:code-action");
+    // retry N starts a new epoch, in which the action may run once more; GitHub is read again after our own write before anything is judged.
+    expect(state(decide(row({ reviewers, retryEpoch: 1, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "done" }] }, changes))))
+      .toBe("queued:code-action");
+    expect(decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "done", at: NOW - 10_000 }] }, changes)))
+      .toMatchObject({ phase: "verifying", nextAction: "observe", detail: expect.stringContaining("reading GitHub after it") });
+    expect(state(decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "pending" }] }, changes)))).toBe("executing:code-action");
     // A rate limit waits for its reset, then the action runs again on the same head.
-    const limited = [{ recipe: "request_rereview" as const, headOid: HEAD, status: "rate-limited" as const, retryAt: NOW + 10 * MINUTE }];
+    const limited = [{ recipe: "request_rereview" as const, headOid: HEAD, retryEpoch: 0, status: "rate-limited" as const, retryAt: NOW + 10 * MINUTE }];
     expect(decide(row({ reviewers, codeActions: limited }, changes))).toMatchObject({ phase: "waiting", cause: "rate-limit", wake: { dueAt: NOW + 10 * MINUTE } });
     expect(state(decide(row({ now: NOW + 10 * MINUTE, reviewers, codeActions: limited, full: { facts: facts(changes), at: NOW + 9 * MINUTE } }, changes)))).toBe("queued:code-action");
     // A GitHub write needs a read under two minutes old.

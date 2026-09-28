@@ -88,8 +88,8 @@ export function latestReviewStates(reviews: unknown): string[] {
 
 /**
  * Who left each latest review, and its state, from the same `latestReviews`
- * payload. Bots are kept: they review like people. Display only, never passed
- * to gh, so a login is bounded rather than validated.
+ * payload. Bots are kept: they review like people. A login is bounded here, and
+ * validated as a reviewer only where a re-request passes it to gh.
  */
 export function latestReviewers(reviews: unknown): { login: string; state: string }[] {
   if (!Array.isArray(reviews)) return [];

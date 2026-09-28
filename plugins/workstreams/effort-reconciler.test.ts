@@ -14,6 +14,7 @@ import { createEffortStore } from "./effort-store.js";
 import type { createEffortV2, EffortCommandResult } from "./effort-v2-server.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
+import { createPrHoldStore } from "./pr-hold-store.js";
 import type { RunDb } from "./runstore.js";
 import plugin from "./server.js";
 
@@ -46,21 +47,24 @@ const url = (n: number) => `https://github.com/inkwell/folio/pull/${n}`;
 const head = (n: number, version = 0) => `${n}${version}`.padEnd(40, "a");
 /** GitHub's side of one PR. */
 type Live = { state: "OPEN" | "MERGED" | "CLOSED"; headOid: string; checks: "passed" | "pending" | "failed"; mergeStateStatus: string; mergeable: string;
-  reviewDecision: string | null; unresolvedThreads: number; basePrNumber: number | null };
+  reviewDecision: string | null; unresolvedThreads: number; basePrNumber: number | null; isDraft: boolean; reviewRequests: string[];
+  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean };
 const ready = (n: number): Live => ({ state: "OPEN", headOid: head(n), checks: "passed", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", reviewDecision: "APPROVED",
-  unresolvedThreads: 0, basePrNumber: null });
+  unresolvedThreads: 0, basePrNumber: null, isDraft: false, reviewRequests: [], latestReviews: [] });
 const conflicting = { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" } satisfies Partial<Live>;
 const title = (n: number) => `ABC-${n} Keep returned books on their shelf`;
 /** The cheap read: what the board's inventory and inspectPrs see. */
 const cheap = (n: number, live: Live) => ({ ...parsePrList(JSON.stringify([{ number: n, url: url(n), state: live.state, title: title(n), reviewDecision: live.reviewDecision ?? "",
-  isDraft: false, headRefName: `abc-${n}`, baseRefName: "main", headRefOid: live.headOid, baseRefOid: BASE, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable,
+  isDraft: live.isDraft, headRefName: `abc-${n}`, baseRefName: "main", headRefOid: live.headOid, baseRefOid: BASE, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable,
   statusCheckRollup: [live.checks === "passed" ? { conclusion: "SUCCESS" } : live.checks === "failed" ? { conclusion: "FAILURE" } : { status: "IN_PROGRESS", conclusion: "" }],
-  latestReviews: [], reviewRequests: [] }]))!.pr, unresolvedReviewThreads: live.unresolvedThreads, resolvedReviewThreads: 0 });
+  latestReviews: live.latestReviews.map(({ login, state }) => ({ author: { login }, state })), reviewRequests: live.reviewRequests.map((login) => ({ login })) }]))!.pr,
+  unresolvedReviewThreads: live.unresolvedThreads, resolvedReviewThreads: 0 });
 /** The full read: what advanceInspect sees. */
 const full = (n: number, live: Live): AdvanceFacts => ({ prUrl: url(n), number: n, title: title(n), repo: "inkwell/folio", headRefName: `abc-${n}`, baseRefName: "main",
-  headOid: live.state === "OPEN" ? live.headOid : "", baseOid: live.state === "OPEN" ? BASE : "", state: live.state, isDraft: false, isCrossRepository: false,
+  headOid: live.state === "OPEN" ? live.headOid : "", baseOid: live.state === "OPEN" ? BASE : "", state: live.state, isDraft: live.isDraft, isCrossRepository: false,
   reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable, needsPreparation: false, readiness: "ready", detail: "",
-  unresolvedThreads: live.unresolvedThreads, threadsComplete: true, checks: live.checks, basePrNumber: live.basePrNumber, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
+  unresolvedThreads: live.unresolvedThreads, threadsComplete: true, checks: live.checks, basePrNumber: live.basePrNumber,
+  ...live.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: live.reviewFollowupPosted }, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
 /** BB's turn.failed for a worker's turn, with no rate limit to wait out. */
 const failed = (threadId: string, requestId: string) => ({ threadId, requestId, turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 }) as never;
 /** Let the event hooks record their signals and mark rows due. */
@@ -93,7 +97,11 @@ async function setup(numbers: number[], options: Options = {}) {
     /** PRs whose full read fails for a reason other than a rate limit. */
     failFor: new Set<number>(),
     /** Runs while a pass reads a launch's checkout, between planning the row and committing it. */
-    duringCheckoutRead: null as (() => void) | null };
+    duringCheckoutRead: null as (() => void) | null,
+    /** Whether one write lands on GitHub, and what the host answers (an Error is a call that never answered); by default it lands and succeeds. */
+    write: null as ((request: { kind: string; prUrl: string }) => { lands: boolean; answer: { ok: true; detail: string } | { ok: false; error: string } | Error }) | null,
+    /** PRs whose review requests the host can't read, with the error it answers. */
+    reviewersFail: new Map<number, string>() };
   const checkout = (n: number): RawUnit => ({ path: `/p/folio-${n}`, dirName: `folio-${n}`, repo: "folio", githubRepo: "inkwell/folio", branch: `abc-${n}`, dirty: false, ahead: 0,
     behind: 0, lastCommitAt: "2026-09-27T12:00:00Z", defaultBranch: "main", pr: cheap(n, lives.get(n)!), shipped: null, changedPaths: [], observed: { status: true, pr: true } });
   const threads = new Map<string, ReturnType<typeof makeThreadResponse> & { environment: { hostId: string; path: string; branchName: string | null } }>();
@@ -174,6 +182,22 @@ async function setup(numbers: number[], options: Options = {}) {
       return { ok: true, head: lives.get(n)!.headOid, branch: `abc-${n}`, clean: true, commonDir: "/p/folio/.git", relation: "at-head" };
     }
     if (method === "githubRateLimit") return { resetAt: github.resetAt };
+    if (method === "prReviewers") {
+      const n = number((input as { prUrl: string }).prUrl);
+      const error = github.reviewersFail.get(n);
+      return error ? { ok: false, error } : { ok: true, reviewers: lives.get(n)!.reviewRequests };
+    }
+    if (method === "prWrite") {
+      // GitHub as the host's prWrite leaves it, for the kinds v2 writes.
+      const request = input as { kind: string; prUrl: string; reviewers?: string[] };
+      const live = lives.get(number(request.prUrl))!;
+      const { lands, answer } = github.write?.(request) ?? { lands: true, answer: { ok: true, detail: "written" } };
+      if (lands && request.kind === "nudge") live.reviewRequests = [...new Set([...live.reviewRequests, ...request.reviewers!])];
+      if (lands && request.kind === "ready") live.isDraft = false;
+      if (lands && request.kind === "rerun-failed") live.checks = "pending";
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
     if (method === "contextWorkspace") return { path: "/synthetic/workstreams/context" };
     throw new Error(`Unexpected host call ${method}`);
   } });
@@ -209,6 +233,14 @@ async function setup(numbers: number[], options: Options = {}) {
     criteriaNotes: () => (db.prepare(`SELECT detail FROM effort_transitions WHERE cause = 'criteria' ORDER BY seq`).all() as { detail: string }[])
       .map((row) => JSON.parse(row.detail) as { outcomeValidated: boolean; completed: boolean }),
   };
+}
+
+/** One command against the roster as it stands. */
+async function say(env: Awaited<ReturnType<typeof setup>>, text: string, requestId: string) {
+  const roster = await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster;
+  const active = env.work.instruction(env.effort.id);
+  return await env.harness.callRpc("effort_command", { effortId: env.effort.id, snapshotId: roster.snapshotId, text, requestId, source: "panel",
+    ...active ? { expectedRevision: active.revision } : {} }) as EffortCommandResult;
 }
 
 describe("the v2 reconciler", () => {
@@ -565,14 +597,6 @@ describe("the v2 reconciler when a read fails or an event is missed", () => {
       path: `/p/folio-${n}`, body });
     env.work.recordAttempt(`A-${n}`, ["launching"], { status: "uncertain", body });
   }
-  /** One command against the roster as it stands. */
-  async function say(env: Awaited<ReturnType<typeof setup>>, text: string, requestId: string) {
-    const roster = await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster;
-    const active = env.work.instruction(env.effort.id);
-    return await env.harness.callRpc("effort_command", { effortId: env.effort.id, snapshotId: roster.snapshotId, text, requestId, source: "panel",
-      ...active ? { expectedRevision: active.revision } : {} }) as EffortCommandResult;
-  }
-
   it("backs a PR GitHub can't read off 1, 2, 4, 8, then 15 minutes, names a system issue after six tries, and reads it again at its poll", async () => {
     const env = await setup([501]);
     env.github.failFor.add(501);
@@ -741,5 +765,209 @@ describe("the v2 reconciler when a read fails or an event is missed", () => {
     // The new c1 is unproven, so the worker is asked to validate it.
     expect(env.row(901)?.phase).not.toBe("prepared");
     expect(env.work.attempts(url(901))[0]).toMatchObject({ body: { recipes: ["validate_criteria"] } });
+  });
+});
+
+describe("the v2 reconciler's code actions", () => {
+  /** Changes were requested and followed up; ada asked for changes, bea's approval was dismissed, cy approved, and dee is already requested again. */
+  const followedUp = (): Partial<Live> => ({ reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true, mergeStateStatus: "BLOCKED", reviewRequests: ["dee"],
+    latestReviews: [{ login: "ada", state: "CHANGES_REQUESTED" }, { login: "bea", state: "DISMISSED" }, { login: "cy", state: "APPROVED" }, { login: "dee", state: "CHANGES_REQUESTED" }] });
+  const writes = (env: Awaited<ReturnType<typeof setup>>) => env.calls("prWrite").map((call) => call.input);
+
+  it("re-requests review only from reviewers who asked for changes or whose approval was dismissed, skips those already requested, posts no comment, and runs once per head", async () => {
+    const env = await setup([711], { live: followedUp, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(writes(env)).toEqual([{ kind: "nudge", prUrl: url(711), reviewers: ["ada", "bea"], comment: null }]);
+    expect(env.row(711)).toMatchObject({ phase: "waiting", body: { cause: "review", codeActions: [{ recipe: "request_rereview", headOid: head(711), status: "done", tries: 1 }] } });
+    // Someone takes ada's request off again: this head already had its re-request, so v2 doesn't repeat it.
+    env.set(711, { reviewRequests: ["dee", "bea"] });
+    env.at(16 * MINUTE);
+    env.reconciler.due([url(711)]);
+    await env.reconciler.tick();
+    expect(writes(env)).toHaveLength(1);
+    // A new head is new work to review: its re-request runs once.
+    env.set(711, { headOid: head(711, 1) });
+    env.at(32 * MINUTE);
+    env.reconciler.due([url(711)]);
+    await env.reconciler.tick();
+    expect(writes(env)).toEqual([expect.anything(), { kind: "nudge", prUrl: url(711), reviewers: ["ada"], comment: null }]);
+  });
+
+  it("requests review and marks a draft ready only once a command grants each, never on its own", async () => {
+    const env = await setup([721, 722], { live: (n) => n === 721 ? { isDraft: true, reviewDecision: null, mergeStateStatus: "DRAFT" }
+      : { reviewDecision: null, mergeStateStatus: "BLOCKED" }, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect([env.row(721)?.body.decision?.subkind, env.row(722)?.body.decision?.subkind]).toEqual(["mark-ready", "request-review"]);
+    expect(writes(env)).toEqual([]);
+    const [draft, open] = [env.row(721)!.body.n, env.row(722)!.body.n];
+    expect(await say(env, `mark ${draft} ready`, "req-ready")).toMatchObject({ kind: "admit" });
+    expect(await say(env, `request review ${open} from @ada`, "req-review")).toMatchObject({ kind: "admit" });
+    await env.reconciler.tick();
+    expect(writes(env)).toEqual([{ kind: "ready", prUrl: url(721), headOid: head(721) }, { kind: "nudge", prUrl: url(722), reviewers: ["ada"], comment: null }]);
+  });
+
+  it("reruns failed checks once on a head after a worker reports an environment blocker, and a second failure on that head is a CI issue", async () => {
+    const env = await setup([731], { live: () => ({ checks: "failed", mergeStateStatus: "BLOCKED" }), execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [attempt] = env.work.attempts(url(731));
+    expect(attempt?.body.recipes).toEqual(["fix_failing_checks"]);
+    await env.finish(attempt!.threadId!, `Workstreams result v1: ${JSON.stringify({ attemptId: attempt!.id, target: url(731), actions: ["fix_failing_checks"], outcome: "blocked",
+      headOid: head(731), baseOid: BASE, blockers: [{ kind: "environment", summary: "The shelf index runner lost its cache", checks: ["ci/shelf-index"] }] })}`);
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    expect(writes(env)).toEqual([{ kind: "rerun-failed", prUrl: url(731), headOid: head(731) }]);
+    expect(env.row(731)).toMatchObject({ phase: "waiting", body: { cause: "ci" } });
+    env.set(731, { checks: "failed" });
+    env.at(2 * MINUTE + 1_000);
+    await env.reconciler.tick();
+    expect(env.row(731)).toMatchObject({ phase: "repair-needed", body: { cause: "ci-infrastructure", userState: "issue", recovery: ["retry N"] } });
+    expect(writes(env)).toHaveLength(1);
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes the action key into the row before the GitHub write, and reads GitHub back after an unclear answer instead of writing blind", async () => {
+    const env = await setup([741, 742], { live: followedUp, execution: "on" });
+    const atWrite: unknown[] = [];
+    // 741's request lands but its answer is lost; 742's never reaches GitHub.
+    env.github.write = (request) => {
+      atWrite.push(env.work.row(request.prUrl)?.body.codeActions?.[0]);
+      return { lands: request.prUrl === url(741), answer: new Error("socket hang up") };
+    };
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(atWrite).toEqual([741, 742].map((n) => expect.objectContaining({ recipe: "request_rereview", headOid: head(n), retryEpoch: 0, status: "pending" })));
+    const methods = env.hostCalls.map((call) => call.method);
+    expect(methods.lastIndexOf("prReviewers")).toBeGreaterThan(methods.lastIndexOf("prWrite"));
+    expect(env.row(741)?.body.codeActions?.[0]).toMatchObject({ status: "done", tries: 1 });
+    // 742 stays pending, and its row says GitHub's answer is being read back.
+    expect(env.row(742)).toMatchObject({ phase: "executing", body: { cause: "code-action", userState: "doing", codeActions: [{ status: "pending", tries: 1 }] } });
+    env.github.write = null;
+    env.at(5 * MINUTE + 1_000);
+    await env.reconciler.tick();
+    expect(writes(env).map((request) => request.prUrl)).toEqual([url(741), url(742), url(742)]);
+    expect(env.row(742)?.body.codeActions?.[0]).toMatchObject({ status: "done", tries: 2 });
+  });
+
+  it("reads a ready mark or a rerun back before writing it again after an unclear answer, and writes it once when GitHub shows it landed", async () => {
+    // GitHub shows each write only after the read that follows it: the write's answer is lost, and the first read back still shows the PR as it was.
+    const lost = () => ({ lands: false, answer: new Error("socket hang up") });
+    const draft = await setup([791], { live: () => ({ isDraft: true, reviewDecision: null, mergeStateStatus: "DRAFT" }), execution: "on" });
+    draft.github.write = lost;
+    await draft.reconciler.recoverAll();
+    await draft.reconciler.tick();
+    expect(await say(draft, `mark ${draft.row(791)!.body.n} ready`, "req-ready")).toMatchObject({ kind: "admit" });
+    await draft.reconciler.tick();
+    expect(draft.row(791)?.body.codeActions?.[0]).toMatchObject({ recipe: "mark_ready_for_review", status: "pending", tries: 1 });
+    draft.set(791, { isDraft: false });
+    draft.reconciler.due([url(791)]);
+    await draft.reconciler.tick();
+    expect(writes(draft)).toEqual([{ kind: "ready", prUrl: url(791), headOid: head(791) }]);
+    expect(draft.row(791)?.body.codeActions?.[0]).toMatchObject({ status: "done", tries: 1, detail: "GitHub shows the PR ready for review" });
+
+    const failing = await setup([792], { live: () => ({ checks: "failed", mergeStateStatus: "BLOCKED" }), execution: "on" });
+    failing.github.write = lost;
+    await failing.reconciler.recoverAll();
+    await failing.reconciler.tick();
+    const [attempt] = failing.work.attempts(url(792));
+    await failing.finish(attempt!.threadId!, `Workstreams result v1: ${JSON.stringify({ attemptId: attempt!.id, target: url(792), actions: ["fix_failing_checks"],
+      outcome: "blocked", headOid: head(792), baseOid: BASE, blockers: [{ kind: "environment", summary: "The shelf index runner lost its cache", checks: ["ci/shelf-index"] }] })}`);
+    await failing.reconciler.tick();
+    await failing.reconciler.tick();
+    expect(failing.row(792)?.body.codeActions?.[0]).toMatchObject({ recipe: "rerun_failed_checks", status: "pending", tries: 1 });
+    failing.set(792, { checks: "pending" });
+    failing.reconciler.due([url(792)]);
+    await failing.reconciler.tick();
+    expect(writes(failing)).toEqual([{ kind: "rerun-failed", prUrl: url(792), headOid: head(792) }]);
+    expect(failing.row(792)?.body.codeActions?.[0]).toMatchObject({ status: "done", tries: 1, detail: "GitHub shows the failed checks running again" });
+  });
+
+  it("writes nothing to GitHub for a code action whose row was held on the board after the pass planned it", async () => {
+    const env = await setup([793], { live: followedUp, execution: "on" });
+    // The board's hold changes no v2 row, so only planning the row again before its key is written can see it.
+    const code = env.runner.code;
+    env.runner.code = async (run) => {
+      createPrHoldStore(env.db).set(url(793), true, "Waiting on the shelf audit");
+      return code(run);
+    };
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect([writes(env), env.row(793)?.body.codeActions]).toEqual([[], undefined]);
+    env.runner.code = code;
+    await env.reconciler.tick();
+    expect(env.row(793)).toMatchObject({ phase: "paused", body: { cause: "hold" } });
+    expect(writes(env)).toEqual([]);
+  });
+
+  it("checks a pending code action again before it writes a second time, so a hold after the pass stops the retry too", async () => {
+    const env = await setup([794], { live: followedUp, execution: "on" });
+    env.github.write = () => ({ lands: false, answer: new Error("socket hang up") });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(794)?.body.codeActions?.[0]).toMatchObject({ status: "pending", tries: 1 });
+    env.github.write = null;
+    // You hold the PR after the pass planned the retry, and before it runs.
+    const code = env.runner.code;
+    env.runner.code = async (run) => {
+      env.runner.code = code;
+      expect(await say(env, `hold ${env.row(794)!.body.n}`, "req-hold")).toMatchObject({ kind: "admit" });
+      return code(run);
+    };
+    env.at(5 * MINUTE + 1_000);
+    await env.reconciler.tick();
+    expect(writes(env)).toHaveLength(1);
+    expect(env.row(794)).toMatchObject({ phase: "paused", body: { cause: "hold", codeActions: [{ status: "pending", tries: 1 }] } });
+  });
+
+  it("counts a review-request read GitHub can't answer as a try and names it an issue after six, and waits out a rate limit on that read", async () => {
+    const env = await setup([795, 796], { live: followedUp, execution: "on" });
+    env.github.resetAt = START + 20 * MINUTE;
+    env.github.reviewersFail.set(795, "HTTP 502: Bad Gateway");
+    env.github.reviewersFail.set(796, "API rate limit exceeded for user ID 1001.");
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(795)?.body.codeActions?.[0]).toMatchObject({ status: "pending", tries: 1, detail: expect.stringContaining("HTTP 502") });
+    expect(env.row(796)).toMatchObject({ phase: "waiting", dueAt: START + 20 * MINUTE + 30_000, body: { cause: "rate-limit", userState: "waiting" } });
+    for (let poll = 1; poll <= 5; poll++) {
+      env.at(poll * 5 * MINUTE + 1_000);
+      await env.reconciler.tick();
+    }
+    expect(env.row(795)).toMatchObject({ phase: "repair-needed", body: { cause: "github-write", userState: "issue", recovery: ["retry N"],
+      detail: expect.stringContaining("stayed unclear through 6 tries: GitHub couldn't read whom review is requested from: HTTP 502: Bad Gateway") } });
+    expect(writes(env)).toEqual([]);
+    expect(env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target = ? AND to_phase = 'repair-needed'`).get(url(796))).toEqual({ count: 0 });
+  });
+
+  it("makes no GitHub write and reads no reviewer in a dry run, and shows the code action as a plan", async () => {
+    const env = await setup([751], { live: followedUp });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(751)).toMatchObject({ phase: "queued", body: { cause: "code-action", nextAction: ["request_rereview"], userState: "waiting", modifiers: ["plan only"] } });
+    expect([env.calls("prWrite"), env.calls("prReviewers"), env.row(751)?.body.codeActions]).toEqual([[], [], undefined]);
+  });
+
+  it("waits out a rate-limited write until GitHub's reset, and names a refused write as a system issue that retry N runs again", async () => {
+    const env = await setup([761, 762], { live: followedUp, execution: "on" });
+    env.github.resetAt = START + 20 * MINUTE;
+    env.github.write = (request) => ({ lands: false, answer: { ok: false, error: request.prUrl === url(761) ? "Re-requesting review failed: API rate limit exceeded for user ID 1001."
+      : "Re-requesting review failed: HTTP 422: Reviews may only be requested from collaborators." } });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(761)).toMatchObject({ phase: "waiting", dueAt: START + 20 * MINUTE + 30_000, body: { cause: "rate-limit", userState: "waiting" } });
+    expect(env.row(762)).toMatchObject({ phase: "repair-needed", body: { cause: "github-write", userState: "issue", recovery: ["retry N"],
+      detail: expect.stringContaining("only be requested from collaborators") } });
+    env.github.write = null;
+    env.at(20 * MINUTE + 31_000);
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    expect(env.row(761)?.body.codeActions?.[0]).toMatchObject({ status: "done" });
+    expect(env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target = ? AND to_phase = 'repair-needed'`).get(url(761))).toEqual({ count: 0 });
+    expect(await say(env, `retry ${env.row(762)!.body.n}`, "req-retry")).toMatchObject({ kind: "admit" });
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    expect(env.row(762)?.body.codeActions?.[0]).toMatchObject({ retryEpoch: 1, status: "done" });
+    expect(writes(env).filter((request) => request.prUrl === url(762))).toHaveLength(2);
   });
 });

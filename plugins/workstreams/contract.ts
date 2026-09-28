@@ -253,6 +253,9 @@ export const prWriteSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("update-branch"), prUrl: z.string().max(500) }).strict(),
+  /** v2's lifecycle and check actions: each names the head it was confirmed on. */
+  z.object({ kind: z.literal("ready"), prUrl: z.string().max(500), headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
+  z.object({ kind: z.literal("rerun-failed"), prUrl: z.string().max(500), headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
   z
     .object({
       kind: z.literal("nudge"),
@@ -319,7 +322,7 @@ export const hostContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
     ]),
   },
-  /** The only GitHub writes. Each runs only after the user confirmed its dialog. */
+  /** The only GitHub writes. Each runs only after the user confirmed its dialog, or an effort's instruction granted it. */
   prWrite: { input: prWriteSchema, output: writeResultSchema },
   scan: {
     input: z.object({ roots: z.array(z.string().max(1_000)).max(50) }).strict(),

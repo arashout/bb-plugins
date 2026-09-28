@@ -4544,6 +4544,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /** The newest cheap read of each PR here: a full read that follows it is kept with its signature, so a later cheap read that differs supersedes it. */
   const cheapReads = new Map<string, { signature: string; at: number }>();
+  /**
+   * When v2 last wrote each PR to GitHub. A cheap read from before that write no longer describes the PR, so a full read after it keeps no
+   * signature, and the next cheap read counts as a change even if it shows the PR as it was before the write, such as checks failing again.
+   */
+  const v2WroteAt = new Map<string, number>();
   /** One full read of a PR, kept in pr_facts; a failure keeps the last success. A board-tracked PR whose facts moved is refreshed on the board too. */
   async function fullRead(prUrl: string, hostId: string): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
     const failed = (error: string) => {
@@ -4562,7 +4567,8 @@ export default async function plugin(bb: BbPluginApi) {
       const boardAt = Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0;
       const read = cheapReads.get(prWorkItemKey(prUrl));
       const cheap = board && boardAt >= (read?.at ?? 0) ? { signature: cheapSignature(board.pr), at: boardAt } : read;
-      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: cheap?.signature ?? null, cheapAt: cheap?.at ?? null });
+      const current = cheap && cheap.at > (v2WroteAt.get(prWorkItemKey(prUrl)) ?? -Infinity) ? cheap : null;
+      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: current?.signature ?? null, cheapAt: cheap?.at ?? null });
       if (knownPrUrl(prUrl) !== null && previous && JSON.stringify(previous) !== JSON.stringify(full.facts)) scheduleInventoryUrls([prUrl]);
       return { status: "checked" };
     } catch (error) {
@@ -4696,7 +4702,7 @@ export default async function plugin(bb: BbPluginApi) {
     realtime: bb.realtime,
     launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
       launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh), launch: (input) => runner.launch(input),
-      advance: (attemptId) => runner.advance(attemptId) },
+      code: (input) => runner.code(input), advance: (attemptId) => runner.advance(attemptId) },
     reconciler: {
       now: Date.now,
       cheapAt: (prUrl) => Math.max(Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0, prFacts.get(prUrl)?.cheapAt ?? 0) || null,
@@ -4819,6 +4825,21 @@ export default async function plugin(bb: BbPluginApi) {
     // Within the reconciler's budget of full reads, and never while GitHub's rate limit holds reads.
     read: async (prUrl) => await effortV2.reconciler.readFull(prUrl) ? prFacts.get(prUrl)?.facts ?? null : null,
     feedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
+    requested: async (prUrl) => {
+      const hostId = (await bb.sdk.system.config()).primaryHostId;
+      if (hostId === null) throw new Error("No primary BB host is available to read GitHub.");
+      const live = await reviewersOf(hostId)(prUrl);
+      if (!live.ok) throw new Error(live.error);
+      return live.reviewers;
+    },
+    // No primary host is no answer from GitHub: the write stays pending and is read back once a host is available.
+    write: async (request) => {
+      const hostId = (await bb.sdk.system.config()).primaryHostId;
+      if (hostId === null) throw new Error("No primary BB host is available to write to GitHub.");
+      v2WroteAt.set(prWorkItemKey(request.prUrl), Date.now());
+      return writeOf(hostId)(request);
+    },
+    rateLimit: (error) => effortV2.reconciler.rateLimitedUntil(error),
     publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
   });
 
