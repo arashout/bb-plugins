@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { AdvanceJob } from "./bulk-advance.js";
 import { effortRoster, effortRosterSchema, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
+import { RECIPES } from "./effort-recipes.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
 import type { Execution, ExecutionMode } from "./effort-work-store.js";
 import { canonicalPrUrl } from "./pr-holds.js";
@@ -212,6 +213,14 @@ export function createEffortV2(deps: EffortV2Deps) {
   }
   const jobLine = (jobs: readonly LegacyJob[]) => jobs.map((job) => `${job.repo} #${job.number}${job.uncertain ? " (uncertain)" : ""}`).join(", ") || "none";
   const commands = {
+    recipes: cliCommand({
+      summary: "List the action recipes v2 composes into work orders",
+      options: { json: { type: "boolean", description: "Emit the catalog as JSON" } },
+      async run({ options }) {
+        return { exitCode: 0, stdout: options.json ? JSON.stringify(RECIPES) : RECIPES.map((item) =>
+          `${item.action} · ${item.executor === "worker" ? `worker on the ${item.modelRole} model` : "code"} · effects: ${item.effects.join(", ") || "none"}`).join("\n") };
+      },
+    }),
     roster: cliCommand({
       summary: "List an effort's PRs as a numbered roster",
       positionals: [{ name: "effort", description: "Effort id, key, or exact name", required: true, variadic: true }],

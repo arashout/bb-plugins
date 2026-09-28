@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
 import { cheapSignature } from "./effort-roster-store.js";
+import { RECIPES } from "./effort-recipes.js";
 import { createEffortStore } from "./effort-store.js";
 import { INKWELL_ROSTER } from "./inkwell-fixtures.js";
 import { createLinearSync } from "./linearsync.js";
@@ -161,6 +162,14 @@ describe("effort roster read model", () => {
     expect(await env.harness.runCli(["roster", env.efforts["Vault audits"]!.id, "--json"])).toMatchObject({ exitCode: 0 });
     for (const path of ["threads.spawn", "threads.send", "threads.update"]) expect(env.harness.inspection.sdk.callsTo(path)).toEqual([]);
     expect(env.harness.inspection.experimental_hostRpcCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))).toEqual([]);
+  });
+
+  it("serves the recipe catalog as JSON from the CLI", async () => {
+    const env = await setup();
+    const result = await env.harness.runCli(["recipes", "--json"]);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(RECIPES);
+    expect((await env.harness.runCli(["recipes"])).stdout.split("\n")[0]).toBe("integrate_base · worker on the code model · effects: code-fix, test, push");
   });
 
   it("prints a numbered plain roster under 1 MiB for 1,000 members", async () => {
