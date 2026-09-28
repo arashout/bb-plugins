@@ -58,6 +58,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
       role === "unassigned-root" ? "thr-unassigned" : role === "unassigned-repo" ? "thr-unassigned-repo" :
       ++spawned === 1 ? "thr-rebasing" : `thr-repair-${spawned}`;
     const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title, originPluginId: "workstreams",
+      providerId: args.providerId,
       status: role === "coordinator" ? "idle" : "active" }), parentThreadId: options.misparentWorker && role === "rebase-worker" ? null : args.parentThreadId ?? null,
       environment: { hostId: args.environment.hostId }, environmentPath: args.environment.workspace?.path ?? null,
       environmentHostId: args.environment.hostId ?? null };
@@ -268,8 +269,7 @@ describe("bulk advance server integration", () => {
     expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example", parentThreadId: "thr-unassigned-repo",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
       pluginMetadata: { role: "rebase-worker", prUrl: env.url } });
-    expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("model");
-    expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("providerId");
+    expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" });
     expect(env.spawn.mock.calls[2]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");
   });
 
@@ -550,7 +550,7 @@ describe("bulk advance server integration", () => {
     expect(request).toMatchObject({ projectId: "project-example", title: "widget #42: repair review feedback",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
       pluginMetadata: { role: "advance-repair", advanceJobId: result.batch.jobs[0]!.attemptId, prUrl: env.url } });
-    expect(request).not.toHaveProperty("model");
+    expect(request).toMatchObject({ providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" });
     expect(request.parentThreadId).toBe("thr-unassigned-repo");
     expect(result.batch.jobs[0]!.attemptId).not.toBe(ids.jobId);
     expect(request.prompt).toContain("Address the remaining feedback and reply.");

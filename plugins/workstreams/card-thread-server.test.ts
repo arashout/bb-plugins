@@ -36,7 +36,8 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const id = `thr-context-${threads.size + 1}`;
     add(id, { projectId: args.projectId, title: args.title, parentThreadId: args.parentThreadId ?? null,
-      environmentPath: args.environment.workspace.path ?? null, environmentHostId: args.environment.hostId ?? HOST }, args.pluginMetadata);
+      providerId: args.providerId, environmentPath: args.environment.workspace.path ?? null,
+      environmentHostId: args.environment.hostId ?? HOST }, args.pluginMetadata);
     return { ...threads.get(id)!, canSpawnChild: true } as never;
   });
   const send = vi.fn(async (_args: Record<string, any>) => ({ ok: true as const, delivery: "sent" as const }));
@@ -98,6 +99,15 @@ it("starts a remote PR context only on Send, links it to the board, and keeps fo
   expect(await env.harness.callRpc("runs_open", null)).toEqual([]);
   expect(env.send).toHaveBeenCalledTimes(1);
   expect(env.send.mock.calls[0]?.[0].input[0].text).toContain("authorizes inspection and reporting, not a repair");
+});
+
+it("keeps a legacy provider thread as history and refuses to send another turn through Workstreams", async () => {
+  const env = await setup({ remoteOnly: true });
+  const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string };
+  env.threads.set(created.threadId, { ...env.threads.get(created.threadId)!, providerId: "claude-code" });
+  expect(await env.message({ prUrl: URL }, created.threadId)).toMatchObject({ ok: false,
+    error: expect.stringContaining("Choose New agent") });
+  expect(env.send).not.toHaveBeenCalled();
 });
 
 it("keeps a newly created PR context in the first twenty links while thread facts catch up", async () => {
@@ -217,7 +227,7 @@ it("sends held-card context diagnostics but never starts execution", async () =>
 
 it("refuses an existing checkout thread when another live thread owns its path", async () => {
   const env = await setup({ initialThreads: [
-    { id: "thr-linked", patch: { environmentPath: PATH }, metadata: { ticket: "INK-42" } },
+    { id: "thr-linked", patch: { providerId: "codex", environmentPath: PATH }, metadata: { ticket: "INK-42" } },
     { id: "thr-writer", patch: { status: "active", environmentPath: PATH, environmentHostId: HOST }, metadata: {} },
   ] });
   env.setRaw({ ...base }); await env.refresh();

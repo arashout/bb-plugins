@@ -34,7 +34,7 @@ async function setup(saved?: SavedRows) {
   const metadata = new Map<string, Record<string, unknown>>();
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const id = `thr-${threads.size + 1}`;
-    const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
+    const thread = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title, providerId: args.providerId,
       originPluginId: "workstreams", status: args.pluginMetadata?.role === "work-conversation" ? "idle" : "active" }),
       environment: { hostId: HOST }, environmentPath: args.environment.workspace?.path ?? null,
       environmentHostId: HOST, parentThreadId: args.parentThreadId ?? null };

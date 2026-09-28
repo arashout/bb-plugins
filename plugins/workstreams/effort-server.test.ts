@@ -59,7 +59,7 @@ describe("established effort coordination through the server", () => {
     expect(await harness.callRpc("effort_coordinate", input)).toMatchObject({ ok: true });
     expect(spawns[0]).toMatchObject({ title: "🔍 Improve manuscript review", environment: { type: "host", hostId: "host-inkwell",
       workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/1" } }, pluginMetadata: { role: "coordinator" } });
-    expect(spawns[0]).not.toHaveProperty("model"); expect(spawns[0]).not.toHaveProperty("providerId");
+    expect(spawns[0]).toMatchObject({ providerId: "codex", model: "gpt-6-sol", reasoningLevel: "medium" });
     const established = (await board()).efforts[0]!;
     await harness.runCli(["refresh"]);
     expect((await board()).groups.some((group) => group.key === established.key && group.name === input.name)).toBe(true);

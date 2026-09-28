@@ -2,6 +2,7 @@
 // Kept out of server.ts behind a narrow SDK interface, so the exact spawn
 // request can be tested against a fake without a live BB.
 import { withinPath } from "./threads.js";
+import { SOL_HIGH } from "./execution.js";
 
 /** The slice of `bb.sdk` this needs. */
 export type SpawnSdk = {
@@ -17,6 +18,9 @@ export type SpawnSdk = {
         workspace: { type: "unmanaged"; path: string };
       };
       prompt: string;
+      providerId: "codex";
+      model: "gpt-6-sol";
+      reasoningLevel: "high";
       pluginMetadata: { ticket: string };
       /** Set for a subthread: BB files it under this parent and tells the parent when it finishes. */
       parentThreadId?: string;
@@ -49,8 +53,8 @@ export function projectForPath(
 
 /**
  * Spawn a thread that works IN the checkout: an unmanaged workspace at the
- * checkout's own path, so the new thread's environment is that checkout. No
- * provider or model is named, so BB applies the project's own defaults. The
+ * checkout's own path, so the new thread's environment is that checkout. The
+ * explicit execution choice keeps project defaults from selecting another model. The
  * cluster ticket is seeded into this plugin's thread metadata at spawn time,
  * which links the thread to its row before it has done anything.
  *
@@ -74,6 +78,7 @@ export async function startThread(
     };
   }
   const thread = await sdk.threads.spawn({
+    ...SOL_HIGH,
     projectId: project.projectId,
     environment: { type: "host", hostId: project.hostId, workspace: { type: "unmanaged", path: unit.path } },
     prompt: text,

@@ -45,7 +45,7 @@ function unit(mergeStateStatus: "DIRTY" | "CLEAN"): RawUnit {
   };
 }
 
-const thread = (id: string, status: "active" | "idle" | "error" = "active") => makeThreadResponse({ id, status });
+const thread = (id: string, status: "active" | "idle" | "error" = "active") => makeThreadResponse({ id, status, providerId: "codex" });
 
 async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) => unknown; rebasing?: boolean; liveRebasing?: boolean; liveBranch?: string | null;
   remoteOnly?: boolean; metadata?: Record<string, unknown>; delivery?: "sent" | "queued"; threadStatus?: "active" | "idle" | "error" } = {}) {
@@ -63,7 +63,7 @@ async function load(options: { threads?: unknown[]; prWrite?: (input: unknown) =
         spawn: async (args: Record<string, any>) => {
           const role = args.pluginMetadata?.role;
           const id = role === "coordinator" ? "thr-coordinator" : role === "repo" ? "thr-repo" : "thr-quill-new";
-          const result = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title,
+          const result = { ...makeThreadResponse({ id, projectId: args.projectId, title: args.title, providerId: args.providerId,
             status: role === "coordinator" ? "idle" : "active" }), parentThreadId: args.parentThreadId ?? null,
             environment: { hostId: args.environment.hostId } };
           spawned.set(id, result);
@@ -115,7 +115,8 @@ describe("agent runs through the server", () => {
     expect(await harness.callRpc("thread_message", { path: PATH, prUrl: "https://github.com/inkwell/quill/pull/99", threadId: "thr-quill-author", message: "PTAL" })).toMatchObject({ ok: false });
     expect(harness.sdk.callsTo("threads.send")).toEqual([]);
     expect(await harness.callRpc("thread_message", { path: PATH, prUrl: PR_URL, threadId: "thr-quill-author", message: "Rebase, then post PTAL" })).toEqual({ ok: true, delivery: "sent" });
-    expect(harness.sdk.callsTo("threads.send")).toEqual([[expect.objectContaining({ threadId: "thr-quill-author", mode: "auto" })]]);
+    expect(harness.sdk.callsTo("threads.send")).toEqual([[expect.objectContaining({ threadId: "thr-quill-author", mode: "auto",
+      model: "gpt-6-sol", reasoningLevel: "high" })]]);
     expect(await open()).toEqual([expect.objectContaining({ action: "message", status: "running", threadId: "thr-quill-author", prUrl: PR_URL })]);
   });
 
@@ -128,7 +129,7 @@ describe("agent runs through the server", () => {
     expect(await harness.callRpc("thread_message", { prUrl: PR_URL, threadId: "thr-remote-author", message: "Check the branch" }))
       .toEqual({ ok: true, delivery: "sent" });
     expect(await open()).toEqual([expect.objectContaining({ action: "message", path: "", prUrl: PR_URL })]);
-    expect(harness.sdk.callsTo("threads.send")).toHaveLength(1);
+    expect(harness.sdk.callsTo("threads.send")).toEqual([[expect.objectContaining({ model: "gpt-6-sol", reasoningLevel: "high" })]]);
   });
 
   it("does not report a queued instruction as completed by the current turn", async () => {

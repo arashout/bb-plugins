@@ -55,6 +55,8 @@ context needed to name a group. Automatic grouping calls happen when semantic
 inputs change; an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
 via agent** action starts a BB thread only when you confirm it.
 
+Workstreams starts planning and context threads with Codex gpt-6-sol at medium reasoning and work or repair threads at high reasoning. Existing threads from another provider remain available as history; choose **New agent** to continue through Workstreams on Sol.
+
 ## Organize work from a thread
 
 Use **Effort** above the thread composer to assign the thread to an effort,

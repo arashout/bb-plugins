@@ -95,6 +95,9 @@ describe("runAgent", () => {
     expect(spawned).toEqual([
       {
         projectId: "prj_folio",
+        providerId: "codex",
+        model: "gpt-6-sol",
+        reasoningLevel: "high",
         environment: { type: "host", hostId: "host_a", workspace: { type: "unmanaged", path: "/p/folio-abc-101" } },
         prompt: base.prompt,
         pluginMetadata: { ticket: "ABC-101" },

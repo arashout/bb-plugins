@@ -593,8 +593,8 @@ also includes the PR inventory.
 
 **🧭 Coordinate** previews an effort's linked tickets and PRs, editable name and
 goal, and the matching BB projects. Explicit confirmation creates a planning
-thread in an isolated non-Git scratch directory using the selected project's
-default agent, or
+thread in an isolated non-Git scratch directory using Codex gpt-6-sol at medium
+reasoning, or
 associates an eligible idle thread. Coordinator titles prefix the effort name
 with a relevant emoji or a stable, varied fallback, preserving an existing leading
 emoji. An explicitly associated thread receives this title but keeps its parent;
@@ -602,6 +602,8 @@ association does not start a turn. The saved
 effort ID preserves the chosen identity and membership across later grouping.
 The heading then opens the effort thread. Team containers and Unsorted do not
 offer this control.
+
+Workstreams starts planning and context threads with Codex gpt-6-sol at medium reasoning and work or repair threads at high reasoning. A thread created with another provider cannot change providers in place; choose **New agent** to continue through Workstreams while retaining the old thread as history.
 
 **Message agent** on a Pipeline PR or checkout card sends to a linked thread or
 starts a context thread only when you send. The context thread receives the

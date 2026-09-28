@@ -38,7 +38,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
     changedPaths: ["src/review.ts"], observed: { status: true, pr: true } };
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const add = (id: string, patch: Record<string, unknown> = {}) => {
-    const row = makeThreadResponse({ id, projectId: PROJECT, title: id, status: "idle", ...patch } as never);
+    const row = makeThreadResponse({ id, projectId: PROJECT, title: id, status: "idle", providerId: "codex", ...patch } as never);
     threads.set(id, row);
     return row;
   };
@@ -149,7 +149,7 @@ describe("PR thread context and messaging", () => {
     ]));
     expect((await env.context()).recommendedThreadId).toBe("thr-remote");
     expect(await env.message("thr-remote")).toEqual({ ok: true, delivery: "sent" });
-    expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-remote" }));
+    expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-remote", model: "gpt-6-sol", reasoningLevel: "high" }));
     expect(await env.harness.callRpc("runs_open", null)).toEqual([
       expect.objectContaining({ path: "", prUrl: URL, threadId: "thr-remote" }),
     ]);

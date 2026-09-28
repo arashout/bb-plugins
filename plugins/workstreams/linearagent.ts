@@ -6,6 +6,7 @@
 import { z } from "zod";
 import type { LinearDetail } from "./linear.js";
 import { projectForPath } from "./spawn.js";
+import { SOL_MEDIUM } from "./execution.js";
 
 /** The most tickets one fallback run asks about. */
 export const AGENT_FETCH_MAX = 60;
@@ -97,6 +98,9 @@ export type LinearFetchSdk = {
       projectId: string;
       environment: { type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } };
       prompt: string;
+      providerId: "codex";
+      model: "gpt-6-sol";
+      reasoningLevel: "medium";
       pluginMetadata: { purpose: string };
     }): Promise<{ id: string }>;
   };
@@ -119,6 +123,7 @@ export async function startLinearFetch(
     if (project === null) continue;
     const asked = tickets.slice(0, AGENT_FETCH_MAX);
     const thread = await sdk.threads.spawn({
+      ...SOL_MEDIUM,
       projectId: project.projectId,
       environment: { type: "host", hostId: project.hostId, workspace: { type: "unmanaged", path: root } },
       prompt: agentFetchPrompt(asked),
