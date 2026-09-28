@@ -21,7 +21,7 @@ import {
 import { prTarget, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runRerunFailed, runUpdateBranch, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
-import { readAuthoredPrs, readInventoryPrs } from "./inventory.js";
+import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
 import { readAdvancePr, readEqualHeadTrees } from "./advance-host.js";
 import { inspectCheckout, prepareAdvanceWorkspace } from "./advance-workspace.js";
 
@@ -571,6 +571,7 @@ export default experimental_defineHostEntry({
     githubRateLimit: async (_input, context) => ({ resetAt: await readRateLimitReset(ghRunner(context.signal)) }),
     authoredPrs: ({ owners }, context) => readAuthoredPrs(ghRunner(context.signal), owners),
     inspectPrs: ({ prUrls }, context) => readInventoryPrs(ghRunner(context.signal), prUrls),
+    pollAuthoredPrs: ({ owners }, context) => readOpenAuthoredPrs(ghRunner(context.signal), owners),
     checkoutState: async ({ path }, context) => {
       if (!(await isUnit(path))) return { ok: false as const, error: "Checkout is unavailable." };
       const local = await localBranchState(path, context.signal);

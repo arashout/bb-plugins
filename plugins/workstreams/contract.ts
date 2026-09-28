@@ -307,6 +307,11 @@ export const hostContract = defineRpcContract({
     input: z.object({ prUrls: z.array(z.string().max(500)).max(100) }).strict(),
     output: inventoryInspectionSchema,
   },
+  /** Read-only: every open PR you author in these organizations from one batched GraphQL search, without the evidence only a PR's own read proves. */
+  pollAuthoredPrs: {
+    input: z.object({ owners: z.array(z.string().max(39)).max(50) }).strict(),
+    output: inventoryResultSchema,
+  },
   /** Cheap live local guard before a direct PR write; never trusts the last scan's branch state. */
   checkoutState: {
     input: z.object({ path: z.string().max(1_000) }).strict(),

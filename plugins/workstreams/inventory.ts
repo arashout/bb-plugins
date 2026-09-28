@@ -51,9 +51,12 @@ async function bounded<T>(items: readonly T[], worker: (item: T) => Promise<void
   }));
 }
 
+/** A PR whose review threads are read: one a reviewer approved or asked to change, and not a draft. */
+const readsReviewThreads = (pr: Pr) => !pr.isDraft && (pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED");
+
 async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message: string) => void): Promise<void> {
   const { repo, pr } = entry;
-  if (pr.isDraft || (pr.reviewDecision !== "APPROVED" && pr.reviewDecision !== "CHANGES_REQUESTED")) return;
+  if (!readsReviewThreads(pr)) return;
   const threads = await readReviewThreads(run, prTarget(pr.url)!, pr.reviewDecision === "CHANGES_REQUESTED" || pr.approvalHasBody === true);
   if (!threads.ok) {
     warn(`${repo} #${pr.number}: review threads could not be checked: ${threads.error}`);
@@ -148,18 +151,115 @@ export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[])
   return result;
 }
 
-/** Empty or invalid scope never expands discovery to unrelated organizations. */
-export async function readAuthoredPrs(run: GhRunner, scopeOwners: readonly string[]): Promise<InventoryResult> {
+/** An empty read of these organizations; not valid, with the result warning why, when the scope is empty or invalid. */
+function scoped(scopeOwners: readonly string[]): { result: InventoryResult; warn: (message: string) => void; valid: boolean } {
   const owners = [...new Set(scopeOwners.filter((owner) => OWNER.test(owner)).map((owner) => owner.toLowerCase()))].sort().slice(0, 50);
   const result: InventoryResult = { owners, entries: [], discoveryComplete: false, repositories: [], complete: true, warnings: [] };
   const warn = (message: string) => {
     result.complete = false;
     if (result.warnings.length < 50) result.warnings.push(message.slice(0, 500));
   };
-  if (owners.length === 0 || scopeOwners.some((owner) => !OWNER.test(owner)) || new Set(scopeOwners.map((owner) => owner.toLowerCase())).size > 50) {
-    warn("Authored PR discovery needs 1–50 valid GitHub organization names from the scanned projects.");
-    return result;
+  const valid = owners.length > 0 && scopeOwners.every((owner) => OWNER.test(owner)) && new Set(scopeOwners.map((owner) => owner.toLowerCase())).size <= 50;
+  if (!valid) warn("Authored PR discovery needs 1–50 valid GitHub organization names from the scanned projects.");
+  return { result, warn, valid };
+}
+
+const POLL_PAGE = 50;
+/**
+ * Constant: the search text and cursor are typed -f fields, never spliced in. Each PR carries what `gh pr list --json` returns, the
+ * dates the ages read adds, and its review threads' resolution; approval feedback and a changes request's follow-up need the PR's own read.
+ */
+export const OPEN_PRS_QUERY = `query($q:String!,$after:String){search(query:$q,type:ISSUE,first:${POLL_PAGE},after:$after){pageInfo{hasNextPage endCursor} nodes{...on PullRequest{` +
+  "number state isDraft reviewDecision url title mergeable mergeStateStatus baseRefName headRefName headRefOid baseRefOid createdAt updatedAt mergedAt body mergeCommit{oid} " +
+  "latestReviews(first:50){nodes{author{login} state submittedAt body}} " +
+  "reviewRequests(first:20){nodes{requestedReviewer{__typename ...on User{login} ...on Bot{login} ...on Team{slug organization{login}}}}} " +
+  "commits(last:1){nodes{commit{oid committedDate statusCheckRollup{contexts(first:100){nodes{__typename ...on CheckRun{status conclusion} ...on StatusContext{state}}}}}}} " +
+  "timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:50){nodes{...on ReviewRequestedEvent{createdAt requestedReviewer{...on User{login}...on Bot{login}...on Team{combinedSlug}}}}} " +
+  "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}}}}}}";
+
+type PollNode = Record<string, unknown> & { latestReviews?: { nodes?: unknown }; reviewRequests?: { nodes?: { requestedReviewer?: unknown }[] };
+  commits?: { nodes?: { commit?: { statusCheckRollup?: { contexts?: { nodes?: unknown } } | null } }[] };
+  reviewThreads?: { pageInfo?: { hasNextPage?: unknown }; nodes?: { isResolved?: unknown }[] } };
+
+/** A search node as one `gh pr list --json` row, so one parser reads both. */
+function pollRow(node: PollNode): unknown {
+  return { ...node, latestReviews: node.latestReviews?.nodes, reviewRequests: node.reviewRequests?.nodes?.map((request) => request?.requestedReviewer),
+    statusCheckRollup: node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [] };
+}
+
+/**
+ * Every open PR you author in these organizations, from one GraphQL search read 50 PRs a page: the inventory poll's read, in place of
+ * discovery, a listing per repository, and a read per PR. Review threads are counted where the per-PR read would count them; the approval
+ * feedback and follow-up that read proves are left absent for the caller to carry or read.
+ */
+export async function readOpenAuthoredPrs(run: GhRunner, scopeOwners: readonly string[]): Promise<InventoryResult> {
+  const { result, warn, valid } = scoped(scopeOwners);
+  if (!valid) return result;
+  const q = `is:pr is:open author:@me sort:created-asc ${result.owners.map((owner) => `user:${owner}`).join(" ")}`;
+  const entries = new Map<string, InventoryEntry>();
+  let after: string | null = null;
+  for (let page = 0; ; page++) {
+    if (page === INVENTORY_LIMIT / POLL_PAGE) {
+      warn(`The authored PR poll reached its ${INVENTORY_LIMIT} PR limit; coverage is partial.`);
+      break;
+    }
+    const read = await run(["api", "graphql", "-f", `query=${OPEN_PRS_QUERY}`, "-f", `q=${q}`, ...(after === null ? [] : ["-f", `after=${after}`])]);
+    let body: { errors?: unknown; data?: { search?: { pageInfo?: { hasNextPage?: unknown; endCursor?: unknown }; nodes?: unknown } } } | undefined;
+    if (read.ok) try { body = JSON.parse(read.stdout); } catch { /* Reported below. */ }
+    const search = body?.errors === undefined ? body?.data?.search : undefined;
+    const more = search?.pageInfo?.hasNextPage;
+    if (!Array.isArray(search?.nodes) || typeof more !== "boolean" || (more && typeof search.pageInfo?.endCursor !== "string")) {
+      warn(`Authored PR poll failed: ${read.ok ? "GitHub returned unreadable data" : read.error}`);
+      break;
+    }
+    for (const node of search.nodes as (PollNode | null)[]) {
+      const parsed = node === null || typeof node !== "object" ? null : parsePrList(JSON.stringify([pollRow(node)]));
+      const target = parsed === null ? null : prTarget(parsed.pr.url);
+      if (parsed === null || target === null || target.host.toLowerCase() !== "github.com" || !result.owners.includes(target.owner.toLowerCase()) ||
+          parsed.pr.number !== target.number) {
+        warn("The authored PR poll returned an unreadable or out-of-scope PR; membership is partial.");
+        continue;
+      }
+      if (parsed.pr.state !== "OPEN") continue;
+      const pr: Pr = { ...parsed.pr, url: `https://github.com/${target.owner}/${target.name}/pull/${target.number}`, ...agesOf(node, parsed.pr) };
+      const threads = node!.reviewThreads;
+      if (readsReviewThreads(pr) && Array.isArray(threads?.nodes) && typeof threads.pageInfo?.hasNextPage === "boolean") {
+        const open = threads.nodes.filter((thread) => thread?.isResolved === false).length;
+        // As the per-PR read counts them: an unread page leaves the resolved count unknown, and no open thread seen proves nothing.
+        if (open > 0 || !threads.pageInfo.hasNextPage) Object.assign(pr, { unresolvedReviewThreads: open,
+          resolvedReviewThreads: threads.pageInfo.hasNextPage ? null : threads.nodes.length - open });
+      }
+      entries.set(pr.url.toLowerCase(), { repo: target.slug, pr });
+    }
+    if (!more) {
+      // Membership is whole only when every page read cleanly: then a PR it no longer lists left the search.
+      result.discoveryComplete = result.complete;
+      break;
+    }
+    after = search.pageInfo!.endCursor as string;
   }
+  result.entries = [...entries.values()].sort((a, b) => a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
+  result.repositories = [...new Set(result.entries.map((entry) => entry.repo))].sort().map((repo) => ({ repo, complete: result.discoveryComplete }));
+  return result;
+}
+
+/**
+ * A polled PR with the review evidence only its own read proves, carried from the stored read while nothing on the PR moved since: its
+ * head, review decision, latest reviews, and GitHub's update time. Null when the PR needs that read again. A PR whose threads aren't read
+ * needs nothing.
+ */
+export function carryReviewFacts(pr: Pr, stored: Pr | undefined): Pr | null {
+  if (!readsReviewThreads(pr)) return pr;
+  if (stored?.approvalFeedback === undefined || stored.headRefOid !== pr.headRefOid || stored.reviewDecision !== pr.reviewDecision ||
+      stored.updatedAt !== pr.updatedAt || JSON.stringify(stored.latestReviews) !== JSON.stringify(pr.latestReviews)) return null;
+  return { ...pr, approvalFeedback: stored.approvalFeedback, ...(stored.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: stored.reviewFollowupPosted }) };
+}
+
+/** Empty or invalid scope never expands discovery to unrelated organizations. */
+export async function readAuthoredPrs(run: GhRunner, scopeOwners: readonly string[]): Promise<InventoryResult> {
+  const { result, warn, valid } = scoped(scopeOwners);
+  if (!valid) return result;
+  const owners = result.owners;
   const searched = await run(["search", "prs", "--author", "@me", "--state", "open", "--owner", owners.join(","), "--limit", String(INVENTORY_LIMIT), "--json", "url"]);
   if (!searched.ok) {
     warn(`Authored PR discovery failed: ${searched.error}`);

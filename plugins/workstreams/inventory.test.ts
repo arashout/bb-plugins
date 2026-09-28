@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { agesArgv, INVENTORY_LIMIT, readAuthoredPrs, readInventoryPrs } from "./inventory.js";
-import { githubRepoFromRemote, PR_FIELDS } from "./gh.js";
-import type { GhRunner, Run } from "./ghactions.js";
+import { agesArgv, carryReviewFacts, INVENTORY_LIMIT, OPEN_PRS_QUERY, readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
+import { githubRepoFromRemote, parsePrList, PR_FIELDS } from "./gh.js";
+import { githubRateLimit, type GhRunner, type Run } from "./ghactions.js";
+import type { Pr } from "./contract.js";
 
 const url = (number: number, repo = "folio") => `https://github.com/inkwell/${repo}/pull/${number}`;
 const pr = (number: number, extra: Record<string, unknown> = {}) => ({
@@ -199,6 +200,89 @@ describe("PR ages", () => {
     const result = await readInventoryPrs(gh.run, [url(1)]);
     expect(result.entries[0]?.pr).toMatchObject({ headCommittedAt: "2026-09-25T10:00:00Z", reviewRequestedAt: [{ reviewer: "mira", at: "2026-09-22T09:00:00Z" }] });
     expect(gh.calls.filter(isAges)).toHaveLength(1);
+  });
+});
+
+describe("the inventory poll's batched read", () => {
+  const head = "a".repeat(40);
+  const committedDate = "2026-09-25T10:00:00Z";
+  const events = [{ createdAt: "2026-09-24T09:00:00Z", requestedReviewer: { login: "mira" } }];
+  const threadNodes = [{ isResolved: false }, { isResolved: true }];
+  const rows = [
+    pr(1, { headRefOid: head, reviewRequests: [{ __typename: "User", login: "mira" }], createdAt: "2026-09-20T09:00:00Z", updatedAt: "2026-09-25T11:00:00Z",
+      latestReviews: [{ author: { login: "otto" }, state: "APPROVED", submittedAt: "2026-09-23T09:00:00Z", body: "" }], body: "Fixes ABC-12",
+      statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }, { __typename: "CheckRun", status: "IN_PROGRESS", conclusion: null },
+        { __typename: "StatusContext", state: "FAILURE" }] }),
+    pr(2, { headRefOid: head, isDraft: true, reviewRequests: [{ __typename: "Team", slug: "editors", organization: { login: "inkwell" } }] }),
+  ];
+  /** A `gh pr list` row as the search returns it. */
+  const node = (row: Record<string, unknown>, threads: { hasNextPage: boolean; nodes: { isResolved: boolean }[] } = { hasNextPage: false, nodes: threadNodes }) => ({
+    ...row, latestReviews: { nodes: row.latestReviews ?? [] }, reviewRequests: { nodes: ((row.reviewRequests ?? []) as unknown[]).map((requestedReviewer) => ({ requestedReviewer })) },
+    commits: { nodes: [{ commit: { oid: head, committedDate, statusCheckRollup: { contexts: { nodes: row.statusCheckRollup } } } }] },
+    timelineItems: { nodes: events }, reviewThreads: { pageInfo: { hasNextPage: threads.hasNextPage }, nodes: threads.nodes } });
+  const page = (nodes: unknown[], endCursor: string | null = null) => ok({ data: { search: { pageInfo: { hasNextPage: endCursor !== null, endCursor }, nodes } } });
+
+  it("reads what discovery, each repository's listing, the ages read, and the thread reads would, in one GraphQL call", async () => {
+    const ages = { commits: { nodes: [{ commit: { oid: head, committedDate } }] }, timelineItems: { nodes: events } };
+    const full = fake((args) => args[0] === "search" ? ok(rows.map((row) => ({ url: row.url }))) : args[0] === "pr" ? ok(rows) :
+      args.some((arg) => arg.includes("fragment ages")) ? ok({ data: { repository: { p0: ages, p1: ages } } }) : threads(threadNodes));
+    const batched = fake(() => page(rows.map((row) => node(row))));
+    const polled = await readOpenAuthoredPrs(batched.run, ["Inkwell"]);
+    expect(batched.calls).toEqual([["api", "graphql", "-f", `query=${OPEN_PRS_QUERY}`, "-f", "q=is:pr is:open author:@me sort:created-asc user:inkwell"]]);
+    expect(polled).toMatchObject({ complete: true, discoveryComplete: true, repositories: [{ repo: "inkwell/folio", complete: true }] });
+    // The same facts a full refresh keeps, so a poll and a refresh never flip a row between two readings; only the evidence a PR's own
+    // review read proves is left out.
+    const withoutEvidence = ({ approvalFeedback: _feedback, reviewFollowupPosted: _followup, ...rest }: Pr) => rest;
+    expect(polled.entries).toEqual((await readAuthoredPrs(full.run, ["inkwell"])).entries.map((entry) => ({ ...entry, pr: withoutEvidence(entry.pr) })));
+    expect(polled.entries[0]?.pr).toMatchObject({ checkConclusions: ["SUCCESS", "PENDING", "FAILURE"], unresolvedReviewThreads: 1, resolvedReviewThreads: 1,
+      headCommittedAt: committedDate, reviewRequestedAt: [{ reviewer: "mira", at: "2026-09-24T09:00:00Z" }], ticketRefs: { mentions: ["ABC-12"] } });
+    expect(polled.entries[0]?.pr).not.toHaveProperty("approvalFeedback");
+    // A draft's threads aren't read, as the per-PR read skips them.
+    expect(polled.entries[1]?.pr).toMatchObject({ reviewRequests: ["inkwell/editors"], unresolvedReviewThreads: null });
+  });
+
+  it("pages with the cursor as a typed field, and reads a failed page as partial membership that keeps what it read", async () => {
+    const gh = fake((args) => args.includes("after=cursor-1") ? { ok: false, error: "GraphQL: API rate limit exceeded for user ID 1." } : page([node(rows[0]!)], "cursor-1"));
+    const result = await readOpenAuthoredPrs(gh.run, ["inkwell"]);
+    expect(gh.calls).toHaveLength(2);
+    expect(result).toMatchObject({ complete: false, discoveryComplete: false, repositories: [{ repo: "inkwell/folio", complete: false }] });
+    expect(result.entries.map((entry) => entry.pr.number)).toEqual([1]);
+    // The caller waits for the limit to reset instead of reading again.
+    expect(githubRateLimit(result.warnings.join("\n"))).toBe("primary");
+  });
+
+  it("never widens an empty or malformed scope, and drops what the search returns from outside it", async () => {
+    const gh = fake(() => page([node(rows[0]!), node(pr(3, { url: "https://github.com/another/folio/pull/3" }))]));
+    for (const scope of [[], ["--admin"], ["inkwell", ""]]) expect(await readOpenAuthoredPrs(gh.run, scope)).toMatchObject({ discoveryComplete: false, entries: [] });
+    expect(gh.calls).toHaveLength(0);
+    const result = await readOpenAuthoredPrs(gh.run, ["inkwell"]);
+    expect(result.entries.map((entry) => entry.pr.number)).toEqual([1]);
+    expect(result).toMatchObject({ complete: false, discoveryComplete: false });
+  });
+
+  it("counts review threads only as far as it read them", async () => {
+    const unread = (nodes: { isResolved: boolean }[]) => fake(() => page([node(rows[0]!, { hasNextPage: true, nodes })]));
+    expect((await readOpenAuthoredPrs(unread([{ isResolved: true }]).run, ["inkwell"])).entries[0]?.pr)
+      .toMatchObject({ unresolvedReviewThreads: null, resolvedReviewThreads: null });
+    expect((await readOpenAuthoredPrs(unread([{ isResolved: false }]).run, ["inkwell"])).entries[0]?.pr)
+      .toMatchObject({ unresolvedReviewThreads: 1, resolvedReviewThreads: null });
+  });
+});
+
+describe("review evidence across polls", () => {
+  const read: Pr = { ...parsePrList(JSON.stringify([pr(1, { headRefOid: "a".repeat(40), updatedAt: "2026-09-25T11:00:00Z",
+    latestReviews: [{ author: { login: "otto" }, state: "APPROVED", submittedAt: "2026-09-23T09:00:00Z" }] })]))!.pr,
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFollowupPosted: false };
+  const { approvalFeedback: _feedback, reviewFollowupPosted: _followup, ...polled } = read;
+
+  it("carries a PR's approval evidence while nothing on it moved, and asks for its own read once anything did", () => {
+    expect(carryReviewFacts(polled, read)).toEqual(read);
+    for (const moved of [{ headRefOid: "b".repeat(40) }, { reviewDecision: "CHANGES_REQUESTED" }, { updatedAt: "2026-09-26T09:00:00Z" }, { latestReviews: [] }]) {
+      expect(carryReviewFacts({ ...polled, ...moved }, read)).toBeNull();
+    }
+    expect(carryReviewFacts(polled, undefined)).toBeNull();
+    // A draft proves nothing by its threads, so it needs no read.
+    expect(carryReviewFacts({ ...polled, isDraft: true }, undefined)).toEqual({ ...polled, isDraft: true });
   });
 });
 

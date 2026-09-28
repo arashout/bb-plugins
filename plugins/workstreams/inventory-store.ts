@@ -2,6 +2,7 @@ import { inventoryEntrySchema, type Pr } from "./contract.js";
 import type { InventoryEntry, InventoryInspection, InventoryResult } from "./inventory.js";
 import type { RunDb } from "./runstore.js";
 import { INVENTORY_LIMIT } from "./inventory.js";
+import { prTarget } from "./ghactions.js";
 import { UNDATED_STATES, undatedStates, type StateSince, type UndatedState } from "./pr-attention.js";
 import { z } from "zod";
 
@@ -10,9 +11,11 @@ export const INVENTORY_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS authored_pr_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)`,
 ];
 export const PR_OBSERVATIONS_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_observations (url TEXT PRIMARY KEY, checked_at TEXT, failed_at TEXT)`;
+/** Why the last read of a PR failed, kept beside its time until a read succeeds. */
+export const PR_OBSERVATION_ERROR_MIGRATION = `ALTER TABLE pr_observations ADD COLUMN error TEXT`;
 /** When a read first saw a PR in a state GitHub doesn't date (red checks, a conflict); the row goes when a read sees the state end. */
 export const PR_STATE_SINCE_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_state_since (url TEXT NOT NULL, state TEXT NOT NULL, since TEXT NOT NULL, PRIMARY KEY (url, state))`;
-export type PrObservation = { checkedAt: string | null; failedAt: string | null };
+export type PrObservation = { checkedAt: string | null; failedAt: string | null; error?: string | null };
 export type InventoryMeta = { owners: string[]; complete: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; warnings: string[] };
 export const EMPTY_INVENTORY = { owners: [], entries: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, refreshing: false, warnings: [] };
 type InventoryDb = RunDb & { transaction(fn: () => void): () => void };
@@ -32,6 +35,12 @@ function carryAges(previous: Pr | undefined, next: Pr): Pr {
       ? { reviewRequestedAt: previous.reviewRequestedAt.filter((asked) => next.reviewRequests.includes(asked.reviewer)) } : {}) };
 }
 
+/** The read's warning about this PR, else its first warning, which a failure shared by every PR names. */
+function failureOf(url: string, warnings: readonly string[], fallback: string): string {
+  const target = prTarget(url);
+  return (target && warnings.find((warning) => warning.startsWith(`${target.slug} #${target.number}:`))) ?? warnings[0] ?? fallback;
+}
+
 export function createInventoryStore(db: InventoryDb, now: () => number = Date.now) {
   const put = db.prepare(`INSERT OR REPLACE INTO authored_prs (url, repo, entry, stale) VALUES (?, ?, ?, ?)`);
   const remove = db.prepare(`DELETE FROM authored_prs WHERE url = ?`);
@@ -48,12 +57,15 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
   /** After each write, so a refresh that rewrites a PR keeps its dates and a PR that leaves the inventory takes its dates along. */
   const pruneStates = () => { if (datesStates) db.prepare(`DELETE FROM pr_state_since WHERE url NOT IN (SELECT url FROM authored_prs)`).run(); };
   const writeMeta = (meta: InventoryMeta) => db.prepare(`INSERT OR REPLACE INTO authored_pr_metadata (id, value) VALUES (1, ?)`).run(JSON.stringify(meta));
+  // A read-only copy of a database from before the column keeps failure times without their reasons.
+  const keepsErrors = db.prepare(`SELECT 1 FROM pragma_table_info('pr_observations') WHERE name = 'error'`).get() !== undefined;
   const success = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)
-    ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL`);
-  const failure = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, NULL, ?)
-    ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at`);
+    ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL${keepsErrors ? ", error = NULL" : ""}`);
+  const failure = keepsErrors ? db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at, error) VALUES (?, NULL, ?, ?)
+    ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at, error = excluded.error`) : db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at)
+    VALUES (?, NULL, ?) ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at`);
   const recordSuccess = (url: string, at: string) => success.run(url.toLowerCase(), at);
-  const recordFailure = (url: string, at: string) => failure.run(url.toLowerCase(), at);
+  const recordFailure = (url: string, at: string, error: string) => failure.run(url.toLowerCase(), at, ...keepsErrors ? [error.slice(0, 500)] : []);
   function metadata(): InventoryMeta {
     const row = db.prepare(`SELECT value FROM authored_pr_metadata WHERE id = 1`).get() as { value: string } | undefined;
     if (row === undefined) return { owners: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, warnings: [] };
@@ -76,9 +88,9 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
   return {
     read: () => ({ ...metadata(), entries: entries(), refreshing: false }),
     observation(url: string): PrObservation | null {
-      const row = db.prepare(`SELECT checked_at, failed_at FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as
-        { checked_at: string | null; failed_at: string | null } | undefined;
-      return row === undefined ? null : { checkedAt: row.checked_at, failedAt: row.failed_at };
+      const row = db.prepare(`SELECT checked_at, failed_at${keepsErrors ? ", error" : ""} FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as
+        { checked_at: string | null; failed_at: string | null; error?: string | null } | undefined;
+      return row === undefined ? null : { checkedAt: row.checked_at, failedAt: row.failed_at, ...keepsErrors ? { error: row.error ?? null } : {} };
     },
     lastCheckedAt(): string | null {
       const row = db.prepare(`SELECT MAX(checked_at) AS checked_at FROM pr_observations`).get() as { checked_at: string | null };
@@ -120,7 +132,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
           recordStates(entry.pr, at);
         }
         const retained = entries().sort((a, b) => Number(a.stale) - Number(b.stale) || a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
-        for (const entry of retained) if (entry.stale) recordFailure(entry.pr.url, at);
+        for (const entry of retained) if (entry.stale) recordFailure(entry.pr.url, at, failureOf(entry.pr.url, result.warnings, "Not in the last authored PR read."));
         const capped = retained.length > INVENTORY_LIMIT;
         for (const entry of retained.slice(INVENTORY_LIMIT)) remove.run(entry.pr.url.toLowerCase());
         pruneStates();
@@ -136,7 +148,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
         for (const url of result.closed) { remove.run(url.toLowerCase()); recordSuccess(url, at); }
         for (const url of result.failed) {
           db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
-          recordFailure(url, at);
+          recordFailure(url, at, failureOf(url, result.warnings, "GitHub could not read this PR."));
         }
         for (const entry of result.entries) {
           recordSuccess(entry.pr.url, at);

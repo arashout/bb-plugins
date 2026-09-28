@@ -273,6 +273,7 @@ Configure with `bb plugin config workstreams set <key> <value>`:
 | `linearApiKeys` | Secret, optional. One or more Linear personal API keys separated by commas or spaces, one per workspace. Each ticket is routed to the key whose workspace owns its team prefix. |
 | `linearApiKey` | Secret, optional, older single-key setting. Still read and merged with `linearApiKeys`. |
 | `refreshMinutes` | 1–240, default 10. |
+| `inventoryPollSeconds` | 15–3600, default 60. How often one batched GraphQL read refreshes every open PR you author. It only reads, and a GitHub rate limit pauses it until the limit resets. |
 | `typesafeApiKey` | Secret, optional. Turns on efforts and selected summaries. |
 | `anthropicApiKey` | Secret, optional. With Jev enabled, Claude Sonnet 5 writes group names and cohesion verdicts; it does not assign members. |
 | `surfaceRules` | Multiline. `name: glob, glob, …` per line. A table that fails to parse falls back to the default. |

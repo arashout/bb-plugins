@@ -2,17 +2,18 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePrList } from "./gh.js";
 import type { Pr } from "./contract.js";
-import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { INVENTORY_LIMIT, type InventoryEntry, type InventoryResult } from "./inventory.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
-function setup(datesStates = false) {
+function setup(datesStates = false, keepsErrors = false) {
   const db = new Database(":memory:");
   databases.push(db);
   for (const migration of INVENTORY_MIGRATIONS) db.exec(migration);
   db.exec(PR_OBSERVATIONS_MIGRATION);
   if (datesStates) db.exec(PR_STATE_SINCE_MIGRATION);
+  if (keepsErrors) db.exec(PR_OBSERVATION_ERROR_MIGRATION);
   let clock = 1_000;
   return { db, store: createInventoryStore(db, () => clock), tick: () => { clock += 1_000; } };
 }
@@ -101,6 +102,26 @@ describe("authored PR cache coverage", () => {
     expect(store.read().entries).toHaveLength(INVENTORY_LIMIT);
     expect(store.get(fresh.pr.url)?.stale).toBe(false);
     expect(store.read().warnings[0]).toContain("limit");
+  });
+
+  it("keeps why each PR's last read failed beside its time, until a read succeeds", () => {
+    const { store, tick } = setup(false, true);
+    const first = entry(1), second = entry(2), third = entry(3, "inkwell/spine");
+    store.apply(result([first, second, third]));
+    expect(store.observation(first.pr.url)).toEqual({ checkedAt: new Date(1_000).toISOString(), failedAt: null, error: null });
+    tick();
+    // A read that failed for everyone names the shared cause on every PR it couldn't read.
+    store.apply(result([], { complete: false, discoveryComplete: false, warnings: ["GitHub's rate limit was reached; the next read waits until 17:05."] }));
+    expect(store.observation(third.pr.url)).toMatchObject({ failedAt: new Date(2_000).toISOString(), error: expect.stringContaining("rate limit") });
+    tick();
+    // A read of one PR names that PR's own failure, not a neighbour's.
+    store.inspect({ entries: [], closed: [], failed: [first.pr.url, second.pr.url],
+      warnings: ["inkwell/folio #2: PR refresh failed: HTTP 502", "inkwell/folio #1: PR refresh failed: not found"] });
+    expect(store.observation(first.pr.url)?.error).toBe("inkwell/folio #1: PR refresh failed: not found");
+    expect(store.observation(second.pr.url)?.error).toBe("inkwell/folio #2: PR refresh failed: HTTP 502");
+    tick();
+    store.inspect({ entries: [first], closed: [], failed: [], warnings: [] });
+    expect(store.observation(first.pr.url)).toEqual({ checkedAt: new Date(4_000).toISOString(), failedAt: null, error: null });
   });
 
   it("reflects fresh checkout observations without adding unauthored PRs", () => {

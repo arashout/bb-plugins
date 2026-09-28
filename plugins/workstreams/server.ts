@@ -57,8 +57,8 @@ import { canonicalConversationScope, conversationExclusionSchema, conversationSc
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
-import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
-import type { InventoryInspection, InventoryResult } from "./inventory.js";
+import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { carryReviewFacts, type InventoryEntry, type InventoryInspection, type InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
   LENSES,
@@ -142,7 +142,7 @@ import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
 import { executeMerge, type WriteResult } from "./direct.js";
-import { prTarget } from "./ghactions.js";
+import { githubRateLimit, prTarget } from "./ghactions.js";
 import { trackTransitions, toLifecycle, unitLifecycle, type Transition } from "./workstreams.js";
 import { TypeSafeClient, choice, score } from "@typesafe-ai/sdk";
 import { RUNS_MIGRATION, createRunStore } from "./runstore.js";
@@ -292,7 +292,8 @@ const boardSchema = z.object({
   hostId: z.string().nullable(),
   lastScanAt: z.string().nullable(),
   lastPrCheckedAt: z.string().nullable(),
-  prObservations: z.record(z.string(), z.object({ checkedAt: z.string().nullable(), failedAt: z.string().nullable() })).default({}),
+  /** Each PR's last successful read, and its last failed one with why, until a read succeeds. */
+  prObservations: z.record(z.string(), z.object({ checkedAt: z.string().nullable(), failedAt: z.string().nullable(), error: z.string().nullable().optional() })).default({}),
   scanning: z.boolean(),
   warnings: z.array(z.string()),
   /** How many threads the link rules reached, by strongest tier. Reported, never inflated. */
@@ -712,6 +713,13 @@ export default async function plugin(bb: BbPluginApi) {
       experimental_schema: z.number().int().min(1).max(60),
       default: DEFAULT_ATTENTION_THRESHOLDS.stuckAfterDays,
     },
+    inventoryPollSeconds: {
+      type: "number",
+      label: "PR inventory refresh (seconds)",
+      description: "How often one batched GitHub read refreshes every open PR you author. It only reads. A GitHub rate limit pauses it until the limit resets.",
+      experimental_schema: z.number().int().min(15).max(3_600),
+      default: 60,
+    },
   });
   const modelFor = async (role: ModelRole): Promise<ModelChoice> => {
     const { codeModel, planningModel } = await settings.get();
@@ -785,6 +793,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_ATTEMPT_MIGRATIONS,
     ...EFFORT_JOURNAL_MIGRATIONS,
     PR_STATE_SINCE_MIGRATION,
+    PR_OBSERVATION_ERROR_MIGRATION,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -1006,6 +1015,20 @@ export default async function plugin(bb: BbPluginApi) {
       return [canonicalPrUrl(pr.url)!, advanceObservationKey(cached ? withApprovalFeedback(cached) : null)] as const;
     }));
   }
+  /**
+   * PRs a read that rechecks nothing (the inventory poll) saw change, by PR key, owed to the next pass that rechecks, which would otherwise
+   * compare against facts that read already stored and recheck nothing; true when approval evidence carried across an equal tree.
+   */
+  const owedAdvanceRechecks = new Map<string, boolean>();
+  function oweAdvanceRechecks(prs: readonly Pr[], previous: ReadonlyMap<string, string>, carried: readonly string[]): void {
+    const carriedKeys = new Set(carried.map((url) => canonicalPrUrl(url)));
+    for (const pr of prs) {
+      const key = canonicalPrUrl(pr.url);
+      if (key !== null && (carriedKeys.has(key) || previous.get(key) !== advanceObservationKey(withApprovalFeedback(pr)))) {
+        owedAdvanceRechecks.set(key, owedAdvanceRechecks.get(key) === true || carriedKeys.has(key));
+      }
+    }
+  }
   async function recheckObservedAdvanceJobs(prs: readonly Pr[], previous: ReadonlyMap<string, string>, carried: readonly string[]): Promise<void> {
     const carriedKeys = new Set(carried.map((url) => canonicalPrUrl(url)));
     const jobs = pendingAdvanceJobs();
@@ -1015,7 +1038,10 @@ export default async function plugin(bb: BbPluginApi) {
       const pr = withApprovalFeedback(raw);
       const key = canonicalPrUrl(pr.url);
       if (key === null) continue;
-      const changed = previous.get(key) !== advanceObservationKey(pr);
+      const owed = owedAdvanceRechecks.get(key);
+      owedAdvanceRechecks.delete(key);
+      if (owed) carriedKeys.add(key);
+      const changed = owed !== undefined || previous.get(key) !== advanceObservationKey(pr);
       for (const { batchId, job } of jobs) {
         if (canonicalPrUrl(job.prUrl) !== key || ["queued", "launching", "running", "verifying"].includes(job.status) || job.uncertain) continue;
         const neverLaunched = job.threadId === null && job.attemptId === null && !job.dedicated && job.previousAttempts.length === 0;
@@ -1037,6 +1063,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
   async function refreshInventory(signal = disposal.signal): Promise<boolean> {
+    // A poll holds the inventory for a few seconds; a scan's full refresh, with its Advance rechecks, runs after it rather than not at all.
+    await polling;
     if (inventoryRefreshing || inventoryTargeting || signal.aborted) return false;
     inventoryRefreshing = true;
     const owners = inventoryOwners();
@@ -1051,11 +1079,7 @@ export default async function plugin(bb: BbPluginApi) {
         return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
       }) };
       const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
-      const carried: string[] = [];
-      for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
-      inventory.apply(result);
-      intentEvidenceVersion++;
-      advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+      const carried = await writeAuthored(result, hostId);
       effortV2.reconciler.observed(result.entries.map((entry) => entry.pr.url));
       // The whole list: a PR it no longer lists changed too.
       rosterObserved();
@@ -1082,6 +1106,25 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** Write an authored-PR read through the inventory, the approval evidence an equal tree carries, and Advance's view of each PR; returns the PRs whose evidence carried. */
+  async function writeAuthored(result: InventoryResult, hostId: string): Promise<string[]> {
+    const carried: string[] = [];
+    for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
+    inventory.apply(result);
+    intentEvidenceVersion++;
+    advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+    return carried;
+  }
+
+  /** Checkouts of these PRs show what GitHub just said. */
+  function writeCheckoutPrs(fresh: ReadonlyMap<string, Pr>): void {
+    const insert = db.prepare(`INSERT OR REPLACE INTO units (path, unit) VALUES (?, ?)`);
+    for (const unit of readUnits()) {
+      const pr = unit.pr && fresh.get(unit.pr.url.toLowerCase());
+      if (pr) insert.run(unit.path, JSON.stringify({ ...unit, pr }));
+    }
+  }
+
   /** Write one targeted GitHub read through the board's stores: inventory, checkout PRs, and Advance jobs. */
   async function applyInspection(result: InventoryInspection, hostId: string): Promise<void> {
     const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
@@ -1104,17 +1147,86 @@ export default async function plugin(bb: BbPluginApi) {
         catch (error) { bb.log.warn(`Advance terminal refresh: ${String(error).slice(0, 300)}`); }
       }));
     }
-    const insert = db.prepare(`INSERT OR REPLACE INTO units (path, unit) VALUES (?, ?)`);
-    for (const unit of readUnits()) {
-      if (unit.pr === null) continue;
-      const url = unit.pr.url.toLowerCase();
-      const pr = fresh.get(url);
-      if (pr !== undefined) insert.run(unit.path, JSON.stringify({ ...unit, pr }));
-      else if (closed.has(url)) {
-        // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
-        rescans.add(unit.path);
+    writeCheckoutPrs(fresh);
+    // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
+    for (const unit of readUnits()) if (unit.pr && closed.has(unit.pr.url.toLowerCase())) rescans.add(unit.path);
+  }
+
+  let polling: Promise<void> = Promise.resolve();
+  /** GitHub's rate limit holds the poll until then. */
+  let pollLimitedUntil: number | null = null;
+  /**
+   * The inventory poll, every `inventoryPollSeconds`: one batched GitHub read of every open PR you author, written through the stores a
+   * full refresh writes, so the board, roster, and inventory agree. A PR the search stopped listing is read on its own before it leaves, since
+   * the search index can lag a close or an open; so is a PR whose reviews moved since its review threads were read. It only reads: it
+   * rechecks no Advance job, since a recheck ends by pumping queued legacy work, and leaves what it saw change to the next pass that
+   * rechecks; it rescans no checkout, and writes nothing to GitHub or BB. Like every board write, it lets thread intents catch up afterward. A rate limit holds it until GitHub's reset, which each PR's failure names.
+   */
+  function pollInventory(signal: AbortSignal): Promise<void> {
+    if (inventoryRefreshing || inventoryTargeting || scanning || signal.aborted || Date.now() < (pollLimitedUntil ?? 0)) return polling;
+    const owners = inventoryOwners();
+    if (owners.length === 0) return polling;
+    inventoryRefreshing = true;
+    polling = (async () => {
+      try {
+        const hostId = (await bb.sdk.system.config()).primaryHostId;
+        if (hostId === null) return;
+        const began = ++githubReads;
+        const listed = await host.call("pollAuthoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+        const stored = new Map(inventory.read().entries.map((entry) => [prWorkItemKey(entry.pr.url), entry]));
+        const polled = new Map(listed.entries.map((entry) => [prWorkItemKey(entry.pr.url), entry]));
+        const reread = listed.entries.filter((entry) => carryReviewFacts(entry.pr, stored.get(prWorkItemKey(entry.pr.url))?.pr) === null);
+        const vanished = listed.discoveryComplete ? [...stored.values()].filter((entry) => !polled.has(prWorkItemKey(entry.pr.url)) &&
+          owners.includes(entry.repo.split("/")[0]!.toLowerCase())) : [];
+        const followUp = [...reread, ...vanished];
+        const read = followUp.length ? await host.call("inspectPrs", { prUrls: followUp.slice(0, 100).map((entry) => entry.pr.url) }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS }) : null;
+        const fresh = new Map(read?.entries.map((entry) => [prWorkItemKey(entry.pr.url), entry]));
+        const closed = new Set(read?.closed.map(prWorkItemKey));
+        // A PR its own read didn't answer, because that read failed or stopped at 100, keeps its last read, stale, with its repository's
+        // membership read as partial: the poll's facts lack the evidence only that read proves, and the search index can lag a close.
+        const unread = followUp.filter((entry) => { const key = prWorkItemKey(entry.pr.url); return stored.has(key) && !fresh.has(key) && !closed.has(key); });
+        const kept = new Set(unread.map((entry) => prWorkItemKey(entry.pr.url)));
+        const entries: InventoryEntry[] = [...listed.entries.flatMap((entry) => {
+          const key = prWorkItemKey(entry.pr.url);
+          return closed.has(key) || kept.has(key) ? [] : [fresh.get(key) ?? { ...entry, pr: carryReviewFacts(entry.pr, stored.get(key)?.pr) ?? entry.pr }];
+        }), ...vanished.flatMap((entry) => fresh.get(prWorkItemKey(entry.pr.url)) ?? [])];
+        const unconfirmed = new Set(unread.map((entry) => entry.repo));
+        const warnings = [...listed.warnings, ...read?.warnings ?? [],
+          ...followUp.length > 100 ? [`${followUp.length - 100} PRs wait for the next poll to be read on their own.`] : []].slice(0, 50);
+        const rateLimit = githubRateLimit(warnings.join("\n")) ? await effortV2.reconciler.rateLimitedUntil(warnings.join("\n")) : null;
+        if (rateLimit !== null) {
+          pollLimitedUntil = rateLimit;
+          warnings.unshift(`GitHub's rate limit was reached; the next read waits until ${new Date(rateLimit).toISOString()}.`);
+        }
+        const result: InventoryResult = { ...listed, warnings, complete: listed.complete && !read?.failed.length && unconfirmed.size === 0,
+          repositories: [...listed.repositories.filter((repo) => !unconfirmed.has(repo.repo)), ...[...unconfirmed].map((repo) => ({ repo, complete: false }))],
+          entries: entries.flatMap((entry) => {
+            // A Refresh that began after this read has newer facts.
+            const pr = refreshedAfter(entry.pr.url, began);
+            return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
+          }) };
+        const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
+        oweAdvanceRechecks(result.entries.map((entry) => entry.pr), previous, await writeAuthored(result, hostId));
+        // A closed PR leaves even a repository whose membership this read left partial.
+        if (read?.closed.length) inventory.inspect({ entries: [], closed: read.closed, failed: [], warnings: [] });
+        writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
+        recordTransitions(readUnits());
+        effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...vanished.map((entry) => entry.pr.url)]);
+        // The whole list: a PR it no longer lists changed too.
+        rosterObserved();
+      } catch (error) {
+        if (!signal.aborted) {
+          inventory.apply({ owners, entries: [], repositories: [], complete: false, discoveryComplete: false,
+            warnings: [`Authored PR poll failed: ${String(error).slice(0, 400)}`] });
+          intentEvidenceVersion++;
+        }
+      } finally {
+        inventoryRefreshing = false;
+        if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+        if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
       }
-    }
+    })();
+    return polling;
   }
 
   /** Native BB events invalidate these URLs; GitHub remains the facts source. */
@@ -5895,6 +6007,22 @@ export default async function plugin(bb: BbPluginApi) {
 
   // The only v2 scheduler: pass 0, then a tick every 15 seconds or at the next event. Nothing in the UI schedules v2 work.
   bb.background.service("effort-v2", { start: (signal) => effortV2.reconciler.run(signal) });
+
+  // Reads only: every open PR you author, into the board's stores. It starts, messages, and writes nothing.
+  bb.background.service("inventory-poll", {
+    async start(signal) {
+      while (!signal.aborted) {
+        await pollInventory(signal);
+        const { inventoryPollSeconds } = await settings.get();
+        if (signal.aborted) return;
+        await new Promise<void>((resolve) => {
+          const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+          const timer = setTimeout(done, inventoryPollSeconds * 1_000);
+          signal.addEventListener("abort", done, { once: true });
+        });
+      }
+    },
+  });
 
   bb.background.service("refresh", {
     async start(signal) {
