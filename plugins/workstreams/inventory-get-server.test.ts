@@ -16,13 +16,13 @@ const pr = (number: number, title: string, extra: Record<string, unknown> = {}):
   headRefOid: "a".repeat(40), latestReviews: [], reviewRequests: [], statusCheckRollup: [{ conclusion: "SUCCESS" }], createdAt: "2026-09-21T15:00:00Z", ...extra }]))!.pr;
 const unit = (path: string, value: Pr | null): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: "folio", githubRepo: "inkwell/folio", branch: value?.headRefName ?? "main",
   dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: value, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
-const BATCH = "00000000-0000-4000-8000-000000000081", JOB = "00000000-0000-4000-8000-000000000082";
+const BATCH = "00000000-0000-4000-8000-000000000081", JOB = "00000000-0000-4000-8000-000000000082", MERGED_JOB = "00000000-0000-4000-8000-000000000084";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
 /**
  * You author #313 (a green draft), #314 (ABC-341, no reviewer yet, with a legacy Advance worker), and #315 (held). A teammate's #400 is
- * checked out; #401 was never read; #402 belongs to an archived effort; #403 merged.
+ * checked out; #401 was never read; #402 belongs to an archived effort; #403 merged; a legacy Advance job saw #404 merge, and nothing else read it.
  */
 async function setup() {
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
@@ -52,15 +52,18 @@ async function setup() {
   db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
   const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: JOB, hiddenFromProgress: false, status: "needs-attention",
     attemptId: null, dedicated: false, previousAttempts: [], threadId: "thr-worker", path: null, checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
+  const routing = { eligible: true, workspace: "create", projectId: "project-folio", hostId: HOST, sourcePath: null, path: null, effortId: null, effortKey: null,
+    effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null };
+  const merged = { ...facts, prUrl: url(404), number: 404, title: "Shelve maps flat", state: "MERGED" as const, readiness: "merged" as const };
   db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(BATCH, JSON.stringify({ id: BATCH, token: "00000000-0000-4000-8000-000000000083",
-    createdAt: Date.now(), cancelled: false, jobs: [job], facts: { [JOB]: { ...facts, eligible: true, workspace: "create", projectId: "project-folio", hostId: HOST,
-      sourcePath: null, path: null, effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null } },
+    createdAt: Date.now(), cancelled: false, jobs: [job, { ...job, ...advancePreviewJobSchema.parse({ ...merged, eligible: false, workspace: "create" }), id: MERGED_JOB,
+      status: "merged", threadId: null }], facts: { [JOB]: { ...facts, ...routing }, [MERGED_JOB]: { ...merged, ...routing } },
     pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
   await plugin(bb);
   cleanups.push(() => harness.lifecycle.dispose());
   const efforts = createEffortStore(db);
   const shelf = efforts.establish({ sourceKey: "ticket:ABC-341", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
-    coordinatorState: "none", members: { tickets: ["ABC-341"], prUrls: [url(400), url(401), url(403)] } });
+    coordinatorState: "none", members: { tickets: ["ABC-341"], prUrls: [url(400), url(401), url(403), url(404)] } });
   const old = efforts.establish({ sourceKey: "pr:402", name: "Old shelving", goal: "Retired", projectId: "project-folio", coordinatorState: "none",
     members: { tickets: [], prUrls: [url(402)] } });
   efforts.setArchived(old.id, true);
@@ -74,7 +77,7 @@ describe("the PR inventory read model", () => {
     const env = await setup();
     const view = await env.get();
     expect(view.groups.map((group) => [group.effort?.name ?? null, group.rows.map((row) => row.number)])).toEqual([
-      // #402's effort is archived and #403 merged, so neither is open work here.
+      // #402's effort is archived, and #403 and #404 merged, so none is open work here.
       ["Shelf order", [314, 400, 401]], [null, [313, 315]]]);
     const rows = new Map(view.groups.flatMap((group) => group.rows).map((row) => [row.number, row]));
     expect(rows.get(313)).toMatchObject({ authored: true, draft: true, status: "Draft", attention: [{ question: "forgotten-draft", action: "mark-ready", owner: "you" }],

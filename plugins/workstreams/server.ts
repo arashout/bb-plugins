@@ -5116,13 +5116,16 @@ export default async function plugin(bb: BbPluginApi) {
     const listed = new Set(rows.map((row) => row.prUrl));
     const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
       unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []))));
+    const legacy = currentLegacyAttempts(advance.list());
     for (const prUrl of new Set(current.efforts.filter((effort) => !effort.archivedAt).flatMap((effort) => effort.members.prUrls.map(prWorkItemKey)))) {
       if (listed.has(prUrl)) continue;
       const pr = scanned.get(prUrl) ?? null;
       const kept = prFacts.get(prUrl);
       const observation = inventory.observation(prUrl) ?? (kept && { checkedAt: kept.fullAt === null ? null : new Date(kept.fullAt).toISOString(),
         failedAt: kept.failedAt === null ? null : new Date(kept.failedAt).toISOString(), error: kept.error });
-      const state = pr?.state ?? kept?.facts?.state ?? null;
+      // A legacy Advance job that saw the PR merge or close settles it too, when no board read holds its facts.
+      const settled = legacy.get(prUrl)?.job.status;
+      const state = pr?.state ?? kept?.facts?.state ?? (settled === "merged" || settled === "closed" ? settled.toUpperCase() : null);
       // Only open PRs; one read and then dropped has closed or left, and one never read may still be open. The board's newest read
       // finding it merged or closed settles it over an older checkout or roster read that still says open.
       if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;
