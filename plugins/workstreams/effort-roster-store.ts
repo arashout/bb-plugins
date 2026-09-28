@@ -74,6 +74,15 @@ export function createEffortRosterStore(db: RosterDb, efforts: Pick<EffortStore,
         return { effortId: id, rows, snapshotId };
       })();
     },
+    /** Every number the effort ever issued, which stays bound to its PR. */
+    issued(effortId: string): Map<number, string> {
+      return new Map((db.prepare(`SELECT ordinal, target FROM effort_roster_numbers WHERE effort_id = ?`).all(resolve(effortId)) as { ordinal: number; target: string }[])
+        .map((row) => [row.ordinal, row.target]));
+    },
+    /** The snapshot the effort's roster last showed. */
+    latest(effortId: string): string | null {
+      return (db.prepare(`SELECT id FROM effort_roster_snapshots WHERE effort_id = ? ORDER BY created_at DESC LIMIT 1`).get(resolve(effortId)) as { id: string } | undefined)?.id ?? null;
+    },
     /** A snapshot of a merged or missing effort is stale: its numbers no longer authorize anything. */
     snapshot(id: string): RosterSnapshot | null {
       const row = db.prepare(`SELECT effort_id AS effortId, created_at AS createdAt, body FROM effort_roster_snapshots WHERE id = ?`)

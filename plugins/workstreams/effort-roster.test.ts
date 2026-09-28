@@ -27,16 +27,21 @@ const urls = Array.from({ length: 8 }, (_, index) => `https://github.com/inkwell
 const byTarget = (rows: ReturnType<typeof roster>["rows"]) => new Map(rows.map((row) => [row.target, row]));
 
 describe("effort roster rows", () => {
-  it("is Doing only while a legacy worker, running action, dispatch, or active checkout thread writes the PR", () => {
+  it("is Doing only while a legacy worker, an action or dispatch on the PR or in its checkout, or an active checkout thread writes the PR", () => {
+    const ticketRun = "https://github.com/inkwell/atlas/pull/418";
     const [queued, launching, verifying, running, idleRun, dispatched, verified, threaded] = urls;
     const job = (status: string, prUrl: string) => ({ ...legacy.get(INKWELL_ADVANCE_EFFORTS["Reader accounts"][0]!)!,
       ...{ cause: status === "queued" ? "queued" as const : "running" as const, label: status === "verifying" ? "Verifying the worker's result" : "Worker running" },
       job: { ...legacy.get(INKWELL_ADVANCE_EFFORTS["Reader accounts"][0]!)!.job, prUrl, status: status as "queued" } });
-    const rows = byTarget(roster(urls, {
+    const rows = byTarget(roster([...urls, ticketRun], {
       legacy: new Map([[queued!, job("queued", queued!)], [launching!, job("launching", launching!)], [verifying!, job("verifying", verifying!)]]),
-      runs: [{ prUrl: running!, status: "running", action: "resolve-conflicts" }, { prUrl: idleRun!, status: "needs-you", action: "address-review" },
-        { prUrl: idleRun!, status: "done", action: "investigate-ci" }],
-      dispatch: [{ prUrl: dispatched!, status: "launching", action: "address-comments" }, { prUrl: verified!, status: "verified", action: "address-comments" }],
+      runs: [{ id: 1, path: "/Users/reader/src/413", prUrl: running!, status: "running", action: "resolve-conflicts" },
+        { id: 2, path: "/Users/reader/src/414", prUrl: idleRun!, status: "needs-you", action: "address-review" },
+        { id: 3, path: "/Users/reader/src/414", prUrl: idleRun!, status: "done", action: "investigate-ci" },
+        // A ticket's run names no PR, but it writes in this PR's checkout.
+        { id: 4, path: "/Users/reader/src/418", prUrl: null, status: "running", action: "investigate-ci" }],
+      dispatch: [{ id: 1, path: "/Users/reader/src/415", prUrl: dispatched!, status: "launching", action: "address-comments" },
+        { id: 2, path: "/Users/reader/src/416", prUrl: verified!, status: "verified", action: "address-comments" }],
       threads: [{ id: "thr_idle", status: "idle", environmentPath: "/Users/reader/src/414" },
         { id: "thr_writer", status: "active", environmentPath: "/Users/reader/src/417/" }],
     }).rows);
@@ -49,6 +54,7 @@ describe("effort roster rows", () => {
       [dispatched, "doing", "worker", "dispatch"],
       [verified, "not-in-instruction", "review", "you"],
       [threaded, "doing", "worker", "thread"],
+      [ticketRun, "doing", "worker", "run"],
     ]);
   });
 

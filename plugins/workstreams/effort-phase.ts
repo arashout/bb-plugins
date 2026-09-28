@@ -11,7 +11,7 @@ import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
 import type { Effect, InstructionScope } from "./effort-command.js";
 import { authorityNeed, recipe, WORKER_RESULTS, WORKER_ROUTES, type CodeRecipe, type CodeRecipeId, type RecipeId, type WorkerRecipe, type WorkerRecipeId } from "./effort-recipes.js";
-import { prWriter, selectResource, type Resource, type ResourceAttempt, type ResourceInput } from "./effort-resources.js";
+import { prBlocker, prWriter, selectResource, type Resource, type ResourceAttempt, type ResourceInput } from "./effort-resources.js";
 import type { ExecutionMode } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
 import { mergeWait, prGates, type GateId } from "./pr-gates.js";
@@ -80,7 +80,11 @@ export type DecideInput = {
   settledDependencies: ReadonlySet<string>;
   admission: { capacityFull: boolean; breakerOpen: boolean };
   models: Record<ModelRole, ModelChoice>;
-  resources: Omit<ResourceInput, "effortId" | "pr" | "model" | "attempt">;
+  /**
+   * The runner's reads of checkouts and threads. Before those reads exist, only the PR's other writers
+   * are known: a launch then plans its recipes and leaves the checkout and thread to the read.
+   */
+  resources: Omit<ResourceInput, "effortId" | "pr" | "model" | "attempt"> | (Pick<ResourceInput, "legacy" | "writers"> & { inspections: null });
 };
 
 export type Next = {
@@ -141,7 +145,7 @@ const PAUSED = { hold: "On hold", archived: "The effort is archived", "v2-off": 
 const CODE_LABEL: Record<CodeRecipeId, string> = { request_rereview: "Re-request review from reviewers who asked for changes",
   request_review: "Request review", mark_ready_for_review: "Mark ready for review", rerun_failed_checks: "Rerun the failed checks once" };
 /** The gates a verified merge candidate passes; `fresh` and criteria are checked beside them. */
-const PREPARED: GateId[] = ["open", "unheld", "checks-green", "threads-resolved", "feedback-verified", "changes-addressed", "approved", "not-draft", "parent-merged", "merge-clean"];
+export const PREPARED: GateId[] = ["open", "unheld", "checks-green", "threads-resolved", "feedback-verified", "changes-addressed", "approved", "not-draft", "parent-merged", "merge-clean"];
 
 export function decide(input: DecideInput): Next {
   const { now, full, attempts } = input;
@@ -317,12 +321,14 @@ export function decide(input: DecideInput): Next {
     if (tried >= Math.min(...allowed.map((id) => recipe(id).bound.attemptsPerHead)))
       return issue("retry-exhausted", `${allowed.join(", ")} reached its bound of ${tried} attempts on this head`);
     const role: ModelRole = allowed.some((id) => (recipe(id) as WorkerRecipe).modelRole === "code") ? "code" : "planning";
-    const resource = selectResource({ ...input.resources, effortId: input.effort.id, pr: facts, model: input.models[role], attempt: latest });
-    if (resource.kind === "wait" || resource.kind === "decision" || resource.kind === "repair") return fromResource(resource);
-    if (resource.kind === "attach") return next("executing", "attached", `Attached to attempt ${resource.attemptId}`, { nextAction: "attach", resource });
+    const { resources } = input;
+    const resource = resources.inspections === null ? prBlocker({ ...resources, pr: facts })
+      : selectResource({ ...resources, effortId: input.effort.id, pr: facts, model: input.models[role], attempt: latest });
+    if (resource?.kind === "wait" || resource?.kind === "decision" || resource?.kind === "repair") return fromResource(resource);
+    if (resource?.kind === "attach") return next("executing", "attached", `Attached to attempt ${resource.attemptId}`, { nextAction: "attach", resource });
     if (input.admission.breakerOpen) return waiting("launch-breaker", "Launch outcomes uncertain; new launches paused", workers, { resource });
     if (input.admission.capacityFull) return waiting("capacity", "Waiting for a v2 worker slot", workers, { resource });
-    return next("queued", "launching", `${allowed.join(" + ")} ${resource.kind === "reuse" ? `in ${resource.threadId}` : `in a new thread: ${resource.reason}`}`,
+    return next("queued", "launching", `${allowed.join(" + ")} ${!resource ? "once its checkout and thread are read" : resource.kind === "reuse" ? `in ${resource.threadId}` : `in a new thread: ${resource.reason}`}`,
       { nextAction: allowed, resource });
   }
 

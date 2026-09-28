@@ -20,6 +20,9 @@ export const CODE_RESULTS = ["write-refused", "rate-limited", "failed-again"] as
 export type WorkerRecipeId = "integrate_base" | "fix_failing_checks" | "address_review_feedback" | "validate_criteria" | "repair_report";
 export type CodeRecipeId = "request_rereview" | "request_review" | "mark_ready_for_review" | "rerun_failed_checks";
 export type RecipeId = WorkerRecipeId | CodeRecipeId;
+/** Every recipe id, for schemas that store a planned step. */
+export const RECIPE_IDS = ["integrate_base", "fix_failing_checks", "address_review_feedback", "validate_criteria", "repair_report",
+  "request_rereview", "request_review", "mark_ready_for_review", "rerun_failed_checks"] as const satisfies readonly RecipeId[];
 type Route = "reverify" | "retry" | `wait:${string}` | `decision:${string}` | `recipe:${WorkerRecipeId}` | `code:${CodeRecipeId}` | `repair:${string}`;
 type Shared = { version: 1; goal: "prepared"; runsWhenFailing: Condition[]; requires: Condition[]; effects: Effect[]; instructions: string[]; verify: Condition[] };
 export type WorkerRecipe = Shared & { action: WorkerRecipeId; executor: "worker"; modelRole: ModelRole;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_EFFECTS, EFFECTS, interpretEffortCommand, WORK_RECIPES, type CommandContext, type CommandRow, type InstructionScope } from "./effort-command.js";
+import { capAcknowledgment, DEFAULT_EFFECTS, EFFECTS, interpretEffortCommand, WORK_RECIPES, type CommandContext, type CommandRow, type InstructionScope } from "./effort-command.js";
 
 const pr = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 // Row 3 is quill #2, so `#2` could mean row 2 or that PR. Row 10 merged; row 11 is a teammate's.
@@ -286,6 +286,33 @@ describe("numbered effort commands", () => {
 });
 
 // Every row of the design critique's grammar table (amendment A8).
+describe("held PRs", () => {
+  it("names a held PR as held whenever a command leaves it out, rechecks it, or asks to merge it, not only when it is included", () => {
+    const ctx = context({ holds: { [at(5)]: { reason: "waiting on the style guide", heldAt: 1 } } });
+    const HELD = "Held, skipped until released (a hold outlasts every instruction): 5";
+    const left = admit("move 1-6 forward, leave 5 alone", ctx);
+    expect(left.acknowledgment).toEqual(expect.arrayContaining(["Left alone this instruction, not a hold: 5", HELD]));
+    for (const text of ["recheck 5", "refresh 5", "merge 5"]) expect(admit(text, ctx).acknowledgment, text).toContain(HELD);
+    expect(admit("refresh 4", ctx).acknowledgment).not.toContain(HELD);
+  });
+});
+
+describe("acknowledgment length", () => {
+  it("folds lines past twelve into a pointer to the roster, keeping the lines naming held PRs first", () => {
+    const lines = [...Array.from({ length: 13 }, (_, index) => `Line ${index + 1}`), "Now held: 7", "Held, skipped until released (a hold outlasts every instruction): 5, 7"];
+    const capped = capAcknowledgment(lines);
+    expect(capped).toHaveLength(12);
+    expect(capped).toEqual([...Array.from({ length: 9 }, (_, index) => `Line ${index + 1}`), "Now held: 7",
+      "Held, skipped until released (a hold outlasts every instruction): 5, 7", "+4 more lines; open the roster for the rest"]);
+    expect(capAcknowledgment(lines.slice(0, 12))).toEqual(lines.slice(0, 12));
+    // A range of holds is one line, however long the range.
+    expect(admit("hold 1-11 because the catalog schema is frozen").acknowledgment).toEqual(["Now held: 1-11 (the catalog schema is frozen)"]);
+    // Twelve lines is a hard cap, even when held lines alone would pass it.
+    const holdsOnly = [...Array.from({ length: 13 }, (_, index) => `Now held: ${index + 1} (reason ${index + 1})`), "Line 1"];
+    expect(capAcknowledgment(holdsOnly)).toEqual([...holdsOnly.slice(0, 11), "+3 more lines; open the roster for the rest"]);
+  });
+});
+
 describe("command grammar golden table", () => {
   it("D2 all but N answers with every one of D2's rows except N", () => {
     const decisions = [{ n: 1, options: ["A", "B"], targets: [7] }, { n: 2, options: [], targets: [2, 4, 5, 6] }];

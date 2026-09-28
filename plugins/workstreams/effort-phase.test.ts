@@ -3,6 +3,7 @@ import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import { DEFAULT_EFFECTS, VERBS, type InstructionScope } from "./effort-command.js";
 import { decide, type Attempt, type DecideInput, type Next } from "./effort-phase.js";
+import type { ResourceInput } from "./effort-resources.js";
 
 const NOW = Date.UTC(2026, 8, 28, 12);
 const MINUTE = 60_000;
@@ -39,18 +40,20 @@ const author = { path: AUTHOR, githubRepo: "inkwell/folio", branch: "abc-340", p
 const source = { ...author, path: SOURCE, branch: "main", prUrl: null };
 const codex = (reasoningLevel: "high" | "medium") => ({ providerId: "codex", model: "gpt-6-sol", reasoningLevel });
 
+/** The author's clean checkout at the head, with the idle origin thread in it. */
+const RESOURCES: Omit<ResourceInput, "effortId" | "pr" | "model" | "attempt"> = {
+  hostId: HOST, units: [source, author], origin: "thr_origin", linked: [], writers: [], legacy: null, unpushedAllowed: false,
+  inspections: new Map([[SOURCE, { ok: true, head: "a".repeat(40), branch: "main", clean: true, commonDir: `${SOURCE}/.git`, relation: "diverged" }],
+    [AUTHOR, { ok: true, head: HEAD, branch: "abc-340", clean: true, commonDir: `${AUTHOR}/.git`, relation: "at-head" }]]),
+  threads: [{ id: "thr_origin", providerId: "codex", status: "idle", archived: false, projectId: "proj_folio", hostId: HOST, environmentPath: AUTHOR, updatedAt: 1, contextUsed: 0.3 }],
+};
 function row(overrides: Partial<DecideInput> = {}, pr: Partial<AdvanceFacts> = {}): DecideInput {
   return {
     now: NOW, target: PR_URL, effort: { id: EFFORT, mode: "v2", archived: false }, ownerId: EFFORT, instruction: scope(), held: false,
     full: { facts: facts(pr), at: NOW - 30_000 }, feedback: null, reviewers: { reviewRequests: [], latestReviews: [{ login: "ada", state: "APPROVED" }] },
     attempts: [], codeActions: [], retryEpoch: 0, decision: null, declined: [], criteriaPending: false, settledDependencies: new Set(),
     admission: { capacityFull: false, breakerOpen: false }, models: { code: codex("high"), planning: codex("medium") },
-    resources: {
-      hostId: HOST, units: [source, author], origin: "thr_origin", linked: [], writers: [], legacy: null, unpushedAllowed: false,
-      inspections: new Map([[SOURCE, { ok: true, head: "a".repeat(40), branch: "main", clean: true, commonDir: `${SOURCE}/.git`, relation: "diverged" }],
-        [AUTHOR, { ok: true, head: HEAD, branch: "abc-340", clean: true, commonDir: `${AUTHOR}/.git`, relation: "at-head" }]]),
-      threads: [{ id: "thr_origin", providerId: "codex", status: "idle", archived: false, projectId: "proj_folio", hostId: HOST, environmentPath: AUTHOR, updatedAt: 1, contextUsed: 0.3 }],
-    },
+    resources: RESOURCES,
     ...overrides,
   };
 }
@@ -71,9 +74,9 @@ function accountable(next: Next): boolean {
 
 describe("decide()", () => {
   const scenarios: [string, DecideInput, string][] = [
-    ["ambiguous origin: recorded as history, never a repair", row({ resources: { ...row().resources, origin: null, threads: [] } }, FEEDBACK), "queued:launching"],
-    ["missing checkout: a worktree with its reason", row({ resources: { ...row().resources, units: [source] } }, FEEDBACK), "queued:launching"],
-    ["active writer", row({ resources: { ...row().resources, writers: [{ owner: "thread", ref: "thr_teammate", path: null }] } }, FEEDBACK), "waiting:writer-available"],
+    ["ambiguous origin: recorded as history, never a repair", row({ resources: { ...RESOURCES, origin: null, threads: [] } }, FEEDBACK), "queued:launching"],
+    ["missing checkout: a worktree with its reason", row({ resources: { ...RESOURCES, units: [source] } }, FEEDBACK), "queued:launching"],
+    ["active writer", row({ resources: { ...RESOURCES, writers: [{ owner: "thread", ref: "thr_teammate", path: null }] } }, FEEDBACK), "waiting:writer-available"],
     ["archived effort", row({ effort: { id: EFFORT, mode: "v2", archived: true } }, FEEDBACK), "paused:archived"],
     ["merge redirect: another effort owns it now", row({ ownerId: "e-destination" }, FEEDBACK), "paused:membership-moved"],
     ["stack parent open", row({}, { basePrNumber: 312 }), "waiting:parent"],
@@ -101,7 +104,7 @@ describe("decide()", () => {
 
   it("launches work that reuses the checkout and thread, or names why it allocates one", () => {
     expect(decide(row({}, FEEDBACK))).toMatchObject({ nextAction: ["address_review_feedback"], resource: { kind: "reuse", threadId: "thr_origin" } });
-    expect(decide(row({ resources: { ...row().resources, units: [source] } }, FEEDBACK)))
+    expect(decide(row({ resources: { ...RESOURCES, units: [source] } }, FEEDBACK)))
       .toMatchObject({ resource: { kind: "worktree", reason: `no checkout on ${HOST}`, workspace: { batchId: `effort-${EFFORT}`, jobId: "pr-313" } } });
   });
 
@@ -289,8 +292,18 @@ describe("decide()", () => {
     expect(state(decide(row({}, { mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN" })))).toBe("verifying:observe");
   });
 
+  it("plans a launch's recipes before its checkout is read, never inventing a checkout, and still waits on the PR's other writers and repairs a fork", () => {
+    const unread = { legacy: null, writers: [], inspections: null };
+    expect(decide(row({ resources: unread }, FEEDBACK))).toMatchObject({ phase: "queued", cause: "launching", nextAction: ["address_review_feedback"], resource: null,
+      detail: "address_review_feedback once its checkout and thread are read" });
+    expect(state(decide(row({ resources: { ...unread, writers: [{ owner: "run", ref: "run-7", path: null }] } }, FEEDBACK)))).toBe("waiting:writer-available");
+    expect(state(decide(row({ resources: unread, admission: { capacityFull: true, breakerOpen: false } }, FEEDBACK)))).toBe("waiting:capacity");
+    // The full read already says a fork's branch can't be pushed, so no launch is planned for it.
+    expect(decide(row({ resources: unread }, { ...FEEDBACK, isCrossRepository: true }))).toMatchObject({ phase: "repair-needed", cause: "fork", nextAction: null });
+  });
+
   it("honors an answer that allows work beside the author's unpushed commits", () => {
-    const ahead = { resources: { ...row().resources, inspections: new Map([...row().resources.inspections,
+    const ahead: { resources: typeof RESOURCES } = { resources: { ...RESOURCES, inspections: new Map([...RESOURCES.inspections,
       [AUTHOR, { ok: true as const, head: "9".repeat(40), branch: "abc-340", clean: true, commonDir: `${AUTHOR}/.git`, relation: "diverged" as const }]]) } };
     expect(decide(row(ahead, FEEDBACK))).toMatchObject({ phase: "decision-needed", cause: "authority", decision: { key: `authority:${PR_URL}:checkout` } });
     expect(decide(row({ resources: { ...ahead.resources, unpushedAllowed: true } }, FEEDBACK)))

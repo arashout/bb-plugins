@@ -284,6 +284,17 @@ function render({ clause, refs, excluded }: Resolved, replace: boolean): string 
   }
 }
 
+const ACK_LINES = 12;
+const HELD = ["Held, skipped until released", "Now held:"];
+/** At most 12 lines, folding the rest into a pointer to the roster; lines naming held PRs are kept before any other. */
+export function capAcknowledgment(lines: readonly string[]): string[] {
+  if (lines.length <= ACK_LINES) return [...lines];
+  const held = (line: string) => HELD.some((prefix) => line.startsWith(prefix));
+  const keep = new Set([...lines.keys()].sort((a, b) => Number(held(lines[b]!)) - Number(held(lines[a]!)) || a - b).slice(0, ACK_LINES - 1));
+  const shown = lines.filter((_, index) => keep.has(index));
+  return [...shown, `+${lines.length - shown.length} more lines; open the roster for the rest`];
+}
+
 /** Read one command against the effort's snapshot and active instruction; admit all of it, or clarify and admit nothing. */
 export function interpretEffortCommand(text: string, ctx: CommandContext): CommandResult {
   const issues: string[] = [];
@@ -558,7 +569,8 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
   // The acknowledgment: what changed, what stays out, and what a hold keeps waiting.
   const heldNow = (target: string) => holds.some((item) => item.target === target) || (!releases.some((item) => item.target === target) && prHoldFor(target, ctx.holds) !== null);
   const scope = cancel ? prev! : next;
-  const held = scope.include.filter((grant) => heldNow(grant.target));
+  // Every held PR the instruction includes or this command names: leaving one out doesn't lift its hold.
+  const held = [...scope.include, ...excludedHere, ...interventions, ...mergePreviews].filter((item) => heldNow(item.target));
   const draining = superseded.filter((grant) => row(grant.target).claim);
   const recheckLaunches = resolved.some(({ clause }) => clause.head.op === "recheck-launches");
   const postRoster = resolved.some(({ clause }) => clause.head.op === "post-roster");
@@ -592,7 +604,8 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
       ? `Outside membership, membership unchanged: ${formatTargets(next.include.filter((grant) => grant.outsideMembership && grant.addedInRevision === revision))}` : null,
     next.outcome !== prev?.outcome && next.outcome ? `Outcome: ${next.outcome}` : null,
     ...notes,
-    ...holds.map((item) => `Now held: ${formatTargets([item])}${item.reason ? ` (${item.reason})` : ""}`),
+    // One line per reason, so a range of holds stays one line.
+    ...[...new Set(holds.map((item) => item.reason))].map((reason) => `Now held: ${formatTargets(holds.filter((item) => item.reason === reason))}${reason ? ` (${reason})` : ""}`),
     releases.length ? `Released: ${formatTargets(releases)}` : null,
     ...(["refresh", "recheck", "reset", "stop", "retry"] as const).flatMap((action) => {
       const targets = interventions.filter((item) => item.action === action);
@@ -606,7 +619,7 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
     ...answers.map((answer) => `D${answer.decision}: ${"option" in answer ? answer.option : "numbers" in answer ? answer.numbers.join(", ") : q(answer.text)}`),
   ].filter((line): line is string => line !== null);
   return {
-    kind: "admit", normalized, acknowledgment: lines.length > 12 ? [...lines.slice(0, 11), `+${lines.length - 11} more lines; open the roster for the rest`] : lines,
+    kind: "admit", normalized, acknowledgment: lines,
     instruction: revised && !cancel ? { ...next, revision } : null, cancel, holds, releases, interventions, recheckLaunches, postRoster, mergePreviews, answers,
   };
 }

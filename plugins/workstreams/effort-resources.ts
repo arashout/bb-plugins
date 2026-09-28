@@ -78,6 +78,10 @@ export function prWriter({ legacy, writers }: Pick<ResourceInput, "legacy" | "wr
   const writer = writers.find((item) => item.path === null);
   return writer ? writerWait(writer) : null;
 }
+/** What the PR alone decides before any checkout is read: someone else writing it, or a fork whose branch v2 can't push. */
+export function prBlocker(input: Pick<ResourceInput, "legacy" | "writers"> & { pr: Pick<ResourceInput["pr"], "isCrossRepository"> }): Extract<Resource, { kind: "wait" | "repair" }> | null {
+  return prWriter(input) ?? (input.pr.isCrossRepository ? { kind: "repair", cause: "fork", reason: "Fork PRs need manual preparation; v2 can't push their branch." } : null);
+}
 const WRITER: Record<ResourceWriter["owner"], string> = { "legacy-job": "Legacy Advance job", run: "Action run", dispatch: "Dispatch", manual: "Manual write", thread: "Thread" };
 function writerWait(writer: ResourceWriter): Extract<Resource, { kind: "wait" }> {
   return { kind: "wait", cause: writer.owner === "legacy-job" ? "legacy-drain" : "writer-available",
@@ -94,9 +98,8 @@ function legacyThreads(legacy: LegacyAttempt | null): string[] {
 export function selectResource(input: ResourceInput): Resource {
   const { pr, attempt, legacy, hostId } = input;
   if (attempt && CLAIMS.has(attempt.status)) return { kind: "attach", attemptId: attempt.id, threadId: attempt.threadId, path: attempt.path };
-  const busy = prWriter(input);
-  if (busy) return busy;
-  if (pr.isCrossRepository) return { kind: "repair", cause: "fork", reason: "Fork PRs need manual preparation; v2 can't push their branch." };
+  const blocked = prBlocker(input);
+  if (blocked) return blocked;
 
   const target = prWorkItemKey(pr.prUrl);
   const repository = input.units.filter((unit) => unit.githubRepo?.toLowerCase() === pr.repo.toLowerCase());

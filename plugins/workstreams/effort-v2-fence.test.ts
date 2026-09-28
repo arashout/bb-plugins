@@ -586,14 +586,22 @@ describe("v2 opt-in", () => {
   it("opts out at the current revision only, keeping the parent and every record and lifting the fence", async () => {
     const env = await setup();
     const joined = await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
+    expect(await env.rpc("effort_command", { effortId: env.returns.id, snapshotId: null, text: `move ${RETURNS} forward`, requestId: "returns-1", source: "panel" }))
+      .toMatchObject({ kind: "admit" });
     await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 1, parentThreadId: null })).rejects.toThrow("already runs on its roster");
     await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 0 })).rejects.toThrow("execution mode changed");
     await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 1, parentThreadId: null })).rejects.toThrow("keeps the parent");
     expect(await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 1 }))
       .toEqual({ execution: { mode: "legacy", revision: 2 }, parentThreadId: joined.parentThreadId, cancelled: [], draining: [] });
     expect(env.store.get(env.returns.id)).toMatchObject({ coordinatorThreadId: joined.parentThreadId, members: env.returns.members });
+    // The instruction stays; its row pauses and no longer fences the PR.
+    expect(env.work.instruction(env.returns.id)).toMatchObject({ revision: 1 });
+    expect(env.work.row(RETURNS)).toMatchObject({ phase: "paused", body: { cause: "v2-off" } });
     expect(env.work.managedBy(RETURNS)).toBeNull();
     expect(await env.preview([RETURNS])).toMatchObject([{ eligible: true }]);
+    // Opting in again with the same parent resumes the row where the instruction left it.
+    await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 2, parentThreadId: joined.parentThreadId });
+    expect(env.work.row(RETURNS)).toMatchObject({ phase: "verifying", body: { cause: "observe" } });
     expect(env.spawn).toHaveBeenCalledTimes(1);
   });
 

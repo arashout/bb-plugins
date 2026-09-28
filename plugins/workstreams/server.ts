@@ -28,7 +28,7 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortV2, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
-import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
+import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
 import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
@@ -730,6 +730,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_ROSTER_MIGRATIONS,
     PR_FACTS_MIGRATION,
     ...EFFORT_EXECUTION_MIGRATIONS,
+    ...EFFORT_INSTRUCTION_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -3530,6 +3531,9 @@ export default async function plugin(bb: BbPluginApi) {
           blockers.push(`Finish pending thread sync for merged effort ${row.sourceId} before merging again.`);
       }
       if (!retry && (source.archivedAt || destination.archivedAt)) blockers.push("Restore archived efforts before merging them.");
+      // Combining efforts must not combine their authorizations: each instruction ends first.
+      if (!retry) for (const effort of [source, destination]) if (effortWork.instruction(effort.id))
+        blockers.push(`${effort.name} has an active instruction. Cancel it, or let it complete, before merging.`);
       // A merge never lifts a fence: a v2 effort's PRs may join only another v2 roster.
       if (!retry && effortWork.execution(source.id).mode === "v2" && effortWork.execution(destination.id).mode === "legacy")
         blockers.push(`${source.name} runs on its roster and ${destination.name} does not. Move ${source.name} back to legacy launchers, or ${destination.name} to its roster, before merging.`);
@@ -4528,9 +4532,15 @@ export default async function plugin(bb: BbPluginApi) {
     return candidates;
   }
 
+  const rosterStore = createEffortRosterStore(db, effortStore);
   const effortV2 = createEffortV2({
     efforts: effortStore,
-    numbers: createEffortRosterStore(db, effortStore).numbers,
+    numbers: rosterStore.numbers,
+    snapshots: rosterStore,
+    work: effortWork,
+    holds: { set: prHolds.set, changed: () => bb.realtime.publish(BOARD_CHANGED, { scanning }) },
+    models: async () => ({ code: await modelFor("code"), planning: await modelFor("planning") }),
+    authored: (prUrl) => inventory.get(prUrl) !== undefined,
     observe: observePr,
     realtime: bb.realtime,
     execution: {
@@ -4581,9 +4591,12 @@ export default async function plugin(bb: BbPluginApi) {
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
-    pr_hold_set: ({ prUrl, held, reason }) => {
+    pr_hold_set: async ({ prUrl, held, reason }) => {
       const holds = prHolds.set(prUrl, held, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      // A hold outlasts every instruction: a v2 row pauses on it, or resumes on release, now.
+      const row = effortWork.row(prUrl);
+      if (row) await effortV2.settle(row.effortId, "hold", new Set([row.target]));
       return holds;
     },
     advance_preview: ({ prUrls }) => advance.preview(prUrls),
@@ -4652,7 +4665,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       return { ok: true as const, effort, notice: null };
     },
-    effort_admin_archive: ({ effortKey, archived, expectedScope }) => {
+    effort_admin_archive: async ({ effortKey, archived, expectedScope }) => {
       const record = adminRecord(effortKey);
       if (!record || record.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the effort list." };
       if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
@@ -4668,6 +4681,8 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "An affected worker or advance job is still active. Wait for it to settle before archiving." };
       const effort = effortStore.setArchived(record.id, archived);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      // Archiving pauses a v2 effort's rows and restoring resumes them; running work drains, nothing is cancelled.
+      await effortV2.settle(record.id, archived ? "archive" : "restore");
       return { ok: true as const, effort };
     },
     effort_admin_merge_preview: ({ sourceKey, destinationKey }) => adminMergePreview(sourceKey, destinationKey),
@@ -4695,6 +4710,8 @@ export default async function plugin(bb: BbPluginApi) {
             throw new Error("Effort ownership or controller bindings changed. Reopen the merge preview.");
           if (dispatching || (dispatch.policy().mode === "auto" && [freshSource.id, freshDestination.id].includes(effortStore.source(dispatch.policy().effort_key ?? "")?.id ?? "")))
             throw new Error("Automatic dispatch is active for these efforts. Turn it off before merging.");
+          if (effortWork.instruction(freshSource.id) || effortWork.instruction(freshDestination.id))
+            throw new Error("An instruction became active for these efforts. Reopen the merge preview.");
           const paths = new Set([...(freshSource.members.checkoutPaths ?? []), ...(freshDestination.members.checkoutPaths ?? [])]);
           const prs = new Set([...freshSource.members.prUrls, ...freshDestination.members.prUrls].map((url) => canonicalPrUrl(url) ?? url));
           const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
