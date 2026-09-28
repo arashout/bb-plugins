@@ -1,0 +1,232 @@
+// The effort roster: one permanently numbered row per PR an effort owns,
+// projected from the facts the board already keeps. Until an instruction exists
+// nothing is authorized work, so an open row is Doing only while a writer holds
+// it, a system issue only while a legacy launch is uncertain, and otherwise it
+// sits outside any instruction showing the need its observed gates name. Legacy
+// attempts stay history: they explain counts and never become current state.
+import { z } from "zod";
+import type { AdvanceFacts } from "./advance-contract.js";
+import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
+import type { Pr } from "./contract.js";
+import type { DispatchAttempt } from "./dispatch.js";
+import type { EstablishedEffort } from "./effort-store.js";
+import { prTarget } from "./ghactions.js";
+import type { PrObservation } from "./inventory-store.js";
+import type { LegacyAttempt } from "./legacy-history.js";
+import { checksFailed, checksGreen } from "./pr-checks.js";
+import { GATE_IDS, mergeWait, prGates, type GateId, type Gates } from "./pr-gates.js";
+import { prHoldFor, prHoldSchema, type PrHolds } from "./pr-holds.js";
+import type { Run } from "./runs.js";
+import type { ThreadFacts } from "./threads.js";
+import { prWorkItemKey } from "./work-item-index.js";
+import { displayTitle } from "./workstreams.js";
+
+const ticketSchema = z.object({ id: z.string(), title: z.string().nullable(), url: z.string().nullable() });
+export const rosterRowSchema = z.object({
+  n: z.number(), provisional: z.boolean(), target: z.string(), repo: z.string(), number: z.number(), title: z.string(),
+  state: z.enum(["doing", "issue", "done", "not-in-instruction"]), cause: z.string(), label: z.string(),
+  owner: z.enum(["you", "ci", "reviewer", "github", "legacy-job", "run", "dispatch", "thread"]).nullable(),
+  hold: prHoldSchema.nullable(), reviewers: z.array(z.object({ login: z.string(), state: z.string() })), requested: z.array(z.string()),
+  head: z.string().nullable(), checks: z.enum(["passed", "pending", "failed", "unknown"]).nullable(), reviewDecision: z.string().nullable(),
+  gates: z.record(z.enum(GATE_IDS), z.boolean().nullable()).nullable(),
+  observedAt: z.number().nullable(), failedAt: z.number().nullable(),
+  tickets: z.array(ticketSchema), checkouts: z.array(z.string()),
+  legacy: z.object({ batchId: z.string(), jobId: z.string(), cause: z.string(), label: z.string(), jobs: z.number() }).nullable(),
+});
+export const effortRosterSchema = z.object({
+  effort: z.object({ id: z.string(), key: z.string(), name: z.string(), goal: z.string(), archivedAt: z.number().nullable(),
+    redirectedFrom: z.string().nullable(), coordinatorThreadId: z.string().nullable() }),
+  snapshotId: z.string().nullable(),
+  observedAt: z.number(),
+  rows: z.array(rosterRowSchema),
+  issues: z.array(z.object({ cause: z.string(), label: z.string(), numbers: z.array(z.number()) })),
+  ticketsWithoutPrs: z.array(ticketSchema),
+  /** Derived board groups that already reach into this roster: suggestions, never membership. */
+  suggestions: z.array(z.object({ key: z.string(), name: z.string(), tickets: z.array(z.string()), prUrls: z.array(z.string()), overlap: z.array(z.string()) })),
+  /** Legacy job rows behind these PRs: why Advance's counts exceed the roster's. */
+  history: z.object({ legacyJobs: z.number(), legacyPrs: z.number() }),
+});
+export type EffortRoster = z.infer<typeof effortRosterSchema>;
+export type RosterRow = z.infer<typeof rosterRowSchema>;
+export type RosterState = RosterRow["state"];
+type RosterNeed = Pick<RosterRow, "state" | "cause" | "label" | "owner">;
+type RosterSuggestion = EffortRoster["suggestions"][number];
+export type SuggestionGroup = { key: string; name: string; clusters: readonly { ticket: string; units: readonly { pr: { url: string } | null }[] }[] };
+
+/** What the server reads live, and the dry-run script reads from a database copy. */
+export type RosterSources = {
+  now: number;
+  work: { items: ReadonlyMap<string, { paths: readonly string[]; tickets: readonly string[] }>; ownerForPr(prUrl: string): { id: string } | null };
+  /** The freshest cheap facts: the authored-PR inventory, else a scanned checkout. */
+  facts(prUrl: string): Pr | null;
+  observation(prUrl: string): PrObservation | null;
+  feedback(prUrl: string): ApprovalFeedbackRecord | null;
+  holds: PrHolds;
+  legacy: ReadonlyMap<string, LegacyAttempt>;
+  runs: readonly Pick<Run, "prUrl" | "status" | "action">[];
+  dispatch: readonly Pick<DispatchAttempt, "prUrl" | "status" | "action">[];
+  /** Null when thread state is unknown, as it is offline without an export. */
+  threads: readonly Pick<ThreadFacts, "id" | "status" | "environmentPath">[] | null;
+  tickets(ids: readonly string[]): ReadonlyMap<string, { title: string | null; url: string | null }>;
+  /** Derived effort-level board groups; null when the board cannot be derived. */
+  groups: readonly SuggestionGroup[] | null;
+};
+
+const byRepoAndNumber = (a: string, b: string) => {
+  const [left, right] = [prTarget(a), prTarget(b)];
+  return (left?.slug ?? a).localeCompare(right?.slug ?? b) || (left?.number ?? 0) - (right?.number ?? 0);
+};
+
+/** Every PR the effort owns: explicit PR members, and PRs whose tickets it alone owns. */
+export function rosterTargets(effort: EstablishedEffort, work: RosterSources["work"]): string[] {
+  const targets = new Set(effort.members.prUrls.map(prWorkItemKey));
+  for (const key of work.items.keys()) if (work.ownerForPr(key)?.id === effort.id) targets.add(key);
+  return [...targets].sort(byRepoAndNumber);
+}
+
+/**
+ * Gates from the board's cheap read. The cheap read never proves what only a
+ * full read knows (fork, stack parent, every review-thread page), and it is never
+ * fresh, so a cheap read alone can name a need but never a merge candidate.
+ */
+function cheapGates(pr: Pr, held: boolean, feedback: ApprovalFeedbackRecord | null, now: number): Gates {
+  const facts: AdvanceFacts = {
+    prUrl: pr.url, number: pr.number, title: pr.title, repo: prTarget(pr.url)?.slug ?? "",
+    headRefName: pr.headRefName ?? "", baseRefName: pr.baseRefName ?? "", headOid: pr.headRefOid ?? "", baseOid: pr.baseRefOid ?? "",
+    state: pr.state === "MERGED" || pr.state === "CLOSED" ? pr.state : "OPEN", isDraft: pr.isDraft, isCrossRepository: false,
+    reviewDecision: pr.reviewDecision, mergeStateStatus: pr.mergeStateStatus, mergeable: pr.mergeable ?? "UNKNOWN",
+    needsPreparation: false, readiness: "needs-attention", detail: "",
+    unresolvedThreads: pr.unresolvedReviewThreads ?? 0, threadsComplete: pr.resolvedReviewThreads !== null,
+    checks: checksFailed(pr.checkConclusions) ? "failed" : checksGreen(pr.checkConclusions) ? "passed" : "pending",
+    basePrNumber: null, reviewFollowupPosted: pr.reviewFollowupPosted,
+    approvalFeedback: pr.approvalFeedback ?? { status: "unknown", fingerprint: null, sourceIds: [] },
+  };
+  const gates = prGates({ facts, observedAt: -Infinity, now, held, feedback, reviewers: pr });
+  const openThreads = pr.unresolvedReviewThreads;
+  return { ...gates, "not-fork": null, "parent-merged": null,
+    "threads-resolved": openThreads === null || (openThreads === 0 && pr.resolvedReviewThreads === null) ? null : gates["threads-resolved"] };
+}
+
+/** The gates a merge candidate must pass that facts alone decide; freshness shows as age instead. */
+const CANDIDATE: GateId[] = ["checks-green", "threads-resolved", "feedback-verified", "changes-addressed", "approved", "not-draft", "parent-merged", "merge-clean"];
+
+/** What the observed gates ask for next, in decide()'s order: work before waits, waits before readiness. */
+function observedNeed(gates: Gates, pr: Pick<Pr, "mergeStateStatus" | "reviewRequests">): Omit<RosterNeed, "state"> {
+  if (gates["no-conflict"] === false || gates["base-current"] === false) return { cause: "branch", label: "Branch needs updating", owner: "you" };
+  if (gates["checks-settled"] === true && gates["checks-green"] === false) return { cause: "checks-failed", label: "Checks failed", owner: "you" };
+  if (gates["threads-resolved"] === false || gates["feedback-verified"] === false || gates["changes-addressed"] === false)
+    return { cause: "review-feedback", label: "Review feedback open", owner: "you" };
+  if (gates["checks-settled"] === false) return { cause: "ci", label: "Checks running", owner: "ci" };
+  if (gates["not-draft"] === false) return { cause: "draft", label: "Draft", owner: "you" };
+  if (gates.approved === false) return pr.reviewRequests.length > 0
+    ? { cause: "review", label: `Waiting for review from ${pr.reviewRequests.map((login) => `@${login}`).join(", ")}`, owner: "reviewer" }
+    : gates["review-requested"] ? { cause: "review", label: "Waiting for approval", owner: "reviewer" }
+    : { cause: "review", label: "No review requested", owner: "you" };
+  if (gates["merge-clean"] === false) {
+    const cause = mergeWait(pr);
+    return { cause, label: cause === "merge-blocked" ? "Merge blocked by branch protection" : "Waiting for merge requirements", owner: "github" };
+  }
+  const unknown = CANDIDATE.filter((gate) => gates[gate] === null);
+  if (unknown.length > 0) return { cause: "observe", label: `Refresh to verify ${unknown.join(", ")}`, owner: null };
+  return { cause: "merge-candidate", label: "Ready to merge", owner: "you" };
+}
+
+const normalizePath = (path: string) => path.replace(/\/+$/u, "");
+
+/** The writer that makes a row Doing: a live legacy worker or verification, a running action, a dispatch, or an active thread in its checkout. */
+function writer(target: string, checkouts: readonly string[], legacy: LegacyAttempt | null, sources: RosterSources): Omit<RosterNeed, "state"> | null {
+  if (legacy?.cause === "running") return { cause: legacy.job.status === "verifying" ? "verifying" : "worker", label: `Legacy Advance: ${legacy.label}`, owner: "legacy-job" };
+  const run = sources.runs.find((item) => item.status === "running" && item.prUrl !== null && prWorkItemKey(item.prUrl) === target);
+  if (run) return { cause: "worker", label: `Action running: ${run.action}`, owner: "run" };
+  const dispatched = sources.dispatch.find((item) => ["launching", "running", "verifying"].includes(item.status) && prWorkItemKey(item.prUrl) === target);
+  if (dispatched) return { cause: dispatched.status === "verifying" ? "verifying" : "worker", label: `Dispatch ${dispatched.status}: ${dispatched.action}`, owner: "dispatch" };
+  const paths = new Set(checkouts.map(normalizePath));
+  const thread = sources.threads?.find((item) => !["idle", "error"].includes(item.status) && item.environmentPath !== null && paths.has(normalizePath(item.environmentPath)));
+  return thread ? { cause: "worker", label: `Thread ${thread.id} is active in its checkout`, owner: "thread" } : null;
+}
+
+function rosterRow(target: string, number: { n: number; provisional: boolean }, sources: RosterSources): RosterRow {
+  const item = sources.work.items.get(target);
+  const checkouts = [...item?.paths ?? []];
+  const pr = sources.facts(target);
+  const hold = prHoldFor(target, sources.holds);
+  const legacy = sources.legacy.get(target) ?? null;
+  const observation = sources.observation(target);
+  const gates = pr ? cheapGates(pr, hold !== null, sources.feedback(target), sources.now) : null;
+  const need = ((): RosterNeed => {
+    if (pr && pr.state !== "OPEN") return { state: "done", cause: pr.state === "MERGED" ? "merged" : "closed", label: pr.state === "MERGED" ? "Merged" : "Closed", owner: null };
+    const active = writer(target, checkouts, legacy, sources);
+    if (active) return { state: "doing", ...active };
+    if (legacy?.cause === "uncertain") return { state: "issue", cause: "legacy-uncertain", label: "Legacy launch outcome uncertain; recheck it", owner: "legacy-job" };
+    const outside = (observed: Omit<RosterNeed, "state">): RosterNeed => ({ state: "not-in-instruction", ...observed });
+    if (hold) return outside({ cause: "hold", label: hold.reason ? `On hold: ${hold.reason}` : "On hold", owner: "you" });
+    if (legacy?.cause === "queued") return outside({ cause: "capacity", label: "Queued in legacy Advance", owner: "legacy-job" });
+    if (!pr || !gates) return outside(observation?.failedAt ? { cause: "source-unavailable", label: "GitHub read failed", owner: "github" }
+      // The board read it and then dropped it: it merged or closed, or its only checkout went away.
+      : observation?.checkedAt ? { cause: "observe", label: "No longer on the board; refresh to read it", owner: null }
+      : { cause: "source-unavailable", label: "Not observed yet", owner: "github" });
+    return outside(observedNeed(gates, pr));
+  })();
+  const tickets = sources.tickets(item?.tickets ?? []);
+  const parsed = prTarget(target);
+  return {
+    ...need, n: number.n, provisional: number.provisional, target, repo: parsed?.slug ?? "", number: parsed?.number ?? 0,
+    title: pr ? displayTitle(pr.title) : "", hold, reviewers: pr?.latestReviews ?? [], requested: pr?.reviewRequests ?? [],
+    head: pr?.headRefOid ?? null, checks: gates === null ? null : gates["checks-green"] ? "passed" : gates["checks-settled"] ? "failed" : "pending",
+    reviewDecision: pr?.reviewDecision ?? null, gates,
+    observedAt: observation?.checkedAt ? Date.parse(observation.checkedAt) : null, failedAt: observation?.failedAt ? Date.parse(observation.failedAt) : null,
+    tickets: (item?.tickets ?? []).map((id) => ({ id, title: tickets.get(id)?.title ?? null, url: tickets.get(id)?.url ?? null })),
+    checkouts, legacy: legacy && { batchId: legacy.batchId, jobId: legacy.job.id, cause: legacy.cause, label: legacy.label, jobs: legacy.jobs },
+  };
+}
+
+export function effortRoster(input: {
+  effort: EstablishedEffort; redirectedFrom: string | null; sources: RosterSources;
+  /** Numbers the targets in display order; see the roster store. */
+  number(targets: string[]): { rows: { n: number; target: string; provisional: boolean }[]; snapshotId: string | null };
+}): EffortRoster {
+  const { effort, sources } = input;
+  const numbered = input.number(rosterTargets(effort, sources.work));
+  const rows = numbered.rows.map((row) => rosterRow(row.target, row, sources)).sort((a, b) => a.n - b.n);
+  const issues = new Map<string, EffortRoster["issues"][number]>();
+  for (const row of rows) if (row.state === "issue") {
+    const issue = issues.get(row.cause) ?? { cause: row.cause, label: row.label, numbers: [] };
+    issue.numbers.push(row.n);
+    issues.set(row.cause, issue);
+  }
+  const covered = new Set(rows.flatMap((row) => row.tickets.map((ticket) => ticket.id)));
+  const uncovered = effort.members.tickets.filter((ticket) => !covered.has(ticket));
+  const details = sources.tickets(uncovered);
+  const targets = new Set(rows.map((row) => row.target));
+  const suggestions = (sources.groups ?? []).flatMap((group): RosterSuggestion[] => {
+    const prUrls = [...new Set(group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [prWorkItemKey(unit.pr.url)] : [])))].sort(byRepoAndNumber);
+    const overlap = prUrls.filter((url) => targets.has(url));
+    return overlap.length === 0 ? [] : [{ key: group.key, name: group.name, tickets: [...new Set(group.clusters.map((cluster) => cluster.ticket))].sort(), prUrls, overlap }];
+  });
+  const legacy = rows.flatMap((row) => row.legacy ? [row.legacy.jobs] : []);
+  return {
+    effort: { id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, archivedAt: effort.archivedAt ?? null,
+      redirectedFrom: input.redirectedFrom, coordinatorThreadId: effort.coordinatorThreadId },
+    snapshotId: numbered.snapshotId, observedAt: sources.now, rows, issues: [...issues.values()],
+    ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
+    suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length },
+  };
+}
+
+/** The numbered plain list the CLI prints: `n · repo #num · reviewer · summary · state · next`. */
+export function rosterText(roster: EffortRoster): string {
+  const { effort } = roster;
+  const state = { doing: "Doing", issue: "System issue", done: "Done", "not-in-instruction": "Not in instruction" } satisfies Record<RosterState, string>;
+  const open = roster.rows.filter((row) => row.state !== "done").length;
+  const lines = [
+    `${effort.name} · ${effort.key}${roster.snapshotId ? ` · ${roster.snapshotId}` : ""}${effort.archivedAt ? " · archived" : ""}${effort.redirectedFrom ? ` · merged from effort:${effort.redirectedFrom}` : ""}`,
+    `${open} open · ${roster.rows.length - open} done · ${roster.ticketsWithoutPrs.length} tickets without PRs · ${roster.history.legacyJobs} legacy Advance jobs over ${roster.history.legacyPrs} PRs`,
+    ...roster.rows.map((row) => [row.n, `${row.repo} #${row.number}`,
+      row.requested.map((login) => `@${login}`).join(" ") || row.reviewers.map((review) => `@${review.login}`).join(" ") || "—",
+      row.title.slice(0, 120) || "—", `${state[row.state]}${row.hold ? " · held" : ""}`, row.label].join(" · ")),
+  ];
+  if (roster.issues.length > 0) lines.push(...roster.issues.map((issue) => `System issue: ${issue.label} (${issue.numbers.join(", ")})`));
+  if (roster.ticketsWithoutPrs.length > 0) lines.push(`Tickets without PRs: ${roster.ticketsWithoutPrs.map((ticket) => ticket.title ? `${ticket.id} ${ticket.title}` : ticket.id).join("; ")}`);
+  for (const suggestion of roster.suggestions) lines.push(`Suggestion: ${suggestion.name} (${suggestion.tickets.join(", ")}) already covers ${suggestion.overlap.length} roster PRs`);
+  return lines.join("\n");
+}

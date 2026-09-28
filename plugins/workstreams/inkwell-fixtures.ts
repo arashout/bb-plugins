@@ -2,6 +2,7 @@
 // (batch sizes, overlaps, statuses, checkouts, and ownership); every name,
 // number, path, and thread id is invented.
 import { advanceBatchSchema, type AdvanceBatch, type AdvanceJob } from "./bulk-advance.js";
+import { prSchema, type RawUnit } from "./contract.js";
 
 const HOME = "/Users/reader";
 const START = Date.UTC(2026, 8, 26, 12);
@@ -133,3 +134,64 @@ export const INKWELL_ADVANCE_BATCHES: AdvanceBatch[] = BATCHES.map(([created, ro
     };
   }) });
 }).reverse();
+
+/** [repo, number, title, open, checkout, description] for one roster member. */
+type Member = [repo: string, number: number, title: string, state: "OPEN" | "MERGED", checkout: boolean, body?: string];
+const REPOS = ["catalog", "folio", "quill", "atlas", "spine"];
+const ticketRange = (prefix: string, first: number, count: number) => Array.from({ length: count }, (_, index) => `${prefix}-${first + index}`);
+const CATALOG_TICKETS = ticketRange("ABC", 120, 21);
+const SHELVING_TICKETS = ticketRange("ABC", 401, 7);
+const VAULT_TICKETS = ticketRange("OPS", 41, 10);
+/** Catalog: 31 open PRs over 20 of its 21 tickets, one without a checkout; ABC-140 has no PR yet. */
+const CATALOG: Member[] = Array.from({ length: 31 }, (_, index) => {
+  const ticket = CATALOG_TICKETS[index < 22 ? index >> 1 : index - 11]!;
+  return index === 0 ? ["catalog", 96, "ABC-120 Link follow-up notes to catalog entries", "OPEN", true]
+    : [REPOS[index % 5]!, 500 + index, `${ticket} Catalog follow-up ${index}`, "OPEN", index !== 30];
+});
+/** Shelving: 16 open PRs over its 7 tickets with 13 checkouts, plus 7 merged backend PRs that are context only. */
+const SHELVING: Member[] = [
+  ...Array.from({ length: 16 }, (_, index): Member =>
+    [REPOS[index % 5]!, 700 + index, `${SHELVING_TICKETS[index < 6 ? index % 2 : 2 + (index - 6 >> 1)]!} Shelve new arrivals ${index}`, "OPEN", index < 13]),
+  ...SHELVING_TICKETS.map((ticket, index): Member => ["spine", 720 + index, `${ticket} Shelving backend ${index}`, "MERGED", true]),
+];
+/** Vault: 18 open PRs over its 10 tickets with 10 checkouts; six only mention a Catalog ticket in their descriptions. */
+const VAULT: Member[] = [
+  ["folio", 311, "OPS-41 Rotate vault audit keys", "OPEN", true],
+  ["folio", 312, "OPS-42 Record vault access reviews", "OPEN", true],
+  ["quill", 209, "OPS-43 Log vault token use", "OPEN", true],
+  ...Array.from({ length: 15 }, (_, index): Member => [REPOS[index % 5]!, 800 + index, `${VAULT_TICKETS[index % 10]!} Audit vault access ${index}`, "OPEN", index < 7,
+    index >= 9 ? `Found while reviewing https://linear.app/inkwell/issue/${CATALOG_TICKETS[index]}\nRefs: ${CATALOG_TICKETS[index]}` : undefined]),
+];
+/** An OPS ticket no effort owns yet: a prefix is no standing claim. */
+const FUTURE: Member = ["atlas", 610, "OPS-90 Rotate archive keys", "OPEN", false];
+
+const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
+function pull([repo, number, title, state, , body]: Member) {
+  const [, prefix, id] = /^([A-Z]+)-(\d+)/u.exec(title)!;
+  return prSchema.parse({ number, state, isDraft: false, reviewDecision: null, checkConclusions: [], url: url(repo, number), title,
+    mergeable: state === "OPEN" ? "MERGEABLE" : "UNKNOWN", baseRefName: "main", headRefName: `${prefix!.toLowerCase()}-${id}-${number}`,
+    headRefOid: number.toString(16).padStart(40, "a"), latestReviewStates: [], mergeStateStatus: state === "OPEN" ? "CLEAN" : "UNKNOWN",
+    ...(body ? { ticketRefs: { urls: [/issue\/([A-Z]+-\d+)/u.exec(body)![1]!], mentions: [] } } : {}) });
+}
+const members = [...CATALOG, ...SHELVING, ...VAULT, FUTURE];
+
+/** The acceptance cohorts as fictional board state: saved efforts, scanned checkouts, authored PRs, and Linear titles. */
+export const INKWELL_ROSTER = {
+  efforts: [
+    { name: "Catalog follow-ups", tickets: CATALOG_TICKETS, prUrls: CATALOG.map(([repo, number]) => url(repo, number)) },
+    { name: "Shelving entry", tickets: SHELVING_TICKETS, prUrls: SHELVING.filter((member) => member[3] === "OPEN").map(([repo, number]) => url(repo, number)) },
+    { name: "Vault audits", tickets: VAULT_TICKETS, prUrls: VAULT.filter((member) => !member[5]).map(([repo, number]) => url(repo, number)) },
+  ],
+  /** Every Vault PR whose description mentions a Catalog ticket. */
+  described: VAULT.filter((member) => member[5]).map(([repo, number]) => url(repo, number)),
+  future: url(FUTURE[0], FUTURE[1]),
+  units: members.filter((member) => member[4]).map((member): RawUnit => {
+    const pr = pull(member);
+    return { path: `${HOME}/src/${member[0]}-${member[1]}`, dirName: `${member[0]}-${member[1]}`, repo: member[0], githubRepo: `inkwell/${member[0]}`,
+      branch: pr.headRefName, dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr, shipped: null, changedPaths: [],
+      observed: { status: true, pr: true } };
+  }),
+  inventory: members.filter((member) => member[3] === "OPEN").map((member) => ({ repo: `inkwell/${member[0]}`, pr: pull(member) })),
+  linear: [...CATALOG_TICKETS, ...SHELVING_TICKETS, ...VAULT_TICKETS].map((ticket) => ({ ticket,
+    title: `${ticket.startsWith("OPS") ? "Vault audit" : "Bookstore task"} ${ticket.slice(4)}`, url: `https://linear.app/inkwell/issue/${ticket}` })),
+};

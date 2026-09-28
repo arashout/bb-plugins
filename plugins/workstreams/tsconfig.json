@@ -44,6 +44,7 @@
     "faces.ts",
     "app.tsx",
     "*.test.ts",
+    "scripts/*.ts",
     "components",
     "lib",
     "hooks"

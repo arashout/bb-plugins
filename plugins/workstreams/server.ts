@@ -26,7 +26,9 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
-import { EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
+import { createEffortRosterStore, EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
+import { createEffortV2, effortV2Contract } from "./effort-v2-server.js";
+import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
@@ -536,6 +538,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({ target: cardEffortTargetSchema, threadId: z.string().max(200) }).strict(),
     output: z.object({ lastLine: z.string().max(280).nullable() }),
   },
+  ...effortV2Contract,
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -4371,7 +4374,31 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const effortV2 = createEffortV2({
+    efforts: effortStore,
+    numbers: createEffortRosterStore(db, effortStore).numbers,
+    async sources() {
+      const current = await board();
+      const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
+      const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
+      return {
+        now: Date.now(), work,
+        facts: (prUrl) => inventory.get(prUrl)?.pr ?? scanned.get(prUrl) ?? null,
+        observation: (prUrl) => inventory.observation(prUrl),
+        feedback: (prUrl) => approvalFeedback.get(prUrl),
+        holds: prHolds.list(),
+        legacy: currentLegacyAttempts(advance.list()),
+        runs: runs.recent(Number.MAX_SAFE_INTEGER),
+        dispatch: dispatch.attempts(),
+        threads: [...threadFacts.values()],
+        tickets: (ids) => new Map([...linear.read(ids)].map(([id, detail]) => [id, { title: detail.title, url: detail.url }])),
+        groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !effortStore.get(group.key)),
+      };
+    },
+  });
+
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
+    ...effortV2.handlers,
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
@@ -5217,6 +5244,7 @@ export default async function plugin(bb: BbPluginApi) {
       name: "workstreams",
       summary: "Read the workstream board and name ticket clusters",
       commands: {
+        ...effortV2.commands,
         list: cliCommand({
           summary: "List workstreams, their clusters, and each cluster's lifecycle",
           options: { json: { type: "boolean", description: "Emit the full board as JSON" } },
