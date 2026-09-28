@@ -20,6 +20,22 @@ export const BRIEF_STAGES = [
 
 export type BriefStage = (typeof BRIEF_STAGES)[number];
 
+/**
+ * The statuses a *stored* brief can resolve to, in sidebar-section order.
+ *
+ * `working` is absent because it is live thread state that never reaches a
+ * stored row — which is also why these, and not the full status list, are what
+ * a manual override may pick: pinning a thread to "working" would be pinning it
+ * to a fact about right now.
+ */
+export const STORED_BRIEF_STATUSES = [
+  "waiting-on-me",
+  "waiting-on-other",
+  "done",
+] as const;
+
+export type StoredBriefStatus = (typeof STORED_BRIEF_STATUSES)[number];
+
 /** Realtime channel the server pokes when any brief changes. */
 export const BRIEFS_CHANGED_CHANNEL = "briefs-changed";
 

@@ -472,6 +472,180 @@ describe("stage override", () => {
   });
 });
 
+describe("status override", () => {
+  /**
+   * The same host, but with a conversation cursor the test can advance, so a
+   * summary can follow *real* activity rather than a hand-edited kv row. That is
+   * the path an override has to expire on, and the only one that distinguishes
+   * "anchored to where you set it" from "re-anchored on every summary" — the
+   * latter never expires at all.
+   */
+  function movingHost(fetchMock: ReturnType<typeof fakeCompletion>) {
+    let maxSeq = 12;
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const created = createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings: {
+        apiKey: "test-key",
+        baseUrl: "https://api.test/v1",
+        model: "test-model",
+        jsonMode: true,
+        quietSeconds: 120,
+      },
+      sdk: {
+        threads: {
+          get: async () => thread,
+          list: async () => [thread],
+          output: async () => ({ output: "All set." }),
+          conversationOutline: async () => ({
+            items: [
+              { id: "1", role: "user", preview: "Build it", attachmentSummary: null },
+            ],
+            maxSeq,
+          }),
+          interactions: { list: async () => [] },
+        },
+      },
+    });
+    return {
+      ...created,
+      advance: () => {
+        maxSeq += 1;
+      },
+    };
+  }
+
+  /** Force a summary and wait for the brief it produces. */
+  const summarize = async (
+    harness: { behavior: { callRpc: (method: string, input: unknown) => Promise<unknown> } },
+    after = 0,
+  ) => {
+    await harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    return waitFor(async () => {
+      const result = (await harness.behavior.callRpc("getBrief", {
+        threadId: "thr_1",
+      })) as BriefState;
+      if (result.state !== "ready") return null;
+      return result.brief.lastSummarizedAt >= after ? result : null;
+    });
+  };
+
+  it("pins a status the brief's own prose would never reach", async () => {
+    // SUMMARY has a next step, so the derivation says waiting-on-me — and if
+    // that step is carried out outside the thread, nothing can ever say so.
+    const { bb, harness } = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(bb);
+
+    const before = await summarize(harness);
+    expect(before.brief.status).toBe("waiting-on-me");
+
+    const pinned = (await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    })) as BriefState;
+    if (pinned.state !== "ready") throw new Error("unreachable");
+    expect(pinned.brief.status).toBe("done");
+    expect(pinned.brief.statusOverride).toBe("done");
+    // The prose is left alone: the next summary is fed the previous brief, so a
+    // blanked nextStep would simply be written back.
+    expect(pinned.brief.nextStep).toBe(SUMMARY.nextStep);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("hands the status back to the derivation when the pin is cleared", async () => {
+    const { bb, harness } = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(bb);
+    await summarize(harness);
+
+    await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    });
+    const cleared = (await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: null,
+    })) as BriefState;
+    if (cleared.state !== "ready") throw new Error("unreachable");
+    expect(cleared.brief.status).toBe("waiting-on-me");
+    expect(cleared.brief.statusOverride).toBeNull();
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("survives a re-summary of a thread that has not moved", async () => {
+    // Re-summarize is how a stale brief is fixed, so it must not also throw
+    // away a decision made about one.
+    const { bb, harness } = movingHost(fakeCompletion(SUMMARY));
+    await plugin(bb);
+    const first = await summarize(harness);
+
+    await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    });
+
+    const again = await summarize(harness, first.brief.lastSummarizedAt + 1);
+    expect(again.brief.status).toBe("done");
+    expect(again.brief.statusOverride).toBe("done");
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("retires on the next real turn", async () => {
+    const { bb, harness, advance } = movingHost(fakeCompletion(SUMMARY));
+    await plugin(bb);
+    const first = await summarize(harness);
+
+    await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    });
+
+    advance();
+    const after = await summarize(harness, first.brief.lastSummarizedAt + 1);
+    expect(after.brief.status).toBe("waiting-on-me");
+    expect(after.brief.statusOverride).toBeNull();
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("retires a stage pin on the next real turn too", async () => {
+    // The same anchor, exercised through a summary rather than a hand-edited
+    // row: a pin re-anchored to each new cursor would advance in step with the
+    // activity meant to expire it, and so never expire at all.
+    const { bb, harness, advance } = movingHost(fakeCompletion(SUMMARY));
+    await plugin(bb);
+    const first = await summarize(harness);
+
+    await harness.behavior.callRpc("setStageOverride", {
+      threadId: "thr_1",
+      stage: "planning",
+    });
+
+    advance();
+    const after = await summarize(harness, first.brief.lastSummarizedAt + 1);
+    expect(after.brief.stage).toBe("review");
+    expect(after.brief.stageOverride).toBeNull();
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("leaves a thread with no brief alone rather than inventing one", async () => {
+    const { bb, harness } = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(bb);
+
+    const state = (await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    })) as BriefState;
+    // Nothing to pin a status onto, and briefs are never backfilled.
+    expect(state.state).toBe("absent");
+
+    await harness.lifecycle.dispose();
+  });
+});
+
 describe("sidebar grouping by status", () => {
   const groupedThread = (overrides: Partial<ReturnType<typeof makeThreadResponse>>) =>
     makeThreadResponse({ visibility: "visible", status: "idle", ...overrides });

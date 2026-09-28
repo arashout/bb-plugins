@@ -24,6 +24,7 @@ const READY: BriefState = {
     stage: "review",
     status: "waiting-on-me",
     stageOverride: null,
+    statusOverride: null,
     lastSummarizedAt: 1_000,
   },
 };
@@ -180,6 +181,7 @@ describe("the brief panel", () => {
   const render = async (options: {
     getBrief?: () => BriefState;
     setStageOverride?: (input: unknown) => BriefState;
+    setStatusOverride?: (input: unknown) => BriefState;
     refresh?: () => { queued: boolean };
   }) => {
     const captured = await loadApp();
@@ -190,6 +192,7 @@ describe("the brief panel", () => {
         rpc: {
           getBrief: options.getBrief ?? (() => READY),
           setStageOverride: options.setStageOverride ?? (() => READY),
+          setStatusOverride: options.setStatusOverride ?? (() => READY),
           refresh: options.refresh ?? (() => ({ queued: true })),
           listRowSignals: () => ({ signals: [] }),
         },
@@ -205,7 +208,8 @@ describe("the brief panel", () => {
     expect(await slot.findByText("Server and app written")).toBeTruthy();
     expect(await slot.findByText("Push the branch")).toBeTruthy();
     expect(slot.queryByText("Blocked on")).toBeNull();
-    expect(await slot.findByText("Waiting on you")).toBeTruthy();
+    // Twice over: the status line at the top, and the control that changes it.
+    expect(await slot.findAllByText("Waiting on you")).toHaveLength(2);
 
     slot.lifecycle.unmount();
   });
@@ -309,6 +313,60 @@ describe("the brief panel", () => {
         ),
       ).toBe(true),
     );
+    slot.lifecycle.unmount();
+  });
+
+  it("pins a status by hand, which is the only way to close this thread", async () => {
+    // "Push the branch" is a next step nobody can record as taken from inside
+    // the thread, so the derivation says waiting-on-me until somebody says
+    // otherwise.
+    const slot = await render({});
+    fireEvent.click(await slot.findByRole("button", { name: "Done" }));
+
+    await waitFor(() =>
+      expect(
+        slot.inspection.rpcCalls.some(
+          (call) =>
+            call.method === "setStatusOverride" &&
+            (call.input as { status: string }).status === "done",
+        ),
+      ).toBe(true),
+    );
+    slot.lifecycle.unmount();
+  });
+
+  it("clears the pin when the active manual status is picked again", async () => {
+    const pinned: BriefState = {
+      state: "ready",
+      brief: { ...READY.brief!, status: "done", statusOverride: "done" },
+    };
+    const slot = await render({ getBrief: () => pinned });
+    fireEvent.click(await slot.findByRole("button", { name: /Done/u }));
+
+    await waitFor(() =>
+      expect(
+        slot.inspection.rpcCalls.some(
+          (call) =>
+            call.method === "setStatusOverride" &&
+            (call.input as { status: string | null }).status === null,
+        ),
+      ).toBe(true),
+    );
+    slot.lifecycle.unmount();
+  });
+
+  it("says when the status came from you rather than from the brief", async () => {
+    // A "Done" heading over a live next step otherwise reads as a bug.
+    const slot = await render({
+      getBrief: () => ({
+        state: "ready",
+        brief: { ...READY.brief!, status: "done", statusOverride: "done" },
+      }),
+    });
+    expect(
+      await slot.findByText(/Status set by hand to Done/u),
+    ).toBeTruthy();
+    expect(slot.queryByText("No next step — this thread reads as done.")).toBeNull();
     slot.lifecycle.unmount();
   });
 });

@@ -1,6 +1,11 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { BRIEF_STAGES, type BriefStage } from "./shared.js";
+import {
+  BRIEF_STAGES,
+  STORED_BRIEF_STATUSES,
+  type BriefStage,
+  type StoredBriefStatus,
+} from "./shared.js";
 
 /**
  * Where the thread is in its arc. A semantic judgement the summarizer makes
@@ -18,15 +23,19 @@ export type { BriefStage };
  * and is only ever applied on the client, so it never appears in a stored row
  * or in a row signal off the wire.
  */
-export const briefStatusSchema = z.enum([
-  "working",
-  "waiting-on-me",
-  "waiting-on-other",
-  "done",
-]);
+export const briefStatusSchema = z.enum(["working", ...STORED_BRIEF_STATUSES]);
 export type BriefStatus = z.infer<typeof briefStatusSchema>;
 
-export { BRIEF_STAGES };
+/**
+ * The statuses a manual override may pick: the three a stored brief can hold.
+ *
+ * Built from the same list, so the sidebar's sections, the derivation and the
+ * override cannot come to disagree about what a stored status is.
+ */
+export const storedBriefStatusSchema = z.enum(STORED_BRIEF_STATUSES);
+export type { StoredBriefStatus };
+
+export { BRIEF_STAGES, STORED_BRIEF_STATUSES };
 
 /**
  * Who has to take `nextStep`. The one part of the status the model has to judge
@@ -91,9 +100,9 @@ export type SummaryResult = z.infer<typeof summaryResultSchema>;
  * The persisted row, one per thread, under kv key `brief:<threadId>`.
  *
  * `stage` and `status` are deliberately absent: `stage` is
- * `stageOverride ?? modelStage` and `status` is derived from `nextStep`,
- * `blockedOn` and `nextStepActor`, all resolved on read so none goes stale
- * between summaries. The live `working` override is applied later still, per row
+ * `stageOverride ?? modelStage` and `status` is `statusOverride` falling back to
+ * a derivation over `nextStep`, `blockedOn` and `nextStepActor`, all resolved on
+ * read so none goes stale between summaries. The live `working` override is applied later still, per row
  * on the client.
  *
  * New fields must be optional and `version` must stay at 1. `readBrief` deletes
@@ -116,6 +125,27 @@ export const storedBriefSchema = z
      * thread activity" needs no timer.
      */
     stageOverrideSeq: z.number().nullable(),
+    /**
+     * A manual status that wins over the derived status until real new activity.
+     *
+     * The escape hatch for the one thing the derivation cannot see: a `nextStep`
+     * addressed to you and carried out *outside the thread* ("reload a client and
+     * check the panel opens"). Doing it leaves no trace in the transcript, so no
+     * summary can ever retire it, and re-summarizing only reads the same
+     * unresolved instruction back. Without a manual say-so such a thread is
+     * `waiting-on-me` forever.
+     *
+     * Optional, like every field added after version 1: `readBrief` deletes a row
+     * that fails this parse and briefs are never backfilled, so a required field
+     * would silently drop every brief written before it.
+     */
+    statusOverride: storedBriefStatusSchema.nullable().optional(),
+    /**
+     * The thread's activity cursor when the status override was set. Same
+     * contract as {@link stageOverrideSeq}: the override is dropped once the
+     * thread's cursor moves past it.
+     */
+    statusOverrideSeq: z.number().nullable().optional(),
     /**
      * Whether the thread's last assistant turn read as a question.
      *
@@ -153,6 +183,8 @@ export const resolvedBriefSchema = briefFieldsSchema
     stage: briefStageSchema,
     status: briefStatusSchema,
     stageOverride: briefStageSchema.nullable(),
+    /** The manual status, only while it is still in force. */
+    statusOverride: storedBriefStatusSchema.nullable(),
     lastSummarizedAt: z.number(),
   })
   .strict();
@@ -215,6 +247,19 @@ export const rpcContract = defineRpcContract({
       .object({
         threadId: z.string().min(1),
         stage: briefStageSchema.nullable(),
+      })
+      .strict(),
+    output: briefStateSchema,
+  },
+  /**
+   * Set or clear the manual status. Clearing returns to the derivation over the
+   * brief's own fields.
+   */
+  setStatusOverride: {
+    input: z
+      .object({
+        threadId: z.string().min(1),
+        status: storedBriefStatusSchema.nullable(),
       })
       .strict(),
     output: briefStateSchema,

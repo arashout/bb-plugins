@@ -22,6 +22,12 @@ Plus a derived **stage** (discovery / planning / implementation / review) and
 **status** (working / waiting-on-me / waiting-on-other / done) — where `working`
 comes from bb's live thread state and the other three from the brief.
 
+Either can be pinned by hand in the Brief panel, anchored to the thread's
+activity cursor so the pin retires on the next real turn. The status pin is what
+closes a thread whose next step was carried out somewhere the transcript cannot
+see — "reload a client and confirm the panel opens" leaves nothing for a summary
+to read, so the derivation would say `waiting-on-me` forever.
+
 ## Install
 
 ```sh
@@ -105,8 +111,8 @@ takes it over; turning grouping off deletes the three sections and restores the
 sidebar preferences it changed, but cannot put a hand-made placement back.
 
 **The side panel** — a **Brief** tab holding the full five fields (empty ones
-are skipped), the derived status, when it was last summarized, a stage control
-for the manual override, and Re-summarize. The **Brief** button in the thread
+are skipped), the derived status, when it was last summarized, status and stage
+controls for the manual overrides, and Re-summarize. The **Brief** button in the thread
 header opens it; so does the panel's own new-tab launcher, under Actions. It
 works the same on mobile and desktop — on a compact viewport the host reveals
 the panel drawer as part of the open — and nothing depends on hover.

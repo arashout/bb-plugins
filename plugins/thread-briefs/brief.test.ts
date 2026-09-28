@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   deriveStatus,
   effectiveStage,
+  effectiveStatus,
   isStageOverrideStale,
+  isStatusOverrideStale,
   planRename,
   resolveBrief,
   rowDecoration,
@@ -174,6 +176,106 @@ describe("stage overrides", () => {
     );
     expect(resolved.stageOverride).toBeNull();
     expect(resolved.stage).toBe("implementation");
+  });
+});
+
+describe("status overrides", () => {
+  it("derives the status when nothing is overridden", () => {
+    expect(effectiveStatus(stored())).toBe("waiting-on-me");
+  });
+
+  it("reads a brief written before the field existed as underived", () => {
+    // The field is optional precisely so an older row still parses; absent must
+    // behave as "no override" rather than throwing or pinning to undefined.
+    const { statusOverride, statusOverrideSeq, ...legacy } = stored();
+    expect(statusOverride).toBeUndefined();
+    expect(statusOverrideSeq).toBeUndefined();
+    expect(effectiveStatus(legacy as StoredBrief)).toBe("waiting-on-me");
+    expect(isStatusOverrideStale(legacy as StoredBrief)).toBe(false);
+  });
+
+  it("pins a thread done over a next step the transcript will never retire", () => {
+    // The case the override exists for: the next step was carried out somewhere
+    // no summary can see, so the derivation says waiting-on-me forever.
+    const brief = stored({
+      fields: {
+        ...stored().fields,
+        nextStep: "Reload a client and confirm the panel tab opens",
+      },
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 50,
+    });
+    expect(deriveStatus(brief.fields)).toBe("waiting-on-me");
+    expect(effectiveStatus(brief)).toBe("done");
+    expect(isStatusOverrideStale(brief)).toBe(false);
+  });
+
+  it("outranks a blockedOn, which the derivation treats as final", () => {
+    const brief = stored({
+      fields: { ...stored().fields, blockedOn: "A review that has since landed" },
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 50,
+    });
+    expect(effectiveStatus(brief)).toBe("done");
+  });
+
+  it("retires the override once the thread has real new activity", () => {
+    const brief = stored({
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 51,
+    });
+    expect(isStatusOverrideStale(brief)).toBe(true);
+    expect(effectiveStatus(brief)).toBe("waiting-on-me");
+  });
+
+  it("hides a retired override from the status control", () => {
+    const resolved = resolveBrief(
+      stored({
+        statusOverride: "done",
+        statusOverrideSeq: 50,
+        lastActivitySeen: 51,
+      }),
+    );
+    expect(resolved.statusOverride).toBeNull();
+    expect(resolved.status).toBe("waiting-on-me");
+  });
+
+  it("reports a live override to the status control", () => {
+    const resolved = resolveBrief(
+      stored({
+        statusOverride: "done",
+        statusOverrideSeq: 50,
+        lastActivitySeen: 50,
+      }),
+    );
+    expect(resolved.statusOverride).toBe("done");
+    expect(resolved.status).toBe("done");
+  });
+
+  it("does not touch the stored prose, which the next summary is fed", () => {
+    // The pin sits in front of the derivation rather than blanking nextStep,
+    // because `renderTranscript` hands the previous brief to the summarizer: a
+    // blanked field would simply be written back.
+    const brief = stored({
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 50,
+    });
+    expect(resolveBrief(brief).nextStep).toBe("Run the vitest suite");
+  });
+
+  it("draws the done ring on a row pinned done, as the panel does", () => {
+    const pinned = stored({
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 50,
+    });
+    const decoration = rowDecoration(rowSignalFor(resolveBrief(pinned)), false);
+    expect(decoration?.icon).toBe("thread-briefs/done");
+    expect(decoration?.tone).toBe("success");
   });
 });
 

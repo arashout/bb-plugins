@@ -11,27 +11,71 @@ export const briefKey = (threadId: string) => `brief:${threadId}`;
 export const threadIdFromKey = (key: string) => key.slice("brief:".length);
 
 /**
+ * Whether an override anchored at `anchorSeq` still applies to a thread whose
+ * activity cursor reads `cursor`.
+ *
+ * The whole of "sticks until real thread activity", shared by both overrides so
+ * they cannot drift apart. An override with no anchor holds indefinitely: that
+ * is unreachable today — setting one always records the cursor — but reading an
+ * unanchored pin as *expired* would silently discard a deliberate choice, where
+ * reading it as held merely leaves it for the user to clear.
+ */
+export function overrideHolds(
+  anchorSeq: number | null | undefined,
+  cursor: number,
+): boolean {
+  return anchorSeq === null || anchorSeq === undefined || cursor <= anchorSeq;
+}
+
+/**
  * The effective stage: a manual override wins until the thread has real new
  * activity past the point where it was set.
  */
 export function effectiveStage(stored: StoredBrief): BriefStage {
-  if (stored.stageOverride === null) return stored.modelStage;
-  if (
-    stored.stageOverrideSeq !== null &&
-    stored.lastActivitySeen > stored.stageOverrideSeq
-  ) {
-    return stored.modelStage;
-  }
-  return stored.stageOverride;
+  if (isStageOverrideStale(stored)) return stored.modelStage;
+  return stored.stageOverride ?? stored.modelStage;
 }
 
-/** True once the thread has moved on from where a manual override was set. */
+/** True once the thread has moved on from where a manual stage was set. */
 export function isStageOverrideStale(stored: StoredBrief): boolean {
   return (
     stored.stageOverride !== null &&
-    stored.stageOverrideSeq !== null &&
-    stored.lastActivitySeen > stored.stageOverrideSeq
+    !overrideHolds(stored.stageOverrideSeq, stored.lastActivitySeen)
   );
+}
+
+/** True once the thread has moved on from where a manual status was set. */
+export function isStatusOverrideStale(stored: StoredBrief): boolean {
+  return (
+    (stored.statusOverride ?? null) !== null &&
+    !overrideHolds(stored.statusOverrideSeq, stored.lastActivitySeen)
+  );
+}
+
+/**
+ * The status this brief reports: the manual one while it holds, otherwise the
+ * derivation over the brief's own fields.
+ *
+ * The override sits *in front of* {@link deriveStatus} rather than editing the
+ * fields it reads, because `renderTranscript` feeds the previous brief into the
+ * next summary as a starting point: a `nextStep` blanked in storage would
+ * simply be written back, where a pin is a separate fact the summarizer never
+ * sees and cannot undo.
+ *
+ * It exists for the one thing the derivation cannot see. A `nextStep` addressed
+ * to you and carried out *outside the thread* — reload a client, check a
+ * rollout, confirm a glyph — leaves no trace in the transcript, so no summary
+ * can retire it and re-summarizing reads the same unresolved instruction back.
+ * That thread is `waiting-on-me` forever unless you can say otherwise.
+ */
+export function effectiveStatus(stored: StoredBrief): BriefStatus {
+  const override = stored.statusOverride ?? null;
+  if (override !== null && !isStatusOverrideStale(stored)) return override;
+  return deriveStatus({
+    nextStep: stored.fields.nextStep,
+    blockedOn: stored.fields.blockedOn,
+    nextStepActor: stored.fields.nextStepActor,
+  });
 }
 
 /**
@@ -83,14 +127,13 @@ export function resolveBrief(stored: StoredBrief): ResolvedBrief {
     ...stored.fields,
     threadId: stored.threadId,
     stage: effectiveStage(stored),
-    status: deriveStatus({
-      nextStep: stored.fields.nextStep,
-      blockedOn: stored.fields.blockedOn,
-      nextStepActor: stored.fields.nextStepActor,
-    }),
-    // Report the override only while it is still in force, so the stage
-    // control does not show a stale manual pick as active.
+    status: effectiveStatus(stored),
+    // Report each override only while it is still in force, so a control does
+    // not show a stale manual pick as active.
     stageOverride: isStageOverrideStale(stored) ? null : stored.stageOverride,
+    statusOverride: isStatusOverrideStale(stored)
+      ? null
+      : (stored.statusOverride ?? null),
     lastSummarizedAt: stored.lastSummarizedAt,
   };
 }

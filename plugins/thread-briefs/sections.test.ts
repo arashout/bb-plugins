@@ -96,6 +96,29 @@ describe("storedStatus", () => {
       sectionNameForStatus(storedStatus(stored({ nextStepActor: "other" }))),
     ).toBe("Blocked");
   });
+
+  it("files a pinned thread where the pin says, not where its prose does", () => {
+    // Sections are keyed on this, and nothing feeds a section assignment back
+    // into a brief — so if the grouping ignored the override, the next
+    // reconcile would put the thread straight back where you moved it from.
+    const pinned: StoredBrief = {
+      ...stored(),
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+    };
+    expect(sectionNameForStatus(storedStatus(stored()))).toBe("Waiting on you");
+    expect(sectionNameForStatus(storedStatus(pinned))).toBe("Done");
+  });
+
+  it("stops honouring the pin once the thread has moved on", () => {
+    const retired: StoredBrief = {
+      ...stored(),
+      statusOverride: "done",
+      statusOverrideSeq: 50,
+      lastActivitySeen: 51,
+    };
+    expect(sectionNameForStatus(storedStatus(retired))).toBe("Waiting on you");
+  });
 });
 
 describe("planAssignments", () => {

@@ -18,8 +18,10 @@ import type {
 import {
   BRIEFS_CHANGED_CHANNEL,
   BRIEF_STAGES,
+  STORED_BRIEF_STATUSES,
   isLiveWorking,
   type BriefStage,
+  type StoredBriefStatus,
 } from "./shared.js";
 import {
   DONE_RING_ICON,
@@ -258,15 +260,78 @@ function StageControl({
   );
 }
 
+/**
+ * The manual status, in the same shape as the stage control below it.
+ *
+ * Status is otherwise derived from the brief's own prose, which has no way to
+ * learn that a `nextStep` addressed to you was carried out somewhere the
+ * transcript cannot see — reload a client, confirm a rollout, check a glyph.
+ * Doing it leaves no trace to summarize, so without this the thread is
+ * "Waiting on you" for good. Dragging its sidebar row elsewhere does not help:
+ * sections are keyed on this status, so the next reconcile files it straight
+ * back.
+ *
+ * No rings beside the options, unlike the stage control. The row glyph draws
+ * the *stage*, and only `done` gets a status treatment at all (tone, and the
+ * closed ring in place of the stage), so three labelled rings here would be two
+ * identical glyphs and a claim that status is what the row shows.
+ */
+function StatusControl({
+  brief,
+  onPick,
+}: {
+  brief: ResolvedBrief;
+  onPick: (status: StoredBriefStatus | null) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        Status
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {STORED_BRIEF_STATUSES.map((status) => {
+          const isActive = brief.status === status;
+          const isManual = brief.statusOverride === status;
+          return (
+            <button
+              key={status}
+              type="button"
+              aria-pressed={isActive}
+              // Picking the status that is already pinned clears the override
+              // and hands the judgement back to the derivation.
+              onClick={() => onPick(isManual ? null : status)}
+              className={`inline-flex items-center rounded border px-1.5 py-0.5 text-xs ${
+                isActive
+                  ? "border-border bg-card font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:bg-card"
+              }`}
+            >
+              {STATUS_LABELS[status]}
+              {isManual ? " ·" : ""}
+            </button>
+          );
+        })}
+      </div>
+      {brief.statusOverride !== null ? (
+        <div className="text-[11px] text-muted-foreground">
+          Set by hand · clears on the next turn
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function BriefBody({
   now,
   state,
   onPick,
+  onPickStatus,
   onRefresh,
 }: {
   now: number;
   state: BriefState | null;
   onPick: (stage: BriefStage | null) => void;
+  onPickStatus: (status: StoredBriefStatus | null) => void;
   onRefresh: () => void;
 }) {
   if (state === null) {
@@ -357,7 +422,18 @@ function BriefBody({
           <Field label="Next step" value={brief.nextStep} />
           <Field label="Blocked on" value={brief.blockedOn} />
           <Field label="Constraints" value={brief.constraints} />
-          {brief.nextStep.trim() === "" ? (
+          {/*
+            Why the status above may not follow from the prose here: either the
+            brief recorded nothing outstanding, or you overrode it — worth
+            saying, because a "Done" heading over a live next step otherwise
+            reads as a bug.
+          */}
+          {brief.statusOverride !== null ? (
+            <div className="text-sm text-muted-foreground">
+              Status set by hand to {STATUS_LABELS[brief.statusOverride]} —
+              whatever this brief says is outstanding.
+            </div>
+          ) : brief.nextStep.trim() === "" ? (
             <div className="text-sm text-muted-foreground">
               No next step — this thread reads as done.
             </div>
@@ -365,6 +441,7 @@ function BriefBody({
         </div>
       )}
 
+      <StatusControl brief={brief} onPick={onPickStatus} />
       <StageControl brief={brief} onPick={onPick} />
     </div>
   );
@@ -388,7 +465,7 @@ function useNow(intervalMs: number): number {
 }
 
 /**
- * The brief for one thread plus the two writes the panel offers.
+ * The brief for one thread plus the three writes the panel offers.
  *
  * The panel mounts only while its tab is active in a visible pane, so it
  * re-reads on every mount rather than trusting state from the last time it was
@@ -423,13 +500,23 @@ function useBrief(threadId: string) {
     [rpc, threadId, load],
   );
 
+  const setStatus = useCallback(
+    (status: StoredBriefStatus | null) => {
+      void rpc
+        .call("setStatusOverride", { threadId, status })
+        .then(setState)
+        .catch(() => load());
+    },
+    [rpc, threadId, load],
+  );
+
   const refresh = useCallback(() => {
     void rpc.call("refresh", { threadId }).then(() => {
       setState({ state: "summarizing" });
     });
   }, [rpc, threadId]);
 
-  return { state, setStage, refresh };
+  return { state, setStage, setStatus, refresh };
 }
 
 /**
@@ -442,10 +529,16 @@ function useBrief(threadId: string) {
  * none of that is this component's problem.
  */
 function BriefPanel({ threadId }: { threadId: string }) {
-  const { state, setStage, refresh } = useBrief(threadId);
+  const { state, setStage, setStatus, refresh } = useBrief(threadId);
   const now = useNow(30_000);
   return (
-    <BriefBody now={now} state={state} onPick={setStage} onRefresh={refresh} />
+    <BriefBody
+      now={now}
+      state={state}
+      onPick={setStage}
+      onPickStatus={setStatus}
+      onRefresh={refresh}
+    />
   );
 }
 

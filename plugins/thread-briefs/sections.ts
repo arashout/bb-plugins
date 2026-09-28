@@ -5,14 +5,14 @@
  * by stored briefs, so this module needs no live thread state beyond each
  * thread's current section.
  */
-import { deriveStatus } from "./brief.js";
-import type { BriefStatus, StoredBrief } from "./contract.js";
+import { effectiveStatus } from "./brief.js";
+import type { BriefStatus, StoredBrief, StoredBriefStatus } from "./contract.js";
 
 /**
  * The status sections, top to bottom.
  *
  * There is no `working` section. `working` is live thread state and never
- * reaches a stored brief (see {@link deriveStatus}), so a section keyed on it
+ * reaches a stored brief (see {@link effectiveStatus}), so a section keyed on it
  * could not have members: a running thread sits in the section its last brief
  * implies and keeps bb's own running indicator. Grouping running threads
  * separately would mean reacting to live state, which is what keeps the server
@@ -22,20 +22,26 @@ export const STATUS_SECTIONS = [
   { status: "waiting-on-me", name: "Waiting on you" },
   { status: "waiting-on-other", name: "Blocked" },
   { status: "done", name: "Done" },
-] as const satisfies readonly { status: BriefStatus; name: string }[];
+  // Typed against the stored statuses rather than all of them, so a section
+  // cannot be keyed on `working` — which could never have members.
+] as const satisfies readonly { status: StoredBriefStatus; name: string }[];
 
 /** The section names this plugin owns, top to bottom. */
 export const SECTION_NAMES: readonly string[] = STATUS_SECTIONS.map(
   (entry) => entry.name,
 );
 
-/** The status a stored brief resolves to, with no live input folded in. */
+/**
+ * The status a stored brief resolves to, with no live input folded in.
+ *
+ * Deliberately the *effective* status, so a thread pinned by hand is filed
+ * where the pin says. A grouping that ignored the override would put the thread
+ * straight back into the section you moved it out of — which is the only way to
+ * move a thread in this sidebar, since a section assignment never feeds back
+ * into a brief.
+ */
 export function storedStatus(stored: StoredBrief): BriefStatus {
-  return deriveStatus({
-    nextStep: stored.fields.nextStep,
-    blockedOn: stored.fields.blockedOn,
-    nextStepActor: stored.fields.nextStepActor,
-  });
+  return effectiveStatus(stored);
 }
 
 /** The section for a stored status, or null when no section covers it. */

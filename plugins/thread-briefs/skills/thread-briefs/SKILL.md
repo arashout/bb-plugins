@@ -1,6 +1,6 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the manual stage override, and renaming threads to the brief's title.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the manual stage and status overrides, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
@@ -90,6 +90,12 @@ override it; the override is anchored to the thread's activity cursor and retire
 itself on the next real turn. Clicking the active manual stage clears it. The
 override moves the row's ring too, immediately.
 
+Both overrides share that anchor rule, and "the next real turn" means a summary
+whose conversation cursor has moved past where the pin was set — so
+**Re-summarize** on an unchanged thread keeps your pin, and a summary after an
+actual turn drops it. The anchor is never re-stamped to the new cursor; one that
+advanced in step with the activity meant to expire it would never expire.
+
 `status` is derived mechanically, so it stays correct between summaries. It has
 a live half and a stored half, and the live half wins:
 
@@ -97,6 +103,7 @@ a live half and a stored half, and the live half wins:
   brief says. A run in flight is newer information than the brief, which
   describes the last turn that finished.
 - otherwise, from the stored brief:
+  - a manual status override in force → that status, whatever the fields say
   - `nextStep` **and** `blockedOn` both empty → **done**
   - `blockedOn` non-empty, or `nextStepActor` is `other` → **waiting-on-other**
   - otherwise → **waiting-on-me**
@@ -105,6 +112,33 @@ a live half and a stored half, and the live half wins:
 if a summary comes back without a next step. And **waiting-on-me** is the
 fallback: an idle thread with work left needs a human look whether or not its
 last turn ended in a question, and whether or not the actor is known.
+
+### Overriding the status by hand
+
+Pick a status in the Brief panel to pin it, exactly as with the stage: the pin
+is anchored to the thread's activity cursor, retires on the next real turn, and
+clears if you click the one that is already pinned. It moves the sidebar
+section as well as the row, because sections are keyed on this status.
+
+**Why it exists.** The derivation reads the brief's prose, and the prose can
+record a `nextStep` that is addressed to you and carried out somewhere the
+transcript cannot see — "reload an open client and confirm the panel tab
+opens", "check the rollout landed", "confirm the glyph looks right". Doing it
+leaves no trace for any summary to read, so **Re-summarize** just writes the
+same unresolved instruction back and the thread is **waiting-on-me** forever.
+The pin is the only way to say you did it.
+
+The pin sits *in front of* the derivation rather than editing the fields it
+reads. Blanking `nextStep` in storage would not work: `renderTranscript` feeds
+the previous brief into the next summary as a starting point, so the field would
+simply come back. A pin is a separate fact the summarizer is never shown and
+cannot undo.
+
+Dragging the row into another sidebar section is **not** a substitute. Section
+assignment never feeds back into a brief, so the next reconcile — on plugin
+start, after any batch of briefs, or on a settings change — files the thread
+straight back where its status says. Pin the status instead and the section
+follows.
 
 `nextStepActor` is the one input the model judges rather than the code: "try it
 and tell me if the glyph looks right" and "keep porting the call sites" are both
@@ -334,6 +368,13 @@ no preference writes.
   under the status. Briefs are only rewritten after `quietSeconds` of quiet, so
   one that predates the last few turns is expected rather than broken;
   **Re-summarize** forces it.
+- A thread stuck on **Waiting on you** whose next step you have already carried
+  out: expected if the step happened outside the thread, because nothing in the
+  transcript can record that. Pin the status to **Done** in the Brief panel —
+  see [Overriding the status by hand](#overriding-the-status-by-hand).
+- A thread that will not stay in the section you drag it to: sections are keyed
+  on status and nothing feeds an assignment back into a brief, so the next
+  reconcile undoes the move. Pin the status instead.
 - The header **Brief** button does nothing: it opens a tab in the thread's side
   panel, which only the main thread view has. A `ThreadChat` embedded elsewhere
   has no panel to open, and the host logs the declined open.

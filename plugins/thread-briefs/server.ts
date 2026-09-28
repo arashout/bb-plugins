@@ -12,7 +12,7 @@ import {
 import {
   briefKey,
   deriveStatus,
-  isStageOverrideStale,
+  overrideHolds,
   planRename,
   resolveBrief,
   rowSignalFor,
@@ -314,6 +314,28 @@ export default async function plugin(bb: BbPluginApi) {
     return title;
   }
 
+  /**
+   * Carry a manual override through a summary, or drop it.
+   *
+   * An override is anchored to the cursor it was set at and survives only while
+   * the thread has not moved past it: a forced re-summary of an unchanged thread
+   * keeps the pin, and a summary that follows a real turn retires it. The
+   * original anchor is kept rather than re-stamped to the new cursor — restamping
+   * would make every override permanent, since the pin would advance in step with
+   * the activity meant to expire it.
+   */
+  function carryOverride<T>(
+    value: T | null | undefined,
+    anchorSeq: number | null | undefined,
+    cursor: number,
+  ): { value: T | null; seq: number | null } {
+    const kept = value ?? null;
+    if (kept === null || !overrideHolds(anchorSeq, cursor)) {
+      return { value: null, seq: null };
+    }
+    return { value: kept, seq: anchorSeq ?? cursor };
+  }
+
   /** Returns true when a brief was written (so callers know to announce). */
   async function summarizeThread(
     threadId: string,
@@ -348,12 +370,20 @@ export default async function plugin(bb: BbPluginApi) {
     const config = await completionConfig();
     const { output } = await bb.sdk.threads.output({ threadId });
 
-    // An override in force is passed to the model as fixed; a stale one is
-    // dropped here, which is what "sticks until real thread activity" means.
-    const overrideInForce =
-      stored !== null && !isStageOverrideStale(stored)
-        ? stored.stageOverride
-        : null;
+    // A stage override in force is passed to the model as fixed; one the thread
+    // has moved past is dropped here, which is what "sticks until real thread
+    // activity" means. The status override needs no such handoff — the model is
+    // never asked for a status — but expires on the same terms.
+    const stagePin = carryOverride(
+      stored?.stageOverride,
+      stored?.stageOverrideSeq,
+      outline.maxSeq,
+    );
+    const statusPin = carryOverride(
+      stored?.statusOverride,
+      stored?.statusOverrideSeq,
+      outline.maxSeq,
+    );
 
     const transcript = renderTranscript({
       title: thread.title ?? thread.titleFallback,
@@ -368,10 +398,10 @@ export default async function plugin(bb: BbPluginApi) {
     const signal = AbortSignal.any([timeout, lifetime.signal]);
     const reply = await requestSummary(
       config,
-      buildUserPrompt({ transcript, fixedStage: overrideInForce }),
+      buildUserPrompt({ transcript, fixedStage: stagePin.value }),
       signal,
     );
-    const summary = parseSummary(reply, overrideInForce);
+    const summary = parseSummary(reply, stagePin.value);
 
     const appliedTitle = await applyTitle({
       threadId,
@@ -393,8 +423,10 @@ export default async function plugin(bb: BbPluginApi) {
         constraints: summary.constraints,
       },
       modelStage: summary.stage,
-      stageOverride: overrideInForce,
-      stageOverrideSeq: overrideInForce === null ? null : outline.maxSeq,
+      stageOverride: stagePin.value,
+      stageOverrideSeq: stagePin.seq,
+      statusOverride: statusPin.value,
+      statusOverrideSeq: statusPin.seq,
       endedWithQuestion: endsWithQuestion(output),
       appliedTitle,
       lastSummarizedAt: Date.now(),
@@ -452,6 +484,24 @@ export default async function plugin(bb: BbPluginApi) {
         stageOverrideSeq: stage === null ? null : stored.lastActivitySeen,
       });
       announce();
+      return briefState(threadId);
+    },
+
+    setStatusOverride: async ({ threadId, status }) => {
+      const stored = await readBrief(threadId);
+      if (stored === null) return briefState(threadId);
+      await writeBrief({
+        ...stored,
+        statusOverride: status,
+        // Anchored to the activity the user was looking at, so the next real
+        // turn retires it — the same contract as the stage override.
+        statusOverrideSeq: status === null ? null : stored.lastActivitySeen,
+      });
+      announce();
+      // The status is what the sidebar sections are keyed on, so a pin has to
+      // move the thread as well as its glyph. Debounced, so clicking through a
+      // few threads is still one pass.
+      scheduleReconcile();
       return briefState(threadId);
     },
 
