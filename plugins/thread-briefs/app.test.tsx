@@ -17,6 +17,7 @@ import {
 } from "./shared.js";
 import { doneRingIcon, stageRingIcon } from "./brief.js";
 
+
 const READY: BriefState = {
   state: "ready",
   brief: {
@@ -42,8 +43,12 @@ const sidebarThread = (
     id: "thr_1",
     status: "idle",
     hasPendingInteraction: false,
+    projectId: "proj_alpha",
     ...overrides,
   }) as PluginSidebarThread;
+
+/** The ring `proj_alpha` hashes to, which every default fixture thread draws. */
+const ALPHA = projectColorIndex("proj_alpha");
 
 let app: CapturedPluginApp | null = null;
 const loadApp = async () => {
@@ -427,9 +432,9 @@ describe("sidebar row glyphs", () => {
         rpc: { listRowSignals: () => ({ signals: options.signals }) },
         sidebarThreads: {
           threads: options.threads ?? [sidebarThread({ id: "thr_1" })],
-          ...(options.projects === undefined
-            ? {}
-            : { projects: options.projects as never }),
+          projects: (options.projects ?? [
+            { id: "proj_alpha", name: "Alpha" },
+          ]) as never,
         },
       },
     );
@@ -441,9 +446,9 @@ describe("sidebar row glyphs", () => {
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "thread-briefs/done",
-        label: "Review — Done",
-        tone: "success",
+        icon: doneRingIcon(ALPHA),
+        label: "Review — Done (Alpha)",
+        tone: "default",
       }),
     );
 
@@ -464,8 +469,8 @@ describe("sidebar row glyphs", () => {
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "thread-briefs/stage-planning",
-        label: "Planning — Waiting on you",
+        icon: stageRingIcon("planning", ALPHA),
+        label: "Planning — Waiting on you (Alpha)",
         tone: "default",
       }),
     );
@@ -496,8 +501,8 @@ describe("sidebar row glyphs", () => {
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "thread-briefs/stage-review",
-        label: "Review — Waiting on you",
+        icon: stageRingIcon("review", ALPHA),
+        label: "Review — Waiting on you (Alpha)",
         tone: "default",
       }),
     );
@@ -556,9 +561,9 @@ describe("sidebar row glyphs", () => {
     await scripts.lifecycle.dispose();
   });
 
-  it("stays neutral while every thread is in one project", async () => {
-    // A colour is a comparison, and there is nothing here to compare: colouring
-    // would be decoration, and would cost `done` its green for nothing.
+  it("colours a lone project's rows too, rather than waiting for a second", async () => {
+    // Unconditional: a colour that only appeared once a second project showed
+    // up would change every ring on the list without any thread having changed.
     const { scripts, slot } = await mountBoth({
       signals: [signal({ threadId: "thr_1" })],
       threads: [sidebarThread({ id: "thr_1", projectId: "proj_alpha" } as never)],
@@ -567,11 +572,37 @@ describe("sidebar row glyphs", () => {
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "thread-briefs/done",
-        label: "Review — Done",
-        tone: "success",
+        icon: doneRingIcon(ALPHA),
+        label: "Review — Done (Alpha)",
+        tone: "default",
       }),
     );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("leaves a projectless thread its neutral ring instead of dropping the pass", async () => {
+    // Every row is painted in one pass, so a thread the host handed us with no
+    // project must not cost the rows around it their glyphs.
+    const { scripts, slot } = await mountBoth({
+      signals: [signal({ threadId: "thr_1" }), signal({ threadId: "thr_2" })],
+      threads: [
+        sidebarThread({ id: "thr_1", projectId: undefined } as never),
+        sidebarThread({ id: "thr_2", projectId: "proj_alpha" } as never),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_2")?.icon).toBe(
+        doneRingIcon(ALPHA),
+      ),
+    );
+    expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+      icon: "thread-briefs/done",
+      label: "Review — Done",
+      tone: "default",
+    });
 
     slot.lifecycle.unmount();
     await scripts.lifecycle.dispose();

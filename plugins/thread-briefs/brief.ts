@@ -304,17 +304,20 @@ export const DONE_RING_ICON = `${ICON_PREFIX}done`;
  * unrelated glyphs cannot: you read four rings at a glance without reading any
  * of them.
  *
- * Status keeps the one channel a named icon leaves free — `tone` — for the one
- * status with a treatment worth having, `done`. `waiting-on-me` and
- * `waiting-on-other` therefore draw the same muted ring and are told apart by
- * the section header, or by the label on hover when grouping is off.
+ * The one channel a named icon leaves free — colour — goes to the **project**,
+ * because `sidebarGrouping status` is what takes the sidebar's own project
+ * grouping away and nothing else on the row replaces it. `done` used to hold
+ * that channel and gives it up: it already has the two marks that do not need
+ * it, the filled centre and its section heading, where the project has neither.
  *
- * Passing a `project` takes that channel back and spends it on the project
- * instead: the ring paints itself from the project's hue, which outranks the
- * tone class, and `done` gives up its green. It loses nothing, because `done`
- * already has its own artwork — the closed ring with the filled centre — and
- * its own section heading, where the project has neither. Leave `project` null
- * and the ring is exactly as it was.
+ * Unconditionally, including where only one project is on screen. A colour that
+ * appeared only sometimes would have to be interpreted before it could be read,
+ * against a rule nothing in the sidebar shows you — and "only one project" is a
+ * fact a filter or a newly added project can change without any thread having
+ * changed.
+ *
+ * `waiting-on-me` and `waiting-on-other` still draw the same ring, told apart
+ * by the section header or by the label on hover when grouping is off.
  *
  * Precedence is live first, stored second: a thread whose agent is running or
  * queued is `working` no matter what its brief says, and `working` still draws
@@ -345,10 +348,12 @@ export function rowDecoration(
   const label = rowLabelFor(signal.stage, signal.status);
   return {
     icon: isDone ? doneRingIcon(colorIndex) : stageRingIcon(signal.stage, colorIndex),
-    // Inert once a project colours the ring — the artwork paints itself and
-    // ignores the tone class — but still the tone the neutral ring wants, so
-    // the `done` green survives wherever no project is passed.
-    tone: isDone ? "success" : "default",
+    // Never `success`. The colour channel belongs to the project now, and a
+    // green that showed up only on the rows this function happens to be handed
+    // no project for would be a second, invisible rule competing with it.
+    // `done` keeps the two marks that do not need the channel: the filled
+    // centre, and its section heading.
+    tone: "default",
     label:
       project === null || project.name === "" ? label : `${label} (${project.name})`,
   };

@@ -275,11 +275,18 @@ a row says which project a thread is in. The ring's colour says it: a hue from
 project id, so the colour is stable across windows, machines and reloads with
 nothing stored, and adding or removing a project never reshuffles the others.
 
-The colour is only drawn when the sidebar holds **more than one project**. Below
-that there is nothing to compare, so the rings stay neutral and `done` keeps its
-green — which is what the colour costs when it is on. That trade is cheap
-because `done` already has its own artwork (the filled centre) and its own
-section heading, where the project has neither.
+Every ring takes a colour, including when the sidebar holds a single project.
+Drawing it only on a list spanning two or more would mean the channel had to be
+interpreted before it could be read, against a rule nothing in the sidebar shows
+you — and "only one project" is a fact a filter or a newly added project can
+change without any thread having changed.
+
+`done` therefore has **no green**: the success tone is gone from the row
+entirely, rather than surviving on the rows that reach the decoration without a
+project. `done` keeps the two marks that never needed the colour channel — the
+filled centre, and its section heading. A thread the host reports with no
+project id keeps the plain `currentColor` ring and is skipped rather than
+throwing, so one bad entry cannot cost the other rows their glyphs.
 
 Each hue renders through `light-dark()` at two lightnesses: no single lightness
 clears 3:1 on the light sidebar and still reads on the dark one. bb sets

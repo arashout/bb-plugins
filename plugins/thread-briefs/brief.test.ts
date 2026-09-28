@@ -281,7 +281,6 @@ describe("status overrides", () => {
     });
     const decoration = rowDecoration(rowSignalFor(resolveBrief(pinned)), false);
     expect(decoration?.icon).toBe("thread-briefs/done");
-    expect(decoration?.tone).toBe("success");
   });
 });
 
@@ -350,7 +349,6 @@ describe("rowDecoration", () => {
     // `done` is a status, not a fifth stage: the arc is over.
     const decoration = rowDecoration(signalFor(done), false);
     expect(decoration?.icon).toBe("thread-briefs/done");
-    expect(decoration?.tone).toBe("success");
     expect(
       rowDecoration(
         signalFor(
@@ -395,6 +393,14 @@ describe("rowDecoration", () => {
       expect(decoration?.icon).toBe(
         `thread-briefs/done-c${projectColorIndex(alpha.id)}`,
       );
+    });
+
+    it("never asks for the success tone, project or not", () => {
+      // The colour channel means "project" on every row. A green surviving on
+      // the rows that happen to reach here without a project would be a second
+      // rule for the same channel, and an invisible one.
+      expect(rowDecoration(signalFor(done), false, alpha)?.tone).toBe("default");
+      expect(rowDecoration(signalFor(done), false)?.tone).toBe("default");
     });
 
     it("names the project in the label, since a hue cannot name itself", () => {

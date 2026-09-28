@@ -112,22 +112,27 @@ function BriefSync() {
   }, [threads]);
 
   /**
-   * The project each row belongs to — but only while more than one is on
-   * screen.
+   * The project each row belongs to.
    *
-   * A colour is a comparison, and there is nothing to compare in a sidebar
-   * holding one project: every ring would take the same arbitrary hue, which
-   * reads as decoration and costs `done` its green for nothing. Below two
-   * projects the rings stay neutral and the plugin behaves exactly as it did.
+   * Unconditional — not held back until two projects are on screen. A ring that
+   * only takes its colour some of the time is a ring whose colour you have to
+   * think about before you can read it, and the rule deciding it is invisible
+   * from the sidebar. One project in the list is also a temporary fact: a
+   * filter, an archive sweep or a second project added later would flip every
+   * ring's colour without anything about the threads having changed.
    */
   const projectByThreadId = useMemo(() => {
-    const byThread = new Map<string, { id: string; name: string }>();
-    const projectIds = new Set(threads.map((thread) => thread.projectId));
-    if (projectIds.size < 2) return byThread;
     const names = new Map(
       projects.map((project) => [project.id, project.name] as const),
     );
+    const byThread = new Map<string, { id: string; name: string }>();
     for (const thread of threads) {
+      // A thread with no project id cannot be coloured and must not take the
+      // whole pass down with it: this effect paints every row, so one bad
+      // entry would cost every other row its glyph.
+      if (typeof thread.projectId !== "string" || thread.projectId === "") {
+        continue;
+      }
       byThread.set(thread.id, {
         id: thread.projectId,
         // The row still gets its colour from the id when the project is not in

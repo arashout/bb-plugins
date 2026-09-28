@@ -62,7 +62,8 @@ export function isLiveWorking(threadStatus: string): boolean {
  * nothing on the row says which project a thread belongs to any more — and at
  * the same time the section header takes over the one thing the ring's colour
  * used to carry, `done`. The stage stays on the ring's shape, the status stays
- * in the heading, and the colour is left free for the project.
+ * in the heading, and the colour is left free for the project. Every ring takes
+ * one, so the channel means exactly one thing on every row.
  *
  * Hues rather than finished colours because the ring has to read on both the
  * light and the dark sidebar and no single lightness does: one that clears 3:1
