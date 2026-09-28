@@ -3,6 +3,9 @@
 // server module (plan amendment A12.1): effort-command.ts, for one, pulls in
 // node:crypto through its GitHub helpers.
 
+/** Realtime: the server publishes `{ effortId }`, or `{ effortId, prUrl }` for one refreshed row, whenever a roster changes. */
+export const ROSTER_CHANGED = "effort-roster-changed";
+
 /** A numbered roster PR, or one only its URL names. */
 export type TargetRef = { target: string; n: number | null };
 

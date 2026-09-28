@@ -1,10 +1,18 @@
-export type ViewId = "map" | "pipeline" | "work" | "efforts" | "board";
+export type ViewId = "map" | "pipeline" | "work" | "efforts" | "board" | "roster";
 
 export const VIEW_STORAGE_KEY = "bb-workstreams:last-view";
 
 export function viewFromSubPath(subPath: string): ViewId | null {
   const head = subPath.split("/").find(Boolean);
-  return head === "board-v2" ? "board" : head === "map" || head === "pipeline" || head === "work" || head === "efforts" || head === "board" ? head : null;
+  return head === "board-v2" ? "board" : head === "map" || head === "pipeline" || head === "work" || head === "efforts" || head === "board" || head === "roster" ? head : null;
+}
+
+/** `roster` (the effort picker), `roster/<effortId>`, or `roster/<effortId>/<n>` (focus row n); null for any other view. */
+export function rosterRoute(subPath: string): { effortId: string | null; n: number | null } | null {
+  const [head, effortId, n] = subPath.split("/").filter(Boolean);
+  if (head !== "roster") return null;
+  const decoded = (() => { try { return effortId === undefined ? null : decodeURIComponent(effortId); } catch { return effortId!; } })();
+  return { effortId: decoded, n: n !== undefined && /^\d+$/u.test(n) ? Number(n) : null };
 }
 
 export function readLastView(): ViewId {
@@ -16,7 +24,9 @@ export function readLastView(): ViewId {
   }
 }
 
+/** A roster is one effort's page, never the view the panel root reopens. */
 export function storeLastView(view: ViewId): void {
+  if (view === "roster") return;
   try {
     window.localStorage.setItem(VIEW_STORAGE_KEY, view);
   } catch {

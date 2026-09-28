@@ -42,12 +42,13 @@ import type { LegacyAttempt } from "./legacy-history.js";
 import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type CriterionEvidence } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor } from "./pr-holds.js";
+import { ROSTER_CHANGED } from "./roster-shared.js";
 import { prWorkItemKey } from "./work-item-index.js";
 
 export type { EffortCommandResult } from "./effort-command.js";
 
 /** Realtime: `{ effortId, prUrl }` names the one row a refresh recomputed. */
-export const EFFORT_ROSTER_CHANGED = "effort-roster-changed";
+export const EFFORT_ROSTER_CHANGED = ROSTER_CHANGED;
 
 const MINUTE = 60_000;
 /** Journal sources a person started: their steps aren't ones v2 took on its own. */

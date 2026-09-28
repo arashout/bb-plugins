@@ -29,8 +29,9 @@ import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
-import { readLastView, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
+import { readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
+import { RosterNavView, RosterPanelTab } from "./roster-view";
 
 export type Group = WireGroup;
 export type Cluster = Group["clusters"][number];
@@ -340,8 +341,9 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   // `V` cycles Map, Pipeline, Work, and Efforts from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
-  // `?` opens How this works from any view.
+  // `?` opens How this works from any view. A roster owns its keys, `?` included.
   useEffect(() => {
+    if (view === "roster") return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "v" && event.key !== "V" && event.key !== "?") return;
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
@@ -353,8 +355,14 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate, openHow, view]);
 
+  // A leaving roster keeps drawing the effort it showed while it fades out.
+  const rosterPath = useRef(subPath);
+  if (view === "roster") rosterPath.current = subPath;
+
   const render = (id: ViewId) =>
-    id === "pipeline" ? (
+    id === "roster" ? (
+      <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} />
+    ) : id === "pipeline" ? (
       board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
         <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />
     ) : id === "work" ? (
@@ -390,7 +398,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   return (
     <div className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
-      {view === "pipeline" || view === "work" || view === "efforts" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
+      {view === "pipeline" || view === "work" || view === "efforts" || view === "roster" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
         {/* Map, Pipeline, Work, Efforts, and the legacy Board share this panel. */}
         <div role="tablist" aria-label="Workstreams views" className="flex shrink-0 items-center gap-3">
           {VIEWS.map((entry) => (
@@ -464,7 +472,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(["map", "pipeline", "work", "efforts", "board"] as const).map((id) =>
+        {(["map", "pipeline", "work", "efforts", "board", "roster"] as const).map((id) =>
           id === view || id === leaving ? (
             <ViewLayer key={id} leaving={id !== view}>
               {render(id)}
@@ -536,6 +544,8 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "thread-effort-control", chrome: "bare", component: ThreadEffortControl }],
   });
+  // The roster beside a thread: the effort parent's own roster, or a picker in any other thread.
+  app.slots.threadPanelAction({ id: "effort-roster", title: "Roster", layout: "flush", component: RosterPanelTab });
   app.slots.navPanel({
     id: "board",
     title: "Workstreams",

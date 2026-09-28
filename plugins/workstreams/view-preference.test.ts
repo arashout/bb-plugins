@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readLastView, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
+import { readLastView, rosterRoute, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -39,6 +39,23 @@ describe("Workstreams view preference", () => {
     storeLastView("map");
     expect(readLastView()).toBe("map");
     values.set(VIEW_STORAGE_KEY, "unexpected");
+    expect(readLastView()).toBe("map");
+  });
+
+  it("routes to an effort's roster and focused row, and never reopens a roster from the panel root", () => {
+    expect(rosterRoute("roster")).toEqual({ effortId: null, n: null });
+    expect(rosterRoute("roster/eff-shelving")).toEqual({ effortId: "eff-shelving", n: null });
+    expect(rosterRoute("roster/eff-shelving/7")).toEqual({ effortId: "eff-shelving", n: 7 });
+    expect(rosterRoute(`roster/${encodeURIComponent("effort:a/b")}/x`)).toEqual({ effortId: "effort:a/b", n: null });
+    expect(rosterRoute("efforts/eff-shelving")).toBeNull();
+    expect(viewFromSubPath("roster/eff-shelving/7")).toBe("roster");
+
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } });
+    storeLastView("pipeline");
+    storeLastView("roster");
+    expect(readLastView()).toBe("pipeline");
+    values.set(VIEW_STORAGE_KEY, "roster");
     expect(readLastView()).toBe("map");
   });
 

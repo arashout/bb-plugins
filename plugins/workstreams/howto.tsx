@@ -10,6 +10,7 @@ import { TIER_WORDS } from "./threadmenu";
 import { THREAD_TIERS } from "./threads";
 import { runLabel } from "./runs";
 import { LinearFetchAction } from "./linearfetch";
+import { ROSTER_KEYS } from "./roster-view-model";
 
 /** The fixed tab's stable reference: the owning nav panel, and this tab. */
 export const HOW_TAB = { panelId: "board", id: "how" } as const;
@@ -154,6 +155,8 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <Pairs rows={BOARD_KEYS} mono />
         <p className="pt-1 text-foreground">Map</p>
         <Pairs rows={MAP_KEYS} mono />
+        <p className="pt-1 text-foreground">Roster</p>
+        <Pairs rows={ROSTER_KEYS} mono />
         <p className="pt-1 text-foreground">All views</p>
         <Pairs rows={BOTH_KEYS} mono />
       </Section>

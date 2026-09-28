@@ -25,6 +25,8 @@ export type Chip = {
   /** The worker thread the chip stands for, whose live indicator animates it. */
   threadId: string | null;
   progress: { done: number; total: number; failed: number } | null;
+  /** The roster row the chip points at: a stacked child's parent. */
+  rowN: number | null;
 };
 export type MenuItem = {
   id: "refresh" | "recheck" | "reset" | "hold" | "release" | "retry" | "stop" | "thread" | "pr";
@@ -123,7 +125,7 @@ const afterRelease = (row: RosterRow) => row.membership === "included" ? `releas
 /** The one chip that names who acts next, from server fields only (V2-UI-SPEC §4.4). A hold overrides every other. */
 export function ownerChip(row: RosterRow, roster: Pick<EffortRoster, "decisions" | "issues">, now: number): Chip {
   const chip = (kind: Chip["kind"], label: string, title: string, extra: Partial<Chip> = {}): Chip =>
-    ({ kind, label, title, tone: null, threadId: null, progress: null, ...extra });
+    ({ kind, label, title, tone: null, threadId: null, progress: null, rowN: null, ...extra });
   if (row.hold) return chip("held", `held ${age(row.hold.heldAt, now)}`,
     `Held by you${row.hold.reason ? `: ${row.hold.reason}` : ""}. ${["A hold outlasts every instruction", afterRelease(row)].filter(Boolean).join("; ")}.`);
   if (row.state === "done") return chip("done", row.cause === "closed" ? "closed" : "merged", row.label);
@@ -149,7 +151,7 @@ export function ownerChip(row: RosterRow, roster: Pick<EffortRoster, "decisions"
     return chip("ci", `CI ${counts.done}/${counts.total}`, `${counts.done} of ${counts.total} checks finished${counts.failed ? `, ${counts.failed} failed` : ""}`, { progress: counts });
   }
   if (row.cause === "review") return chip("reviewer", row.requested[0] ? `@${row.requested[0]}` : "review", row.label);
-  if (row.cause === "parent") return chip("parent", `↱ ${row.stack?.parentN ?? "parent"}`, row.label);
+  if (row.cause === "parent") return chip("parent", `↱ ${row.stack?.parentN ?? "parent"}`, row.label, { rowN: row.stack?.parentN ?? null });
   return chip("owner", row.owner ? OWNER_LABEL[row.owner] : "—", row.label);
 }
 
@@ -173,6 +175,36 @@ export function rowMenu(row: RosterRow, roster: Pick<EffortRoster, "execution">)
     item("thread", "Open thread", null, "⏎", thread ? { ok: true, why: null } : { ok: false, why: "No thread yet" }),
     item("pr", "Open PR", null, "o", { ok: true, why: null }),
   ];
+}
+
+/** What choosing a row's menu item, or pressing its key, does. Only `send` writes; a reset that drops a launch claim confirms first. */
+export type RowIntent = { kind: "refuse"; command: string; why: string } | { kind: "open-pr"; url: string } | { kind: "open-thread"; threadId: string }
+  | { kind: "refresh"; command: string } | { kind: "hold" } | { kind: "confirm-reset" } | { kind: "send"; command: string };
+export function rowIntent(line: RosterLine, id: MenuItem["id"]): RowIntent | null {
+  const item = line.menu.find((entry) => entry.id === id);
+  if (!item) return null;
+  if (!item.enabled) return { kind: "refuse", command: item.command ?? item.label, why: item.why ?? "Not available now" };
+  if (id === "pr") return { kind: "open-pr", url: line.target };
+  if (id === "thread") return line.threadId ? { kind: "open-thread", threadId: line.threadId } : null;
+  if (id === "refresh") return { kind: "refresh", command: item.command! };
+  if (id === "hold") return { kind: "hold" };
+  if (item.confirm) return { kind: "confirm-reset" };
+  return { kind: "send", command: item.command! };
+}
+
+/**
+ * What Hold sends: `hold N`, or `hold N because <reason>`. A `;`, comma, newline, or sentence-ending period would end the reason
+ * and let the rest read as more commands, such as `D1 A` or `move 5 forward`, so each becomes a space: the reason stays one hold's words.
+ */
+export function holdCommand(n: number, reason: string): string {
+  const words = reason.replace(/[;,\n\r]|\.(?=\s|$)/gu, " ").replace(/\s+/gu, " ").trim();
+  return words ? `hold ${n} because ${words}` : `hold ${n}`;
+}
+
+/** A row command's effort_command input. It shows no decisions, so the server refuses any `Dn` answer in it: only a decision surface answers. */
+export function rowCommandInput(roster: Pick<EffortRoster, "effort" | "snapshotId" | "instruction">, text: string, requestId: string) {
+  return { effortId: roster.effort.id, snapshotId: roster.snapshotId, text, requestId, source: "panel" as const,
+    ...roster.instruction ? { expectedRevision: roster.instruction.revision } : {} };
 }
 
 /** What the next-owner cell leads with: who acts and what wakes the row, then the server's detail. */
@@ -359,6 +391,35 @@ export function rosterView(roster: EffortRoster, options: { order: RosterOrder; 
     groups,
     order: groupsInOrder.flatMap((entry) => entry.lines.map((line) => line.n)),
   };
+}
+
+/** A roster key: move, toggle the order, Mark seen, list the keys, open the row's menu, or run one of its items. */
+export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" } | { kind: "row"; id: MenuItem["id"] };
+/**
+ * What a key does on the roster, or null for a key it leaves alone. Shift, never a letter's case, picks ⇧R and ⇧S, so Caps Lock can't
+ * turn Refresh into Reset or the order toggle into Stop. Space and Enter on a button or link stay that control's own.
+ */
+export function rosterKey(event: { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean },
+  on: { control: boolean; held: boolean }): KeyAction | null {
+  if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  const key = /^[a-z]$/iu.test(event.key) ? event.shiftKey ? event.key.toUpperCase() : event.key.toLowerCase() : event.key;
+  switch (key) {
+    case "j": case "ArrowDown": return { kind: "move", step: 1 };
+    case "k": case "ArrowUp": return { kind: "move", step: -1 };
+    case "s": return { kind: "order" };
+    case " ": return on.control ? null : { kind: "seen" };
+    case "?": return { kind: "keys" };
+    case ".": return { kind: "menu" };
+    case "Enter": return on.control ? null : { kind: "row", id: "thread" };
+    case "o": return { kind: "row", id: "pr" };
+    case "r": return { kind: "row", id: "refresh" };
+    case "c": return { kind: "row", id: "recheck" };
+    case "h": return { kind: "row", id: on.held ? "release" : "hold" };
+    case "R": return { kind: "row", id: "reset" };
+    case "t": return { kind: "row", id: "retry" };
+    case "S": return { kind: "row", id: "stop" };
+    default: return null;
+  }
 }
 
 /** The keys the pane answers while focus is on it, never while you type in a field or the thread's composer. */
