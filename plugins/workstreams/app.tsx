@@ -32,6 +32,8 @@ import { POINTER_CURSORS, cn } from "@/lib/utils";
 import { readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
 import { RosterNavView, RosterPanelTab } from "./roster-view";
+import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
+import { rosterPanelOpen, rosterParents } from "./roster-parents";
 
 export type Group = WireGroup;
 export type Cluster = Group["clusters"][number];
@@ -544,8 +546,12 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "thread-effort-control", chrome: "bare", component: ThreadEffortControl }],
   });
-  // The roster beside a thread: the effort parent's own roster, or a picker in any other thread.
-  app.slots.threadPanelAction({ id: "effort-roster", title: "Roster", layout: "flush", component: RosterPanelTab });
+  // The roster beside a thread: the effort parent's own roster, or a picker in any other thread. Effort parent threads also get a
+  // Roster button in their header; one overlay keeps the parents current for every header and for this launcher.
+  app.slots.threadPanelAction({ id: "effort-roster", title: "Roster", layout: "flush", component: RosterPanelTab,
+    run: (context) => { context.openPanel(rosterPanelOpen(context.threadId, rosterParents())); } });
+  app.slots.experimental_appOverlay({ id: "roster-parents", component: RosterParentsFeed });
+  app.slots.experimental_threadHeaderAction({ id: "effort-roster", title: "Effort roster", component: RosterHeaderButton });
   app.slots.navPanel({
     id: "board",
     title: "Workstreams",

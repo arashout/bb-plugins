@@ -22,6 +22,7 @@ import { Icon } from "./components/ui/icon";
 import { EASE_CSS } from "./layout";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
+import type { RosterListEntry } from "./roster-parents";
 import { HATCH, RosterList, RosterTable, TONE_CLASS, type RowActions } from "./roster-rows";
 import { ROSTER_CHANGED } from "./roster-shared";
 import { holdCommand, liveGroup, ROSTER_KEYS, rosterKey, rosterView, rowCommandInput, rowIntent, settle, type GroupKey, type MenuItem, type RosterLine,
@@ -205,8 +206,6 @@ export function RosterPane(props: RosterPaneProps) {
     {props.note ? <CommandNote note={props.note} /> : null}
   </div>;
 }
-
-export type RosterListEntry = { id: string; key: string; name: string; archived: boolean; mode: "legacy" | "v2"; parentThreadId: string | null };
 
 /** The effort picker: rosters that run on v2 first, then the ones legacy launchers still run. */
 export function RosterPicker({ efforts, onPick }: { efforts: readonly RosterListEntry[]; onPick(id: string): void }) {
