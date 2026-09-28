@@ -343,3 +343,22 @@ describe("decide()", () => {
     for (const [, input] of scenarios) expect(decide(input)).toEqual(decide(input));
   });
 });
+
+describe("decide() with launch readback", () => {
+  const lost = (id: string) => attempt({ id, status: "released", releasedReason: "no-worker", result: null, endedAt: null });
+  it("counts no launch that readback proved never started a worker, and requeues such a launch only once", () => {
+    // One lost launch beside one finished attempt: the bound of two attempts on this head still has room.
+    expect(state(decide(row({ attempts: [attempt({ id: "A-2" }), lost("A-1")] }, FEEDBACK)))).toBe("queued:launching");
+    const twice = decide(row({ attempts: [lost("A-2"), lost("A-1")] }, FEEDBACK));
+    expect([state(twice), twice.detail]).toEqual(["repair-needed:retry-exhausted", "address_review_feedback launched twice on this head and readback found no worker either time"]);
+    // A new epoch (retry N, reset N) starts the count over.
+    expect(state(decide(row({ attempts: [lost("A-2"), lost("A-1")], retryEpoch: 1 }, FEEDBACK)))).toBe("queued:launching");
+  });
+
+  it("keeps an uncertain claim whose readback found several workers or couldn't read BB, as a named issue or a wait", () => {
+    const uncertain = (failure: string | null) => decide(row({ attempts: [attempt({ status: "uncertain", result: null, endedAt: null, failure })] }, FEEDBACK));
+    expect(state(uncertain(null))).toBe("repair-needed:launch-uncertain");
+    expect(uncertain("duplicate-writer")).toMatchObject({ phase: "repair-needed", cause: "duplicate-writer", recovery: ["reset N release"], owner: { kind: "v2-attempt", ref: "A-1" } });
+    expect(uncertain("source-unavailable")).toMatchObject({ phase: "waiting", cause: "source-unavailable", owner: { kind: "v2-attempt", ref: "A-1" } });
+  });
+});

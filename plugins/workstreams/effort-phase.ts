@@ -29,6 +29,7 @@ export type Attempt = ResourceAttempt & {
   /** The head and feedback fingerprint its work order was bound to. */
   headOid: string;
   fingerprint: string | null;
+  /** When its turn ended, or its launch failed. */
   endedAt: number | null;
   /** A completed attempt's report as the key its recipes route: an outcome, `blocked:<kind>`, or report-invalid. Null until parsed. */
   result: WorkerResult | null;
@@ -108,8 +109,10 @@ export type Next = {
 
 const MINUTE = 60_000;
 const TURN_RETRIES = 2;
-/** Minutes to wait after the Nth environment blocker on a head before trying again. */
+/** Minutes to wait after the Nth environment blocker, or checkout that couldn't be prepared, on a head before trying again. */
 const BACKOFF = [1, 2, 4, 8, 15];
+/** A checkout that can't be prepared this many times on one head is a repair. */
+const PREPARE_TRIES = 6;
 const CLAIMS = new Set<Attempt["status"]>(["launching", "running", "uncertain"]);
 /** What wakes a waiting or paused row, and the poll that backs the event up (plan §2.6). */
 const WAKES: Record<string, [event: string, pollMs: number]> = {
@@ -190,7 +193,14 @@ export function decide(input: DecideInput): Next {
     const owner = { kind: "v2-attempt" as const, ref: attempt.id };
     const recovering = (cause: string, detail: string, nextAction: Next["nextAction"], event: string) =>
       next("repair-needed", cause, detail, { modifiers: ["recovering"], nextAction, owner, wake: { event, ref: attempt.id, dueAt: now + 2 * MINUTE } });
-    if (attempt.status === "uncertain") return recovering("launch-uncertain", "Launch outcome uncertain; reading BB back by its launch key", "recover-launch", "readback finds or rules out its worker");
+    if (attempt.status === "uncertain") {
+      // More than one worker answers to the launch key: the claim stays until you stop the extras and release it.
+      if (attempt.failure === "duplicate-writer")
+        return { ...issue("duplicate-writer", `More than one BB thread answers to attempt ${attempt.id}; stop the extras, then release its claim`), owner, recovery: ["reset N release"] };
+      if (attempt.failure === "source-unavailable")
+        return waiting("source-unavailable", `BB couldn't be read back for attempt ${attempt.id}; its claim holds until a readback succeeds`, owner);
+      return recovering("launch-uncertain", "Launch outcome uncertain; reading BB back by its launch key", "recover-launch", "readback finds or rules out its worker");
+    }
     if (attempt.turnFailed) return attempt.turnRetries < TURN_RETRIES
       ? recovering("turn-retry", `The worker's turn failed; retry ${attempt.turnRetries + 1} of ${TURN_RETRIES}`, "retry-turn", "the retried turn starts")
       : issue("turn-failed", `The worker's turn failed ${TURN_RETRIES + 1} times`);
@@ -253,7 +263,16 @@ export function decide(input: DecideInput): Next {
 
   // 5. Verifying: a finished attempt's report routes through its recipes, within its retry epoch.
   if (latest && latest.retryEpoch === input.retryEpoch) {
-    if (latest.status === "failed") return issue(latest.failure ?? "turn-failed", `The launch failed: ${latest.failure ?? "unknown cause"}`);
+    if (latest.status === "failed" && latest.failure === "workspace") {
+      // Its checkout couldn't be prepared, so nothing started: like a source that didn't read, it backs off on its head, and a new head reverifies.
+      const failed = attempts.filter((item) => item.retryEpoch === input.retryEpoch && item.headOid === latest.headOid && item.status === "failed" && item.failure === "workspace").length;
+      if (latest.headOid === facts?.headOid) {
+        if (failed >= PREPARE_TRIES) return issue("workspace", `The checkout couldn't be prepared ${failed} times on this head`);
+        const due = (latest.endedAt ?? now) + BACKOFF[Math.min(failed, BACKOFF.length) - 1]! * MINUTE;
+        if (now < due) return waiting("source-unavailable", "The checkout couldn't be prepared; trying again after a backoff", { kind: "v2-attempt", ref: latest.id },
+          { wake: { event: WAKES["source-unavailable"]![0], ref: latest.id, dueAt: due } });
+      }
+    } else if (latest.status === "failed") return issue(latest.failure ?? "turn-failed", `The launch failed: ${latest.failure ?? "unknown cause"}`);
     if (latest.status === "completed" && latest.result === null)
       return next("verifying", "parse-report", "Reading the worker's report", { nextAction: "parse-report", owner: { kind: "v2-attempt", ref: latest.id } });
     if (latest.status === "completed" && latest.result !== null) {
@@ -302,7 +321,7 @@ export function decide(input: DecideInput): Next {
 
   // 7. Observe: no full read yet, or none since the last turn ended.
   if (!facts || !gates || !full) return observe("No full read yet");
-  if (latest?.endedAt && full.at < latest.endedAt) return observe("Reading GitHub after the worker's turn");
+  if (latest?.endedAt && full.at < latest.endedAt) return observe("Reading GitHub after the last attempt ended");
 
   // 8. Work, even under an open parent or pending CI: a push reruns CI anyway. A draft gets only branch and check mechanics.
   const failing: WorkerRecipeId[] = [];
@@ -323,7 +342,12 @@ export function decide(input: DecideInput): Next {
     if (!gates.fresh) return observe("A launch needs a read under two minutes old");
     const fingerprint = facts.approvalFeedback.status === "present" ? facts.approvalFeedback.fingerprint : null;
     const same = (recipes: readonly string[]) => [...recipes].sort().join() === [...allowed].sort().join();
-    const tried = attempts.filter((item) => item.retryEpoch === input.retryEpoch && item.headOid === facts.headOid && item.fingerprint === fingerprint && same(item.recipes)).length;
+    const work = attempts.filter((item) => item.retryEpoch === input.retryEpoch && item.headOid === facts.headOid && item.fingerprint === fingerprint && same(item.recipes));
+    // A launch that never started a worker doesn't count as an attempt. One readback proved never started requeues once, and a second is
+    // exhausted; one whose checkout couldn't be prepared backs off above.
+    const lost = work.filter((item) => item.status === "released" && item.releasedReason === "no-worker").length;
+    if (lost >= 2) return issue("retry-exhausted", `${allowed.join(", ")} launched twice on this head and readback found no worker either time`);
+    const tried = work.length - lost - work.filter((item) => item.status === "failed" && item.failure === "workspace").length;
     if (tried >= Math.min(...allowed.map((id) => recipe(id).bound.attemptsPerHead)))
       return issue("retry-exhausted", `${allowed.join(", ")} reached its bound of ${tried} attempts on this head`);
     const role: ModelRole = allowed.some((id) => (recipe(id) as WorkerRecipe).modelRole === "code") ? "code" : "planning";

@@ -20,6 +20,8 @@ export const CODE_RESULTS = ["write-refused", "rate-limited", "failed-again"] as
 export type WorkerRecipeId = "integrate_base" | "fix_failing_checks" | "address_review_feedback" | "validate_criteria" | "repair_report";
 export type CodeRecipeId = "request_rereview" | "request_review" | "mark_ready_for_review" | "rerun_failed_checks";
 export type RecipeId = WorkerRecipeId | CodeRecipeId;
+/** Every worker recipe id, for schemas that store an attempt's work. */
+export const WORKER_RECIPE_IDS = ["integrate_base", "fix_failing_checks", "address_review_feedback", "validate_criteria", "repair_report"] as const satisfies readonly WorkerRecipeId[];
 /** Every recipe id, for schemas that store a planned step. */
 export const RECIPE_IDS = ["integrate_base", "fix_failing_checks", "address_review_feedback", "validate_criteria", "repair_report",
   "request_rereview", "request_review", "mark_ready_for_review", "rerun_failed_checks"] as const satisfies readonly RecipeId[];

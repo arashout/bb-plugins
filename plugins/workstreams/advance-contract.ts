@@ -31,6 +31,10 @@ export const advanceWorkspaceInputSchema = z.object({
   sourcePath: z.string().max(1_000), prUrl: z.string().max(500),
   expectedHeadOid: z.string().regex(/^[0-9a-f]{40}$/u), expectedBaseOid: z.string().regex(/^[0-9a-f]{40}$/u),
   batchId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u), jobId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u),
+  /** Use only the checkout already at this key, never create one. A draft's branch mechanics run only in an existing checkout. */
+  reuseOnly: z.boolean().optional(),
+  /** Detach a clean checkout whose HEAD is an ancestor of the expected head at that head; one holding commits the PR lacks is refused. */
+  moveCleanToHead: z.boolean().optional(),
 }).strict();
 export type AdvanceWorkspaceInput = z.infer<typeof advanceWorkspaceInputSchema>;
 export const advanceWorkspaceSchema = z.discriminatedUnion("ok", [

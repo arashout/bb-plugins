@@ -5,7 +5,7 @@ import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
 import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
-import { EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS } from "./effort-work-store.js";
+import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS } from "./effort-work-store.js";
 import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
 import { PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
@@ -152,8 +152,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends decisions after instructions", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 47 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id BETWEEN 47 AND 48 ORDER BY id").all())
       .toEqual(EFFORT_DECISION_MIGRATIONS.map((statement, index) => ({ id: 47 + index, hash: statementHash(statement) })));
+    await harness.lifecycle.dispose();
+  });
+  it("appends attempts and their writer claims after decisions", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 49 ORDER BY id").all())
+      .toEqual(EFFORT_ATTEMPT_MIGRATIONS.map((statement, index) => ({ id: 49 + index, hash: statementHash(statement) })));
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

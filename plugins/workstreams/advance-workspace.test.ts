@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -40,18 +40,27 @@ async function fixture() {
     catch (error) { return { ok: false, error: String(error) }; }
   };
   const input = { sourcePath, prUrl: "https://github.com/example/widget/pull/42", expectedHeadOid: head, expectedBaseOid: base, batchId: "batch-1", jobId: "job-42" };
+  /** What GitHub reports for the PR; a test moves its head or makes it a draft. */
+  const live = { head, isDraft: false };
   const gh: GhRunner = async (args) => {
     const value = args[0] === "api" ? { data: { repository: { pullRequest: {
-      headRefOid: head, baseRefOid: "c".repeat(40), baseRefName: "main", baseRef: { name: "main", target: { oid: base } }, reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+      headRefOid: live.head, baseRefOid: "c".repeat(40), baseRefName: "main", baseRef: { name: "main", target: { oid: base } }, reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
       reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
     } } } } : args[1] === "list" ? [] : {
-      url: input.prUrl, number: 42, title: "Fix account lookup", state: "OPEN", isDraft: false, isCrossRepository: false,
-      headRefName: "feature", baseRefName: "main", headRefOid: head, baseRefOid: "c".repeat(40),
+      url: input.prUrl, number: 42, title: "Fix account lookup", state: "OPEN", isDraft: live.isDraft, isCrossRepository: false,
+      headRefName: "feature", baseRefName: "main", headRefOid: live.head, baseRefOid: "c".repeat(40),
       reviewDecision: "APPROVED", mergeStateStatus: "BEHIND", mergeable: "MERGEABLE", latestReviews: [], statusCheckRollup: [],
     };
     return { ok: true, stdout: JSON.stringify(value) };
   };
-  return { directory, sourcePath, git, head, base, run, gh, input, root: join(directory, "workspaces") };
+  /** A reviewer follow-up lands on the PR branch: GitHub and the remote report the new head. */
+  const advanceHead = async () => {
+    await git("commit", "--allow-empty", "-m", "Reviewer follow-up");
+    live.head = await git("rev-parse", "HEAD");
+    await git("push", "--quiet", remotePath, `${live.head}:refs/pull/42/head`);
+    return live.head;
+  };
+  return { directory, sourcePath, git, head, base, run, gh, input, live, advanceHead, root: join(directory, "workspaces") };
 }
 
 describe("isolated advance workspaces", () => {
@@ -90,6 +99,48 @@ describe("isolated advance workspaces", () => {
     expect(await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root)).toMatchObject({ ok: false, error: expect.stringContaining("push origin") });
     await f.git("remote", "set-url", "origin", "https://github.com/other/widget.git");
     expect(await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root)).toMatchObject({ ok: false, error: expect.stringContaining("source origin") });
+  });
+
+  it("moves a clean detached checkout behind the PR head to it only when asked, and preserves one holding unpushed commits", async () => {
+    const f = await fixture();
+    const first = await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root);
+    if (!first.ok) throw new Error(first.error);
+    const next = await f.advanceHead();
+    const behind = { ...f.input, expectedHeadOid: next, reuseOnly: true };
+    const worktreeHead = async () => (await exec("git", ["rev-parse", "HEAD"], { cwd: first.path })).stdout.trim();
+    // Legacy callers never ask, so a checkout behind the head stays preserved for them.
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, behind, f.root)).toMatchObject({ ok: false, error: expect.stringContaining("preserved") });
+    expect(await worktreeHead()).toBe(f.head);
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, { ...behind, moveCleanToHead: true }, f.root)).toEqual({ ok: true, path: first.path,
+      workerPath: first.workerPath, sourcePath: first.sourcePath, created: false });
+    expect(await worktreeHead()).toBe(next);
+    expect((await exec("git", ["branch", "--show-current"], { cwd: first.path })).stdout.trim()).toBe("");
+    // A worker commit no one pushed: the PR head doesn't contain it, so moving would lose it.
+    await exec("git", ["commit", "--allow-empty", "-m", "Unpushed worker commit"], { cwd: first.path });
+    const unpushed = await worktreeHead();
+    const later = await f.advanceHead();
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, { ...behind, expectedHeadOid: later, moveCleanToHead: true }, f.root))
+      .toMatchObject({ ok: false, error: expect.stringContaining("unpushed") });
+    expect(await worktreeHead()).toBe(unpushed);
+    // Uncommitted changes are never moved either.
+    await exec("git", ["reset", "--quiet", "--hard", next], { cwd: first.path });
+    await writeFile(join(first.path, "file.txt"), "unfinished edit\n");
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, { ...behind, expectedHeadOid: later, moveCleanToHead: true }, f.root))
+      .toMatchObject({ ok: false, error: expect.stringContaining("preserved") });
+    expect([await worktreeHead(), await readFile(join(first.path, "file.txt"), "utf8")]).toEqual([next, "unfinished edit\n"]);
+  });
+
+  it("reuses only a checkout that already exists, never creating one, and runs a draft only there", async () => {
+    const f = await fixture();
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, { ...f.input, reuseOnly: true }, f.root))
+      .toMatchObject({ ok: false, error: expect.stringContaining("Nothing was created") });
+    expect((await f.git("worktree", "list", "--porcelain")).match(/^worktree /gmu)).toHaveLength(1);
+    await expect(stat(join(f.root, "batch-1"))).rejects.toMatchObject({ code: "ENOENT" });
+    const first = await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root);
+    if (!first.ok) throw new Error(first.error);
+    f.live.isDraft = true;
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root)).toMatchObject({ ok: false, error: expect.stringContaining("a draft") });
+    expect(await prepareAdvanceWorkspace(f.run, f.gh, { ...f.input, reuseOnly: true }, f.root)).toMatchObject({ ok: true, path: first.path, created: false });
   });
 
   it("rejects traversal in batch identifiers before any git command", async () => {

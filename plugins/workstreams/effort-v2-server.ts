@@ -20,13 +20,14 @@ import { z } from "zod";
 import type { AdvanceJob } from "./bulk-advance.js";
 import { capAcknowledgment, EFFECTS, formatTargets, interpretEffortCommand, WORK_RECIPES, type CommandResult, type CommandRow, type CommandTarget,
   type DecisionAnswer, type InstructionScope } from "./effort-command.js";
-import { decide, PREPARED, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
+import { decide, PREPARED, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
 import type { ResourceWriter } from "./effort-resources.js";
 import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
+import type { Admission, V2Execution } from "./effort-runner.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
-import { decisionId, holdsPr, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
+import { decideAttempt, decisionId, holdsPr, sameBody, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
   type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
 import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow } from "./outcome-evidence.js";
@@ -46,8 +47,8 @@ type LegacyJob = z.infer<typeof legacyJobSchema>;
 export const effortV2PreviewSchema = z.object({
   effort: z.object({ id: z.string(), key: z.string(), name: z.string(), coordinatorThreadId: z.string().nullable() }),
   execution: executionSchema,
-  /** Nothing executes for a v2 effort until the reconciler ships, so execution is always a dry run. */
-  v2Execution: z.literal("dry-run"),
+  /** The v2Execution setting: a dry run plans every step and claims, starts, sends, and writes nothing. */
+  v2Execution: z.enum(["dry-run", "on"]),
   consequence: z.string(),
   /** Why opting in is refused now; empty when it is allowed. */
   blockers: z.array(z.string()),
@@ -126,14 +127,27 @@ function shown(step: Next): Pick<WorkRowBody, "userState" | "modifiers"> {
   return { userState, modifiers: step.phase === "queued" || step.phase === "verifying" ? [...step.modifiers, "plan only"] : step.modifiers };
 }
 
+/** The row body recording a step, with the facts it was planned from. */
+export function rowBody(step: Next, row: Pick<WorkRowBody, "n" | "retryEpoch" | "observedHead" | "observedAt" | "gates" | "tickets">): WorkRowBody {
+  return { n: row.n, cause: step.cause, detail: step.detail, ...shown(step), nextAction: step.nextAction, owner: step.owner, wake: step.wake, decision: step.decision,
+    recovery: step.recovery, offers: step.offers, retryEpoch: row.retryEpoch, observedHead: row.observedHead, observedAt: row.observedAt, gates: row.gates, tickets: row.tickets };
+}
+
 /**
- * Plan each PR's step from stored facts. Slice 2 reads no checkout or thread, so a launch plans its recipes and
- * leaves the checkout and thread to the reconciler's reads. No worker has reported, so no criterion has proof yet.
+ * Plan each PR's step from stored facts and our attempts on it. This reads no checkout or thread, so a launch plans
+ * its recipes and leaves the checkout and thread to the reconciler's reads. No worker has reported, so no criterion
+ * has proof yet.
  */
 export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode; scope: InstructionScope | null; sources: RosterSources;
   models: Record<ModelRole, ModelChoice>; held(target: string): boolean; targets: readonly { target: string; n: number | null; retryEpoch: number }[];
   /** The open decision a PR asked, and the head it asked on. */
-  open?(target: string): { decision: RowDecision; head: string | null } | null }): PlannedRow[] {
+  open?(target: string): { decision: RowDecision; head: string | null } | null;
+  /** Our attempts on a PR, newest first; none when absent. */
+  attempts?(target: string): readonly Attempt[];
+  /** Whether a new launch may start now; open when absent. */
+  admission?: Admission;
+  /** A writer found outside the board's facts, such as the holder of a claim that just failed. */
+  writer?(target: string): ResourceWriter | null }): PlannedRow[] {
   const { sources, scope } = input;
   const read = input.targets.map(({ target, n, retryEpoch }) => {
     const observed = observedFacts(target, sources);
@@ -151,21 +165,22 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
   return read.map((row) => {
     const decideInput: DecideInput = { now: sources.now, target: row.target, effort: { id: input.effort.id, mode: input.mode, archived: Boolean(input.effort.archivedAt) },
       ownerId: sources.work.ownerForPr(row.target)?.id ?? null, instruction: scope, held: input.held(row.target), full: row.observed.full, feedback: row.feedback,
-      reviewers: row.observed.pr, attempts: [], codeActions: [], retryEpoch: row.retryEpoch, decision: null,
+      reviewers: row.observed.pr, attempts: input.attempts?.(row.target) ?? [], codeActions: [], retryEpoch: row.retryEpoch, decision: null,
       declined: (scope?.answers ?? []).flatMap((answer) => answer.subkind && answer.declined.includes(row.target) ? [answer.subkind] : []),
-      criteriaPending: (pending.get(row.target)?.length ?? 0) > 0, settledDependencies: new Set(), admission: { capacityFull: false, breakerOpen: false }, models: input.models,
+      criteriaPending: (pending.get(row.target)?.length ?? 0) > 0, settledDependencies: new Set(), admission: input.admission ?? { capacityFull: false, breakerOpen: false },
+      models: input.models,
       // No checkout is chosen yet, so every active writer counts against the PR.
       resources: { legacy: sources.legacy.get(row.target) ?? null, inspections: null,
-        writers: activeWriters(row.target, row.item?.paths ?? [], sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })) } };
+        writers: [...activeWriters(row.target, row.item?.paths ?? [], sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })),
+          ...[input.writer?.(row.target)].filter((writer) => writer != null)] } };
     let step = decide(decideInput);
     // An open decision holds its row while the facts that asked it are read again, so its number stays put. Once they are
     // read, decide() asks again only if the question still applies; a new head never inherits the old head's question.
     const open = step.nextAction === "observe" ? input.open?.(row.target) : null;
     if (open && open.head === (row.observed.facts?.headOid || null)) step = decide({ ...decideInput, decision: open.decision });
     return { target: row.target, phase: step.phase, step, criteria: pending.get(row.target) ?? [],
-      body: { n: row.n, cause: step.cause, detail: step.detail, ...shown(step), nextAction: step.nextAction, owner: step.owner, wake: step.wake, decision: step.decision,
-        recovery: step.recovery, offers: step.offers, retryEpoch: row.retryEpoch, observedHead: row.observed.facts?.headOid || null,
-        observedAt: row.observed.full?.at ?? null, gates: row.gates, tickets: row.tickets } };
+      body: rowBody(step, { n: row.n, retryEpoch: row.retryEpoch, observedHead: row.observed.facts?.headOid || null, observedAt: row.observed.full?.at ?? null,
+        gates: row.gates, tickets: row.tickets }) };
   });
 }
 
@@ -184,10 +199,6 @@ export function rowContract(effort: Pick<EstablishedEffort, "goal">, scope: Inst
       step: { phase: row.phase, cause: body.cause, modifiers: body.modifiers, nextAction: body.nextAction, owner: body.owner, wake: body.wake, decision: body.decision } }];
   }) });
 }
-
-/** A stable form for comparing row bodies, ignoring when the row next falls due. */
-const comparable = (body: WorkRowBody) => JSON.stringify({ ...body, wake: body.wake && { ...body.wake, dueAt: 0 } },
-  (_key, value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 
 /**
  * The decisions after these rows are written: each row joins the open decision its step asks, at the head it asked on,
@@ -282,7 +293,13 @@ export type EffortV2Deps = {
   efforts: Pick<EffortStore, "get" | "getRecord" | "list">;
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
-  work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision">;
+  work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
+    | "attempts" | "attempt" | "claims" | "release">;
+  /**
+   * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
+   * whether this process is making one on a PR now.
+   */
+  launches: { execution(): Promise<V2Execution>; admission(): Promise<Admission>; recover(attemptId: string): Promise<void>; launching(target: string): boolean };
   /** Holds write through the existing store, inside the command's transaction; `changed` tells the board afterward. */
   holds: { set(prUrl: string, held: boolean, reason?: string): unknown; changed(): void };
   models(): Promise<Record<ModelRole, ModelChoice>>;
@@ -347,19 +364,30 @@ export function createEffortV2(deps: EffortV2Deps) {
     queues.set(effortId, next.catch(() => undefined));
     return next;
   }
+  /** Our attempts on a PR as decide() reads them; a claim `reset N release` drops is read as released. */
+  function attemptsOf(target: string, released?: ReadonlySet<string>): Attempt[] {
+    return deps.work.attempts(target).map(decideAttempt).map((attempt) => released?.has(target) && (attempt.status === "launching" || attempt.status === "uncertain")
+      ? { ...attempt, status: "released" as const, releasedReason: "no-worker" as const } : attempt);
+  }
   /**
    * Plan the included PRs and any row still open under the effort, the writes for the rows whose step changed, and the
    * decisions those writes ask or leave. A retry, reset, or answer starts a row's new epoch and makes it due now.
+   * `change` plans one PR with other attempts, a writer, or an admission than the stored ones, as a launch about to claim sees them.
    */
   async function replan(effort: EstablishedEffort, scope: InstructionScope | null, sources: RosterSources,
-    options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string>; decisions: readonly Decision[] }) {
+    options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string>; decisions: readonly Decision[]; released?: ReadonlySet<string>;
+      change?: { target: string; attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission } }) {
     const open = deps.work.rows(effort.id).filter((row) => row.phase !== "finished").map((row) => row.target);
     const numberOf = new Map([...deps.snapshots.issued(effort.id)].map(([n, target]) => [target, n]));
     // A row another effort holds is that effort's to plan, even while this instruction still names its PR.
     const stored = new Map([...new Set([...scope?.include.map((grant) => prWorkItemKey(grant.target)) ?? [], ...open])].map((target) => [target, deps.work.row(target)]));
     const targets = [...stored].filter(([, row]) => !row || row.effortId === effort.id || !holdsPr(row)).map(([target]) => target);
     // Another effort's row starts over here, number and epoch alike; this effort's row keeps its epoch unless a retry or reset starts a new one.
+    const { change } = options;
     const planned = planRows({ effort, mode: deps.execution.get(effort.id).mode, scope, sources, models: await deps.models(), held: options.held,
+      admission: change?.admission ?? await deps.launches.admission(),
+      attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released),
+      writer: (target) => change?.target === target ? change.writer ?? null : null,
       targets: targets.map((target) => {
         const row = stored.get(target);
         const mine = row?.effortId === effort.id ? row : null;
@@ -374,7 +402,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     const writes = planned.flatMap((row) => {
       if (options.only && !options.only.has(row.target)) return [];
       const current = stored.get(row.target);
-      if (current?.effortId === effort.id && current.phase === row.phase && comparable(current.body) === comparable(row.body)) return [];
+      // A dry run's plan is the launch pass's to write, so a step that is otherwise unchanged keeps it instead of dropping it every pass.
+      if (current?.effortId === effort.id && current.phase === row.phase && sameBody({ ...current.body, plan: undefined }, row.body)) return [];
       return [{ target: row.target, expectedRevision: current?.revision ?? 0, phase: row.phase, body: row.body,
         dueAt: options.retry.has(row.target) ? sources.now : row.step.wake?.dueAt ?? null }];
     });
@@ -399,6 +428,17 @@ export function createEffortV2(deps: EffortV2Deps) {
       deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
     });
   }
+  /** One PR's row as a launch about to claim it would write it: planned from stored facts, with the attempts, writer, and admission the launch sees. */
+  async function planRow(effortId: string, target: string, change: { attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission }) {
+    const effort = deps.efforts.get(effortId);
+    if (effort?.id !== effortId) return null;
+    const key = prWorkItemKey(target);
+    const sources = await deps.sources();
+    const { planned } = await replan(effort, deps.work.instruction(effort.id)?.scope ?? null, sources, { held: (item) => prHoldFor(item, sources.holds) !== null,
+      retry: new Set(), decisions: deps.work.decisions(effort.id), only: new Set([key]), change: { target: key, ...change } });
+    const row = planned.find((item) => item.target === key);
+    return row ? { phase: row.phase, body: row.body, dueAt: row.step.wake?.dueAt ?? null } : null;
+  }
   /** The effort that owns a PR now: one whose row holds it, else its member owner. */
   function ownerOf(target: string, sources: RosterSources): { effortId: string; name: string } | null {
     const row = deps.work.row(target);
@@ -408,8 +448,10 @@ export function createEffortV2(deps: EffortV2Deps) {
   function commandRow(target: string, sources: RosterSources): CommandRow {
     const row = deps.work.row(target);
     const facts = observedFacts(target, sources).facts;
+    const claim = deps.work.attempts(target).find((attempt) => attempt.status === "launching" || attempt.status === "running" || attempt.status === "uncertain");
     return { finished: facts !== null && facts.state !== "OPEN", teammate: !deps.authored(target), issue: row?.body.userState === "issue",
-      stopped: row?.phase === "paused" && ["stopped", "user-cancelled"].includes(row.body.cause), claim: null };
+      stopped: row?.phase === "paused" && ["stopped", "user-cancelled"].includes(row.body.cause),
+      claim: claim ? { status: claim.status as "launching" | "running" | "uncertain", threadId: claim.threadId } : null };
   }
   /** Numbers, else URLs, with each group's step: `1, 2 read GitHub; 5 paused: hold`. */
   function steps(rows: readonly PlannedRow[]): string {
@@ -494,7 +536,13 @@ export function createEffortV2(deps: EffortV2Deps) {
     const active = deps.work.instruction(effort.id);
     const lastRevision = deps.work.lastRevision(effort.id);
     if (result.postRoster) return refuse("post roster arrives with parent-thread reports; open the roster instead. Nothing was admitted.");
+    if (result.interventions.some((item) => item.action === "stop"))
+      return refuse("stop N arrives with bounded repairs; until then, hold N lets the current turn finish and starts nothing new. Nothing was admitted.");
     if (effort.archivedAt && (result.instruction || result.answers.length)) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
+    // A launch this process is still making settles its own claim when BB answers; releasing it first would let its worker start unrecorded.
+    const making = result.interventions.filter((item) => item.release && deps.launches.launching(item.target));
+    if (making.length) return refuse(`${formatTargets(making)}'s launch is still waiting on BB, and settles as running or uncertain on its own. `
+      + `If it stays uncertain, send reset ${formatTargets(making)} release again. Nothing was admitted.`);
     // Answers amend what the rest of the command leaves, in the same revision.
     let scope = result.cancel ? null : result.instruction ?? active?.scope ?? null;
     const includeOf = (value: InstructionScope | null) => JSON.stringify(value?.include.map((grant) => grant.target));
@@ -516,15 +564,26 @@ export function createEffortV2(deps: EffortV2Deps) {
     }
     // The revision holds the command's changes and its answers together.
     const revised = result.instruction !== null || answered.length > 0 ? scope : null;
-    // Refresh and recheck read GitHub, the threads, and the checkouts first; every other step plans from stored facts.
+    // Refresh and recheck read GitHub, the threads, and the checkouts first, and recheck launches reads BB back for each
+    // unfinished launch; every other step plans from stored facts.
     const reads = new Map<string, Awaited<ReturnType<EffortV2Deps["observe"]>>>();
     for (const item of result.interventions) if (item.action === "refresh" || item.action === "recheck")
       reads.set(item.target, await observeOnce(item.target, sources.work.items.get(item.target)?.paths ?? []));
     if (reads.size) sources = await deps.sources();
+    const readback: string[] = [];
+    if (result.recheckLaunches) for (const claim of deps.work.claims(effort.id).filter((attempt) => attempt.status !== "running")) {
+      await deps.launches.recover(claim.id);
+      const after = deps.work.attempt(claim.id)!;
+      readback.push(`${formatTargets([{ target: claim.target, n: deps.work.row(claim.target)?.body.n ?? null }])} ${after.status === "running" ? `attached to ${after.threadId}`
+        : after.status === "released" ? "released: two readbacks found no worker" : after.body.failure === "duplicate-writer" ? "has more than one worker"
+        : after.body.failure === "source-unavailable" ? "still uncertain: BB couldn't be read" : "still uncertain"}`);
+    }
+    // `reset N release`: you confirmed no worker holds the launch, so its claim drops in this command's own commit.
+    const released = new Set(result.interventions.filter((item) => item.release).map((item) => prWorkItemKey(item.target)));
     const held = (target: string) => result.holds.some((item) => item.target === target)
       || (!result.releases.some((item) => item.target === target) && prHoldFor(target, sources.holds) !== null);
     const touched = new Set([...result.holds, ...result.releases, ...result.interventions].map((item) => item.target));
-    const { planned, writes, decisions } = await replan(effort, scope, sources, { held, decisions: open.filter((item) => !answered.some((other) => other.id === item.id)),
+    const { planned, writes, decisions } = await replan(effort, scope, sources, { held, released, decisions: open.filter((item) => !answered.some((other) => other.id === item.id)),
       retry: new Set([...result.interventions.filter((item) => item.action === "reset" || item.action === "retry").map((item) => item.target), ...asked]),
       // An answer alone re-plans only the PRs that asked it, and other rows keep their revisions, unless it changed which PRs the
       // instruction includes: a whole-effort criterion follows that set to another PR.
@@ -537,6 +596,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       kind: "admit", normalized: result.normalized, revision: scope?.revision ?? null, mergePreviews: result.mergePreviews,
       acknowledgment: capAcknowledgment([...result.acknowledgment, ...answerLines,
         ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
+        ...result.recheckLaunches ? [`Readback: ${readback.join("; ") || "no launch is unfinished"}`] : [],
         ...next.length ? [`Next (planned; nothing runs until v2 execution is on): ${steps(next)}`] : []]),
       rollup: scope ? rowContract(effort, scope, planned, sources.work, after).rollup : null,
     };
@@ -549,6 +609,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       also: () => {
         for (const item of result.holds) deps.holds.set(item.target, true, item.reason);
         for (const item of result.releases) deps.holds.set(item.target, false);
+        for (const target of released) deps.work.release(target);
       } });
     if (result.holds.length || result.releases.length) deps.holds.changed();
     deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
@@ -618,10 +679,12 @@ export function createEffortV2(deps: EffortV2Deps) {
       ...(effort.coordinatorState === "creating" && !coordinator ? ["A coordinator launch is unresolved. Inspect it before moving this effort to its roster."] : []),
     ];
     const onRoster = (prUrl: string | null) => prUrl !== null && targets.has(prWorkItemKey(prUrl));
+    const v2Execution = await deps.launches.execution();
     const summary: EffortV2Preview = {
       effort: { id: effort.id, key: effort.key, name: effort.name, coordinatorThreadId: effort.coordinatorThreadId },
-      execution, v2Execution: "dry-run", blockers,
+      execution, v2Execution, blockers,
       consequence: execution.mode === "v2" ? "Legacy Advance and dispatch apply to this effort again. Every v2 record is kept."
+        : v2Execution === "on" ? "Legacy Advance and dispatch stop for this effort. v2 claims each PR it works on and launches the work its instruction authorizes."
         : "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
       members: { tickets: effort.members.tickets.length, prUrls: effort.members.prUrls.length, prs: rows.length,
         open: rows.filter((row) => row.state !== "done").length },
@@ -754,5 +817,5 @@ export function createEffortV2(deps: EffortV2Deps) {
       },
     }),
   };
-  return { handlers, commands, settle };
+  return { handlers, commands, settle, planRow };
 }

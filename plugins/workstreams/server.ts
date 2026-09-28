@@ -27,8 +27,10 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
-import { createEffortV2, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
-import { createEffortWorkStore, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
+import { createEffortRunner, type V2Execution } from "./effort-runner.js";
+import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
+import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
+  type V2Target } from "./effort-work-store.js";
 import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
@@ -667,12 +669,32 @@ export default async function plugin(bb: BbPluginApi) {
       experimental_schema: modelSettingSchema,
       default: "codex/gpt-6-sol/medium",
     },
+    v2Execution: {
+      type: "select",
+      label: "v2 execution",
+      description:
+        "Whether efforts on their v2 roster run work. A dry run plans each PR's next step and where it would run, and claims, starts, messages, and writes nothing. On lets the roster claim a PR and launch the work its instruction authorizes.",
+      options: ["dry-run", "on"],
+      default: "dry-run",
+    },
+    workerConcurrency: {
+      type: "number",
+      label: "v2 worker concurrency",
+      description: "The most v2 worker turns that run at once. A launch whose outcome is uncertain keeps its claim but takes no slot.",
+      experimental_schema: z.number().int().min(1).max(8),
+      default: 2,
+    },
   });
   const modelFor = async (role: ModelRole): Promise<ModelChoice> => {
     const { codeModel, planningModel } = await settings.get();
     return parseModelSetting(role === "code" ? codeModel : planningModel);
   };
   const models = async () => ({ code: await modelFor("code"), planning: await modelFor("planning") });
+  /** Whether v2 runs work at all, and how many of its worker turns run at once. */
+  const v2Settings = async (): Promise<{ execution: V2Execution; concurrency: number }> => {
+    const { v2Execution, workerConcurrency } = await settings.get();
+    return { execution: v2Execution === "on" ? "on" : "dry-run", concurrency: workerConcurrency };
+  };
 
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -732,6 +754,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_EXECUTION_MIGRATIONS,
     ...EFFORT_INSTRUCTION_MIGRATIONS,
     ...EFFORT_DECISION_MIGRATIONS,
+    ...EFFORT_ATTEMPT_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -752,6 +775,11 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const v2Managed = (prUrl: string): string | null => v2Pointer(effortWork.managedBy(prUrl));
   const v2Excluded = (prUrl: string): boolean => v2Managed(prUrl) !== null;
+  /** The refusal every writer outside v2 gets while a v2 attempt claims this PR or checkout: launching, running, or uncertain. */
+  const v2Claimed = (prUrl: string | null | undefined, path: string | null | undefined): string | null => {
+    const claim = effortWork.claimOn(prUrl ?? null, path ?? null);
+    return claim ? `A worker from the ${effortStore.get(claim.effortId)?.name ?? claim.effortId} roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.` : null;
+  };
   dispatch.closeStranded();
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
@@ -3535,6 +3563,9 @@ export default async function plugin(bb: BbPluginApi) {
       // Combining efforts must not combine their authorizations: each instruction ends first.
       if (!retry) for (const effort of [source, destination]) if (effortWork.instruction(effort.id))
         blockers.push(`${effort.name} has an active instruction. Cancel it, or let it complete, before merging.`);
+      // A worker can outlive its instruction: a cancelled or completed one drains its running turn first.
+      if (!retry) for (const effort of [source, destination]) if (effortWork.claims(effort.id).length)
+        blockers.push(`${effort.name} has a v2 worker launching, running, or uncertain. Let it finish, or release it from the roster, before merging.`);
       // A merge never lifts a fence: a v2 effort's PRs may join only another v2 roster.
       if (!retry && effortWork.execution(source.id).mode === "v2" && effortWork.execution(destination.id).mode === "legacy")
         blockers.push(`${source.name} runs on its roster and ${destination.name} does not. Move ${source.name} back to legacy launchers, or ${destination.name} to its roster, before merging.`);
@@ -3696,6 +3727,8 @@ export default async function plugin(bb: BbPluginApi) {
   const pendingPrThreads = new Map<string, { id: string; startedAt: number }>();
   async function withPrWriter<T>(path: string, prUrl: string | undefined, action: () => Promise<T>): Promise<T | { ok: false; error: string }> {
     const key = prUrl?.toLowerCase();
+    const claimed = v2Claimed(prUrl, path);
+    if (claimed) return { ok: false, error: claimed };
     if (advance.reserved(key ?? "", path) || (key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
     if (key) manualPrWrites.add(key);
     try {
@@ -3848,9 +3881,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (!result.ok) throw new Error(result.error);
       return result;
     },
-    busyNow: (prUrl, path) => manualPrWrites.has(prUrl.toLowerCase()) || pendingPrThreads.has(prUrl.toLowerCase()) || (path !== null && launchingCheckouts.has(path)) || dispatch.activeFor(path ?? "", prUrl) ||
+    busyNow: (prUrl, path) => v2Claimed(prUrl, path) !== null || manualPrWrites.has(prUrl.toLowerCase()) || pendingPrThreads.has(prUrl.toLowerCase()) || (path !== null && launchingCheckouts.has(path)) || dispatch.activeFor(path ?? "", prUrl) ||
       runs.recent(Number.MAX_SAFE_INTEGER).some((run) => (run.prUrl === prUrl || (path !== null && run.path === path)) && ["running", "needs-you"].includes(run.status)),
     busy: async (prUrl, path, ownThreadId) => {
+      if (v2Claimed(prUrl, path)) return true;
       const key = prUrl.toLowerCase();
       const pending = pendingPrThreads.get(key);
       if (pending && pending.id !== ownThreadId) {
@@ -4327,7 +4361,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (preflightPass === 0) queueMicrotask(() => void dispatchOne(1));
         return;
       }
-      if (advance.reserved(checked.candidate.prUrl, checked.candidate.path)) return;
+      if (advance.reserved(checked.candidate.prUrl, checked.candidate.path) || v2Claimed(checked.candidate.prUrl, checked.candidate.path)) return;
       const id = dispatch.reserve(checked);
       if (id === null) return;
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -4428,6 +4462,9 @@ export default async function plugin(bb: BbPluginApi) {
     const prUrl = "prUrl" in input ? input.prUrl : unit?.pr?.url;
     const held = action === "merge" && prUrl ? holdMessage(prUrl) : null;
     if (held) return { ok: false, error: held };
+    // Merging a Ready row stays allowed: Ready means no v2 worker holds it.
+    const claimed = v2Claimed(prUrl, unit?.path);
+    if (claimed) return { ok: false, error: claimed };
     if (prUrl && (advance.reserved(prUrl, unit?.path ?? null) || manualPrWrites.has(prUrl.toLowerCase()))) return { ok: false, error: "A batch or another action owns this PR." };
     if (prUrl) manualPrWrites.add(prUrl.toLowerCase());
     try {
@@ -4544,6 +4581,8 @@ export default async function plugin(bb: BbPluginApi) {
     authored: (prUrl) => inventory.get(prUrl) !== undefined,
     observe: observePr,
     realtime: bb.realtime,
+    launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
+      launching: (target) => runner.launching(target) },
     execution: {
       get: (effortId) => effortWork.execution(effortId),
       set: async (effortId, mode, expectedRevision) => {
@@ -4585,6 +4624,53 @@ export default async function plugin(bb: BbPluginApi) {
         groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !effortStore.get(group.key)),
       };
     },
+  });
+  /**
+   * v2 launches and their readback. Nothing here schedules a launch: the reconciler does, and until it runs only
+   * `recheck launches` reads BB back. Every thread it starts or messages uses the configured model for its role.
+   */
+  const runner = createEffortRunner({
+    now: Date.now,
+    work: effortWork,
+    settings: v2Settings,
+    models,
+    // Every legacy writer the Advance fences read, read again here synchronously inside the claim's transaction.
+    writer: (prUrl, path) => {
+      const key = canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
+      const touches = (url: string | null, at: string | null) => (url !== null && (canonicalPrUrl(url) ?? url.toLowerCase()) === key) || (path !== null && at === path);
+      if (advance.reserved(prUrl, path)) {
+        const owner = advance.list().flatMap((batch) => batch.jobs.map((job) => ({ batch, job })))
+          .find(({ job }) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.prUrl, job.path));
+        return { owner: "legacy-job", ref: owner ? `${owner.batch.id}/${owner.job.id}` : "reservation", path: null };
+      }
+      const pending = pendingPrThreads.get(key);
+      if (manualPrWrites.has(key) || pending) return { owner: "manual", ref: pending?.id ?? "a board action", path: null };
+      if (path !== null && launchingCheckouts.has(path)) return { owner: "manual", ref: "a launching board action", path: null };
+      const attempt = dispatch.attempts().find((entry) => ["launching", "running", "verifying", "needs-you"].includes(entry.status) && touches(entry.prUrl, entry.path));
+      if (attempt) return { owner: "dispatch", ref: String(attempt.id), path: null };
+      const run = runs.recent(Number.MAX_SAFE_INTEGER).find((entry) => ["running", "needs-you"].includes(entry.status) && touches(entry.prUrl, entry.path));
+      return run ? { owner: "run", ref: String(run.id), path: null } : null;
+    },
+    threadStatus: (threadId) => threadFacts.get(threadId)?.status ?? null,
+    plan: (effortId, target, change) => effortV2.planRow(effortId, target, change),
+    settle: (effortId, target) => effortV2.settle(effortId, "launch", new Set([prWorkItemKey(target)])),
+    workspace: (input, hostId) => host.call("advanceWorkspace", input, { hostId, timeoutMs: SCAN_TIMEOUT_MS, signal: disposal.signal }),
+    spawn: (args) => bb.sdk.threads.spawn(args),
+    send: (args, role) => sendForRole(args, role),
+    spawned: async (projectId, attemptId) => {
+      const matches: string[] = [];
+      for (let offset = 0; ; offset += 100) {
+        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+        for (const thread of rows) if ((await bb.sdk.threads.getPluginMetadata({ threadId: thread.id })).workAttemptId === attemptId) matches.push(thread.id);
+        if (rows.length < 100) return matches;
+      }
+    },
+    marked: async (threadId, marker) => {
+      const requested = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "50" });
+      if (requested.some((event) => JSON.stringify(event).includes(marker))) return true;
+      return (await bb.sdk.threads.queuedMessages.list({ threadId })).some((queued) => JSON.stringify(queued).includes(marker));
+    },
+    publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
   });
 
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
@@ -4713,6 +4799,8 @@ export default async function plugin(bb: BbPluginApi) {
             throw new Error("Automatic dispatch is active for these efforts. Turn it off before merging.");
           if (effortWork.instruction(freshSource.id) || effortWork.instruction(freshDestination.id))
             throw new Error("An instruction became active for these efforts. Reopen the merge preview.");
+          if (effortWork.claims(freshSource.id).length || effortWork.claims(freshDestination.id).length)
+            throw new Error("A v2 worker claimed work for these efforts. Reopen the merge preview.");
           const paths = new Set([...(freshSource.members.checkoutPaths ?? []), ...(freshDestination.members.checkoutPaths ?? [])]);
           const prs = new Set([...freshSource.members.prUrls, ...freshDestination.members.prUrls].map((url) => canonicalPrUrl(url) ?? url));
           const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
@@ -4986,6 +5074,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const held = holdMessage(canonical);
       if (held) return { ok: false as const, error: held };
+      const claimed = v2Claimed(canonical, known.path);
+      if (claimed) return { ok: false as const, error: claimed };
       if (manualPrWrites.has(canonical)) return { ok: false as const, error: "Another action owns this PR." };
       manualPrWrites.add(canonical);
       try {
@@ -5068,6 +5158,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (!text) return { ok: false, error: "Write a message before sending." };
       const card = await cardThreadTarget(target);
       if (!card) return { ok: false, error: "That card is no longer on the board. Refresh before sending." };
+      const claimed = v2Claimed(card.prUrl, card.path);
+      if (claimed) return { ok: false, error: claimed };
       const hold = card.prUrl ? holdMessage(card.prUrl) : null;
       if (threadId !== null) {
         let metadata;

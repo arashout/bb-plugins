@@ -32,7 +32,8 @@ export async function prepareAdvanceWorkspace(
     const inspected = await readAdvancePr(gh, input.prUrl);
     if (!inspected.ok) return inspected;
     const facts = inspected.facts;
-    if (facts.state !== "OPEN" || facts.isDraft || facts.isCrossRepository) return fail("This PR is closed, a draft, or a fork; bulk preparation cannot write its branch.");
+    // A draft's branch mechanics run only in a checkout that already exists.
+    if (facts.state !== "OPEN" || (facts.isDraft && !input.reuseOnly) || facts.isCrossRepository) return fail("This PR is closed, a draft, or a fork; bulk preparation cannot write its branch.");
     if (facts.headOid !== input.expectedHeadOid || facts.baseOid !== input.expectedBaseOid) return fail("The PR head or base changed before workspace preparation. Refresh its plan.");
     for (const branch of [facts.headRefName, facts.baseRefName]) {
       if (!(await git(["check-ref-format", `refs/heads/${branch}`], sourcePath)).ok) return fail("GitHub returned an invalid branch reference.");
@@ -49,7 +50,6 @@ export async function prepareAdvanceWorkspace(
     if (!head.ok || !base.ok || head.stdout.trim() !== input.expectedHeadOid || base.stdout.trim() !== input.expectedBaseOid) return fail("The fetched PR head or base changed. No checkout was created; refresh its plan.");
     const workerPath = join(root, input.batchId, `${target.owner}--${target.name}`);
     const path = join(workerPath, input.jobId);
-    await mkdir(workerPath, { recursive: true });
     let exists = false;
     try { exists = (await stat(path)).isDirectory(); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -60,13 +60,26 @@ export async function prepareAdvanceWorkspace(
         git(["status", "--porcelain"], path), git(["rev-parse", "--git-common-dir"], path),
         git(["rev-parse", "--git-common-dir"], sourcePath),
       ]);
+      const preserved = "The batch checkout already exists with changed or unverified work. It was preserved for inspection.";
       if (!existingRoot.ok || await realpath(existingRoot.stdout.trim()) !== await realpath(path) ||
-          !current.ok || current.stdout.trim() !== input.expectedHeadOid || !status.ok || status.stdout.trim() !== "" ||
+          !current.ok || !status.ok || status.stdout.trim() !== "" ||
           !common.ok || !sourceCommon.ok || await realpath(resolve(path, common.stdout.trim())) !== await realpath(resolve(sourcePath, sourceCommon.stdout.trim()))) {
-        return fail("The batch checkout already exists with changed or unverified work. It was preserved for inspection.");
+        return fail(preserved);
+      }
+      const head = current.stdout.trim();
+      if (head !== input.expectedHeadOid) {
+        if (!input.moveCleanToHead) return fail(preserved);
+        // Only a HEAD the PR head already contains holds nothing the PR lacks; anything else is work no one has pushed.
+        if (!(await git(["merge-base", "--is-ancestor", head, input.expectedHeadOid], path)).ok)
+          return fail(`The checkout at ${path} holds unpushed or rewritten commits. It was preserved for inspection.`);
+        const moved = await git(["checkout", "--quiet", "--detach", input.expectedHeadOid], path);
+        const after = await git(["rev-parse", "HEAD"], path);
+        if (!moved.ok || !after.ok || after.stdout.trim() !== input.expectedHeadOid) return fail(`Could not move the checkout at ${path} to the PR head.`);
       }
       return { ok: true, path, workerPath, sourcePath, created: false };
     }
+    if (input.reuseOnly) return fail(`No checkout exists at ${path} to reuse. Nothing was created.`);
+    await mkdir(workerPath, { recursive: true });
     const added = await git(["worktree", "add", "--detach", "--", path, input.expectedHeadOid], sourcePath);
     if (!added.ok) return fail(`Could not create the isolated PR checkout: ${added.error}`);
     return { ok: true, path, workerPath, sourcePath, created: true };

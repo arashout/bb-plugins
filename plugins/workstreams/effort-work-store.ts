@@ -11,10 +11,15 @@
 //
 // A decision is recorded once per real choice: rows asking the same question
 // share one open decision, numbered D1, D2, ... for good within the effort.
+//
+// One writer per PR, checkout, and thread is the database's to enforce: an
+// attempt that is launching, running, or uncertain holds partial unique index
+// entries on all three, so a second claim fails inside its transaction however
+// the two launches interleave. A claim ends only by a status change here.
 import { z } from "zod";
 import { EFFECTS, instructionScopeSchema, WORK_RECIPES, type InstructionScope } from "./effort-command.js";
-import type { Phase } from "./effort-phase.js";
-import { RECIPE_IDS } from "./effort-recipes.js";
+import type { Attempt, Phase } from "./effort-phase.js";
+import { RECIPE_IDS, WORKER_RECIPE_IDS } from "./effort-recipes.js";
 import { GATE_IDS } from "./pr-gates.js";
 import type { RunDb } from "./runstore.js";
 import { prWorkItemKey } from "./work-item-index.js";
@@ -39,6 +44,15 @@ export const EFFORT_INSTRUCTION_MIGRATIONS = [
 export const EFFORT_DECISION_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS effort_decisions (id TEXT PRIMARY KEY, effort_id TEXT NOT NULL, ordinal INTEGER NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('open','answered','withdrawn')), body TEXT NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER, UNIQUE (effort_id, ordinal))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS effort_decisions_open ON effort_decisions (effort_id, dedupe_key) WHERE status = 'open'`,
+];
+
+/** Append-only: server.ts adds these after the decision migrations (ids 49-53). */
+export const EFFORT_ATTEMPT_MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS effort_attempts (id TEXT PRIMARY KEY, target TEXT NOT NULL, effort_id TEXT NOT NULL, instruction_id TEXT NOT NULL, launch_key TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK (status IN ('launching','running','uncertain','completed','failed','released')), thread_id TEXT, host_id TEXT, checkout_path TEXT, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS effort_attempts_pr_writer ON effort_attempts (target) WHERE status IN ('launching','running','uncertain')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS effort_attempts_checkout_writer ON effort_attempts (host_id, checkout_path) WHERE status IN ('launching','running','uncertain') AND checkout_path IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS effort_attempts_thread_writer ON effort_attempts (thread_id) WHERE status IN ('launching','running','uncertain') AND thread_id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS effort_attempts_target ON effort_attempts (target, created_at)`,
 ];
 
 const sourceSchema = z.object({ kind: z.enum(["panel", "banner", "thread", "cli"]), threadId: z.string().nullable(), eventId: z.string().nullable() }).strict();
@@ -70,11 +84,63 @@ export const workRowBodySchema = z.object({
   observedHead: z.string().nullable(), observedAt: z.number().nullable(),
   gates: z.record(z.enum(GATE_IDS), z.boolean().nullable()).nullable(),
   tickets: z.array(z.object({ id: z.string(), title: z.string().nullable(), url: z.string().nullable() }).strict()),
+  /** In a dry run, the launch a queued step would make: its work, where it would run, and the key that would claim it. Nothing holds it. */
+  plan: z.object({ recipes: z.array(z.enum(WORKER_RECIPE_IDS)), role: z.enum(["code", "planning"]), launchKey: z.string(),
+    resource: z.object({ kind: z.string(), threadId: z.string().nullable(), path: z.string().nullable(), hostId: z.string().nullable(), reason: z.string().nullable() }).strict() })
+    .strict().optional(),
 }).strict();
 export type WorkRowBody = z.infer<typeof workRowBodySchema>;
 export type WorkRow = { target: string; effortId: string; instructionId: string; phase: Phase; revision: number; dueAt: number | null; body: WorkRowBody };
-/** A row write at the revision it was decided from; 0 for a PR with no row yet. */
-export type RowWrite = { target: string; expectedRevision: number; phase: Phase; body: WorkRowBody; dueAt: number | null };
+/** Whether two row bodies say the same thing, ignoring when the row next falls due. */
+export const sameBody = (a: WorkRowBody, b: WorkRowBody) => comparable(a) === comparable(b);
+const comparable = (body: WorkRowBody) => JSON.stringify({ ...body, wake: body.wake && { ...body.wake, dueAt: 0 } },
+  (_key, value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+/** A row write at the revision it was decided from; 0 for a PR with no row yet. `attemptId` names the attempt its transition records. */
+export type RowWrite = { target: string; expectedRevision: number; phase: Phase; body: WorkRowBody; dueAt: number | null; attemptId?: string };
+
+/** Launching, running, and uncertain attempts hold their claims; the rest are history. */
+export type AttemptStatus = "launching" | "running" | "uncertain" | "completed" | "failed" | "released";
+const workspaceSchema = z.object({ batchId: z.string(), jobId: z.string(), sourcePath: z.string(), moveCleanToHead: z.boolean() }).strict();
+/** One launch: the work order it bound, where it runs, and what reading BB back found. */
+const attemptBodySchema = z.object({
+  instructionRevision: z.number().int().positive(),
+  recipes: z.array(z.enum(WORKER_RECIPE_IDS)).min(1),
+  role: z.enum(["code", "planning"]),
+  retryEpoch: z.number().int().nonnegative(), retryIndex: z.number().int().nonnegative(),
+  start: z.object({ headOid: z.string(), baseOid: z.string(), fingerprint: z.string().nullable(), sourceIds: z.array(z.string()) }).strict(),
+  resource: z.object({ kind: z.enum(["reuse", "spawn", "worktree", "same-thread"]), threadId: z.string().nullable(), path: z.string().nullable(),
+    hostId: z.string().nullable(), projectId: z.string().nullable(), reason: z.string().nullable(), workspace: workspaceSchema.nullable() }).strict(),
+  mode: z.enum(["spawn", "send"]),
+  marker: z.string(),
+  /** When the spawn or send returned or threw, or a restart found the launch unfinished. Readback counts only from here. */
+  settledAt: z.number().nullable(),
+  /** When the launch went uncertain, which the breaker's run of uncertain launches reads. */
+  uncertainAt: z.number().nullable(),
+  /** The first complete readback after settling that found no worker; a second one at least a minute later releases the claim. */
+  emptyReadbackAt: z.number().nullable(),
+  /** Why the launch failed for good (project-source, workspace, unpushed-worktree), or what keeps an uncertain one (duplicate-writer, source-unavailable). */
+  failure: z.string().nullable(),
+  error: z.string().max(800).nullable(),
+  releasedReason: z.enum(["no-worker", "user-cancelled", "stopped"]).nullable(),
+}).strict();
+export type AttemptBody = z.infer<typeof attemptBodySchema>;
+export type StoredAttempt = { id: string; target: string; effortId: string; instructionId: string; launchKey: string; status: AttemptStatus;
+  threadId: string | null; hostId: string | null; path: string | null; body: AttemptBody; createdAt: number };
+/** An attempt as decide() reads it. */
+export function decideAttempt({ id, status, threadId, path, body }: StoredAttempt): Attempt {
+  return { id, status, threadId, path, workspace: body.resource.workspace && { batchId: body.resource.workspace.batchId, jobId: body.resource.workspace.jobId },
+    recipes: body.recipes, retryEpoch: body.retryEpoch, headOid: body.start.headOid, fingerprint: body.start.fingerprint, endedAt: status === "failed" ? body.settledAt : null,
+    result: null, blocker: null, failure: body.failure, releasedReason: body.releasedReason, interactionPending: false, turnFailed: false, turnRetries: 0 };
+}
+/** A write lost its compare-and-swap: the row, instruction, decision, or attempt changed after its writer read it. */
+export class StaleWriteError extends Error {}
+/** Another attempt holds the PR, the checkout, or the thread this claim needs, or already made this exact launch. */
+export class ClaimConflictError extends Error {
+  constructor(readonly holder: StoredAttempt | null) {
+    super(holder ? `Attempt ${holder.id} holds this PR, checkout, or thread.` : "This launch was already made.");
+  }
+}
+const isUnique = (error: unknown) => (error as { code?: string } | null)?.code === "SQLITE_CONSTRAINT_UNIQUE";
 
 /**
  * One question and the PRs asking it, each at the head it asked on. `answer` is the command's reading of the answer;
@@ -106,10 +172,15 @@ export const holdsPr = (row: Pick<WorkRow, "phase" | "body">) => row.phase !== "
 const ROW = `target, effort_id AS effortId, instruction_id AS instructionId, phase, revision, due_at AS dueAt, body`;
 type StoredRow = Omit<WorkRow, "body"> & { body: string };
 const readRow = ({ body, ...row }: StoredRow): WorkRow => ({ ...row, phase: z.enum(PHASES).parse(row.phase), body: workRowBodySchema.parse(JSON.parse(body)) });
-const instructionId = (effortId: string, revision: number) => `I-${effortId}-r${revision}`;
+export const instructionId = (effortId: string, revision: number) => `I-${effortId}-r${revision}`;
 export const decisionId = (effortId: string, n: number) => `D-${effortId}-${n}`;
 const DECISION = `id, effort_id AS effortId, ordinal AS n, dedupe_key AS key, status, revision, body`;
 const readDecision = ({ body, ...decision }: Omit<Decision, "body"> & { body: string }): Decision => ({ ...decision, body: decisionBodySchema.parse(JSON.parse(body)) });
+const ATTEMPT = `id, target, effort_id AS effortId, instruction_id AS instructionId, launch_key AS launchKey, status, thread_id AS threadId, host_id AS hostId,
+  checkout_path AS path, body, created_at AS createdAt`;
+const CLAIMED = `status IN ('launching','running','uncertain')`;
+type AttemptRow = Omit<StoredAttempt, "body"> & { body: string };
+const readAttempt = ({ body, ...attempt }: AttemptRow): StoredAttempt => ({ ...attempt, body: attemptBodySchema.parse(JSON.parse(body)) });
 
 export function createEffortWorkStore(db: WorkDb, now = Date.now) {
   function lastRevision(effortId: string): number {
@@ -125,6 +196,10 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
   function row(target: string): WorkRow | null {
     const stored = db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE target = ?`).get(prWorkItemKey(target)) as StoredRow | undefined;
     return stored ? readRow(stored) : null;
+  }
+  function attempt(id: string): StoredAttempt | null {
+    const stored = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE id = ?`).get(id) as AttemptRow | undefined;
+    return stored ? readAttempt(stored) : null;
   }
   function execution(effortId: string): Execution {
     return (db.prepare(`SELECT mode, revision FROM effort_execution WHERE effort_id = ?`).get(effortId) as Execution | undefined)
@@ -185,6 +260,77 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       return (db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE effort_id = ? ORDER BY target`).all(effortId) as StoredRow[]).map(readRow);
     },
     row,
+    /** Our attempts on a PR, newest first. */
+    attempts(target: string): StoredAttempt[] {
+      return (db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE target = ? ORDER BY created_at DESC, rowid DESC`).all(prWorkItemKey(target)) as
+        AttemptRow[]).map(readAttempt);
+    },
+    attempt,
+    /** Every claim that is launching, running, or uncertain, oldest first; only one effort's when named. */
+    claims(effortId?: string): StoredAttempt[] {
+      return (db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE ${CLAIMED} AND (? IS NULL OR effort_id = ?) ORDER BY created_at, rowid`)
+        .all(effortId ?? null, effortId ?? null) as AttemptRow[]).map(readAttempt);
+    },
+    /** The claim on this PR or checkout, if any. Every legacy writer reads it before starting, as v2 reads theirs before claiming. */
+    claimOn(prUrl: string | null, path: string | null): StoredAttempt | null {
+      const stored = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE ${CLAIMED} AND (target = ? OR checkout_path = ?) LIMIT 1`)
+        .get(prUrl === null ? null : prWorkItemKey(prUrl), path) as AttemptRow | undefined;
+      return stored ? readAttempt(stored) : null;
+    },
+    /** The newest launches across every effort, newest first. */
+    launches(limit: number): StoredAttempt[] {
+      return (db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(limit) as
+        AttemptRow[]).map(readAttempt);
+    },
+    /**
+     * Claim the PR, its checkout, and its thread for a new launching attempt. Call it inside commit's `also`, so a claim
+     * someone else holds rolls back the row write with it.
+     */
+    claim(attempt: Omit<StoredAttempt, "createdAt" | "status">): void {
+      const at = now();
+      try {
+        db.prepare(`INSERT INTO effort_attempts (id, target, effort_id, instruction_id, launch_key, status, thread_id, host_id, checkout_path, body, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'launching', ?, ?, ?, ?, ?, ?)`).run(attempt.id, prWorkItemKey(attempt.target), attempt.effortId, attempt.instructionId, attempt.launchKey,
+          attempt.threadId, attempt.hostId, attempt.path, JSON.stringify(attemptBodySchema.parse(attempt.body)), at, at);
+      } catch (error) {
+        if (!isUnique(error)) throw error;
+        const holder = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE (${CLAIMED} AND (target = ? OR (host_id = ? AND checkout_path = ?) OR thread_id = ?))
+          OR launch_key = ? ORDER BY created_at LIMIT 1`).get(prWorkItemKey(attempt.target), attempt.hostId, attempt.path, attempt.threadId, attempt.launchKey) as
+          AttemptRow | undefined;
+        throw new ClaimConflictError(holder ? readAttempt(holder) : null);
+      }
+    },
+    /**
+     * Move an attempt on, but only from a status its writer read; null when it moved on first. Naming a thread
+     * claims it, so a thread another attempt holds is a conflict, never a second writer.
+     */
+    recordAttempt(id: string, from: readonly AttemptStatus[], next: { status: AttemptStatus; threadId?: string | null; path?: string | null; body: AttemptBody }): StoredAttempt | null {
+      const current = attempt(id);
+      if (!current || !from.includes(current.status)) return null;
+      try {
+        db.prepare(`UPDATE effort_attempts SET status = ?, thread_id = ?, checkout_path = ?, body = ?, updated_at = ? WHERE id = ? AND status = ?`)
+          .run(next.status, next.threadId === undefined ? current.threadId : next.threadId, next.path === undefined ? current.path : next.path,
+            JSON.stringify(attemptBodySchema.parse(next.body)), now(), id, current.status);
+      } catch (error) {
+        if (!isUnique(error)) throw error;
+        const holder = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE ${CLAIMED} AND id <> ? AND (thread_id = ? OR (host_id = ? AND checkout_path = ?)) LIMIT 1`)
+          .get(id, next.threadId ?? null, current.hostId, next.path ?? null) as AttemptRow | undefined;
+        throw new ClaimConflictError(holder ? readAttempt(holder) : null);
+      }
+      return (db.prepare(`SELECT changes() AS count`).get() as { count: number }).count === 1 ? attempt(id) : null;
+    },
+    /**
+     * `reset N release`: drop the launching or uncertain claim on a PR, which you confirmed no worker holds. Call it inside
+     * the command's commit, so the release and the command that asked for it are journaled together.
+     */
+    release(target: string): void {
+      const current = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE target = ? AND status IN ('launching','uncertain')`).get(prWorkItemKey(target)) as
+        AttemptRow | undefined;
+      if (!current) throw new StaleWriteError(`${target}'s launch claim changed while this command was read. Reload the roster and send it again.`);
+      const { body } = readAttempt(current);
+      db.prepare(`UPDATE effort_attempts SET status = 'released', body = ?, updated_at = ? WHERE id = ?`)
+        .run(JSON.stringify({ ...body, releasedReason: "no-worker" }), now(), current.id);
+    },
     /** The result an admitted command returned, so a repeated request gets the same answer and changes nothing. */
     command(effortId: string, requestId: string): unknown {
       const row = db.prepare(`SELECT detail FROM effort_transitions WHERE effort_id = ? AND target IS NULL AND cause = 'command'
@@ -201,7 +347,7 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       journal: { requestId: string; text: string; result: unknown } | null; also?: () => void }): void {
       db.transaction(() => {
         const at = now();
-        if (lastRevision(input.effortId) !== input.baseRevision) throw new Error("The instruction changed while this command was read. Reload the roster and send it again.");
+        if (lastRevision(input.effortId) !== input.baseRevision) throw new StaleWriteError("The instruction changed while this command was read. Reload the roster and send it again.");
         const current = activeInstruction(input.effortId);
         if (input.instruction !== null) {
           if (current) db.prepare(`UPDATE effort_instructions SET status = ?, updated_at = ? WHERE id = ?`)
@@ -220,7 +366,7 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
         for (const write of input.rows) {
           const target = prWorkItemKey(write.target);
           const stored = row(target);
-          if ((stored?.revision ?? 0) !== write.expectedRevision) throw new Error(`${target} changed while this command was read. Reload the roster and send it again.`);
+          if ((stored?.revision ?? 0) !== write.expectedRevision) throw new StaleWriteError(`${target} changed while this command was read. Reload the roster and send it again.`);
           // A row moves to another effort only once it no longer holds its PR.
           if (stored && stored.effortId !== input.effortId && holdsPr(stored)) throw new Error(`${target} is in another effort's instruction.`);
           const body = workRowBodySchema.parse(write.body);
@@ -229,8 +375,9 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
             ON CONFLICT(target) DO UPDATE SET effort_id = excluded.effort_id, instruction_id = excluded.instruction_id, phase = excluded.phase,
             revision = excluded.revision, due_at = excluded.due_at, body = excluded.body, updated_at = excluded.updated_at`)
             .run(target, input.effortId, instructionId(input.effortId, newest), write.phase, revision, write.dueAt, JSON.stringify(body), at);
-          db.prepare(`INSERT INTO effort_transitions (effort_id, target, row_revision, at, from_phase, to_phase, cause, detail, source, observed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.effortId, target, revision, at, stored?.phase ?? null, write.phase, body.cause, body.detail, input.source, body.observedAt);
+          db.prepare(`INSERT INTO effort_transitions (effort_id, target, row_revision, at, from_phase, to_phase, cause, detail, attempt_id, source, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.effortId, target, revision, at, stored?.phase ?? null, write.phase, body.cause, body.detail,
+            write.attemptId ?? null, input.source, body.observedAt);
         }
         for (const write of input.decisions ?? []) {
           const body = JSON.stringify(decisionBodySchema.parse(write.body));
@@ -242,7 +389,7 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
             db.prepare(`UPDATE effort_decisions SET status = ?, body = ?, revision = revision + 1, resolved_at = ? WHERE id = ? AND effort_id = ? AND revision = ? AND status = 'open'`)
               .run(write.status, body, resolved, write.id, input.effortId, write.expectedRevision);
             if ((db.prepare(`SELECT changes() AS count`).get() as { count: number }).count !== 1)
-              throw new Error(`D${write.n} changed while this command was read. Reload the roster and send it again.`);
+              throw new StaleWriteError(`D${write.n} changed while this command was read. Reload the roster and send it again.`);
           }
         }
         if (input.journal) db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES (?, ?, 'command', ?, ?)`)

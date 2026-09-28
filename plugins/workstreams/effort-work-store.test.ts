@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { InstructionScope } from "./effort-command.js";
-import { createEffortWorkStore, decisionId, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type DecisionBody, type DecisionWrite,
-  type RowWrite, type V2Target, type WorkRowBody } from "./effort-work-store.js";
+import { ClaimConflictError, createEffortWorkStore, decisionId, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS,
+  EFFORT_INSTRUCTION_MIGRATIONS, StaleWriteError, type AttemptBody, type DecisionBody, type DecisionWrite, type RowWrite, type StoredAttempt, type V2Target,
+  type WorkRowBody } from "./effort-work-store.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => { databases.splice(0).forEach((db) => db.close()); });
@@ -12,7 +13,7 @@ const [folio, quill, atlas] = [pr("folio", 12), pr("quill", 14), pr("atlas", 16)
 function open() {
   const db = new Database(":memory:");
   databases.push(db);
-  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS].forEach((sql) => db.exec(sql));
+  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS, ...EFFORT_ATTEMPT_MIGRATIONS].forEach((sql) => db.exec(sql));
   let clock = 1_000;
   return { db, work: createEffortWorkStore(db, () => ++clock) };
 }
@@ -189,5 +190,68 @@ describe("effort decisions", () => {
     expect(work.decisions("returns").map((decision) => decision.n)).toEqual([2]);
     expect(db.prepare(`SELECT ordinal, status, resolved_at IS NOT NULL AS resolved FROM effort_decisions ORDER BY ordinal`).all())
       .toEqual([{ ordinal: 1, status: "answered", resolved: 1 }, { ordinal: 2, status: "open", resolved: 0 }]);
+  });
+});
+
+describe("attempt claims", () => {
+  const HOST = "host-inkwell";
+  const body = (path: string | null, threadId: string | null): AttemptBody => ({ instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
+    start: { headOid: "a".repeat(40), baseOid: "b".repeat(40), fingerprint: null, sourceIds: [] },
+    resource: { kind: threadId ? "reuse" : "spawn", threadId, path, hostId: HOST, projectId: "proj-inkwell", reason: null, workspace: null },
+    mode: threadId ? "send" : "spawn", marker: "[Workstreams attempt]", settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null });
+  const claim = (id: string, target: string, path: string | null, threadId: string | null = null): Omit<StoredAttempt, "createdAt" | "status"> =>
+    ({ id, target, effortId: "returns", instructionId: "I-returns-r1", launchKey: `key-${id}`, threadId, hostId: HOST, path, body: body(path, threadId) });
+  const conflict = (run: () => void) => {
+    try { run(); } catch (error) { return error instanceof ClaimConflictError ? error.holder?.id ?? "same launch" : error; }
+    return "claimed";
+  };
+
+  it("holds one writer per PR, per checkout on a host, and per thread in the database, and frees each only when its claim ends", () => {
+    const { work } = open();
+    work.claim(claim("A-1", folio, "/src/folio-12", "thr_shelf"));
+    // A second launch on the PR, into the checkout, or in the thread fails however it was planned.
+    expect(conflict(() => work.claim(claim("A-2", "https://github.com/Inkwell/Folio/pull/12/", "/src/folio-other")))).toBe("A-1");
+    expect(conflict(() => work.claim(claim("A-3", quill, "/src/folio-12")))).toBe("A-1");
+    expect(conflict(() => work.claim(claim("A-4", atlas, "/src/atlas-16", "thr_shelf")))).toBe("A-1");
+    // The same launch made twice is refused even once nothing else holds it.
+    expect(conflict(() => work.claim({ ...claim("A-5", atlas, null), launchKey: "key-A-1" }))).toBe("A-1");
+    expect(work.claims().map((item) => item.id)).toEqual(["A-1"]);
+    // A worktree that isn't created yet has no path to claim; the PR claim covers it.
+    expect(conflict(() => work.claim(claim("A-6", atlas, null)))).toBe("claimed");
+    const running = work.recordAttempt("A-1", ["launching"], { status: "running", body: body("/src/folio-12", "thr_shelf") });
+    expect(running).toMatchObject({ status: "running", threadId: "thr_shelf" });
+    expect(conflict(() => work.claim(claim("A-2", folio, "/src/folio-other")))).toBe("A-1");
+    work.recordAttempt("A-1", ["running"], { status: "completed", body: running!.body });
+    expect(conflict(() => work.claim(claim("A-2", folio, "/src/folio-12", "thr_shelf")))).toBe("claimed");
+    expect(work.attempts(folio).map((item) => [item.id, item.status])).toEqual([["A-2", "launching"], ["A-1", "completed"]]);
+  });
+
+  it("rolls back the row a launch commits with its claim when the claim conflicts", () => {
+    const { db, work } = open();
+    work.claim(claim("A-1", folio, "/src/folio-12"));
+    const row: RowWrite = { target: quill, expectedRevision: 0, phase: "executing", dueAt: null, attemptId: "A-2", body: { n: 2, cause: "launching", detail: "Launching the worker",
+      userState: "doing", modifiers: [], nextAction: "attach", owner: { kind: "v2-attempt", ref: "A-2" }, wake: null, decision: null, recovery: [], offers: [], retryEpoch: 0,
+      observedHead: null, observedAt: null, gates: null, tickets: [] } };
+    work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: { scope: { revision: 1, stopAt: "prepared", reportMode: "changes", outcome: null,
+      criteria: [], answers: [], exclude: [], removed: [], include: [] }, text: "move 2 forward", source: { kind: "panel", threadId: null, eventId: null }, snapshotId: null,
+      requestId: "req-1" }, rows: [], journal: null });
+    expect(() => work.commit({ effortId: "returns", baseRevision: 1, source: "launch", instruction: null, rows: [row], journal: null,
+      also: () => work.claim(claim("A-2", quill, "/src/folio-12")) })).toThrow(ClaimConflictError);
+    expect([work.row(quill), work.attempt("A-2")]).toEqual([null, null]);
+    expect(db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target IS NOT NULL`).get()).toEqual({ count: 0 });
+  });
+
+  it("finds the claim on a PR or its checkout for every legacy writer, and none once it is released", () => {
+    const { work } = open();
+    work.claim(claim("A-1", folio, "/src/folio-12"));
+    expect([work.claimOn("https://github.com/INKWELL/folio/pull/12", null)?.id, work.claimOn(null, "/src/folio-12")?.id, work.claimOn(quill, "/src/quill-14"), work.claimOn(null, null)])
+      .toEqual(["A-1", "A-1", null, null]);
+    expect(work.recordAttempt("A-1", ["running"], { status: "completed", body: body("/src/folio-12", null) })).toBeNull();
+    work.recordAttempt("A-1", ["launching"], { status: "uncertain", body: body("/src/folio-12", null) });
+    work.release(folio);
+    expect(work.attempt("A-1")).toMatchObject({ status: "released", body: { releasedReason: "no-worker" } });
+    expect([work.claimOn(folio, "/src/folio-12"), work.claims()]).toEqual([null, []]);
+    // Nothing is left to release, so a second release is a stale command, never a silent no-op.
+    expect(() => work.release(folio)).toThrow(StaleWriteError);
   });
 });
