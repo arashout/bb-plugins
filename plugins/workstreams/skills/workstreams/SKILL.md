@@ -659,6 +659,70 @@ Zoom bands span depth ranges and adapt to the depth the board actually
 collapsed to, so every band boundary reveals something. On a two-level board
 the thresholds are exactly what they were before the hierarchy existed.
 
+## Effort rosters (v2)
+
+An effort can move to its v2 roster: one permanently numbered row per PR the
+effort owns or its instruction includes, and one current state per PR. Legacy
+Advance jobs and v2 attempts stay history. The roster's `history` counts them,
+so the roster's rows, Advance's job rows, and the board's row runs explain one
+another instead of disagreeing.
+
+```
+bb workstreams roster <effort> [--json]     # n · repo #num · reviewer · summary · state · next
+bb workstreams recipes [--json]             # the action recipes v2 composes into work orders
+bb workstreams v2 preview <effort> [--json] # what moving the effort to its roster changes
+bb workstreams v2 set <effort> --mode v2|legacy --revision <n> (--parent <threadId> | --new-parent)
+```
+
+Moving an effort to its roster never changes membership or reparents a thread.
+From then on, Advance, dispatch, repairs, and agent runs refuse its PRs with
+"Managed by the <effort> roster; instruct there." `board_get` lists those PRs
+under `v2Managed` with their roster state. The board's cards don't show that
+state yet: they still offer Advance and Fix, and the server refuses both with
+the same message.
+
+Each row is one of:
+
+- **Doing**: a v2 worker, a code action, or a read is running.
+- **Waiting**: names who it waits on (CI, a reviewer, a parent PR, legacy
+  Advance, GitHub, or you) and when it looks again.
+- **Decision**: one numbered decision per real choice, such as `D1`,
+  shared by every PR that asks it.
+- **Ready**: a verified merge candidate on a fresh GitHub read. Merging is never
+  part of an instruction; it stays a separate action with its own preview.
+- **Done**: merged or closed.
+
+A **system issue** is separate from these and names its recovery, such as
+`retry N`.
+
+Commands use the numbers of the roster the user read. The command is the
+authorization boundary: a command that is ambiguous is clarified and admits
+nothing.
+
+- `move 1-6 forward, leave 3 alone` adds work; `only move 7-9 forward` replaces
+  the included set; `drop N` removes a PR; `cancel` ends the instruction.
+- `fix ci N`, `rebase N`, and `address review N` name one kind of work;
+  `mark N ready` and `request review N from @login` grant those actions.
+- `hold N because …` and `release N`: a hold outlasts every instruction.
+- `refresh N`, `recheck N`, `reset N` (`reset N release` when a launch's outcome
+  is uncertain), `retry N`, `stop N`, and `recheck launches`.
+- `outcome: …`, `done when 2: …`, and `drop c1` correct the evidence contract.
+- `D1 <option>` answers a decision.
+
+A command naming PRs that other efforts own admits nothing and returns one
+command for each owning effort.
+
+Only the user sends commands. Don't call `effort_command` yourself, even to pass
+on words that the user typed: the roster records each command it receives as the
+user's own action from the roster panel, and commands such as `move … forward`,
+`retry N`, and `reset N release` carry the user's authority. Tell the user which
+command fits, and leave sending it to them.
+
+The `v2Execution` setting is `dry-run` by default: v2 plans each PR's next step
+and where it would run, and claims, starts, messages, and writes nothing. `on`
+runs the work the instruction authorizes, at most `workerConcurrency` (default 2)
+worker turns at a time.
+
 ## Grouping signals
 
 - **Code area.** Each changed path maps to an area: container directories

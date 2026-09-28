@@ -84,7 +84,8 @@ describe("effort roster rows", () => {
     const targets = [first!, second!, third!, fourth!];
     const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
-      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, contract: null, decisions: [] } });
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, contract: null, decisions: [],
+        attempts: () => 0 } });
     // Details that differ only in each PR's own facts label the issue by its cause, and each PR's detail follows; a detail every PR shares labels it.
     // Each lists the recovery its rows name, for all of them at once.
     expect(result.issues).toEqual([
@@ -162,7 +163,7 @@ describe("effort roster rows", () => {
     expect(result.rows[0]!.tickets).toEqual([{ id: "ABC-205", title: "Let readers update their email", url: "https://linear.app/inkwell/issue/ABC-205" }]);
     expect(result.ticketsWithoutPrs).toEqual([{ id: "ABC-299", title: null, url: null }]);
     // Six job rows across two batches describe three current PRs.
-    expect(result.history).toEqual({ legacyJobs: 6, legacyPrs: 3 });
+    expect(result.history).toEqual({ legacyJobs: 6, legacyPrs: 3, v2Attempts: 0 });
   });
 });
 
@@ -191,7 +192,7 @@ describe("roster presentation facts", () => {
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
       v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), claims: new Map((options.claims ?? []).map((item) => [item.target, item])), active: null,
         rollup: null, contract: null, decisions: [], scope: { revision: 1, include: targets.map((target, index) => ({ target, n: index + 1, outsideMembership: false, work: [], effects: [], reviewers: [],
-          addedInRevision: 1 })), exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] } } });
+          addedInRevision: 1 })), exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] }, attempts: () => 0 } });
   }
 
   it("carries each v2 row's wake and next step, and none once the row is done, so the pane never guesses when a row looks again", () => {
@@ -304,7 +305,7 @@ describe("roster presentation facts", () => {
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: target === series ? 17 : 8, target, provisional: false })) }),
       launches: { breakerOpen, capacityFull: false, uncertain: [uncertain] },
       v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set([series, duplicated]), scope: null, claims: new Map([[series, uncertain]]), active: null,
-        rollup: null, contract: null, decisions: [] } });
+        rollup: null, contract: null, decisions: [], attempts: () => 0 } });
     const open = read(true);
     expect(open.launches).toEqual({ breakerOpen: true, capacityFull: false,
       uncertain: [{ n: 17, target: series, attemptId: uncertain.id, threadId: "thr_folio_421", since: NOW - 3 * MINUTE }] });

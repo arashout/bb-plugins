@@ -300,7 +300,7 @@ export const INKWELL_SHELVING_ROSTER: EffortRoster = {
     likelyThreadId: "thr_folio_421" }],
   launches: { breakerOpen: true, capacityFull: false, uncertain: [{ n: 17, target: shelf("folio", 421), attemptId: "att-17", threadId: "thr_folio_421", since: AGO(3 * MINUTE) }] },
   ticketsWithoutPrs: [{ id: "OPS-219", title: "Shelf audit report", url: "https://linear.app/inkwell/issue/OPS-219" }],
-  suggestions: [], history: { legacyJobs: 3, legacyPrs: 2 },
+  suggestions: [], history: { legacyJobs: 3, legacyPrs: 2, v2Attempts: 4 },
   decisions: [
     { id: "dec-shelving-1", n: 1, revision: 1, kind: "product", subkind: null, question: "Out-of-print ISBNs at entry: allow them, or block them?", createdAt: AGO(4 * MINUTE),
       answer: "command", options: [{ id: "A", label: "Allow, and show an \"Out of print\" badge", consequence: "12 already renders the badge; 7 adds one check" },

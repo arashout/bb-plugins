@@ -503,7 +503,8 @@ export function createEffortV2(deps: EffortV2Deps) {
       rollup: contract?.rollup ?? null,
       contract: contract && { criteria: contract.criteria, outcomeValidated: contract.outcomeValidated, completed: contract.completed },
       decisions: decisions.map((decision) => decisionCard(decision, { createdAt: asked.get(decision.id) ?? null, row: (target) => byTarget.get(target) ?? null,
-        attempts: (target) => deps.work.attempts(target) })) };
+        attempts: (target) => deps.work.attempts(target) })),
+      attempts: (target: string) => deps.work.attempts(target).length };
   }
   async function roster(effortId: string, since?: number): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);

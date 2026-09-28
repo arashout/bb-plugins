@@ -102,8 +102,8 @@ export const effortRosterSchema = z.object({
   ticketsWithoutPrs: z.array(ticketSchema),
   /** Derived board groups that already reach into this roster: suggestions, never membership. */
   suggestions: z.array(z.object({ key: z.string(), name: z.string(), tickets: z.array(z.string()), prUrls: z.array(z.string()), overlap: z.array(z.string()) })),
-  /** Legacy job rows behind these PRs: why Advance's counts exceed the roster's. */
-  history: z.object({ legacyJobs: z.number(), legacyPrs: z.number() }),
+  /** Legacy job rows and v2 attempts behind these PRs: why Advance's and the attempts' counts exceed the roster's. */
+  history: z.object({ legacyJobs: z.number(), legacyPrs: z.number(), v2Attempts: z.number() }),
   /**
    * Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. A worker's question carries
    * its evidence from every PR that asked it, its recommendation and reason, what each option means for the work, and the attempt that
@@ -388,9 +388,9 @@ export function effortRoster(input: {
   execution?: Execution; v2Execution?: V2Execution;
   /** Whether a new launch may start, this effort's uncertain launches, and the other efforts with any; absent for a copy that can't tell. */
   launches?: Admission & { uncertain: readonly StoredAttempt[]; elsewhere?: readonly string[] };
-  /** The active instruction, its rows, its rollup, and its open decisions; absent for a legacy effort or a copy without them. */
+  /** The active instruction, its rows, its rollup, its open decisions, and our attempts on a PR; absent for a legacy effort or a copy without them. */
   v2?: RosterInstruction & { active: Omit<NonNullable<EffortRoster["instruction"]>, "included" | "excluded"> | null; rollup: string[] | null;
-    contract: EffortRoster["contract"]; decisions: EffortRoster["decisions"] };
+    contract: EffortRoster["contract"]; decisions: EffortRoster["decisions"]; attempts(target: string): number };
 }): EffortRoster {
   const { effort, sources, v2 = null } = input;
   const execution = input.execution ?? { mode: "legacy", revision: 0 };
@@ -460,7 +460,8 @@ export function effortRoster(input: {
     rollup: v2?.rollup ?? null, contract: v2?.contract ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
     launches: input.launches ? { breakerOpen: input.launches.breakerOpen, capacityFull: input.launches.capacityFull, uncertain } : null,
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
-    suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
+    suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length,
+      v2Attempts: v2 ? rows.reduce((sum, row) => sum + v2.attempts(row.target), 0) : 0 }, decisions: v2?.decisions ?? [],
     lastCommand: null, pending: [], through: 0, since: null,
   };
 }
