@@ -68,7 +68,8 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (pr.reviewDecision === "CHANGES_REQUESTED" && pr.reviewFollowupPosted) return { label: "Awaiting re-review", tone: "wait" };
   if (pr.reviewDecision === "APPROVED" && !checksGreen(pr.checkConclusions)) return { label: "Checks pending", tone: "wait" };
   if (pr.mergeStateStatus === "BLOCKED") return { label: "Rules block", tone: "wait" };
-  if (pr.mergeStateStatus === "UNKNOWN" || pr.unresolvedReviewThreads === null) return { label: "Status unknown", tone: "wait" };
+  if (pr.mergeStateStatus === "UNKNOWN" ||
+    (pr.reviewDecision === "APPROVED" && pr.unresolvedReviewThreads === null)) return { label: "Status unknown", tone: "wait" };
   if (pr.reviewDecision !== "APPROVED" && pr.reviewRequests.length === 0) return { label: "No reviewer", tone: "wait" };
   if (pr.reviewDecision !== "APPROVED") return { label: "Awaiting review", tone: "wait" };
   return { label: "Clear", tone: "clear" };

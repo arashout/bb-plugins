@@ -135,6 +135,18 @@ describe("pipeline position and gates", () => {
     expect(review).toMatchObject({ blocker: { label: "Awaiting review" }, action: { kind: "nudge" }, nextStep: "Nudge the requested reviewer or wait for review." });
   });
 
+  it("shows requested review while thread details have not been fetched before a decision", () => {
+    const pending = pr(21, { reviewDecision: null, latestReviewStates: [], reviewRequests: ["flasd"],
+      unresolvedReviewThreads: null, resolvedReviewThreads: null, approvalFeedback: undefined,
+      approvalFeedbackVerified: false, approvalFeedbackVerification: "unknown" });
+    expect(pipelineCards([entry(pending)], [], now)[0]).toMatchObject({ stage: "review",
+      blocker: { label: "Awaiting review" }, action: { kind: "nudge" },
+      nextStep: "Nudge the requested reviewer or wait for review." });
+    expect(pipelineCards([entry(pr(22, { reviewDecision: null, reviewRequests: ["flasd"],
+      unresolvedReviewThreads: 2, approvalFeedback: undefined }))], [], now)[0]?.blocker.label).toBe("2 open threads");
+    expect(pipelineCards([entry(pr(23, { unresolvedReviewThreads: null }))], [], now)[0]?.blocker.label).toBe("Status unknown");
+  });
+
   it("does not present stale local-only PR facts as Ready after a failed GitHub read", () => {
     const value = pr(30);
     const card = pipelineCards([], [local(value, { unit: { ...local(value).unit, lifecycle: "awaiting-merge" } })], now, {
