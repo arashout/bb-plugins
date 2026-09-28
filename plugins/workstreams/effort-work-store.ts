@@ -74,7 +74,7 @@ const grantsSchema = z.object({ work: z.array(z.enum(WORK_RECIPES)), effects: z.
 export const workRowBodySchema = z.object({
   n: z.number().int().positive().nullable(),
   cause: z.string(), detail: z.string(), userState: z.enum(USER_STATES),
-  /** `plan only`: the step is planned, and nothing performs it until the reconciler runs. */
+  /** `plan only`: the step is planned, and nothing performs it yet: a launch in a dry run, or a code action. */
   modifiers: z.array(z.enum(["draining", "recovering", "plan only"])),
   nextAction: z.union([z.array(z.enum(RECIPE_IDS)), z.enum(["observe", "attach", "parse-report", "recover-launch", "retry-turn"])]).nullable(),
   owner: z.object({ kind: z.enum(["v2-attempt", "legacy-job", "thread", "user", "github", "reviewer", "ci", "pr"]), ref: z.string().nullable() }).strict().nullable(),
@@ -146,10 +146,14 @@ const attemptBodySchema = z.object({
   report: reportSchema.nullable().optional(),
   /** The worker is waiting on your input in its thread. */
   interactionPending: z.boolean().optional(),
+  /** Its thread was archived or deleted: a turn that hadn't finished then never will. */
+  threadGone: z.boolean().optional(),
   /** A failed turn waiting for its retry: the turn request to retry, and when. */
   turnFailure: z.object({ requestId: z.string().nullable(), sendAt: z.number() }).strict().nullable().optional(),
   /** Retries v2 asked BB for; a retry core queued itself isn't one. */
   turnRetries: z.number().int().nonnegative().optional(),
+  /** Readbacks in a row that couldn't read BB; one that reads clears it. */
+  readbackFailures: z.number().int().nonnegative().optional(),
 }).strict();
 export type AttemptBody = z.infer<typeof attemptBodySchema>;
 export type AttemptReport = z.infer<typeof reportSchema>;
@@ -161,7 +165,8 @@ export function decideAttempt({ id, status, threadId, path, body }: StoredAttemp
     recipes: body.recipes, retryEpoch: body.retryEpoch, headOid: body.start.headOid, fingerprint: body.start.fingerprint,
     endedAt: status === "failed" || status === "completed" ? body.endedAt ?? body.settledAt : null,
     result: status === "completed" ? body.report?.key ?? null : null, blocker: body.report?.blocker ?? null, failure: body.failure, releasedReason: body.releasedReason,
-    interactionPending: body.interactionPending ?? false, turnFailed: Boolean(body.turnFailure), turnRetries: body.turnRetries ?? 0 };
+    interactionPending: body.interactionPending ?? false, turnFailed: Boolean(body.turnFailure), turnRetries: body.turnRetries ?? 0,
+    readbackFailures: body.readbackFailures ?? 0 };
 }
 /**
  * Criteria evidence from our attempts' reports, newest first. Only an accepted report carries any, each entry bound to the head it named and to
@@ -295,6 +300,33 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
     },
     rows(effortId: string): WorkRow[] {
       return (db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE effort_id = ? ORDER BY target`).all(effortId) as StoredRow[]).map(readRow);
+    },
+    /** Rows of v2 efforts that fell due, oldest first. */
+    due(at: number, limit: number): WorkRow[] {
+      return (db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE due_at <= ? AND phase <> 'finished'
+        AND effort_id IN (SELECT effort_id FROM effort_execution WHERE mode = 'v2') ORDER BY due_at, target LIMIT ?`).all(at, limit) as StoredRow[]).map(readRow);
+    },
+    /** An event makes these rows due now. Their revision doesn't change: nothing about the row did. */
+    markDue(targets: readonly string[], at: number): void {
+      const update = db.prepare(`UPDATE effort_pr_work SET due_at = ? WHERE target = ? AND phase <> 'finished' AND (due_at IS NULL OR due_at > ?)`);
+      for (const target of targets) update.run(at, prWorkItemKey(target), at);
+    },
+    /** A pass that found a row's step unchanged sets when it falls due again, at the revision it read. */
+    reschedule(target: string, revision: number, dueAt: number | null): void {
+      db.prepare(`UPDATE effort_pr_work SET due_at = ? WHERE target = ? AND revision = ?`).run(dueAt, prWorkItemKey(target), revision);
+    },
+    /** Journal an effort-level fact the reconciler observed, such as a criterion's status changing. */
+    note(effortId: string, cause: string, detail: unknown): void {
+      db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES (?, ?, ?, ?, 'reconciler')`).run(effortId, now(), cause, JSON.stringify(detail));
+    },
+    /** The effort's journaled facts of one kind, newest first. */
+    notes(effortId: string, cause: string, limit = 1_000): unknown[] {
+      return (db.prepare(`SELECT detail FROM effort_transitions WHERE effort_id = ? AND target IS NULL AND cause = ? ORDER BY seq DESC LIMIT ?`).all(effortId, cause, limit) as
+        { detail: string }[]).map((row) => JSON.parse(row.detail) as unknown);
+    },
+    /** Every included PR finished with its criteria held on its final head: the instruction is complete, and stays so. */
+    completeInstruction(id: string): void {
+      db.prepare(`UPDATE effort_instructions SET status = 'completed', updated_at = ? WHERE id = ? AND status = 'active'`).run(now(), id);
     },
     row,
     /** Our attempts on a PR, newest first. */

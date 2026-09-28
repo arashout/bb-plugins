@@ -9,7 +9,7 @@ import type { AdvanceFacts, AdvanceWorkspace } from "./advance-contract.js";
 import { DEFAULT_EFFECTS, VERBS, type InstructionScope } from "./effort-command.js";
 import { decide, type DecideInput, type Next } from "./effort-phase.js";
 import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
-import { createEffortRunner, type Admission, type V2Execution } from "./effort-runner.js";
+import { createEffortRunner, type Admission, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { rowBody } from "./effort-v2-server.js";
 import { createEffortWorkStore, decideAttempt, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
   sameBody, type AttemptBody, type ExecutionMode, type StoredAttempt } from "./effort-work-store.js";
@@ -74,7 +74,8 @@ function setup(options: Options = {}) {
     attempts: change.attempts ?? work.attempts(PR).map(decideAttempt), codeActions: [], retryEpoch: work.row(PR)?.body.retryEpoch ?? 0, decision: null, declined: [],
     criteriaPending: false, settledDependencies: new Set(), admission: change.admission ?? { capacityFull: false, breakerOpen: false }, models: MODELS,
     resources: change.writer ? { ...RESOURCES, writers: [change.writer], inspections: null } : { ...options.resources ?? RESOURCES } });
-  const body = (step: Next) => rowBody(step, { n: 4, retryEpoch: work.row(PR)?.body.retryEpoch ?? 0, observedHead: HEAD, observedAt: clock.now - 30_000, gates: null, tickets: [] });
+  const body = (step: Next) => rowBody(step, { n: 4, retryEpoch: work.row(PR)?.body.retryEpoch ?? 0, observedHead: HEAD, observedAt: clock.now - 30_000, gates: null, tickets: [] },
+    settings.execution);
   const plan = (change: Parameters<typeof input>[0]) => { const step = decide(input(change)); return { phase: step.phase, body: body(step), dueAt: step.wake?.dueAt ?? null }; };
   const sdk = {
     workspace: vi.fn(async (request: { batchId: string; jobId: string }): Promise<AdvanceWorkspace> =>
@@ -112,6 +113,12 @@ function setup(options: Options = {}) {
     retry: (args) => sdk.retry(args), read: (prUrl) => sdk.read(prUrl), feedback: (prUrl, threadId, report) => sdk.feedback(prUrl, threadId, report), publish: () => {},
   });
   const first = runner();
+  /** A BB event, then the reconciler's next tick for the attempt that heard it, which takes the attempt's next step. */
+  const signal = async (threadId: string, event: AttemptSignal) => {
+    const heard = await first.signal(threadId, event);
+    const [attempt] = heard ? work.attempts(heard.target) : [];
+    if (attempt) await first.advance(attempt.id);
+  };
   /** The queued step as the reconciler plans it now, at the revisions it read. */
   const planned = (resource?: Next["resource"]) => {
     const step = decide(input());
@@ -131,7 +138,7 @@ function setup(options: Options = {}) {
     work.claim({ id, target: url(number), effortId: EFFORT, instructionId: "I-e-shelving-r1", launchKey: `key-${id}`, threadId, hostId: HOST, path, body: attemptBody });
     if (status !== "launching") work.recordAttempt(id, ["launching"], { status, body: attemptBody });
   };
-  return { db, clock, work, settings, statuses, legacy, world, sdk, runner, first, planned, launch, count, other, writerCalls, plan, hooks };
+  return { db, clock, work, settings, statuses, legacy, world, sdk, runner, first, signal, planned, launch, count, other, writerCalls, plan, hooks };
 }
 const claimOf = (env: ReturnType<typeof setup>) => env.work.claimOn(PR, null);
 
@@ -565,7 +572,7 @@ describe("worker results and SDK signals", () => {
     const attempt = await finished(env, (id) => `Rebased onto main and pushed.\n${result(id)}`);
     env.world.pr = pushed;
     env.clock.now += 20 * MINUTE;
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.sdk.read).toHaveBeenCalledWith(PR);
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { endedAt: env.clock.now, report: { source: "v1", key: "changed", rejection: null, headOid: NEXT } } });
     // The report only routed the row back to the gates; running checks on the pushed head are a CI wait, not Ready.
@@ -579,7 +586,7 @@ describe("worker results and SDK signals", () => {
       const attempt = await finished(env, () => output);
       // GitHub shows a merge candidate, and still a report that can't be read never clears the row.
       env.world.pr = { headOid: NEXT, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", checks: "passed" };
-      await env.first.signal("thr_origin", { kind: "idle" });
+      await env.signal("thr_origin", { kind: "idle" });
       expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed",
         body: { report: { key: "report-invalid", rejection: "The output has no Workstreams result line.", raw: output ?? "" } } });
       expect(env.work.row(PR)).toMatchObject({ phase: "queued", body: { cause: "report-repair", nextAction: ["repair_report"] } });
@@ -590,12 +597,12 @@ describe("worker results and SDK signals", () => {
     const env = setup();
     const attempt = await finished(env, (id) => result(id, { headOid: undefined, finalHeadOid: NEXT }));
     env.world.pr = pushed;
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)?.body.report).toMatchObject({ key: "changed", rejection: null, compat: ["finalHeadOid → headOid"], headOid: NEXT });
     const stale = setup();
     const other = await finished(stale, (id) => result(id, { headOid: undefined, finalHeadOid: "5".repeat(40) }));
     stale.world.pr = pushed;
-    await stale.first.signal("thr_origin", { kind: "idle" });
+    await stale.signal("thr_origin", { kind: "idle" });
     expect(stale.work.attempt(other.id)?.body.report).toMatchObject({ key: "report-invalid", compat: [], rejection: "finalHeadOid 555555555555 isn't the live headOid 444444444444." });
   });
 
@@ -605,14 +612,14 @@ describe("worker results and SDK signals", () => {
     const attempt = env.work.attempts(PR)[0]!;
     // The thread went idle from an earlier turn while the work order still waited in its queue: not this attempt's turn.
     env.sdk.turn.mockResolvedValue({ status: "idle", requests: [{ seq: 9, id: "req-9", text: "What changed on the shelf?" }], lastSeq: 11, output: "The shelf order changed." });
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)?.status).toBe("running");
     expect(env.sdk.read).not.toHaveBeenCalled();
     // You prompted the thread after the work order: the latest output is read anyway.
     env.sdk.turn.mockResolvedValue({ status: "idle", lastSeq: 57, output: `Also reran the shelf tests.\n${result(attempt.id)}`,
       requests: [{ seq: 41, id: "req-41", text: "Also rerun the shelf tests." }, { seq: 12, id: "req-12", text: attempt.body.marker }, { seq: 9, id: "req-9", text: "What changed on the shelf?" }] });
     env.world.pr = pushed;
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { startSeq: 12, endSeq: 57, report: { key: "changed" } } });
   });
 
@@ -621,7 +628,7 @@ describe("worker results and SDK signals", () => {
     const attempt = await finished(env, (id) => result(id));
     // main moved on after the rebase: GitHub now shows the pushed head behind a new base.
     env.world.pr = { headOid: NEXT, baseOid: "c".repeat(40), mergeStateStatus: "BEHIND", mergeable: "MERGEABLE", checks: "passed" };
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)?.body.report).toMatchObject({ key: "changed", rejection: null, baseMoved: true });
     // The fresh gates find the branch behind, so integrating the base is queued again, for the new head.
     expect(env.work.row(PR)).toMatchObject({ phase: "queued", body: { cause: "launching", nextAction: ["integrate_base"] } });
@@ -631,18 +638,20 @@ describe("worker results and SDK signals", () => {
     const env = setup();
     expect(await env.launch()).toBe("launched");
     const attempt = env.work.attempts(PR)[0]!;
-    await env.first.signal("thr_origin", { kind: "interaction" });
+    env.sdk.interactions.mockResolvedValue(1);
+    await env.signal("thr_origin", { kind: "interaction" });
     expect(env.work.row(PR)).toMatchObject({ phase: "decision-needed", body: { cause: "worker-interaction",
       decision: { key: `worker-interaction:${attempt.id}`, answer: "open-thread", options: [{ id: "open", label: "Open thread" }] } } });
     // The thread's events move while you answer; the row asks until none is pending.
-    env.sdk.interactions.mockResolvedValueOnce(1);
-    await env.first.signal("thr_origin", { kind: "events" });
+    await env.signal("thr_origin", { kind: "events" });
     expect(env.work.row(PR)?.phase).toBe("decision-needed");
-    await env.first.signal("thr_origin", { kind: "events" });
+    env.sdk.interactions.mockResolvedValue(0);
+    await env.signal("thr_origin", { kind: "events" });
     expect(env.work.row(PR)).toMatchObject({ phase: "executing", body: { cause: "worker", owner: { kind: "v2-attempt", ref: attempt.id } } });
     // Once nothing is pending, the thread's events read nothing more.
-    await env.first.signal("thr_origin", { kind: "events" });
-    expect(env.sdk.interactions).toHaveBeenCalledTimes(2);
+    const reads = env.sdk.interactions.mock.calls.length;
+    await env.signal("thr_origin", { kind: "events" });
+    expect(env.sdk.interactions).toHaveBeenCalledTimes(reads);
   });
 
   it("releases an attempt whose queued work order you deleted, pauses its row, and never reads a later turn in that thread as its result", async () => {
@@ -650,15 +659,15 @@ describe("worker results and SDK signals", () => {
     expect(await env.launch()).toBe("launched");
     const attempt = env.work.attempts(PR)[0]!;
     // Another message deleted from the same queue isn't ours.
-    await env.first.signal("thr_origin", { kind: "cancelled", text: "Also rerun the shelf tests." });
+    await env.signal("thr_origin", { kind: "cancelled", text: "Also rerun the shelf tests." });
     expect(env.work.attempt(attempt.id)?.status).toBe("running");
-    await env.first.signal("thr_origin", { kind: "cancelled", text: `${attempt.body.marker}\nPrepare exactly one PR toward merge.` });
+    await env.signal("thr_origin", { kind: "cancelled", text: `${attempt.body.marker}\nPrepare exactly one PR toward merge.` });
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "released", body: { releasedReason: "user-cancelled" } });
     expect(claimOf(env)).toBeNull();
     expect(env.work.row(PR)).toMatchObject({ phase: "paused", body: { cause: "user-cancelled" } });
     // A later turn in that thread, even one naming the marker with a valid report, is never this attempt's result.
     env.sdk.turn.mockResolvedValue({ status: "idle", requests: [{ seq: 20, id: "req-20", text: attempt.body.marker }], lastSeq: 25, output: result(attempt.id) });
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "released", body: { releasedReason: "user-cancelled" } });
     expect(env.work.attempt(attempt.id)?.body.report).toBeUndefined();
     expect([env.sdk.turn.mock.calls.length, env.sdk.read.mock.calls.length, env.work.row(PR)?.body.cause]).toEqual([0, 0, "user-cancelled"]);
@@ -670,22 +679,22 @@ describe("worker results and SDK signals", () => {
     const attempt = env.work.attempts(PR)[0]!;
     const reset = START + 45 * MINUTE;
     const limited = { status: "blocked", windows: [{ status: "blocked", resetsAtMs: reset }, { status: "allowed", resetsAtMs: START + 300 * MINUTE }] };
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: limited });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: limited });
     expect(env.sdk.retry).toHaveBeenLastCalledWith({ threadId: "thr_origin", turnRequestId: "req-1", sendAt: reset });
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "running", body: { turnRetries: 1, turnFailure: null } });
     expect(env.work.row(PR)).toMatchObject({ phase: "executing", body: { cause: "worker" } });
     // Core queued its own retry of the next failure: v2 asks for none, and spends none of its bound.
     env.sdk.retrying.mockResolvedValueOnce(true);
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-2", rateLimits: null });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-2", rateLimits: null });
     expect(env.sdk.retry).toHaveBeenCalledTimes(1);
     expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: null });
     // With no rate limit to wait out, the retry goes a minute later; an answer that is lost still spends it.
     env.sdk.retry.mockRejectedValueOnce(new Error("socket hang up"));
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-3", rateLimits: null });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-3", rateLimits: null });
     expect(env.sdk.retry).toHaveBeenLastCalledWith({ threadId: "thr_origin", turnRequestId: "req-3", sendAt: START + MINUTE });
     expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 2, turnFailure: { requestId: "req-3" }, error: "socket hang up" });
     // The bound is spent: no more retries, and the failure is a system issue. The attempt ends, so its claim goes and retry N can start anew.
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-4", rateLimits: null });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-4", rateLimits: null });
     expect(env.sdk.retry).toHaveBeenCalledTimes(2);
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "failed", body: { failure: "turn-failed", turnFailure: null } });
     expect(claimOf(env)).toBeNull();
@@ -697,7 +706,7 @@ describe("worker results and SDK signals", () => {
     expect(await env.launch()).toBe("launched");
     const attempt = env.work.attempts(PR)[0]!;
     env.settings.execution = "dry-run";
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: null });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: null });
     expect(env.sdk.retry).not.toHaveBeenCalled();
     expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnFailure: { requestId: "req-1" } });
     expect(env.work.attempt(attempt.id)?.body.turnRetries ?? 0).toBe(0);
@@ -734,7 +743,7 @@ describe("worker results and SDK signals", () => {
     const attempt = env.work.attempts(PR)[0]!;
     env.sdk.turn.mockResolvedValue({ status: "error", lastSeq: 15, output: null,
       requests: [{ seq: 14, id: "req-14", text: "Retry of req-12" }, { seq: 12, id: "req-12", text: attempt.body.marker }] });
-    await env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-12", rateLimits: null });
+    await env.signal("thr_origin", { kind: "turn-failed", requestId: "req-12", rateLimits: null });
     expect(env.sdk.retry).toHaveBeenCalledTimes(1);
     expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: null });
   });
@@ -767,9 +776,10 @@ describe("worker results and SDK signals", () => {
     const env = setup();
     expect(await env.launch()).toBe("launched");
     const attempt = env.work.attempts(PR)[0]!;
+    env.sdk.interactions.mockResolvedValue(1);
     let answer!: (moved: boolean) => void;
     env.sdk.retrying.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
-    const failing = env.first.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: null });
+    const failing = env.signal("thr_origin", { kind: "turn-failed", requestId: "req-1", rateLimits: null });
     await vi.waitFor(() => expect(env.sdk.retrying).toHaveBeenCalled());
     await env.first.signal("thr_origin", { kind: "interaction" });
     answer(false);
@@ -782,7 +792,7 @@ describe("worker results and SDK signals", () => {
     const env = setup();
     const attempt = await finished(env, (id) => result(id, { headOid: undefined, finalHeadOid: NEXT }));
     // The turn ended before GitHub showed the pushed head, so the older field name couldn't be checked against it.
-    await env.first.signal("thr_origin", { kind: "idle" });
+    await env.signal("thr_origin", { kind: "idle" });
     expect(env.work.attempt(attempt.id)?.body.report).toMatchObject({ key: "report-invalid", rejection: expect.stringContaining("isn't the live headOid") });
     await env.first.recheck(PR, { ...facts(), ...pushed });
     expect(env.work.attempt(attempt.id)?.body.report).toMatchObject({ key: "changed", rejection: null, compat: ["finalHeadOid → headOid"] });
@@ -793,13 +803,13 @@ describe("worker results and SDK signals", () => {
     expect(await env.launch()).toBe("launched");
     const attempt = env.work.attempts(PR)[0]!;
     env.sdk.turn.mockRejectedValueOnce(Object.assign(new Error("missing thread"), { status: 404 }));
-    await env.first.signal("thr_origin", { kind: "gone" });
+    await env.signal("thr_origin", { kind: "gone" });
     expect(env.work.attempt(attempt.id)).toMatchObject({ status: "failed", body: { failure: "thread-gone" } });
     expect([claimOf(env), env.work.row(PR)?.phase, env.work.row(PR)?.body.cause]).toEqual([null, "repair-needed", "thread-gone"]);
     const archived = setup();
     const done = await finished(archived, (id) => result(id));
     archived.world.pr = pushed;
-    await archived.first.signal("thr_origin", { kind: "gone" });
+    await archived.signal("thr_origin", { kind: "gone" });
     expect(archived.work.attempt(done.id)).toMatchObject({ status: "completed", body: { report: { key: "changed" } } });
   });
 
@@ -807,7 +817,7 @@ describe("worker results and SDK signals", () => {
     const env = setup({ execution: "dry-run" });
     expect(await env.launch()).toBe("planned");
     for (const signal of [{ kind: "idle" }, { kind: "interaction" }, { kind: "events" }, { kind: "turn-failed", requestId: "req-1", rateLimits: null },
-      { kind: "cancelled", text: "anything" }] as const) await env.first.signal("thr_origin", signal);
+      { kind: "cancelled", text: "anything" }] as const) expect(await env.first.signal("thr_origin", signal)).toBeNull();
     for (const call of Object.values(env.sdk)) expect(call).not.toHaveBeenCalled();
     expect(env.count("effort_attempts")).toBe(0);
   });

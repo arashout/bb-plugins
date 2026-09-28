@@ -9,10 +9,12 @@
 //
 // BB's signals about a worker's thread are facts on the attempt that holds it:
 // a pending interaction, a failed turn, a work order you deleted from the
-// queue. A turn is complete when its thread is idle, a turn request carries the
-// attempt's marker, and its output reads; its report is then read against a
-// fresh full read of the PR. The worker never declares readiness: its report
-// only routes the next step, and decide() judges the PR on fresh facts.
+// queue, a thread archived or deleted. The reconciler, not the event, then
+// takes the attempt's next step. A turn is complete when its thread is idle, a
+// turn request carries the attempt's marker, and its output reads; its report
+// is then read against a fresh full read of the PR. The worker never declares
+// readiness: its report only routes the next step, and decide() judges the PR
+// on fresh facts.
 import { createHash } from "node:crypto";
 import type { AdvanceFacts, AdvanceWorkspace, AdvanceWorkspaceInput } from "./advance-contract.js";
 import type { FeedbackReport } from "./approval-feedback.js";
@@ -372,11 +374,11 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
         matches = body.mode === "spawn" ? await deps.spawned(body.resource.projectId ?? "", attempt.id)
           : await deps.marked(body.resource.threadId ?? "", body.marker) ? [body.resource.threadId!] : [];
       } catch (error) {
-        record(attempt, ["uncertain"], { status: "uncertain", body: { failure: "source-unavailable", error: message(error) } });
+        record(attempt, ["uncertain"], { status: "uncertain", body: { failure: "source-unavailable", readbackFailures: (body.readbackFailures ?? 0) + 1, error: message(error) } });
         return;
       }
       const at = deps.now();
-      const clear = { failure: null, error: null };
+      const clear = { failure: null, error: null, readbackFailures: 0 };
       if (matches.length === 1) record(attempt, ["uncertain"], { status: "running", threadId: matches[0]!, body: { ...clear, emptyReadbackAt: null } });
       else if (matches.length > 1) record(attempt, ["uncertain"], { status: "uncertain", body: { failure: "duplicate-writer", error: `Threads ${matches.join(", ")} answer to ${attempt.id}.` } });
       else if (body.emptyReadbackAt === null || body.settledAt === null || body.emptyReadbackAt < body.settledAt)
@@ -393,7 +395,7 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
    * read here as well: a thread in error with no retry queued failed its turn, and a work order sent to an idle thread
    * that is in no turn request and no longer queued, on two reads a minute apart, was deleted from the queue.
    */
-  async function complete(attempt: StoredAttempt, gone: boolean): Promise<void> {
+  async function complete(attempt: StoredAttempt): Promise<void> {
     const threadId = attempt.threadId!;
     const { marker } = attempt.body;
     let turn: Awaited<ReturnType<EffortRunnerDeps["turn"]>> | null = null;
@@ -403,7 +405,7 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       const output = turn.output ?? "";
       record(attempt, ["running"], { status: "completed", body: { startSeq: mine.seq, endSeq: turn.lastSeq, endedAt: deps.now(), interactionPending: false,
         report: { raw: output.slice(-RAW_LIMIT), source: null, envelope: null, compat: [], rejection: null, key: null, headOid: null, baseMoved: false, criteria: [], blocker: null } } });
-    } else if (gone) record(attempt, ["running"], { status: "failed", body: { failure: "thread-gone", endedAt: deps.now(),
+    } else if (attempt.body.threadGone) record(attempt, ["running"], { status: "failed", body: { failure: "thread-gone", endedAt: deps.now(),
       error: "The worker's thread was archived or deleted before its turn finished." } });
     else if (turn?.status === "error") {
       // Its turn.failed never reached us, as across a reload: the newest turn failed, and is retried as that event would have it.
@@ -459,9 +461,10 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
 
   /**
    * One attempt's next step, then its row re-planned: read back an unfinished launch, retry a failed turn, read a
-   * finished turn, or read its report against fresh facts. `gone` fails a turn whose thread was archived or deleted.
+   * finished turn, or read its report against fresh facts. A turn whose thread was archived or deleted before it
+   * finished fails.
    */
-  function advance(attemptId: string, gone = false): Promise<void> {
+  function advance(attemptId: string): Promise<void> {
     return once(`advance:${attemptId}`, async () => {
       let attempt = deps.work.attempt(attemptId);
       if (!attempt) return;
@@ -478,7 +481,10 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       // A failure the thread already moved past no longer keeps its turn from being read. A retry just asked for is read once it
       // has run: until then the thread may still show the error, beside the retry's own turn request.
       if (attempt.status === "running" && !attempt.body.turnFailure && !asked) {
-        await complete(attempt, gone);
+        // A pending interaction is read again at its poll, in case the event that cleared it never reached us.
+        if (attempt.body.interactionPending && await deps.interactions(attempt.threadId!).catch(() => 1) === 0)
+          attempt = record(attempt, ["running"], { status: "running", body: { interactionPending: false } }) ?? attempt;
+        await complete(attempt);
         attempt = deps.work.attempt(attemptId)!;
       }
       if (attempt.status === "completed" && attempt.body.report?.key == null) await parse(attempt);
@@ -488,36 +494,36 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
 
   /**
    * BB said something about a thread. Only a claim of ours on that thread hears it, so a dry run, which claims
-   * nothing, hears nothing. The signal is recorded on the attempt; an idle, gone, or failed turn is then acted on.
+   * nothing, hears nothing. The signal is recorded on the attempt, and the attempt that heard it is returned: the
+   * caller makes its row due, and the reconciler takes its next step.
    */
-  async function signal(threadId: string, event: AttemptSignal): Promise<void> {
+  async function signal(threadId: string, event: AttemptSignal): Promise<{ effortId: string; target: string } | null> {
     const attempt = deps.work.claims().find((claim) => claim.threadId === threadId);
     // A launch still in flight settles when BB answers it.
-    if (!attempt || attempt.status === "launching") return;
+    if (!attempt || attempt.status === "launching") return null;
+    const heard = { effortId: attempt.effortId, target: attempt.target };
     const note = (patch: Partial<AttemptBody>, status: AttemptStatus = attempt.status) => record(attempt, [attempt.status], { status, body: patch });
-    if (event.kind === "idle" || event.kind === "gone") return advance(attempt.id, event.kind === "gone");
-    if (event.kind === "turn-failed") {
-      if (attempt.status !== "running") return;
+    if (event.kind === "gone") note({ threadGone: true });
+    else if (event.kind === "turn-failed") {
+      if (attempt.status !== "running") return null;
       note({ turnFailure: { requestId: event.requestId, sendAt: retryAt(event.rateLimits, deps.now()) } });
-      return advance(attempt.id);
-    }
-    if (event.kind === "interaction") note({ interactionPending: true });
+    } else if (event.kind === "interaction") note({ interactionPending: true });
     else if (event.kind === "events") {
       // BB has no "interaction answered" event; the thread's events move when you answer, so its interactions are read again then.
-      if (!attempt.body.interactionPending || await deps.interactions(threadId) > 0) return;
+      if (!attempt.body.interactionPending || await deps.interactions(threadId) > 0) return null;
       note({ interactionPending: false });
     } else if (event.kind === "cancelled") {
       // You deleted our queued work order before it ran: nothing started, and no later turn in that thread is this attempt's.
-      if (attempt.body.mode !== "send" || !event.text.includes(attempt.body.marker)) return;
+      if (attempt.body.mode !== "send" || !event.text.includes(attempt.body.marker)) return null;
       note({ releasedReason: "user-cancelled" }, "released");
     }
-    await deps.settle(attempt.effortId, attempt.target);
+    return heard;
   }
 
   /** Recheck: read the latest attempt's turn again, and its report against these fresh facts, even a report already read. The caller re-plans. */
   async function recheck(target: string, fresh: AdvanceFacts): Promise<void> {
     const [latest] = deps.work.attempts(target);
-    if (latest?.status === "running" && !latest.body.turnFailure) await complete(latest, false);
+    if (latest?.status === "running" && !latest.body.turnFailure) await complete(latest);
     const current = latest && deps.work.attempt(latest.id);
     if (current?.status === "completed") await parse(current, fresh);
   }

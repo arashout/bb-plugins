@@ -555,8 +555,8 @@ describe("effort instructions", () => {
       "Still needed: branch, checks, feedback, review, dependencies, merge: read GitHub (1, 2, 4, 6); also 5 · v2 · wake: the next reconciler pass; 5 tickets: their PRs (1, 2, 4-6)",
       "Needs a decision: none",
     ]);
-    expect(env.rows()).toEqual([[1, "verifying", "observe", "waiting"], [2, "verifying", "observe", "waiting"], [4, "verifying", "observe", "waiting"],
-      [5, "paused", "hold", "waiting"], [6, "verifying", "observe", "waiting"]]);
+    expect(env.rows()).toEqual([[1, "verifying", "observe", "doing"], [2, "verifying", "observe", "doing"], [4, "verifying", "observe", "doing"],
+      [5, "paused", "hold", "waiting"], [6, "verifying", "observe", "doing"]]);
     const replaced = await env.admit("only move 7-9 forward");
     expect(replaced.acknowledgment).toEqual(expect.arrayContaining(["Superseded: 1, 2, 4-6", "Next (planned; nothing runs until v2 execution is on): 7-9 read GitHub"]));
     expect(env.rows().filter(([, phase]) => phase !== "finished").map(([n]) => n)).toEqual([7, 8, 9]);
@@ -566,7 +566,7 @@ describe("effort instructions", () => {
     expect(roster).toMatchObject({ instruction: { revision: 2, text: "only move 7-9 forward", reportMode: "decisions-only" }, rollup: replaced.rollup });
     expect(roster.rows.slice(0, 9).map((row) => [row.n, row.state, row.cause, row.modifiers])).toEqual([
       ...[1, 2, 3, 4].map((n) => [n, "not-in-instruction", "review", []]), [5, "not-in-instruction", "hold", []], [6, "not-in-instruction", "review", []],
-      ...[7, 8, 9].map((n) => [n, "waiting", "observe", ["plan only"]])]);
+      ...[7, 8, 9].map((n) => [n, "doing", "observe", []])]);
   });
 
   it("corrects the evidence contract with done when and drop cN, each as an instruction revision", async () => {
@@ -591,7 +591,7 @@ describe("effort instructions", () => {
     expect(admitted.acknowledgment).toContain(`Outside membership, membership unchanged: ${future}`);
     expect(env.store.get(env.effort.id)!.members).toEqual(before);
     const row = (await env.roster(env.effort.id)).rows.find((item) => item.target === future);
-    expect(row).toMatchObject({ n: 32, outsideMembership: true, state: "waiting", cause: "observe" });
+    expect(row).toMatchObject({ n: 32, outsideMembership: true, state: "doing", cause: "observe" });
     const preview = await env.harness.callRpc("advance_preview", { prUrls: [future] }) as { jobs: { eligible: boolean; detail: string }[] };
     expect(preview.jobs).toEqual([expect.objectContaining({ eligible: false, detail: "Managed by the Catalog follow-ups roster; instruct there." })]);
     // Refresh reaches it too, though it isn't a member.
@@ -633,7 +633,7 @@ describe("effort instructions", () => {
     // Back on its roster, Catalog resumes its own rows and plans around Vault's.
     env.work.setMode(env.effort.id, "v2", 2, () => []);
     await env.admit("move 2 forward");
-    expect(env.rows()).toEqual([[1, "verifying", "observe", "waiting"], [2, "verifying", "observe", "waiting"]]);
+    expect(env.rows()).toEqual([[1, "verifying", "observe", "doing"], [2, "verifying", "observe", "doing"]]);
     expect(env.work.row(future)!.effortId).toBe(vault.id);
   });
 
@@ -684,7 +684,7 @@ describe("effort instructions", () => {
     expect(env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE source = 'archive'`).get()).toEqual({ count: 3 });
     expect(await env.command("move 4 forward")).toMatchObject({ kind: "clarify", message: expect.stringContaining("Restore Catalog follow-ups") });
     expect(await archive(false)).toMatchObject({ ok: true });
-    expect(env.rows()).toEqual([1, 2, 3].map((n) => [n, "verifying", "observe", "waiting"]));
+    expect(env.rows()).toEqual([1, 2, 3].map((n) => [n, "verifying", "observe", "doing"]));
   });
 
   it("pauses an instructed PR on a hold set from the board and resumes it on release", async () => {
@@ -692,9 +692,9 @@ describe("effort instructions", () => {
     await env.admit("move 1-2 forward");
     const [one, two] = [env.first.rows[0]!.target, env.first.rows[1]!.target];
     await env.harness.callRpc("pr_hold_set", { prUrl: one, held: true, reason: "the style guide is changing" });
-    expect(env.rows()).toEqual([[1, "paused", "hold", "waiting"], [2, "verifying", "observe", "waiting"]]);
+    expect(env.rows()).toEqual([[1, "paused", "hold", "waiting"], [2, "verifying", "observe", "doing"]]);
     await env.harness.callRpc("pr_hold_set", { prUrl: one, held: false });
-    expect(env.rows()).toEqual([[1, "verifying", "observe", "waiting"], [2, "verifying", "observe", "waiting"]]);
+    expect(env.rows()).toEqual([[1, "verifying", "observe", "doing"], [2, "verifying", "observe", "doing"]]);
     expect(env.transitions(one)).toEqual([{ revision: 1, phase: "verifying", source: "command" }, { revision: 2, phase: "paused", source: "hold" },
       { revision: 3, phase: "verifying", source: "hold" }]);
     expect(env.transitions(two)).toEqual([{ revision: 1, phase: "verifying", source: "command" }]);
@@ -789,7 +789,7 @@ describe("effort instructions", () => {
       counts: { doing: 0, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 } });
     const admitted = await env.admit("move 1-3 forward");
     expect(await context("thr_catalog_parent")).toEqual({ effort: { id: env.effort.id, key: env.effort.key, name: "Catalog follow-ups", archived: false },
-      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, decisions: [], rollup: admitted.rollup, counts: { doing: 0, waiting: 3, decision: 0, ready: 0, issue: 0, done: 0 } });
+      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, decisions: [], rollup: admitted.rollup, counts: { doing: 3, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 } });
     expect(await context("thr_someone_else")).toBeNull();
     createEffortWorkStore(env.db).setMode(env.effort.id, "legacy", 1, () => []);
     expect(await context("thr_catalog_parent")).toBeNull();
@@ -983,12 +983,14 @@ describe("effort instructions", () => {
       await env.admit("recheck 1, 2");
       expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 1, targets: [1, 2] }]);
       // The board saw PR 1 change after its full read, at the same head: until it is read again, its row keeps asking D1.
+      const url = env.target(1).toLowerCase();
+      const seen = JSON.parse((env.db.prepare(`SELECT entry FROM authored_prs WHERE url = ?`).get(url) as { entry: string }).entry);
+      env.db.prepare(`UPDATE authored_prs SET entry = ? WHERE url = ?`).run(JSON.stringify({ ...seen, pr: { ...seen.pr, unresolvedReviewThreads: 1 } }), url);
       env.db.prepare(`INSERT OR REPLACE INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)`).run(env.target(1), new Date(Date.now() + 60_000).toISOString());
       await env.admit("move 4 forward");
       expect(env.work.row(env.target(1))).toMatchObject({ phase: "decision-needed", body: { gates: null, decision: { key: "lifecycle:mark-ready" } } });
       expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 1, targets: [1, 2] }]);
       // The board then lists PR 1 on a new head that nothing has read in full: the new head doesn't inherit the old head's question.
-      const url = env.target(1).toLowerCase();
       const { entry } = env.db.prepare(`SELECT entry FROM authored_prs WHERE url = ?`).get(url) as { entry: string };
       env.db.prepare(`UPDATE authored_prs SET entry = ? WHERE url = ?`).run(JSON.stringify({ ...JSON.parse(entry), pr: { ...JSON.parse(entry).pr, headRefOid: "d".repeat(40) } }), url);
       env.db.prepare(`INSERT OR REPLACE INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)`).run(env.target(1), new Date(Date.now() + 120_000).toISOString());

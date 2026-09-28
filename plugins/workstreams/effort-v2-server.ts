@@ -7,8 +7,13 @@
 //
 // A numbered command is admitted in one step: code resolves it, plans each
 // PR's next step with decide(), and commits the instruction revision, the rows
-// that changed, and the acknowledgment together. Until the reconciler runs,
-// every step is a plan: nothing launches, sends, or writes to GitHub.
+// that changed, and the acknowledgment together. A command launches nothing:
+// the reconciler's next tick acts on the rows it planned.
+//
+// The reconciler (the `effort-v2` service) is the one v2 scheduler: events only
+// mark rows due, and each tick reads GitHub within its budgets, plans the due
+// rows, commits them at the revisions it read, and launches or takes an
+// attempt's next step. In a dry run a launch is only planned.
 //
 // Rows that ask the same question share one numbered decision. An answer
 // (`Dn …` or effort_decision_answer) applies only to the decision's revision its
@@ -22,15 +27,17 @@ import type { AdvanceJob } from "./bulk-advance.js";
 import { capAcknowledgment, EFFECTS, formatTargets, interpretEffortCommand, WORK_RECIPES, type CommandResult, type CommandRow, type CommandTarget,
   type DecisionAnswer, type InstructionScope } from "./effort-command.js";
 import { decide, PREPARED, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
-import type { ResourceWriter } from "./effort-resources.js";
+import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
 import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
-import { RECIPES } from "./effort-recipes.js";
-import type { Admission, V2Execution } from "./effort-runner.js";
+import { recipe, RECIPES } from "./effort-recipes.js";
+import type { Admission, Launch, LaunchOutcome, V2Execution } from "./effort-runner.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
-import { attemptEvidence, decideAttempt, decisionId, holdsPr, sameBody, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
-  type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
+import { attemptEvidence, decideAttempt, decisionId, holdsPr, sameBody, StaleWriteError, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution,
+  type ExecutionMode, type RowWrite, type StoredAttempt, type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
+import { githubRateLimit } from "./ghactions.js";
+import type { LegacyAttempt } from "./legacy-history.js";
 import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type CriterionEvidence } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor } from "./pr-holds.js";
@@ -38,6 +45,23 @@ import { prWorkItemKey } from "./work-item-index.js";
 
 /** Realtime: `{ effortId, prUrl }` names the one row a refresh recomputed. */
 export const EFFORT_ROSTER_CHANGED = "effort-roster-changed";
+
+const MINUTE = 60_000;
+/** The reconciler's budgets (plan §2.6 and §7 item 14). */
+const RECONCILE = {
+  tick: 15_000,
+  duePerTick: 20,
+  /** A PR the board or the reconciler read cheaply this recently isn't read again. */
+  cheapFresh: MINUTE,
+  /** A launch, a code action, or Ready needs a full read this fresh. */
+  fullFresh: 2 * MINUTE,
+  fullPerMinute: 4,
+  /** A step planned but not performed (a dry run's launch, a code action) looks again after this, unless an event wakes it first. */
+  plannedPoll: 5 * MINUTE,
+  legacyRecheckEvery: 10 * MINUTE,
+  /** Minutes a secondary rate limit, which names no reset, or a PR GitHub couldn't read, backs off. */
+  backoff: [1, 2, 4, 8, 15],
+};
 
 const executionSchema = z.object({ mode: z.enum(["legacy", "v2"]), revision: z.number().int().nonnegative() });
 const legacyJobSchema = z.object({ batchId: z.string(), jobId: z.string(), prUrl: z.string(), repo: z.string(), number: z.number(),
@@ -120,17 +144,27 @@ export const parentPrompt = (name: string) => `This is the effort parent thread 
 
 /** A PR's step as decide() plans it, the row body recording it, and the user criteria it still lacks proof of. */
 export type PlannedRow = { target: string; phase: Next["phase"]; step: Next; body: WorkRowBody; criteria: string[] };
+/** The checkouts and threads a launch could use, as the reconciler reads them. */
+export type ResourceParts = Omit<ResourceInput, "effortId" | "pr" | "model" | "attempt" | "legacy" | "writers" | "unpushedAllowed">;
+/** A worker launch, as opposed to a code action or a wait. */
+const isLaunch = (step: Next) => step.phase === "queued" && Array.isArray(step.nextAction) && step.nextAction.every((id) => recipe(id).executor === "worker");
 
-/** The user state a step shows. Nothing performs a planned step until the reconciler runs, so it waits, marked as a plan. */
-function shown(step: Next): Pick<WorkRowBody, "userState" | "modifiers"> {
+/**
+ * The user state a step shows. The reconciler reads GitHub and BB in any mode, and launches a worker or asks BB to retry
+ * a failed turn only with v2 execution on; a step nothing performs yet (a launch or a turn retry in a dry run, or a code
+ * action, which no code runs yet) waits, marked as a plan.
+ */
+function shown(step: Next, execution: V2Execution): Pick<WorkRowBody, "userState" | "modifiers"> {
+  const planned = (step.phase === "queued" && !(execution === "on" && isLaunch(step))) || (execution !== "on" && step.nextAction === "retry-turn");
   const userState: UserState = step.phase === "prepared" ? "ready" : step.phase === "finished" ? "done" : step.phase === "decision-needed" ? "decision"
-    : step.phase === "repair-needed" ? step.modifiers.includes("recovering") ? "doing" : "issue" : step.phase === "executing" ? "doing" : "waiting";
-  return { userState, modifiers: step.phase === "queued" || step.phase === "verifying" ? [...step.modifiers, "plan only"] : step.modifiers };
+    : step.phase === "repair-needed" ? step.modifiers.includes("recovering") ? planned ? "waiting" : "doing" : "issue"
+    : ["executing", "verifying", "queued"].includes(step.phase) && !planned ? "doing" : "waiting";
+  return { userState, modifiers: planned ? [...step.modifiers, "plan only"] : step.modifiers };
 }
 
 /** The row body recording a step, with the facts it was planned from. */
-export function rowBody(step: Next, row: Pick<WorkRowBody, "n" | "retryEpoch" | "observedHead" | "observedAt" | "gates" | "tickets">): WorkRowBody {
-  return { n: row.n, cause: step.cause, detail: step.detail, ...shown(step), nextAction: step.nextAction, owner: step.owner, wake: step.wake, decision: step.decision,
+export function rowBody(step: Next, row: Pick<WorkRowBody, "n" | "retryEpoch" | "observedHead" | "observedAt" | "gates" | "tickets">, execution: V2Execution): WorkRowBody {
+  return { n: row.n, cause: step.cause, detail: step.detail, ...shown(step, execution), nextAction: step.nextAction, owner: step.owner, wake: step.wake, decision: step.decision,
     recovery: step.recovery, offers: step.offers, retryEpoch: row.retryEpoch, observedHead: row.observedHead, observedAt: row.observedAt, gates: row.gates, tickets: row.tickets };
 }
 
@@ -139,7 +173,7 @@ export function rowBody(step: Next, row: Pick<WorkRowBody, "n" | "retryEpoch" | 
  * its recipes and leaves the checkout and thread to the reconciler's reads. A criterion has proof only from a
  * worker's accepted report on the PR's current head.
  */
-export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode; scope: InstructionScope | null; sources: RosterSources;
+export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode; execution: V2Execution; scope: InstructionScope | null; sources: RosterSources;
   models: Record<ModelRole, ModelChoice>; held(target: string): boolean; targets: readonly { target: string; n: number | null; retryEpoch: number }[];
   /** The open decision a PR asked, and the head it asked on. */
   open?(target: string): { decision: RowDecision; head: string | null } | null;
@@ -150,7 +184,15 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
   /** Whether a new launch may start now; open when absent. */
   admission?: Admission;
   /** A writer found outside the board's facts, such as the holder of a claim that just failed. */
-  writer?(target: string): ResourceWriter | null }): PlannedRow[] {
+  writer?(target: string): ResourceWriter | null;
+  /** The reconciler's reads of a launch's checkouts and threads; without them a launch plans its recipes and leaves where it runs to those reads. */
+  resources?(target: string): ResourceParts | undefined;
+  /** GitHub's rate limit holds reads until then. */
+  rateLimitedUntil?: number | null;
+  /** How often the reconciler rechecked the uncertain legacy Advance job that holds a PR. */
+  legacyRechecks?(target: string): number;
+  /** A PR GitHub couldn't read in full on its last reads. */
+  unreadable?(target: string): DecideInput["unreadable"] }): PlannedRow[] {
   const { sources, scope } = input;
   const read = input.targets.map(({ target, n, retryEpoch }) => {
     const observed = observedFacts(target, sources);
@@ -163,19 +205,30 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
       checkout: (item?.paths.length ?? 0) > 0, tickets, gates };
     return { target, n, retryEpoch, observed, item, tickets, feedback, gates, contract };
   });
+  // Every active writer counts against the PR itself; the runner checks the chosen checkout's writers again inside its claim.
+  const resourcesOf = (target: string, paths: readonly string[]): DecideInput["resources"] => {
+    const legacy = sources.legacy.get(target) ?? null;
+    const writers = [...activeWriters(target, paths, sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })),
+      ...[input.writer?.(target)].filter((writer) => writer != null)];
+    const parts = input.resources?.(target);
+    // Allow on "Unpushed commits in <path>" lets v2 push beside the author's unpushed work.
+    return parts ? { ...parts, legacy, writers, unpushedAllowed: (scope?.answers ?? []).some((answer) => answer.targets.includes(target)
+      && answer.question.startsWith("Unpushed commits in ") && answer.answer === "Allow") } : { legacy, inspections: null, writers };
+  };
   const included = new Set(scope?.include.map((grant) => prWorkItemKey(grant.target)));
   const pending = scope ? pendingCriteria(scope, read.filter((row) => included.has(row.target)).map((row) => row.contract), input.evidence ?? []) : new Map<string, string[]>();
   return read.map((row) => {
+    const attempts = input.attempts?.(row.target) ?? [];
+    // A PR a worker reported blocking this one settles once it merges or closes.
+    const settledDependencies = new Set(attempts.flatMap((attempt) => attempt.blocker?.prUrl ? [prWorkItemKey(attempt.blocker.prUrl)] : [])
+      .filter((url) => ["MERGED", "CLOSED"].includes(observedFacts(url, sources).facts?.state ?? "OPEN")));
     const decideInput: DecideInput = { now: sources.now, target: row.target, effort: { id: input.effort.id, mode: input.mode, archived: Boolean(input.effort.archivedAt) },
       ownerId: sources.work.ownerForPr(row.target)?.id ?? null, instruction: scope, held: input.held(row.target), full: row.observed.full, feedback: row.feedback,
-      reviewers: row.observed.pr, attempts: input.attempts?.(row.target) ?? [], codeActions: [], retryEpoch: row.retryEpoch, decision: null,
+      reviewers: row.observed.pr, attempts, codeActions: [], retryEpoch: row.retryEpoch, decision: null,
       declined: (scope?.answers ?? []).flatMap((answer) => answer.subkind && answer.declined.includes(row.target) ? [answer.subkind] : []),
-      criteriaPending: (pending.get(row.target)?.length ?? 0) > 0, settledDependencies: new Set(), admission: input.admission ?? { capacityFull: false, breakerOpen: false },
-      models: input.models,
-      // No checkout is chosen yet, so every active writer counts against the PR.
-      resources: { legacy: sources.legacy.get(row.target) ?? null, inspections: null,
-        writers: [...activeWriters(row.target, row.item?.paths ?? [], sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })),
-          ...[input.writer?.(row.target)].filter((writer) => writer != null)] } };
+      criteriaPending: (pending.get(row.target)?.length ?? 0) > 0, settledDependencies, admission: input.admission ?? { capacityFull: false, breakerOpen: false },
+      models: input.models, rateLimitedUntil: input.rateLimitedUntil ?? null, legacyRechecks: input.legacyRechecks?.(row.target) ?? 0,
+      unreadable: input.unreadable?.(row.target) ?? null, resources: resourcesOf(row.target, row.item?.paths ?? []) };
     let step = decide(decideInput);
     // An open decision holds its row while the facts that asked it are read again, so its number stays put. Once they are
     // read, decide() asks again only if the question still applies; a new head never inherits the old head's question.
@@ -183,7 +236,7 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
     if (open && open.head === (row.observed.facts?.headOid || null)) step = decide({ ...decideInput, decision: open.decision });
     return { target: row.target, phase: step.phase, step, criteria: pending.get(row.target) ?? [],
       body: rowBody(step, { n: row.n, retryEpoch: row.retryEpoch, observedHead: row.observed.facts?.headOid || null, observedAt: row.observed.full?.at ?? null,
-        gates: row.gates, tickets: row.tickets }) };
+        gates: row.gates, tickets: row.tickets }, input.execution) };
   });
 }
 
@@ -297,14 +350,37 @@ export type EffortV2Deps = {
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
-    | "attempts" | "attempt" | "claims" | "release">;
+    | "attempts" | "attempt" | "claims" | "release" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
    */
   launches: { execution(): Promise<V2Execution>; admission(): Promise<Admission>; recover(attemptId: string): Promise<void>; launching(target: string): boolean;
     /** Recheck: read the latest attempt's turn again, and its report against these fresh facts. */
-    recheck(target: string, fresh: AdvanceFacts): Promise<void> };
+    recheck(target: string, fresh: AdvanceFacts): Promise<void>;
+    launch(input: Launch): Promise<LaunchOutcome>;
+    /** An attempt's next step: read back its launch, retry its failed turn, read its finished turn, or read its report. */
+    advance(attemptId: string): Promise<void> };
+  /** The reconciler's reads and clock. */
+  reconciler: {
+    now(): number;
+    /** When the board or the reconciler last read this PR cheaply. */
+    cheapAt(prUrl: string): number | null;
+    /**
+     * One cheap read of these PRs, written through the board's stores where the board tracks them: the PRs whose signature
+     * differs from their last full read's, including any that left the open list, and why the read failed.
+     */
+    cheap(prUrls: readonly string[]): Promise<{ changed: string[]; error: string | null }>;
+    /** One full read, kept in pr_facts. */
+    full(prUrl: string): Promise<{ status: "checked" } | { status: "failed"; error: string }>;
+    /** When GitHub's exhausted primary rate limits reset. */
+    rateLimitReset(): Promise<number | null>;
+    /** The checkouts and threads a launch could use: scanned checkouts and legacy worktrees read in place, and the threads in them. */
+    resources(target: string, facts: AdvanceFacts, attempt: StoredAttempt | null): Promise<ResourceParts>;
+    /** Recheck one legacy Advance job, as its own Recheck would, without revealing it in progress. */
+    recheckLegacy(batchId: string, jobId: string): Promise<void>;
+    warn(message: string): void;
+  };
   /** Holds write through the existing store, inside the command's transaction; `changed` tells the board afterward. */
   holds: { set(prUrl: string, held: boolean, reason?: string): unknown; changed(): void };
   models(): Promise<Record<ModelRole, ModelChoice>>;
@@ -369,6 +445,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     queues.set(effortId, next.catch(() => undefined));
     return next;
   }
+  /** PRs GitHub couldn't read in full on the reconciler's last reads, which back off until `retryAt`. A read that succeeds clears one. */
+  const unreadable = new Map<string, NonNullable<DecideInput["unreadable"]>>();
   /** Criteria evidence from our attempts' reports on these PRs. */
   const evidenceOf = (targets: Iterable<string>) => attemptEvidence([...targets].flatMap((target) => deps.work.attempts(target)));
   /** Our attempts on a PR as decide() reads them; a claim `reset N release` drops is read as released. */
@@ -383,7 +461,8 @@ export function createEffortV2(deps: EffortV2Deps) {
    */
   async function replan(effort: EstablishedEffort, scope: InstructionScope | null, sources: RosterSources,
     options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string>; decisions: readonly Decision[]; released?: ReadonlySet<string>;
-      change?: { target: string; attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission } }) {
+      change?: { target: string; attempts: readonly Attempt[]; writer?: ResourceWriter; admission?: Admission };
+      resources?: ReadonlyMap<string, ResourceParts>; rateLimitedUntil?: number | null; legacyRechecks?(target: string): number }) {
     const open = deps.work.rows(effort.id).filter((row) => row.phase !== "finished").map((row) => row.target);
     const numberOf = new Map([...deps.snapshots.issued(effort.id)].map(([n, target]) => [target, n]));
     // A row another effort holds is that effort's to plan, even while this instruction still names its PR.
@@ -391,10 +470,12 @@ export function createEffortV2(deps: EffortV2Deps) {
     const targets = [...stored].filter(([, row]) => !row || row.effortId === effort.id || !holdsPr(row)).map(([target]) => target);
     // Another effort's row starts over here, number and epoch alike; this effort's row keeps its epoch unless a retry or reset starts a new one.
     const { change } = options;
-    const planned = planRows({ effort, mode: deps.execution.get(effort.id).mode, scope, sources, models: await deps.models(), held: options.held,
+    const planned = planRows({ effort, mode: deps.execution.get(effort.id).mode, execution: await deps.launches.execution(), scope, sources, models: await deps.models(), held: options.held,
       admission: change?.admission ?? await deps.launches.admission(),
       attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released), evidence: evidenceOf(targets),
       writer: (target) => change?.target === target ? change.writer ?? null : null,
+      resources: (target) => options.resources?.get(target), rateLimitedUntil: options.rateLimitedUntil ?? null, ...options.legacyRechecks ? { legacyRechecks: options.legacyRechecks } : {},
+      unreadable: (target) => unreadable.get(target) ?? null,
       targets: targets.map((target) => {
         const row = stored.get(target);
         const mine = row?.effortId === effort.id ? row : null;
@@ -433,6 +514,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       if (writes.length === 0) return;
       deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source, rows: writes, instruction: null, decisions, journal: null });
       deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+      nudge();
     });
   }
   /** One PR's row as a launch about to claim it would write it: planned from stored facts, with the attempts, writer, and admission the launch sees. */
@@ -609,7 +691,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       acknowledgment: capAcknowledgment([...result.acknowledgment, ...answerLines,
         ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
         ...result.recheckLaunches ? [`Readback: ${readback.join("; ") || "no launch is unfinished"}`] : [],
-        ...next.length ? [`Next (planned; nothing runs until v2 execution is on): ${steps(next)}`] : []]),
+        ...next.length ? [`Next${await deps.launches.execution() === "on" ? "" : " (planned; nothing runs until v2 execution is on)"}: ${steps(next)}`] : []]),
       rollup: scope ? rowContract(effort, scope, planned, sources.work, after, evidenceOf(planned.map((row) => row.target))).rollup : null,
     };
     deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source: "command", rows: writes,
@@ -625,6 +707,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       } });
     if (result.holds.length || result.releases.length) deps.holds.changed();
     deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+    nudge();
     return answer;
   }
   /** The banner's view of an effort parent thread: its counts, rollup, and the snapshot and revision a command there reads. */
@@ -645,7 +728,10 @@ export function createEffortV2(deps: EffortV2Deps) {
   function observeOnce(target: string, paths: readonly string[]): ReturnType<EffortV2Deps["observe"]> {
     let observed = observing.get(target);
     if (!observed) {
-      observed = deps.observe(target, paths).finally(() => observing.delete(target));
+      observed = deps.observe(target, paths).then((read) => {
+        if (read.status === "checked") unreadable.delete(prWorkItemKey(target));
+        return read;
+      }).finally(() => observing.delete(target));
       observing.set(target, observed);
     }
     return observed;
@@ -659,12 +745,230 @@ export function createEffortV2(deps: EffortV2Deps) {
     if (target === null || !rosterTargets(effort, work, included).includes(target)) throw new Error("That PR is not on this effort's roster.");
     const result = await observeOnce(target, work.items.get(target)?.paths ?? []);
     await settle(effort.id, "refresh", new Set([target]));
+    markDue([target]);
     deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id, prUrl: target });
     const row = (await roster(effort.id)).rows.find((item) => item.target === target);
     // A full read keeps a PR placed after the board drops it, so a row leaves only when ownership moved or no read succeeded.
     if (!row) throw new Error(`That PR is no longer on this effort's roster${result.status === "failed" ? `: ${result.error}` : "."}`);
     return { ...result, row };
   }
+  // The reconciler: the one v2 scheduler. It ticks every 15 seconds, or sooner when an event makes a row due; events
+  // only mark rows due, and only a tick reads GitHub, launches, or takes an attempt's next step. Pass 0 reads every
+  // unfinished launch back before the first tick, so no launch is admitted until it finishes.
+  let fullReads: number[] = [];
+  let limitedUntil: number | null = null;
+  let secondaryLimits = 0;
+  let wake: (() => void) | null = null;
+  let nudged = false;
+  const v2Rows = () => deps.efforts.list().filter((effort) => deps.execution.get(effort.id).mode === "v2").flatMap((effort) => deps.work.rows(effort.id));
+  /** Tick now instead of at the next 15 seconds. */
+  function nudge(): void {
+    if (wake) wake();
+    else nudged = true;
+  }
+  /** Events only mark rows due; the next tick acts on them. */
+  function markDue(targets: readonly string[]): void {
+    if (targets.length === 0) return;
+    deps.work.markDue(targets, deps.reconciler.now());
+    nudge();
+  }
+  /** The PR a waiting row waits on: its stack parent (`owner/repo#N`), or the PR a worker reported blocking it. */
+  function waitsOn(row: WorkRow): string | null {
+    const ref = row.phase === "waiting" && ["parent", "dependency"].includes(row.body.cause) && row.body.owner?.kind === "pr" ? row.body.owner.ref : null;
+    const stack = ref && /^(.+)#(\d+)$/u.exec(ref);
+    if (!stack) return ref && prWorkItemKey(ref);
+    const slug = stack[1]!.split("/");
+    return prWorkItemKey(slug.length === 3 ? `https://${slug[0]}/${slug[1]}/${slug[2]}/pull/${stack[2]}` : `https://github.com/${stack[1]}/pull/${stack[2]}`);
+  }
+  /** A thread went idle, failed, or went away: rows waiting on it as a writer look again, and when it was our worker, its row and rows waiting for a worker slot. */
+  function threadChanged(threadId: string, heard: { target: string } | null): void {
+    markDue([...heard ? [heard.target] : [], ...v2Rows().filter((row) => row.body.owner?.ref === threadId
+      || (heard !== null && row.phase === "waiting" && ["capacity", "launch-breaker"].includes(row.body.cause))).map((row) => row.target)]);
+  }
+  /** The board read these PRs: their rows, and rows waiting on them, look again. */
+  function observed(urls: readonly string[]): void {
+    const read = new Set(urls.map(prWorkItemKey));
+    if (read.size) markDue(v2Rows().filter((row) => read.has(row.target) || read.has(waitsOn(row) ?? "")).map((row) => row.target));
+  }
+  /** Legacy Advance changed: rows waiting for a legacy job to drain look again. */
+  function legacyChanged(): void {
+    markDue(v2Rows().filter((row) => row.phase === "waiting" && row.body.cause === "legacy-drain").map((row) => row.target));
+  }
+  const isLimited = (now: number) => limitedUntil !== null && now < limitedUntil;
+  /** A read that hit GitHub's rate limit holds every read until the reported reset, or backs off when GitHub names none; true when it was one. */
+  async function limit(error: string, now: number): Promise<boolean> {
+    const kind = githubRateLimit(error);
+    if (kind === "primary") limitedUntil = ((await deps.reconciler.rateLimitReset()) ?? now + MINUTE) + 30_000;
+    else if (kind === "secondary") limitedUntil = now + RECONCILE.backoff[Math.min(secondaryLimits++, RECONCILE.backoff.length - 1)]! * MINUTE;
+    return kind !== null;
+  }
+  /** One full read within the budget of four a minute, unless a rate limit holds reads or the PR backs off after failed reads; true when it read. */
+  async function readFull(prUrl: string): Promise<boolean> {
+    const now = deps.reconciler.now();
+    const key = prWorkItemKey(prUrl);
+    fullReads = fullReads.filter((at) => at > now - MINUTE);
+    if (isLimited(now) || now < (unreadable.get(key)?.retryAt ?? now) || fullReads.length >= RECONCILE.fullPerMinute) return false;
+    fullReads.push(now);
+    const read = await deps.reconciler.full(prUrl);
+    if (read.status === "checked") {
+      secondaryLimits = 0;
+      unreadable.delete(key);
+      return true;
+    }
+    // Any other failure backs this PR off 1, 2, 4, 8, then 15 minutes, so a PR GitHub can't read never takes the other PRs' reads.
+    if (!await limit(read.error, now)) {
+      const tries = (unreadable.get(key)?.tries ?? 0) + 1;
+      unreadable.set(key, { tries, error: read.error.slice(0, 300), retryAt: now + RECONCILE.backoff[Math.min(tries, RECONCILE.backoff.length) - 1]! * MINUTE });
+    }
+    return false;
+  }
+  type Recheck = { target: string; job: string; at: number };
+  /** The reconciler's rechecks of the uncertain legacy job that holds a PR now, newest first. */
+  const rechecks = (effortId: string, target: string, legacy: LegacyAttempt | null): Recheck[] => legacy?.cause !== "uncertain" ? []
+    : (deps.work.notes(effortId, "legacy-recheck") as Recheck[]).filter((note) => note.target === target && note.job === `${legacy.batchId}/${legacy.job.id}`);
+  /**
+   * After a pass: journal the instruction's criteria when a status changes (so "outcome validated" is journaled once, as it
+   * becomes true, and the instruction stays active), and complete the instruction once every included PR finished with its
+   * criteria held on its final head.
+   */
+  function evaluate(effort: EstablishedEffort, sources: RosterSources): void {
+    const active = deps.work.instruction(effort.id);
+    if (!active) return;
+    const rows = deps.work.rows(effort.id);
+    const contract = rowContract(effort, active.scope, rows, sources.work, deps.work.decisions(effort.id), evidenceOf(rows.map((row) => row.target)));
+    const state = { instructionId: active.id, criteria: Object.fromEntries(contract.criteria.map((item) => [item.id, item.status])),
+      outcomeValidated: contract.outcomeValidated, completed: contract.completed };
+    if (JSON.stringify(deps.work.notes(effort.id, "criteria", 1)[0]) !== JSON.stringify(state)) deps.work.note(effort.id, "criteria", state);
+    if (contract.completed) deps.work.completeInstruction(active.id);
+  }
+  type Due = { row: WorkRow; step: Next; criteria: string[]; facts: AdvanceFacts | null; legacy: LegacyAttempt | null };
+  /**
+   * One pass over an effort's due rows: plan them from stored facts, read checkouts and threads for each launch so the row
+   * says where it would run, commit the rows whose step changed at the revisions they were read at, and set when the rest
+   * look again. A pass that loses the compare-and-swap to another instance or a command writes nothing.
+   */
+  function pass(effortId: string, targets: ReadonlySet<string>): Promise<Due[]> {
+    return serial(effortId, async () => {
+      const effort = deps.efforts.get(effortId);
+      const lastRevision = deps.work.lastRevision(effortId);
+      if (effort?.id !== effortId || lastRevision === 0) return [];
+      const sources = await deps.sources();
+      const scope = deps.work.instruction(effortId)?.scope ?? null;
+      const options = { held: (target: string) => prHoldFor(target, sources.holds) !== null, retry: new Set<string>(), decisions: deps.work.decisions(effortId), only: targets,
+        rateLimitedUntil: limitedUntil, legacyRechecks: (target: string) => rechecks(effortId, target, sources.legacy.get(target) ?? null).length };
+      let plan = await replan(effort, scope, sources, options);
+      const resources = new Map<string, ResourceParts>();
+      for (const row of plan.planned) {
+        const facts = targets.has(row.target) && isLaunch(row.step) && !row.step.resource ? sources.full(row.target)?.facts : null;
+        if (facts) resources.set(row.target, await deps.reconciler.resources(row.target, facts, deps.work.attempts(row.target)[0] ?? null));
+      }
+      if (resources.size) plan = await replan(effort, scope, sources, { ...options, resources });
+      try {
+        if (plan.writes.length) deps.work.commit({ effortId, baseRevision: lastRevision, source: "reconciler", rows: plan.writes, instruction: null, decisions: plan.decisions, journal: null });
+      } catch (error) {
+        if (error instanceof StaleWriteError) return [];
+        throw error;
+      }
+      if (plan.writes.length) deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId });
+      const written = new Set(plan.writes.map((write) => prWorkItemKey(write.target)));
+      const due: Due[] = [];
+      for (const planned of plan.planned) {
+        const row = targets.has(planned.target) ? deps.work.row(planned.target) : null;
+        if (row?.effortId !== effortId) continue;
+        if (!written.has(row.target)) deps.work.reschedule(row.target, row.revision, planned.step.wake?.dueAt ?? null);
+        due.push({ row, step: planned.step, criteria: planned.criteria, facts: sources.full(row.target)?.facts ?? null, legacy: sources.legacy.get(row.target) ?? null });
+      }
+      evaluate(effort, sources);
+      return due;
+    });
+  }
+  /** Act on one row a pass planned: take its attempt's next step, launch its work order, or recheck the legacy job it waits on. */
+  async function act(effortId: string, { row, step, criteria, facts, legacy }: Due): Promise<void> {
+    const now = deps.reconciler.now();
+    const [latest] = deps.work.attempts(row.target);
+    // A pending worker interaction is read again at its poll too.
+    if (latest && ((typeof step.nextAction === "string" && ["attach", "parse-report", "retry-turn", "recover-launch"].includes(step.nextAction))
+      || step.cause === "worker-interaction")) return deps.launches.advance(latest.id);
+    if (isLaunch(step) && step.resource) {
+      const scope = deps.work.instruction(effortId)?.scope;
+      const grant = scope?.include.find((item) => prWorkItemKey(item.target) === row.target);
+      if (!scope || !grant || !facts) return;
+      const outcome = await deps.launches.launch({ effortId, target: row.target, baseRevision: deps.work.lastRevision(effortId), expectedRevision: row.revision, step, body: row.body,
+        order: { revision: scope.revision, facts, granted: grant.effects, parentMerged: false, tickets: row.body.tickets, threads: [], direction: null,
+          criteria: criteria.map((id) => ({ id, text: scope.criteria.find((item) => item.id === id)?.text ?? id, fixAuthorized: false })),
+          answers: scope.answers.filter((answer) => answer.targets.includes(row.target)).map((answer) => ({ decision: `D${answer.n}`, question: answer.question, answer: answer.answer })) } });
+      if (outcome !== "planned") return;
+    } else if (step.phase === "waiting" && step.cause === "legacy-drain" && legacy?.cause === "uncertain") {
+      // An uncertain legacy job is rechecked every 10 minutes; after six, decide() names it a system issue.
+      if ((rechecks(effortId, row.target, legacy)[0]?.at ?? -Infinity) > now - RECONCILE.legacyRecheckEvery) return;
+      deps.work.note(effortId, "legacy-recheck", { target: row.target, job: `${legacy.batchId}/${legacy.job.id}`, at: now } satisfies Recheck);
+      return deps.reconciler.recheckLegacy(legacy.batchId, legacy.job.id);
+    } else if (step.phase !== "queued") return;
+    // A planned launch in a dry run, or a code action nothing runs yet, looks again later, or at an event.
+    const current = deps.work.row(row.target);
+    if (current?.phase === "queued") deps.work.reschedule(row.target, current.revision, now + RECONCILE.plannedPoll);
+  }
+  /**
+   * One tick: select due rows, oldest first. Read them cheaply (skipping any read in the last minute) along with every PR a
+   * waiting row waits on, so a parent's merge wakes its child in this tick. Read in full only what changed, left the open
+   * list, has no full read, or needs one under two minutes old for its next step, at most four a minute. Then plan, commit,
+   * and act.
+   */
+  async function tick(): Promise<void> {
+    const now = deps.reconciler.now();
+    let due = deps.work.due(now, RECONCILE.duePerTick);
+    const watched = v2Rows().flatMap((row) => { const on = waitsOn(row); return on ? [{ on, row }] : []; });
+    const unread = [...new Set([...due.map((row) => row.target), ...watched.map((item) => item.on)])]
+      .filter((url) => (deps.reconciler.cheapAt(url) ?? -Infinity) <= now - RECONCILE.cheapFresh);
+    const changed = new Set<string>();
+    if (unread.length && !isLimited(now)) {
+      const read = await deps.reconciler.cheap(unread);
+      for (const url of read.changed) changed.add(prWorkItemKey(url));
+      if (read.error) await limit(read.error, now);
+    }
+    // A PR a worker reported blocking a row has no row of its own to read it in full, so its change is read here: a merge settles the wait.
+    for (const on of new Set(watched.filter((item) => item.row.body.cause === "dependency" && changed.has(prWorkItemKey(item.on))).map((item) => item.on))) await readFull(on);
+    const woken = watched.filter((item) => changed.has(prWorkItemKey(item.on))).map((item) => item.row);
+    for (const row of woken) changed.add(row.target);
+    due = [...new Map([...due, ...woken].map((row) => [row.target, row])).values()];
+    if (due.length === 0) return;
+    const sources = await deps.sources();
+    for (const row of due) {
+      const fullAt = sources.full(row.target)?.fullAt ?? null;
+      // A launch, a code action, Ready, and a wait that ends in a launch all decide on a read under two minutes old.
+      const needsFresh = row.phase === "queued" || row.phase === "prepared" || row.body.nextAction === "observe"
+        || (row.phase === "waiting" && ["capacity", "launch-breaker", "writer-available", "legacy-drain"].includes(row.body.cause));
+      if (changed.has(row.target) || fullAt === null || (needsFresh && fullAt <= now - RECONCILE.fullFresh)) await readFull(row.target);
+    }
+    for (const effortId of new Set(due.map((row) => row.effortId)))
+      for (const item of await pass(effortId, new Set(due.filter((row) => row.effortId === effortId).map((row) => row.target)))) await act(effortId, item);
+  }
+  /** Pass 0, on every start: read every unfinished launch back, then make every open row due. */
+  async function recoverAll(): Promise<void> {
+    for (const claim of deps.work.claims()) if (claim.status !== "running") {
+      try { await deps.launches.recover(claim.id); }
+      catch (error) { deps.reconciler.warn(`v2 readback of ${claim.id} failed: ${String(error).slice(0, 300)}`); }
+    }
+    deps.work.markDue(v2Rows().map((row) => row.target), deps.reconciler.now());
+  }
+  /** The `effort-v2` background service: pass 0, then a tick every 15 seconds or at the next event, until stopped. */
+  async function run(signal: AbortSignal): Promise<void> {
+    await recoverAll();
+    while (!signal.aborted) {
+      nudged = false;
+      try { await tick(); }
+      catch (error) { deps.reconciler.warn(`v2 reconciler tick failed: ${String(error).slice(0, 300)}`); }
+      if (signal.aborted || nudged) continue;
+      // A plain setTimeout would sleep through the stop and leave the plugin degraded on reload.
+      await new Promise<void>((resolve) => {
+        const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); wake = null; resolve(); };
+        const timer = setTimeout(done, RECONCILE.tick);
+        signal.addEventListener("abort", done, { once: true });
+        wake = done;
+      });
+    }
+  }
+
   /** Legacy Advance jobs on these PRs: queued ones never started and are cancelled one by one; started or uncertain ones drain. */
   function legacyJobs(targets: ReadonlySet<string>): EffortV2Preview["legacy"] {
     const jobs = deps.legacy.jobs().filter(({ job }) => targets.has(prWorkItemKey(job.prUrl)))
@@ -829,5 +1133,5 @@ export function createEffortV2(deps: EffortV2Deps) {
       },
     }),
   };
-  return { handlers, commands, settle, planRow };
+  return { handlers, commands, settle, planRow, reconciler: { run, tick, recoverAll, threadChanged, observed, legacyChanged, due: markDue, readFull } };
 }

@@ -41,6 +41,8 @@ export type Attempt = ResourceAttempt & {
   interactionPending: boolean;
   turnFailed: boolean;
   turnRetries: number;
+  /** Readbacks in a row that couldn't read BB. */
+  readbackFailures: number;
 };
 /** A code action on this PR: its key is written before the GitHub write, and its result after. */
 export type CodeAction = { recipe: CodeRecipeId; headOid: string } & ({ status: "pending" | "done" | "write-refused" }
@@ -87,6 +89,12 @@ export type DecideInput = {
    * are known: a launch then plans its recipes and leaves the checkout and thread to the read.
    */
   resources: Omit<ResourceInput, "effortId" | "pr" | "model" | "attempt"> | (Pick<ResourceInput, "legacy" | "writers"> & { inspections: null });
+  /** GitHub's rate limit holds reads until then: a step that needs a read waits for the reset instead of failing. */
+  rateLimitedUntil?: number | null;
+  /** How many times the reconciler rechecked the uncertain legacy Advance job that holds this PR. */
+  legacyRechecks?: number;
+  /** GitHub couldn't read this PR in full on its last reads: how many in a row, the last error, and when it is read again. */
+  unreadable?: { tries: number; error: string; retryAt: number } | null;
 };
 
 export type Next = {
@@ -112,8 +120,10 @@ const MINUTE = 60_000;
 export const TURN_RETRIES = 2;
 /** Minutes to wait after the Nth environment blocker, or checkout that couldn't be prepared, on a head before trying again. */
 const BACKOFF = [1, 2, 4, 8, 15];
-/** A checkout that can't be prepared this many times on one head is a repair. */
-const PREPARE_TRIES = 6;
+/** A checkout that can't be prepared on one head, a PR GitHub can't read, or a launch BB can't be read back for, this many times in a row is a repair. */
+const SOURCE_TRIES = 6;
+/** An uncertain legacy Advance job still holding the PR after this many rechecks is a repair. */
+export const LEGACY_RECHECKS = 6;
 const CLAIMS = new Set<Attempt["status"]>(["launching", "running", "uncertain"]);
 /** What wakes a waiting or paused row, and the poll that backs the event up (plan §2.6). */
 const WAKES: Record<string, [event: string, pollMs: number]> = {
@@ -167,7 +177,21 @@ export function decide(input: DecideInput): Next {
     return { phase, cause, detail, modifiers: [], nextAction: null, owner: null, resource: null, decision: null, recovery: [], offers: [],
       wake: phase === "finished" ? null : { event, ref: null, dueAt: now + poll }, ...more };
   };
-  const observe = (detail: string) => next("verifying", "observe", detail, { nextAction: "observe" });
+  const limited = input.rateLimitedUntil != null && now < input.rateLimitedUntil ? input.rateLimitedUntil : null;
+  /**
+   * A step that reads the PR in full, when GitHub couldn't read it: it waits out a backoff of 1, 2, 4, 8, then 15 minutes, and after six
+   * tries in a row it is a system issue. Either way the read runs again at its wake, so the row recovers once GitHub reads it.
+   */
+  const unreadable = (step: Next): Next => {
+    const failing = input.unreadable;
+    if (!failing || (failing.tries < SOURCE_TRIES && now >= failing.retryAt)) return step;
+    const detail = `${step.detail}; GitHub couldn't read ${name} ${failing.tries} ${failing.tries === 1 ? "time" : "times"} in a row: ${failing.error}`;
+    return failing.tries >= SOURCE_TRIES ? { ...issue("source-unavailable", detail), nextAction: step.nextAction, recovery: ["refresh N"] }
+      : waiting("source-unavailable", detail, { kind: "github", ref: null }, { nextAction: step.nextAction, wake: { event: WAKES["source-unavailable"]![0], ref: null, dueAt: failing.retryAt } });
+  };
+  // A rate limit is a wait with its reset time, never a repair.
+  const observe = (detail: string) => limited === null ? unreadable(next("verifying", "observe", detail, { nextAction: "observe" }))
+    : waiting("rate-limit", `${detail}; GitHub's rate limit is reached until it resets`, { kind: "github", ref: null }, { wake: { event: WAKES["rate-limit"]![0], ref: null, dueAt: limited } });
   const issue = (cause: string, detail: string) => next("repair-needed", cause, detail, { owner: user, recovery: ["retry N"] });
   const ask = (cause: string, question: string, options: Option[], key: string, subkind: Lifecycle | null = null, answer: "command" | "open-thread" = "command",
     grants: RowDecision["grants"] = null) => next("decision-needed", cause, question, { owner: user, decision: { key, kind: cause, subkind, question, options, grants, answer } });
@@ -179,6 +203,8 @@ export function decide(input: DecideInput): Next {
   const workers = { kind: "v2-attempt" as const, ref: null };
   const fromResource = (resource: Extract<Resource, { kind: "wait" | "decision" | "repair" }>): Next =>
     resource.kind === "repair" ? { ...issue(resource.cause, resource.reason), resource }
+    : resource.cause === "legacy-drain" && input.resources.legacy?.cause === "uncertain" && (input.legacyRechecks ?? 0) >= LEGACY_RECHECKS
+      ? { ...issue("legacy-uncertain", `${resource.reason}, still uncertain after ${LEGACY_RECHECKS} rechecks`), resource }
     : resource.kind === "decision" ? { ...ask("authority", `${resource.reason}. Allow v2 to push to ${name} anyway?`, [{ id: "allow", label: "Allow" }, { id: "leave", label: "Leave it" }], `authority:${target}:checkout`), resource }
     : waiting(resource.cause, resource.reason, resource.cause === "legacy-drain" ? { kind: "legacy-job", ref: resource.ref }
       : resource.cause === "draft" ? user : { kind: "thread", ref: resource.ref }, { resource });
@@ -198,15 +224,22 @@ export function decide(input: DecideInput): Next {
       // More than one worker answers to the launch key: the claim stays until you stop the extras and release it.
       if (attempt.failure === "duplicate-writer")
         return { ...issue("duplicate-writer", `More than one BB thread answers to attempt ${attempt.id}; stop the extras, then release its claim`), owner, recovery: ["reset N release"] };
-      if (attempt.failure === "source-unavailable")
-        return waiting("source-unavailable", `BB couldn't be read back for attempt ${attempt.id}; its claim holds until a readback succeeds`, owner);
+      if (attempt.failure === "source-unavailable") {
+        // Read back again after 1, 2, 4, 8, then 15 minutes; after six tries it is a system issue, still read back at its poll.
+        const tries = Math.max(attempt.readbackFailures, 1);
+        const detail = `BB couldn't be read back for attempt ${attempt.id} ${tries} ${tries === 1 ? "time" : "times"} in a row; its claim holds until a readback succeeds`;
+        return tries >= SOURCE_TRIES ? { ...issue("source-unavailable", detail), owner, nextAction: "recover-launch", recovery: ["recheck launches", "reset N release"] }
+          : waiting("source-unavailable", detail, owner, { nextAction: "recover-launch",
+            wake: { event: WAKES["source-unavailable"]![0], ref: attempt.id, dueAt: now + BACKOFF[Math.min(tries, BACKOFF.length) - 1]! * MINUTE } });
+      }
       return recovering("launch-uncertain", "Launch outcome uncertain; reading BB back by its launch key", "recover-launch", "readback finds or rules out its worker");
     }
     // Past the bound, the runner ends the attempt, so `retry N` can start a new one.
     if (attempt.turnFailed) return recovering("turn-retry", attempt.turnRetries < TURN_RETRIES ? `The worker's turn failed; retry ${attempt.turnRetries + 1} of ${TURN_RETRIES}`
       : `The worker's turn failed ${TURN_RETRIES + 1} times; ending the attempt`, "retry-turn", "the retried turn starts");
-    if (attempt.interactionPending)
-      return ask("worker-interaction", `The worker in ${attempt.threadId} is waiting for your input`, [{ id: "open", label: "Open thread" }], `worker-interaction:${attempt.id}`, null, "open-thread");
+    // Its interactions are read again at a 5-minute poll too, in case the event that cleared them never reached us.
+    if (attempt.interactionPending) return { ...ask("worker-interaction", `The worker in ${attempt.threadId} is waiting for your input`, [{ id: "open", label: "Open thread" }],
+      `worker-interaction:${attempt.id}`, null, "open-thread"), wake: { event: "the worker's interactions clear", ref: attempt.id, dueAt: now + 5 * MINUTE } };
     return next("executing", attempt.status === "launching" ? "launching" : "worker", attempt.status === "launching" ? "Launching the worker" : `Worker running in ${attempt.threadId}`,
       { nextAction: "attach", owner });
   };
@@ -268,7 +301,7 @@ export function decide(input: DecideInput): Next {
       // Its checkout couldn't be prepared, so nothing started: like a source that didn't read, it backs off on its head, and a new head reverifies.
       const failed = attempts.filter((item) => item.retryEpoch === input.retryEpoch && item.headOid === latest.headOid && item.status === "failed" && item.failure === "workspace").length;
       if (latest.headOid === facts?.headOid) {
-        if (failed >= PREPARE_TRIES) return issue("workspace", `The checkout couldn't be prepared ${failed} times on this head`);
+        if (failed >= SOURCE_TRIES) return issue("workspace", `The checkout couldn't be prepared ${failed} times on this head`);
         const due = (latest.endedAt ?? now) + BACKOFF[Math.min(failed, BACKOFF.length) - 1]! * MINUTE;
         if (now < due) return waiting("source-unavailable", "The checkout couldn't be prepared; trying again after a backoff", { kind: "v2-attempt", ref: latest.id },
           { wake: { event: WAKES["source-unavailable"]![0], ref: latest.id, dueAt: due } });
@@ -276,7 +309,7 @@ export function decide(input: DecideInput): Next {
     } else if (latest.status === "failed") return issue(latest.failure ?? "turn-failed", latest.failure === "turn-failed"
       ? `The worker's turn failed ${TURN_RETRIES + 1} times` : `The launch failed: ${latest.failure ?? "unknown cause"}`);
     if (latest.status === "completed" && latest.result === null)
-      return next("verifying", "parse-report", "Reading the worker's report", { nextAction: "parse-report", owner: { kind: "v2-attempt", ref: latest.id } });
+      return unreadable(next("verifying", "parse-report", "Reading the worker's report", { nextAction: "parse-report", owner: { kind: "v2-attempt", ref: latest.id } }));
     if (latest.status === "completed" && latest.result !== null) {
       const key = latest.result;
       const routes = latest.recipes.map((id) => (recipe(id) as WorkerRecipe).otherwise[key]);

@@ -3,10 +3,12 @@
 import { describe, expect, it } from "vitest";
 import {
   commentArgv,
+  githubRateLimit,
   mergeArgv,
   parseReviewRequests,
   prTarget,
   readLiveMerge,
+  readRateLimitReset,
   readReviewThreads,
   rerequestArgv,
   runMerge,
@@ -423,5 +425,24 @@ describe("writes", () => {
     const { run, calls } = fakeGh();
     expect((await runNudge(run, TARGET, [], null)).ok).toBe(false);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("GitHub rate limits", () => {
+  it("tells the primary limit, which reports its reset, from a secondary limit, which doesn't, and from any other failure", () => {
+    expect(githubRateLimit("GraphQL: API rate limit exceeded for user ID 1001.")).toBe("primary");
+    expect(githubRateLimit("HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.")).toBe("secondary");
+    expect(githubRateLimit("HTTP 502: Bad Gateway")).toBeNull();
+  });
+
+  it("reads the latest reset of the exhausted limits with one rate_limit read, and nothing when none is exhausted", async () => {
+    const limits = (graphql: number) => JSON.stringify({ resources: { core: { limit: 5000, remaining: 4100, reset: 1_790_000_000 },
+      graphql: { limit: 5000, remaining: graphql, reset: 1_790_000_900 }, search: { limit: 30, remaining: 0, reset: 1_790_000_060 } } });
+    const exhausted = fakeGh(() => ({ ok: true, stdout: limits(0) }));
+    expect(await readRateLimitReset(exhausted.run)).toBe(1_790_000_900_000);
+    expect(exhausted.calls).toEqual([{ args: ["api", "rate_limit"], stdin: undefined }]);
+    expect(await readRateLimitReset(fakeGh(() => ({ ok: true, stdout: limits(12) })).run)).toBe(1_790_000_060_000);
+    expect(await readRateLimitReset(fakeGh(() => ({ ok: true, stdout: JSON.stringify({ resources: { core: { remaining: 1, reset: 1 } } }) })).run)).toBeNull();
+    expect(await readRateLimitReset(fakeGh(() => ({ ok: false, error: "gh: not logged in" })).run)).toBeNull();
   });
 });

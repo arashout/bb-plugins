@@ -100,7 +100,7 @@ export function cheapSignature(pr: Pick<Pr, "state" | "headRefOid" | "isDraft" |
     pr.reviewRequests, pr.mergeStateStatus, pr.checkConclusions, pr.unresolvedReviewThreads])).digest("hex");
 }
 
-export type StoredPrFacts = { facts: AdvanceFacts | null; fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null };
+export type StoredPrFacts = { facts: AdvanceFacts | null; fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null; cheapAt?: number | null };
 
 /**
  * The last full read of each roster PR and the signature of the cheap read beside
@@ -112,8 +112,8 @@ export function createPrFactsStore(db: RunDb) {
   const key = (prUrl: string) => canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
   return {
     get(prUrl: string): StoredPrFacts | null {
-      const row = present ? db.prepare(`SELECT full_at AS fullAt, failed_at AS failedAt, error, signature, body FROM pr_facts WHERE pr_url = ?`).get(key(prUrl)) as
-        { fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null; body: string | null } | undefined : undefined;
+      const row = present ? db.prepare(`SELECT full_at AS fullAt, failed_at AS failedAt, error, signature, cheap_at AS cheapAt, body FROM pr_facts WHERE pr_url = ?`).get(key(prUrl)) as
+        { fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null; cheapAt: number | null; body: string | null } | undefined : undefined;
       if (!row) return null;
       const { body, ...rest } = row;
       return { ...rest, facts: body === null ? null : advanceFactsSchema.safeParse(JSON.parse(body)).data ?? null };
@@ -129,6 +129,15 @@ export function createPrFactsStore(db: RunDb) {
       db.prepare(`INSERT INTO pr_facts (pr_url, body, full_at, signature, cheap_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(pr_url) DO UPDATE SET body = excluded.body, full_at = excluded.full_at, signature = excluded.signature,
         cheap_at = excluded.cheap_at, failed_at = NULL, error = NULL`).run(key(prUrl), JSON.stringify(read.facts), read.fullAt, read.signature, read.cheapAt);
+    },
+    /**
+     * A cheap read on its own. It keeps its signature only for a PR with no full read, such as a parent the roster
+     * watches; otherwise the signature stays the full read's, so a change waits for the next full read.
+     */
+    cheap(prUrl: string, signature: string, at: number): void {
+      db.prepare(`INSERT INTO pr_facts (pr_url, signature, cheap_at) VALUES (?, ?, ?)
+        ON CONFLICT(pr_url) DO UPDATE SET cheap_at = excluded.cheap_at, signature = CASE WHEN body IS NULL THEN excluded.signature ELSE signature END`)
+        .run(key(prUrl), signature, at);
     },
     /** A failed read keeps the last success beside the failure. */
     failed(prUrl: string, error: string, at: number): void {

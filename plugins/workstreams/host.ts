@@ -18,7 +18,7 @@ import {
   parsePrList,
   repoFromRemote,
 } from "./gh.js";
-import { prTarget, readLiveMerge, readReviewThreads, runMerge, runNudge, runUpdateBranch, type GhRunner } from "./ghactions.js";
+import { prTarget, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runUpdateBranch, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs } from "./inventory.js";
@@ -565,6 +565,7 @@ export default experimental_defineHostEntry({
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
       (args, cwd) => run("git", args, cwd, GH_WRITE_TIMEOUT_MS, context.signal), ghRunner(context.signal), input),
     inspectCheckout: (input, context) => inspectCheckout((args, cwd) => run("git", args, cwd, GIT_TIMEOUT_MS, context.signal), input),
+    githubRateLimit: async (_input, context) => ({ resetAt: await readRateLimitReset(ghRunner(context.signal)) }),
     authoredPrs: ({ owners }, context) => readAuthoredPrs(ghRunner(context.signal), owners),
     inspectPrs: ({ prUrls }, context) => readInventoryPrs(ghRunner(context.signal), prUrls),
     checkoutState: async ({ path }, context) => {

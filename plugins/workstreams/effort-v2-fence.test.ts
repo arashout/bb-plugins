@@ -12,7 +12,7 @@ import type { RawUnit } from "./contract.js";
 import { createDispatchStore } from "./dispatch.js";
 import { createEffortStore, type EstablishedEffort } from "./effort-store.js";
 import { effortTitle } from "./effort-title.js";
-import type { EffortV2Preview } from "./effort-v2-server.js";
+import type { createEffortV2, EffortV2Preview } from "./effort-v2-server.js";
 import { DEFAULT_EFFECTS, formatTargets } from "./effort-command.js";
 import type { Next } from "./effort-phase.js";
 import type { createEffortRunner } from "./effort-runner.js";
@@ -34,8 +34,18 @@ const TITLES: Record<number, string> = { 12: "ABC-12 Shelve returned books", 14:
 const POINTER = "Managed by the Returns desk roster; instruct there.";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
-/** Each plugin start's own launch runner, so a test can hand it a queued step as the reconciler (C20) will. */
+/** Each plugin start's own launch runner, so a test can hand it a queued step as the reconciler does. */
 const runners = vi.hoisted(() => [] as ReturnType<typeof createEffortRunner>[]);
+/** Each plugin start's reconciler, so a test can run one tick after an event. */
+const reconcilers = vi.hoisted(() => [] as ReturnType<typeof createEffortV2>["reconciler"][]);
+vi.mock("./effort-v2-server.js", async (original) => {
+  const actual = await original<typeof import("./effort-v2-server.js")>();
+  return { ...actual, createEffortV2: (deps: Parameters<typeof actual.createEffortV2>[0]) => {
+    const v2 = actual.createEffortV2(deps);
+    reconcilers.push(v2.reconciler);
+    return v2;
+  } };
+});
 vi.mock("./effort-runner.js", async (original) => {
   const actual = await original<typeof import("./effort-runner.js")>();
   return { ...actual, createEffortRunner: (deps: Parameters<typeof actual.createEffortRunner>[0]) => {
@@ -85,6 +95,8 @@ async function setup() {
   let failedReads = 0;
   /** Each thread's latest output. */
   const outputs = new Map<string, string>();
+  /** The interactions waiting on you in each thread. */
+  const pending = new Map<string, unknown[]>();
   const retry = vi.fn(async () => ({ ok: true, delivery: "queued", attempt: 2, queuedMessageId: "qm-retry", sendAt: null, turnRequestId: "req-retry" }) as never);
   const beforeWorkspace = vi.fn(async () => {});
   const beforeGet = vi.fn(async (_threadId: string) => {});
@@ -125,7 +137,7 @@ async function setup() {
       events: { list: async ({ threadId, types }: { threadId: string; types?: readonly string[] }) =>
         (types?.includes("client/turn/requested") ? turnRequests.get(threadId) ?? [] : []) as never },
       queuedMessages: { list: async ({ threadId }: { threadId: string }) => (queued.get(threadId) ?? []) as never },
-      interactions: { list: async () => [] as never },
+      interactions: { list: async ({ threadId }: { threadId: string }) => (pending.get(threadId) ?? []) as never },
     },
   }, experimental_callHostRpc: async ({ method, input }) => {
     hostCalls.push({ method, input });
@@ -153,6 +165,7 @@ async function setup() {
   } });
   await plugin(bb); cleanups.push(() => harness.lifecycle.dispose());
   const runner = runners.at(-1)!;
+  const reconciler = reconcilers.at(-1)!;
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
   const db = bb.storage.database();
   const store = createEffortStore(db);
@@ -176,7 +189,7 @@ async function setup() {
     ...spawn.mock.calls.filter(([args]) => args.pluginMetadata?.prUrl === prUrl || args.environment?.workspace?.path?.includes(`folio-${prUrl.split("/").at(-1)}`)),
     ...hostCalls.filter((call) => call.method === "advanceWorkspace" && call.input.prUrl === prUrl)];
   return { bb, harness, db, store, work, returns, used, rpc, optIn, preview, job, workedOn, spawn, send, threads, metadata, turnRequests, queued, hostCalls, beforeWorkspace, beforeGet,
-    runner, live, outputs, retry, failWorkspace: (value: boolean) => { failWorkspace = value; }, failReads: (count: number) => { failedReads = count; } };
+    runner, reconciler, live, outputs, pending, retry, failWorkspace: (value: boolean) => { failWorkspace = value; }, failReads: (count: number) => { failedReads = count; } };
 }
 
 describe("v2 execution fence", () => {
@@ -937,6 +950,8 @@ describe("v2 claims", () => {
       await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get(threadId)!, lastAssistantText: output });
     }
     const name = (env: Awaited<ReturnType<typeof setup>>) => formatTargets([{ target: RETURNS, n: env.work.row(RETURNS)?.body.n ?? null }]);
+    /** Events only make rows due: the reconciler's ticks act on them. */
+    const ticked = (env: Awaited<ReturnType<typeof setup>>, check: () => void) => vi.waitFor(async () => { await env.reconciler.tick(); check(); });
 
     it("reads a worker's report when its thread goes idle, judges the PR on a fresh GitHub read, and never merges", async () => {
       const env = await setup();
@@ -944,7 +959,7 @@ describe("v2 claims", () => {
       env.live.set(12, { ...ready, checks: "pending", mergeStateStatus: "BLOCKED" });
       const reads = env.hostCalls.filter((call) => call.method === "advanceInspect").length;
       await idle(env, attempt, `Rebased onto main.\n${result(attempt.id)}`);
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "ci" } }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "ci" } }));
       expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { startSeq: 3, report: { key: "changed", rejection: null } } });
       expect(env.hostCalls.filter((call) => call.method === "advanceInspect").length).toBe(reads + 1);
       // Code declares readiness, and no path from a report reaches a merge or any other GitHub write.
@@ -957,14 +972,17 @@ describe("v2 claims", () => {
       const attempt = await running(env);
       await env.harness.emitThreadEvent("turn.failed", { threadId: attempt.threadId!, requestId: "req-1", turnId: null, errorInfo: null, inputAccepted: true,
         rateLimits: null, attemptNumber: 1 });
-      await vi.waitFor(() => expect(env.retry).toHaveBeenCalledWith({ threadId: attempt.threadId, turnRequestId: "req-1", sendAt: expect.any(Number) }));
+      await ticked(env, () => expect(env.retry).toHaveBeenCalledWith({ threadId: attempt.threadId, turnRequestId: "req-1", sendAt: expect.any(Number) }));
       await vi.waitFor(() => expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: null }));
       // The worker asks for input: you answer in its thread, and the row goes back to executing once nothing is pending.
       const thread = env.threads.get(attempt.threadId!)!;
+      env.pending.set(thread.id, [{ id: "int-1" }]);
       await env.harness.emitThreadEvent("interaction.pending", { thread, interaction: {} as never });
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "decision-needed", body: { cause: "worker-interaction" } }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "decision-needed", body: { cause: "worker-interaction" } }));
+      env.pending.delete(thread.id);
       await env.harness.emitThreadEvent("experimental_thread.events", { thread, sequence: 9 });
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "executing", body: { cause: "worker" } }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "executing", body: { cause: "worker" } }));
+      expect(env.retry).toHaveBeenCalledTimes(1);
       // A work order sent to a busy thread waits in its queue; you delete it there.
       const body = seed(env, "A-16", WRAP, "running", { path: "/p/folio-16", threadId: "thr-author" });
       env.work.recordAttempt("A-16", ["running"], { status: "running", body: { ...body, mode: "send", resource: { ...body.resource, kind: "reuse", threadId: "thr-author" } } });
@@ -983,14 +1001,14 @@ describe("v2 claims", () => {
       env.turnRequests.set(threadId, [requested(3, "req-1")]);
       env.retry.mockRejectedValueOnce(new Error("socket hang up"));
       await env.harness.emitThreadEvent("turn.failed", { threadId, requestId: "req-1", turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 });
-      await vi.waitFor(() => expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: { requestId: "req-1" }, error: "socket hang up" }));
+      await ticked(env, () => expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: { requestId: "req-1" }, error: "socket hang up" }));
       // BB took the retry anyway: a turn was requested after the failed one, and it finished with the work order's report.
       env.turnRequests.set(threadId, [requested(7, "req-7", { retryOfRequestId: "req-1" }), requested(3, "req-1")]);
       env.live.set(12, ready);
       env.outputs.set(threadId, result(attempt.id));
       env.threads.set(threadId, { ...env.threads.get(threadId)!, status: "idle" });
       await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get(threadId)!, lastAssistantText: result(attempt.id) });
-      await vi.waitFor(() => expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { turnFailure: null, report: { key: "changed" } } }));
+      await ticked(env, () => expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { turnFailure: null, report: { key: "changed" } } }));
       expect(env.retry).toHaveBeenCalledTimes(1);
     });
 
@@ -998,10 +1016,10 @@ describe("v2 claims", () => {
       const env = await setup();
       const attempt = await running(env);
       env.live.set(12, ready);
-      // GitHub can't be read when the turn ends: the report waits unread rather than being judged on stale facts.
+      // GitHub can't be read when the turn ends: the report waits unread, backing off, rather than being judged on stale facts.
       env.failReads(1);
       await idle(env, attempt, result(attempt.id));
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "verifying", body: { cause: "parse-report" } }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "source-unavailable", nextAction: "parse-report" } }));
       expect(env.work.attempt(attempt.id)?.body.report?.key).toBeNull();
       const recheck = await command(env, `recheck ${RETURNS}`, "returns-3");
       expect(recheck.acknowledgment).toContain(`Recheck ${name(env)}: Ready`);
@@ -1014,7 +1032,7 @@ describe("v2 claims", () => {
       const env = await setup();
       const attempt = await running(env);
       await idle(env, attempt, result(attempt.id, { outcome: "blocked", blockers: [{ kind: "other", summary: "The shelf fixture is missing" }] }));
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "repair-needed", body: { cause: "worker-blocked", detail: "The shelf fixture is missing" } }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "repair-needed", body: { cause: "worker-blocked", detail: "The shelf fixture is missing" } }));
       const before = transitions(env);
       expect(await command(env, `reset ${RETURNS}`, "returns-3")).toMatchObject({ kind: "admit" });
       // The finished attempt's route belonged to the old epoch: the PR is still conflicting, so its work is planned again.
@@ -1035,7 +1053,7 @@ describe("v2 claims", () => {
       const attempt = env.work.attempts(RETURNS)[0]!;
       env.live.set(12, ready);
       await idle(env, attempt, result(attempt.id, { criteria: [{ id: "c1", outcome: "passed", evidence: "npm test -- shelf passed" }] }));
-      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "prepared" }));
+      await ticked(env, () => expect(env.work.row(RETURNS)).toMatchObject({ phase: "prepared" }));
       expect((await env.rpc("effort_roster_get", { effortId: env.returns.id })).rollup[1]).toContain("returned books keep their shelf order (c1)");
     });
 

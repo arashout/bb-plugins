@@ -28,9 +28,11 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
-import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
+import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
 import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
   type V2Target } from "./effort-work-store.js";
+import type { ResourceThread } from "./effort-resources.js";
+import type { CheckoutInspection } from "./advance-contract.js";
 import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
@@ -1026,6 +1028,7 @@ export default async function plugin(bb: BbPluginApi) {
       inventory.apply(result);
       intentEvidenceVersion++;
       advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+      effortV2.reconciler.observed(result.entries.map((entry) => entry.pr.url));
       await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
@@ -1057,6 +1060,7 @@ export default async function plugin(bb: BbPluginApi) {
     inventory.inspect(result);
     intentEvidenceVersion++;
     advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+    effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...result.closed]);
     await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
     const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
     const closed = new Set(result.closed.map((url) => url.toLowerCase()));
@@ -2281,8 +2285,16 @@ export default async function plugin(bb: BbPluginApi) {
 
   const onThreadError = (error: unknown) =>
     bb.log.warn(`thread event handling failed: ${String(error).slice(0, 300)}`);
-  /** A thread signal for the v2 attempt that holds the thread, if any; no other thread hears anything. */
-  const v2Signal = (threadId: string, signal: AttemptSignal) => { void runner.signal(threadId, signal).catch(onThreadError); };
+  /**
+   * A thread signal is recorded on the v2 attempt that holds the thread, if any, and only makes rows due: that attempt's row,
+   * and, when the thread went idle, failed, or went away, rows waiting on it. The reconciler acts on its next tick.
+   */
+  const v2Signal = (threadId: string, signal: AttemptSignal | null, settled = false) => {
+    void (signal ? runner.signal(threadId, signal) : Promise.resolve(null)).then((heard) => {
+      if (settled) effortV2.reconciler.threadChanged(threadId, heard);
+      else if (heard) effortV2.reconciler.due([heard.target]);
+    }).catch(onThreadError);
+  };
   bb.events.on("thread.created", ({ thread }) => {
     onThreadChanged(thread, false).catch(onThreadError);
   });
@@ -2292,7 +2304,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
-    v2Signal(thread.id, { kind: "idle" });
+    v2Signal(thread.id, { kind: "idle" }, true);
     void advance.signal(thread.id, "idle", lastAssistantText).catch(onThreadError);
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
@@ -2301,6 +2313,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     signalRuns(thread.id, { kind: "failed", text: null, error });
+    v2Signal(thread.id, null, true);
     void advance.signal(thread.id, "failed").catch(onThreadError);
     onThreadChanged(thread, true).catch(onThreadError);
   });
@@ -2310,7 +2323,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
-    v2Signal(thread.id, { kind: "gone" });
+    v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2319,7 +2332,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.deleted", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
-    v2Signal(thread.id, { kind: "gone" });
+    v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -3945,7 +3958,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (rows.length < 100) return matches;
       }
     },
-    changed: () => { bb.realtime.publish(BOARD_CHANGED, { scanning }); },
+    changed: () => { bb.realtime.publish(BOARD_CHANGED, { scanning }); effortV2.reconciler.legacyChanged(); },
     verified: (url, path) => { scheduleInventoryUrls([url]); if (path) rescans.add(path); },
   });
   const advanceTimer = setInterval(() => { void advance.tick().catch(onThreadError); }, 30_000);
@@ -4523,16 +4536,103 @@ export default async function plugin(bb: BbPluginApi) {
         recordTransitions(readUnits());
         bb.realtime.publish(BOARD_CHANGED, { scanning });
       }
+      if (read !== undefined) cheapReads.set(prWorkItemKey(prUrl), { signature: cheapSignature(read), at: cheapAt });
+      return await fullRead(prUrl, hostId);
+    } catch (error) {
+      return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
+    }
+  }
+  /** The newest cheap read of each PR here: a full read that follows it is kept with its signature, so a later cheap read that differs supersedes it. */
+  const cheapReads = new Map<string, { signature: string; at: number }>();
+  /** One full read of a PR, kept in pr_facts; a failure keeps the last success. A board-tracked PR whose facts moved is refreshed on the board too. */
+  async function fullRead(prUrl: string, hostId: string): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
+    const failed = (error: string) => {
+      prFacts.failed(prUrl, error, Date.now());
+      return { status: "failed" as const, error };
+    };
+    try {
       const full = await host.call("advanceInspect", { prUrl }, { hostId, signal: disposal.signal, timeoutMs: 60_000 });
       if (!full.ok) return failed(full.error);
       if (full.facts.approvalFeedback.status === "present" && full.facts.headOid) {
         await carryEquivalentFeedback({ url: prUrl, headRefOid: full.facts.headOid, approvalFeedback: full.facts.approvalFeedback }, hostId);
       }
-      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: read === undefined ? null : cheapSignature(read), cheapAt: read === undefined ? null : cheapAt });
+      const previous = prFacts.get(prUrl)?.facts;
+      // The newest cheap read, here or the board's own, which the roster compares a later cheap read with.
+      const board = inventory.get(prUrl);
+      const boardAt = Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0;
+      const read = cheapReads.get(prWorkItemKey(prUrl));
+      const cheap = board && boardAt >= (read?.at ?? 0) ? { signature: cheapSignature(board.pr), at: boardAt } : read;
+      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: cheap?.signature ?? null, cheapAt: cheap?.at ?? null });
+      if (knownPrUrl(prUrl) !== null && previous && JSON.stringify(previous) !== JSON.stringify(full.facts)) scheduleInventoryUrls([prUrl]);
       return { status: "checked" };
     } catch (error) {
       return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
     }
+  }
+  /**
+   * The reconciler's cheap read: one inspectPrs call per 100 PRs. The board's own stores take what the board tracks, exactly as
+   * its refresh writes them, so the board and the roster read the same facts; for the rest only the signature is kept. Returns
+   * the PRs whose signature differs from their last full read's, including any that left the open list.
+   */
+  async function v2CheapRead(prUrls: readonly string[]): Promise<{ changed: string[]; error: string | null }> {
+    const hostId = (await bb.sdk.system.config()).primaryHostId;
+    if (hostId === null) return { changed: [], error: "No primary BB host is available to read GitHub." };
+    const changed: string[] = [];
+    const errors: string[] = [];
+    for (let offset = 0; offset < prUrls.length; offset += 100) {
+      const at = Date.now();
+      let result: InventoryInspection;
+      try { result = await host.call("inspectPrs", { prUrls: prUrls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: 60_000 }); }
+      catch (error) { errors.push(`GitHub read failed: ${String(error).slice(0, 300)}`); continue; }
+      const known = (url: string) => knownPrUrl(url) !== null;
+      const tracked = { ...result, entries: result.entries.filter((entry) => known(entry.pr.url)), closed: result.closed.filter(known), failed: result.failed.filter(known) };
+      if (tracked.entries.length || tracked.closed.length || tracked.failed.length) {
+        await applyInspection(tracked, hostId);
+        recordTransitions(readUnits());
+        bb.realtime.publish(BOARD_CHANGED, { scanning });
+      }
+      for (const [url, pr] of [...result.entries.map((entry) => [entry.pr.url, entry.pr] as const), ...result.closed.map((url) => [url, null] as const)]) {
+        const signature = cheapSignature(pr);
+        if (prFacts.get(url)?.signature !== signature) changed.push(url);
+        cheapReads.set(prWorkItemKey(url), { signature, at });
+        prFacts.cheap(url, signature, at);
+      }
+      if (result.failed.length) errors.push(result.warnings.join("; ") || `GitHub couldn't read ${result.failed.length} PRs.`);
+    }
+    return { changed, error: errors.join("; ") || null };
+  }
+  /** Where a v2 launch could run: scanned checkouts and legacy worktrees read in place on the primary host, and the threads in them. */
+  async function v2Resources(target: string, facts: { repo: string; headOid: string }, attempt: { path: string | null } | null): Promise<ResourceParts> {
+    const hostId = (await bb.sdk.system.config()).primaryHostId ?? "";
+    const projects = await bb.sdk.projects.list();
+    const units = readUnits().map((unit) => {
+      const project = projectForPath(projects, unit.path);
+      return { path: unit.path, githubRepo: unit.githubRepo ?? null, branch: unit.branch, prUrl: unit.pr?.url ?? null, projectId: project?.projectId ?? null, hostId: project?.hostId ?? null };
+    });
+    const legacy = currentLegacyAttempts(advance.list()).get(target) ?? null;
+    const paths = [...new Set([attempt?.path ?? null, legacy?.reusable?.path ?? null, ...units.filter((unit) => unit.hostId === hostId
+      && unit.githubRepo?.toLowerCase() === facts.repo.toLowerCase()).map((unit) => unit.path)].filter((path) => path !== null))];
+    const inspections = new Map<string, CheckoutInspection>();
+    for (const path of paths) {
+      try { inspections.set(path, await host.call("inspectCheckout", { path, expectedHeadOid: facts.headOid }, { hostId, signal: disposal.signal, timeoutMs: 60_000 })); }
+      catch (error) { inspections.set(path, { ok: false, error: String(error).slice(0, 800) }); }
+    }
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const normal = (path: string) => path.replace(/\/+$/u, "");
+    const inPaths = new Set(paths.map(normal));
+    const threads: ResourceThread[] = [];
+    for (const known of [...threadFacts.values()]) if (known.environmentPath !== null && inPaths.has(normal(known.environmentPath))) {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId: known.id, include: "environment" });
+        // BB not reporting context is no reason to pass a thread over.
+        const usage = await bb.sdk.threads.context({ threadId: known.id }).then((context) => context.usage, () => null);
+        threads.push({ id: thread.id, providerId: thread.providerId, status: thread.status, archived: thread.archivedAt !== null || thread.deletedAt !== null,
+          projectId: thread.projectId, hostId: "environment" in thread ? thread.environment?.hostId ?? null : null, environmentPath: known.environmentPath,
+          updatedAt: thread.updatedAt, contextUsed: usage ? usage.usedTokens / usage.modelContextWindow : null });
+      } catch { /* A thread that can't be read isn't a candidate. */ }
+    }
+    return { hostId, units, inspections, threads, linked: work.directThreadIds(target),
+      origin: work.linksForPr(target, false).find((link) => link.tier === "started")?.threadId ?? null };
   }
 
   /** Each v2 effort's roster PRs, from the same ownership the roster reads: explicit PR members and PRs whose ticket it alone owns. */
@@ -4595,7 +4695,25 @@ export default async function plugin(bb: BbPluginApi) {
     observe: observePr,
     realtime: bb.realtime,
     launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
-      launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh) },
+      launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh), launch: (input) => runner.launch(input),
+      advance: (attemptId) => runner.advance(attemptId) },
+    reconciler: {
+      now: Date.now,
+      cheapAt: (prUrl) => Math.max(Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0, prFacts.get(prUrl)?.cheapAt ?? 0) || null,
+      cheap: v2CheapRead,
+      full: async (prUrl) => {
+        const hostId = (await bb.sdk.system.config()).primaryHostId;
+        return hostId === null ? { status: "failed", error: "No primary BB host is available to read GitHub." } : fullRead(prUrl, hostId);
+      },
+      rateLimitReset: async () => {
+        const hostId = (await bb.sdk.system.config()).primaryHostId;
+        try { return hostId === null ? null : (await host.call("githubRateLimit", {}, { hostId, signal: disposal.signal, timeoutMs: 60_000 })).resetAt; }
+        catch { return null; }
+      },
+      resources: v2Resources,
+      recheckLegacy: async (batchId, jobId) => { await advance.recheck(batchId, jobId, false); },
+      warn: (message) => bb.log.warn(message),
+    },
     execution: {
       get: (effortId) => effortWork.execution(effortId),
       set: async (effortId, mode, expectedRevision) => {
@@ -4639,8 +4757,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   /**
-   * v2 launches and their readback. Nothing here schedules a launch: the reconciler does, and until it runs only
-   * `recheck launches` reads BB back. Every thread it starts or messages uses the configured model for its role.
+   * v2 launches and their readback. Nothing here schedules a launch: the reconciler's ticks do, after pass 0 reads every
+   * unfinished launch back. Every thread it starts or messages uses the configured model for its role.
    */
   const runner = createEffortRunner({
     now: Date.now,
@@ -4698,7 +4816,8 @@ export default async function plugin(bb: BbPluginApi) {
       return requestId !== null && newest?.type === "client/turn/requested" && newest.data.requestId !== requestId;
     },
     retry: (args) => bb.sdk.threads.retry(args),
-    read: async (prUrl) => (await observePr(prUrl, [])).status === "checked" ? prFacts.get(prUrl)?.facts ?? null : null,
+    // Within the reconciler's budget of full reads, and never while GitHub's rate limit holds reads.
+    read: async (prUrl) => await effortV2.reconciler.readFull(prUrl) ? prFacts.get(prUrl)?.facts ?? null : null,
     feedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
     publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
   });
@@ -5647,6 +5766,9 @@ export default async function plugin(bb: BbPluginApi) {
   );
 
   // ---- background refresh ---------------------------------------------
+
+  // The only v2 scheduler: pass 0, then a tick every 15 seconds or at the next event. Nothing in the UI schedules v2 work.
+  bb.background.service("effort-v2", { start: (signal) => effortV2.reconciler.run(signal) });
 
   bb.background.service("refresh", {
     async start(signal) {

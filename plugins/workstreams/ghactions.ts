@@ -477,3 +477,24 @@ export async function runNudge(
   if (done.length === 0) return { ok: false, error: "Nothing to do: choose re-request, a comment, or both." };
   return { ok: true, detail: `${target.slug} #${target.number}: ${done.join(" and ")}.` };
 }
+
+/** How a failed GitHub read hit a rate limit: the primary limit, whose reset GitHub reports, or a secondary limit, which names none. */
+export function githubRateLimit(error: string): "primary" | "secondary" | null {
+  if (/secondary rate limit|abuse detection/iu.test(error)) return "secondary";
+  return /rate limit/iu.test(error) ? "primary" : null;
+}
+
+/**
+ * When GitHub's exhausted primary limits reset, in epoch ms, from `gh api rate_limit`, which doesn't count against
+ * them. Null when none is exhausted or the read failed.
+ */
+export async function readRateLimitReset(run: GhRunner): Promise<number | null> {
+  const result = await run(["api", "rate_limit"]);
+  if (!result.ok) return null;
+  let resources: unknown;
+  try { resources = (JSON.parse(result.stdout) as { resources?: unknown }).resources; } catch { return null; }
+  if (typeof resources !== "object" || resources === null) return null;
+  const resets = Object.values(resources).flatMap((limit: { remaining?: unknown; reset?: unknown }) =>
+    limit?.remaining === 0 && typeof limit.reset === "number" ? [limit.reset * 1_000] : []);
+  return resets.length ? Math.max(...resets) : null;
+}

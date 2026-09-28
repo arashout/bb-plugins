@@ -34,7 +34,7 @@ const scope = (include = [grant()], removed: InstructionScope["removed"] = []): 
 const attempt = (overrides: Partial<Attempt> = {}): Attempt => ({
   id: "A-1", status: "completed", threadId: "thr_origin", path: AUTHOR, workspace: null, recipes: ["address_review_feedback"], retryEpoch: 0,
   headOid: HEAD, fingerprint: FINGERPRINT, endedAt: NOW - 2 * MINUTE, result: "changed", blocker: null, failure: null, releasedReason: null,
-  interactionPending: false, turnFailed: false, turnRetries: 0, ...overrides,
+  interactionPending: false, turnFailed: false, turnRetries: 0, readbackFailures: 0, ...overrides,
 });
 const author = { path: AUTHOR, githubRepo: "inkwell/folio", branch: "abc-340", prUrl: PR_URL, projectId: "proj_folio", hostId: HOST };
 const source = { ...author, path: SOURCE, branch: "main", prUrl: null };

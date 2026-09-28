@@ -120,7 +120,7 @@ function replayAdvance(input: { batches: ReturnType<typeof advanceBatches>; sour
     const result = command(effort, text, targets);
     if (result.kind === "clarify" || !result.instruction) return { effortId, name: effort.name, text, clarified: result.kind === "clarify" ? result.message : "no instruction" };
     const scope = result.instruction;
-    const planned = planRows({ effort, mode: "v2", scope, sources, models, held: (target) => prHoldFor(target, sources.holds) !== null,
+    const planned = planRows({ effort, mode: "v2", execution: "dry-run", scope, sources, models, held: (target) => prHoldFor(target, sources.holds) !== null,
       targets: scope.include.map((grant) => ({ target: grant.target, n: grant.n, retryEpoch: 0 })) });
     const contract = rowContract(effort, scope, planned, sources.work);
     // A ticket holds only through its PRs: each included PR implementing it is Ready or merged.

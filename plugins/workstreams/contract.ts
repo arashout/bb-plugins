@@ -285,6 +285,8 @@ export const hostContract = defineRpcContract({
   advanceWorkspace: { input: advanceWorkspaceInputSchema, output: advanceWorkspaceSchema },
   /** Read-only: a candidate checkout's HEAD, cleanliness, and relation to the PR head, before v2 chooses where work runs. */
   inspectCheckout: { input: checkoutInspectionInputSchema, output: checkoutInspectionSchema },
+  /** Read-only: when GitHub's exhausted rate limits reset, in epoch ms; the read doesn't count against them. */
+  githubRateLimit: { input: z.object({}).strict(), output: z.object({ resetAt: z.number().nullable() }).strict() },
   authoredPrs: {
     input: z.object({ owners: z.array(z.string().max(39)).max(50) }).strict(),
     output: inventoryResultSchema,
