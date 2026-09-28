@@ -38,13 +38,22 @@ export const nextStepActorSchema = z.enum(NEXT_STEP_ACTORS);
 export type NextStepActor = z.infer<typeof nextStepActorSchema>;
 
 /**
+ * A thread title the summarizer proposed, after normalization.
+ *
+ * Short enough to survive a sidebar row: bb clamps its own generated titles to
+ * 48 display columns, and a name that only reads in the popover is no use to
+ * the surface this exists for.
+ */
+export const MAX_TITLE_LENGTH = 48;
+
+/**
  * The fields the summarizer is asked to return, exactly as it returns them.
  *
  * The five prose fields are strings, where an empty string means "nothing to
  * say" — meaningful for `nextStep` (the work is done) and `blockedOn` (nothing
  * is blocking). The display skips empty fields.
  *
- * `nextStepActor` is the odd one out: an enum rather than prose, and optional.
+ * `nextStepActor` and `title` are the odd ones out: not prose, and optional.
  * Optional is load-bearing — see {@link storedBriefSchema}.
  */
 export const briefFieldsSchema = z
@@ -52,6 +61,13 @@ export const briefFieldsSchema = z
     goal: z.string(),
     currentState: z.string(),
     nextStep: z.string(),
+    /**
+     * A four-to-six-word name for the thread, when the model gave one we could
+     * use. Absent means unknown, which is both a brief written before this
+     * field existed and one the model answered with nothing usable; either way
+     * the thread keeps whatever title it already has.
+     */
+    title: z.string().max(MAX_TITLE_LENGTH).optional(),
     /**
      * Who has to take `nextStep`, when the model offered a value we recognise.
      * Absent means unknown, which is both a brief written before this field
@@ -110,6 +126,19 @@ export const storedBriefSchema = z
      * today.
      */
     endedWithQuestion: z.boolean(),
+    /**
+     * The thread title this plugin last wrote, or null if it has never written
+     * one.
+     *
+     * The whole of the "do not clobber a name you chose" rule. bb records no
+     * provenance for a title — there is no column saying whether it came from
+     * bb's opening-prompt guess, from a rename, or from us — so remembering
+     * what we wrote is the only way to tell our own title apart from yours.
+     * Finding something else in `thread.title` means someone renamed the
+     * thread, and renaming stops there: we leave this field alone, so the
+     * mismatch persists and every later summary skips the rename too.
+     */
+    appliedTitle: z.string().nullable().optional(),
     lastSummarizedAt: z.number(),
     /** The thread's `conversationOutline().maxSeq` at summarize time. */
     lastActivitySeen: z.number(),

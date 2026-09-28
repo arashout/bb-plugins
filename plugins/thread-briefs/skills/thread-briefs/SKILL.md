@@ -1,6 +1,6 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, and the manual stage override.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the manual stage override, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
@@ -21,6 +21,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `model` | `gpt-4o-mini` | Model used for summarizing. Any small instruction-following model works. |
 | `jsonMode` | `true` | Send `response_format: {type: "json_object"}`. Turn **off** for endpoints that reject it (many local servers do). |
 | `quietSeconds` | `120` | How long a thread must be quiet before it is summarized. |
+| `renameThreads` | `false` | `true` renames each thread to the short name its brief chose. See [Thread titles](#thread-titles). |
 | `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
 
 The key is a secret setting, so it stays on the server and is never sent to the
@@ -122,6 +123,54 @@ a `nextStep` and a `blockedOn`, so the thread reads **waiting-on-other** rather
 than done. A thread that still reads done despite an open handoff is usually a
 brief written before this bar existed: **Re-summarize** from the header popover.
 
+## Thread titles
+
+```sh
+bb plugin config thread-briefs set renameThreads true
+```
+
+Off by default. On, every summary also puts the brief's `title` — a 4–6 word
+name for the work — on the thread, so the sidebar, thread header, command
+palette and `bb thread list` all show it.
+
+**Why this exists.** bb generates a thread's title exactly once, from the
+opening prompt, before anyone knows what the thread became; if generation fails
+or the prompt is under five words it falls back to the raw first prompt clamped
+to 80 characters. Nothing in bb ever rewrites it. So a title written here is
+permanent, and the brief — which reads the whole transcript every summary — has
+strictly more to go on than the thing that named the thread.
+
+**It will not clobber a name you chose.** bb records no provenance for a title,
+so the plugin remembers the last title it wrote (`appliedTitle` on the brief
+row) and compares:
+
+- never written one → whatever is there is bb's guess; replace it
+- thread still shows the name we wrote → ours; update it
+- anything else → **you renamed it. Renaming that thread stops permanently.**
+
+The stop needs no flag: the skipped rename leaves `appliedTitle` pointing at the
+old name, so the comparison keeps failing on every later summary. Rename a
+thread back to exactly the name the plugin last wrote and it resumes.
+
+The thread is re-read immediately before the write, so a rename made *during* a
+summarizer call (up to 60s) is not overwritten by a name chosen before it.
+
+Other things worth knowing:
+
+- The previous title is fed back to the summarizer, so a settled thread's name
+  stays put instead of wobbling between synonyms. A write only happens when the
+  name actually changes — which matters because bb's title PATCH also dispatches
+  a rename command to the thread's environment.
+- Names are clamped to 48 characters at a word boundary, matching bb's own cap;
+  wrapping quotes and trailing punctuation are stripped. A model answer of
+  `N/A`, `none` or similar is treated as "no name" and the thread is left alone.
+- The name is stored on the brief whether or not renaming is on, so turning the
+  setting on later has one ready for every thread with a brief. It is applied at
+  the next summary, not retroactively.
+- **Turning it off does not undo anything.** bb's original title is not kept
+  anywhere; the last name the plugin wrote stays. Rename by hand to change it.
+- Branch names are derived at thread creation and are unaffected.
+
 ## Sidebar glyphs
 
 bb paints a plugin row status **in place of** its own unsent-draft pencil, so
@@ -202,3 +251,8 @@ no preference writes.
   `bb plugin logs thread-briefs` for HTTP errors from `baseUrl`.
 - "No brief for this thread yet" on an older thread is expected, not a fault —
   briefs are never backfilled. Work the thread, or use **Summarize now**.
+- A thread that stopped picking up new titles was renamed by hand at some point;
+  that is the designed stop, and it is permanent. To restart it, rename the
+  thread to exactly the last name the plugin gave it.
+- Renames logged as `could not rename <id>` leave the brief intact and retry on
+  the next summary.

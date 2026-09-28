@@ -1,5 +1,6 @@
 import {
   BRIEF_STAGES,
+  MAX_TITLE_LENGTH,
   nextStepActorSchema,
   summaryResultSchema,
   type BriefStage,
@@ -11,6 +12,7 @@ export const SYSTEM_PROMPT = `You write one-paragraph-max operating briefs for s
 
 Return ONLY a JSON object with exactly these keys:
 
+  "title"         A name for this thread, 4-6 words, that someone scanning a sidebar would recognise a day later. Name the work, not the conversation: the subsystem, file, or feature plus what is being done to it. No trailing punctuation, no quotes, no "thread"/"discussion"/"chat", no leading verb like "Add" unless adding is genuinely the whole job.
   "goal"          One line: what this thread is actually trying to achieve. Not the opening prompt restated — the underlying objective, as it stands now.
   "currentState"  What exists now, including half-finished work. Name the concrete artifacts (files, branches, PRs) where the transcript names them.
   "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan.
@@ -21,6 +23,7 @@ Return ONLY a JSON object with exactly these keys:
 
 Rules:
 - Every field is a string except "nextStepActor", which is one of the three words above. Keep each to one or two lines.
+- "title" describes what the thread turned out to be about, not what its opening message asked for. A thread that set out to fix a test and ended up rewriting the scheduler is named for the scheduler.
 - Omit "nextStepActor" entirely when "nextStep" is the empty string — there is no actor for a step that does not exist.
 - When "blockedOn" is non-empty, "nextStepActor" is "other".
 - NEVER invent a next step. If the work described is finished, "nextStep" MUST be the empty string. A brief that invents work is worse than one that says the thread is done.
@@ -119,6 +122,45 @@ function normalizeActor(
   return parsed.success ? parsed.data : undefined;
 }
 
+const stripTrailingPunctuation = (text: string) =>
+  text.replace(/[.,;:]+$/u, "").trim();
+
+/**
+ * A title the plugin is willing to put on a thread, or `undefined` when the
+ * model gave nothing usable.
+ *
+ * Stricter than the prose fields because this one is written back into bb: a
+ * title is the thread's name everywhere — sidebar, header, command palette,
+ * `bb thread list` — and it replaces something the reader may have learned to
+ * recognise, so a malformed one costs more than a malformed `constraints`.
+ *
+ * The cleanup is the small set of things models reliably do to a field asked
+ * for as a name: wrap it in quotes, end it with a period, or write a sentence
+ * where a label was wanted. Over-length is truncated at a word boundary rather
+ * than rejected — a good name with a trailing clause is still a good name.
+ */
+export function normalizeTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const collapsed = value.replace(/\s+/gu, " ").trim();
+  // Punctuation is stripped on both sides of the unquote because models put a
+  // trailing period on either side of the closing quote: `"A name".` needs the
+  // first pass to expose the quotes, `"A name."` needs the second.
+  const bare = stripTrailingPunctuation(collapsed);
+  const unquoted = /^(["'`])(.+)\1$/u.exec(bare)?.[2]?.trim() ?? bare;
+  const trimmed = stripTrailingPunctuation(unquoted);
+  if (trimmed === "" || EMPTY_SYNONYMS.has(trimmed.toLowerCase())) {
+    return undefined;
+  }
+  if (trimmed.length <= MAX_TITLE_LENGTH) return trimmed;
+
+  const cut = trimmed.slice(0, MAX_TITLE_LENGTH);
+  const lastSpace = cut.lastIndexOf(" ");
+  // Fall back to the hard cut for a single word longer than the cap, which is
+  // some identifier the reader would rather see truncated than dropped.
+  const clamped = stripTrailingPunctuation(lastSpace > 0 ? cut.slice(0, lastSpace) : cut);
+  return clamped === "" ? undefined : clamped;
+}
+
 export function parseSummary(
   reply: string,
   fixedStage: BriefStage | null,
@@ -141,6 +183,7 @@ export function parseSummary(
   const nextStep = normalizeField(record.nextStep);
 
   return summaryResultSchema.parse({
+    title: normalizeTitle(record.title),
     goal: normalizeField(record.goal),
     currentState: normalizeField(record.currentState),
     nextStep,

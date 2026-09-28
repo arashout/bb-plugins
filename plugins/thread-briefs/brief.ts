@@ -95,6 +95,58 @@ export function resolveBrief(stored: StoredBrief): ResolvedBrief {
   };
 }
 
+/**
+ * The title to write to a thread, or null to leave it alone.
+ *
+ * bb generates a thread's title exactly once, from the opening prompt, before
+ * anyone knows what the thread became — `applyGeneratedThreadTitle` refuses to
+ * write over an existing title and nothing else in bb rewrites one. So a title
+ * this plugin writes is permanent, and the only name that can be clobbered by
+ * writing one is a name a person chose.
+ *
+ * That is the whole of the rule below. bb stores no provenance for a title, so
+ * "did a person choose this?" is answered by memory: `applied` is the title we
+ * last wrote, and a `current` that disagrees with it is someone else's work.
+ *
+ * - `applied === null` — we have never written one. Whatever is there is bb's
+ *   opening-prompt guess (or nothing), which is exactly what this replaces.
+ * - `current === applied` — ours, still untouched. Free to update.
+ * - otherwise — renamed by hand since we last wrote. Never again: the caller
+ *   leaves `applied` as it is, so this comparison keeps failing and every later
+ *   summary skips the rename too, with no "locked" flag to store or clear.
+ *
+ * `observed` covers the case that rule cannot see: the *first* rename, where
+ * `applied` is null and so nothing is being compared against. A summary takes
+ * up to a minute, and a thread renamed during it would be overwritten by a
+ * name chosen before the rename happened. So the caller reads the title once
+ * when the summary starts and again just before writing, and a title that
+ * moved in between belongs to whoever moved it.
+ *
+ * A `desired` equal to what the thread already shows returns null as well, so a
+ * settled thread costs no write — which matters because bb's title PATCH also
+ * dispatches a rename command to the thread's environment.
+ */
+export function planRename(args: {
+  /** The title now, read as late as the caller can manage. */
+  current: string | null;
+  /** The title when this summary started; defaults to `current`. */
+  observed?: string | null;
+  desired: string | undefined;
+  applied: string | null | undefined;
+}): string | null {
+  const desired = args.desired?.trim() ?? "";
+  if (desired === "") return null;
+
+  const current = args.current?.trim() ?? "";
+  const observed = args.observed === undefined ? current : (args.observed?.trim() ?? "");
+  if (current !== observed) return null;
+
+  const applied = args.applied ?? null;
+  if (applied !== null && current !== applied.trim()) return null;
+  if (current === desired) return null;
+  return desired;
+}
+
 export const STAGE_LABELS: Record<BriefStage, string> = {
   discovery: "Discovery",
   planning: "Planning",

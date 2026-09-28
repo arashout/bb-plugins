@@ -74,6 +74,10 @@ export function renderTranscript(input: TranscriptInput): string {
     parts.push(
       [
         "Previous brief (update it; keep what is still true, correct what is not):",
+        // Fed back so the name only moves when the work moved. Without it the
+        // model renames from scratch every summary and a settled thread
+        // wobbles between synonyms in the sidebar.
+        `  title: ${previous.title || "(empty)"}`,
         `  goal: ${previous.goal || "(empty)"}`,
         `  currentState: ${previous.currentState || "(empty)"}`,
         `  nextStep: ${previous.nextStep || "(empty)"}`,

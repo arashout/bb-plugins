@@ -13,6 +13,7 @@ import {
   briefKey,
   deriveStatus,
   isStageOverrideStale,
+  planRename,
   resolveBrief,
   rowSignalFor,
   threadIdFromKey,
@@ -90,6 +91,13 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Quiet period before summarizing (seconds)",
       default: 120,
     },
+    renameThreads: {
+      type: "boolean",
+      label: "Rename threads to the brief's title",
+      description:
+        "Replaces bb's opening-prompt title with the short name the summarizer chose, refreshed on every summary. Stops renaming a thread for good once you rename it yourself. bb's original title is not kept anywhere, so turning this off leaves the last name it wrote in place.",
+      default: false,
+    },
     sidebarGrouping: {
       type: "select",
       label: "Group sidebar threads by brief status",
@@ -135,6 +143,10 @@ export default async function plugin(bb: BbPluginApi) {
   };
 
   const announce = () => {
+    // A summary already in flight when the plugin is disposed still runs its
+    // `finally`, and publishing on a torn-down handle throws. Nobody is
+    // listening on a dead generation anyway.
+    if (lifetime.signal.aborted) return;
     bb.realtime.publish(BRIEFS_CHANGED_CHANNEL, { at: Date.now() });
   };
 
@@ -245,6 +257,63 @@ export default async function plugin(bb: BbPluginApi) {
     };
   };
 
+  /**
+   * Put the brief's title on the thread, and report the title we are now on
+   * record as having written.
+   *
+   * Returns the previous `appliedTitle` unchanged whenever nothing was written
+   * — including on failure — because that value is what makes a hand-rename
+   * stick: see {@link planRename}.
+   *
+   * The thread is re-read first. `summarizeThread` fetched it before a
+   * summarizer call that can take a minute, and a rename during that minute is
+   * exactly the case this must not lose.
+   */
+  async function applyTitle(args: {
+    threadId: string;
+    title: string | undefined;
+    applied: string | null;
+    /** The title as of before the summarizer call. */
+    staleCurrent: string | null;
+  }): Promise<string | null> {
+    if (!(await settings.get()).renameThreads) return args.applied;
+    // Cheap pre-check on what we already hold, so a settled thread costs no
+    // extra round trip; the authoritative check is below.
+    if (
+      planRename({
+        current: args.staleCurrent,
+        desired: args.title,
+        applied: args.applied,
+      }) === null
+    ) {
+      return args.applied;
+    }
+
+    const fresh = await bb.sdk.threads.get({ threadId: args.threadId }).catch(() => null);
+    if (fresh === null) return args.applied;
+    const title = planRename({
+      current: fresh.title,
+      observed: args.staleCurrent,
+      desired: args.title,
+      applied: args.applied,
+    });
+    if (title === null) return args.applied;
+
+    try {
+      await bb.sdk.threads.update({ threadId: args.threadId, title });
+    } catch (error) {
+      // A rename is not worth losing the brief over. Keeping the old
+      // `appliedTitle` also keeps the thread eligible for a retry next time.
+      bb.log.warn(
+        `could not rename ${args.threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return args.applied;
+    }
+    return title;
+  }
+
   /** Returns true when a brief was written (so callers know to announce). */
   async function summarizeThread(
     threadId: string,
@@ -304,10 +373,18 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const summary = parseSummary(reply, overrideInForce);
 
+    const appliedTitle = await applyTitle({
+      threadId,
+      title: summary.title,
+      applied: stored?.appliedTitle ?? null,
+      staleCurrent: thread.title,
+    });
+
     await writeBrief({
       version: 1,
       threadId,
       fields: {
+        title: summary.title,
         goal: summary.goal,
         currentState: summary.currentState,
         nextStep: summary.nextStep,
@@ -319,6 +396,7 @@ export default async function plugin(bb: BbPluginApi) {
       stageOverride: overrideInForce,
       stageOverrideSeq: overrideInForce === null ? null : outline.maxSeq,
       endedWithQuestion: endsWithQuestion(output),
+      appliedTitle,
       lastSummarizedAt: Date.now(),
       lastActivitySeen: outline.maxSeq,
     });

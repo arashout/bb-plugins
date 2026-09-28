@@ -14,6 +14,8 @@ every thread a short, durable **brief**, generated outside the working chat:
   tell me" and "keep going" read alike
 - **blockedOn** — who or what it is waiting on
 - **constraints** — facts learned in the thread that would break a naive re-plan
+- **title** — a 4–6 word name for the work, which can optionally replace bb's
+  own thread title
 
 Plus a derived **stage** (discovery / planning / implementation / review) and
 **status** (working / waiting-on-me / waiting-on-other / done) — where `working`
@@ -38,6 +40,26 @@ keeps bb's own indicator instead, because bb draws a plugin row status in place
 of its unsent-draft pencil and displacing that everywhere would cost more than
 it says. The live status is folded in per row on the client, off the sidebar view
 it already holds, so `listRowSignals` needs no per-thread lookups.
+
+**The thread title itself** — optionally, the brief's name replaces it:
+
+```sh
+bb plugin config thread-briefs set renameThreads true
+```
+
+bb names a thread once, from the opening prompt, before anyone knows what it
+became — and nothing in bb ever rewrites it. The brief re-reads the whole
+transcript every summary, so it has strictly more to go on. With this on the
+name lands everywhere bb shows a title: sidebar, header, command palette,
+`bb thread list`.
+
+It will not clobber a name you chose. The plugin remembers the title it last
+wrote, and finding anything else on the thread means you renamed it — so that
+thread is never renamed again. Nothing is stored to record the stop: the skipped
+rename leaves the remembered name pointing at the old one, so the comparison
+keeps failing. The thread is also re-read immediately before the write, so a
+rename made during a summarizer call is not overwritten by a name chosen before
+it. Turning the setting off undoes nothing — bb's original title is not kept.
 
 **Sidebar sections** — optionally, the sidebar groups by status instead of by
 project:
@@ -81,6 +103,7 @@ configured.
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
 | Header UI | `experimental_threadHeaderAction` with a portalled popover |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
+| Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |
 
 ### Why a content script rather than a list fork
 
@@ -100,6 +123,16 @@ into idle, which is the turn-completion signal a poll would be approximating.
 Polling remains only as the 10-minute sweep, for activity whose event never
 arrived — a server restart, a plugin reload, or a turn that ended in `error`
 rather than idle.
+
+### Why renaming is safe, and why it needs bookkeeping
+
+bb's `applyGeneratedThreadTitle` refuses to write over an existing title, and it
+is the only automatic writer, so a title this plugin writes will not be
+overwritten by bb. The risk runs the other way: a `threads` row carries no
+provenance for its title — there is no column saying whether it came from bb's
+guess, a rename, or us — so "is this name mine to change?" can only be answered
+from memory. `appliedTitle` on the brief row is that memory, and `planRename` is
+the whole rule, kept pure and tested away from the effect.
 
 ### Why sections rather than a grouping mode
 

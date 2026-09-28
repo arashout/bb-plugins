@@ -3,8 +3,10 @@ import {
   buildUserPrompt,
   chatCompletionsUrl,
   extractJson,
+  normalizeTitle,
   parseSummary,
 } from "./summarize.js";
+import { MAX_TITLE_LENGTH } from "./contract.js";
 import {
   endsWithQuestion,
   renderTranscript,
@@ -233,5 +235,66 @@ describe("renderTranscript", () => {
     });
     expect(text).toContain("earlier messages elided");
     expect(text).toContain("(untitled)");
+  });
+});
+
+describe("normalizeTitle", () => {
+  it("keeps a well-formed name as it is", () => {
+    expect(normalizeTitle("Sidebar grouping by brief status")).toBe(
+      "Sidebar grouping by brief status",
+    );
+  });
+
+  it("strips the wrapping quotes and trailing punctuation models add", () => {
+    expect(normalizeTitle('"Kploy image tracking".')).toBe("Kploy image tracking");
+    expect(normalizeTitle("`Machine pod memory limits`")).toBe(
+      "Machine pod memory limits",
+    );
+  });
+
+  it("collapses the whitespace of a wrapped reply", () => {
+    expect(normalizeTitle("  Thread brief\n  titles  ")).toBe("Thread brief titles");
+  });
+
+  it("truncates an over-long name at a word boundary", () => {
+    const title = normalizeTitle(
+      "Adding a summarizer-chosen short name and renaming bb threads to match it",
+    );
+    expect(title).toBe("Adding a summarizer-chosen short name and");
+    expect(title!.length).toBeLessThanOrEqual(MAX_TITLE_LENGTH);
+  });
+
+  it("hard-cuts a single word longer than the cap", () => {
+    // An identifier with no space to break on is better truncated than dropped.
+    const title = normalizeTitle("a".repeat(80));
+    expect(title).toBe("a".repeat(MAX_TITLE_LENGTH));
+  });
+
+  it("rejects a non-answer rather than putting it on a thread", () => {
+    expect(normalizeTitle("")).toBeUndefined();
+    expect(normalizeTitle("   ")).toBeUndefined();
+    expect(normalizeTitle("N/A")).toBeUndefined();
+    expect(normalizeTitle("unknown")).toBeUndefined();
+    expect(normalizeTitle(null)).toBeUndefined();
+    expect(normalizeTitle(42)).toBeUndefined();
+  });
+});
+
+describe("parseSummary titles", () => {
+  it("carries a usable title through", () => {
+    expect(parseSummary(reply({ ...full, title: "Thread brief titles" }), null).title).toBe(
+      "Thread brief titles",
+    );
+  });
+
+  it("leaves the title absent when the model omitted it", () => {
+    // Absent, not empty: the brief is still good and the thread keeps its name.
+    expect(parseSummary(reply(full), null).title).toBeUndefined();
+  });
+
+  it("does not fail the whole brief over a bad title", () => {
+    const summary = parseSummary(reply({ ...full, title: 12 }), null);
+    expect(summary.title).toBeUndefined();
+    expect(summary.goal).toBe("Ship thread briefs");
   });
 });

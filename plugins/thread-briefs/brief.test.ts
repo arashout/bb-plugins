@@ -3,6 +3,7 @@ import {
   deriveStatus,
   effectiveStage,
   isStageOverrideStale,
+  planRename,
   resolveBrief,
   rowDecoration,
   rowSignalFor,
@@ -211,5 +212,111 @@ describe("rowDecoration", () => {
 
   it("restores the stored glyph once the thread goes idle again", () => {
     expect(rowDecoration(signalFor(blocked), false)?.icon).toBe("Pause");
+  });
+});
+
+describe("planRename", () => {
+  it("takes over bb's opening-prompt title the first time", () => {
+    // `applied: null` is "we have never written one", so whatever is there is
+    // bb's guess and replacing it is the whole point.
+    expect(
+      planRename({
+        current: "The thread brief plugin generates some useful or...",
+        desired: "Thread brief thread titles",
+        applied: null,
+      }),
+    ).toBe("Thread brief thread titles");
+  });
+
+  it("titles a thread that never got one", () => {
+    expect(
+      planRename({ current: null, desired: "Kploy image tracking", applied: null }),
+    ).toBe("Kploy image tracking");
+  });
+
+  it("updates a title it wrote itself", () => {
+    expect(
+      planRename({
+        current: "Sidebar status grouping",
+        desired: "Sidebar grouping teardown",
+        applied: "Sidebar status grouping",
+      }),
+    ).toBe("Sidebar grouping teardown");
+  });
+
+  it("writes nothing when the thread already shows the name", () => {
+    expect(
+      planRename({
+        current: "Sidebar status grouping",
+        desired: "Sidebar status grouping",
+        applied: "Sidebar status grouping",
+      }),
+    ).toBeNull();
+  });
+
+  it("stops renaming once someone renames the thread by hand", () => {
+    expect(
+      planRename({
+        current: "DO NOT TOUCH — release cut",
+        desired: "Sidebar grouping teardown",
+        applied: "Sidebar status grouping",
+      }),
+    ).toBeNull();
+  });
+
+  it("stays stopped, because the caller leaves `applied` where it was", () => {
+    // The next summary proposes something new again. Nothing was recorded when
+    // the rename was skipped, so the mismatch is still there and still wins —
+    // which is what makes the stop permanent without a flag to store.
+    expect(
+      planRename({
+        current: "DO NOT TOUCH — release cut",
+        desired: "A third suggestion entirely",
+        applied: "Sidebar status grouping",
+      }),
+    ).toBeNull();
+  });
+
+  it("backs off when the title moved while the summary was running", () => {
+    // The first rename has no `applied` to compare against, so this is the
+    // only thing standing between a mid-summary rename and being overwritten.
+    expect(
+      planRename({
+        current: "Renamed mid-flight",
+        observed: "Build me a thing that does...",
+        desired: "Sidebar grouping teardown",
+        applied: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("proceeds when the title held still for the whole summary", () => {
+    expect(
+      planRename({
+        current: "Build me a thing that does...",
+        observed: "Build me a thing that does...",
+        desired: "Sidebar grouping teardown",
+        applied: null,
+      }),
+    ).toBe("Sidebar grouping teardown");
+  });
+
+  it("leaves the title alone when the model proposed nothing usable", () => {
+    expect(
+      planRename({ current: "Sidebar grouping", desired: undefined, applied: null }),
+    ).toBeNull();
+    expect(
+      planRename({ current: "Sidebar grouping", desired: "   ", applied: null }),
+    ).toBeNull();
+  });
+
+  it("does not count whitespace as a hand-rename", () => {
+    expect(
+      planRename({
+        current: "  Sidebar status grouping  ",
+        desired: "Sidebar grouping teardown",
+        applied: "Sidebar status grouping",
+      }),
+    ).toBe("Sidebar grouping teardown");
   });
 });

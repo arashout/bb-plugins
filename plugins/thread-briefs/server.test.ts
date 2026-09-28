@@ -764,3 +764,210 @@ describe("cleanup", () => {
     await harness.lifecycle.dispose();
   });
 });
+
+describe("renaming threads", () => {
+  /**
+   * A host whose thread is mutable, so a test can watch the title change — and
+   * can rename it by hand between summaries the way a user would.
+   */
+  function renameHost(options: {
+    title?: string | null;
+    renameThreads?: boolean;
+    summaryTitle?: string;
+    /** Runs when the summarizer is called, to move the world mid-flight. */
+    onRequest?: () => void;
+    update?: (args: { threadId: string; title?: string | null }) => void;
+  }) {
+    const live = makeThreadResponse({
+      id: "thr_1",
+      title: options.title === undefined ? "Build me a thing that does..." : options.title,
+      visibility: "visible",
+      status: "idle",
+    });
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      options.onRequest?.();
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  ...SUMMARY,
+                  title: options.summaryTitle ?? "Sidebar grouping by status",
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    // Advanced per summary so a test can wait for *that* summary's write,
+    // rather than seeing the previous one's brief and racing ahead.
+    let seq = 12;
+    const created = createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings: {
+        apiKey: "test-key",
+        baseUrl: "https://api.test/v1",
+        model: "test-model",
+        jsonMode: true,
+        quietSeconds: 120,
+        renameThreads: options.renameThreads ?? true,
+      },
+      sdk: {
+        threads: {
+          get: async () => ({ ...live }),
+          list: async () => [live],
+          update: async (args) => {
+            options.update?.(args as { threadId: string; title?: string | null });
+            if (typeof args.title === "string") live.title = args.title;
+            return live;
+          },
+          output: async () => ({ output: "All set." }),
+          conversationOutline: async () => ({
+            items: [
+              { id: "1", role: "user", preview: "Build it", attachmentSummary: null },
+            ],
+            maxSeq: seq,
+          }),
+          interactions: { list: async () => [] },
+        },
+      },
+    });
+    return { ...created, live, fetchMock, nextSeq: () => (seq += 1) };
+  }
+
+  /** Summarize once, and wait for that summary's brief to be stored. */
+  async function summarize(current: ReturnType<typeof renameHost>) {
+    const target = current.nextSeq();
+    await current.harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    await waitFor(async () => {
+      const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      return stored?.lastActivitySeen === target ? stored : null;
+    });
+  }
+
+  it("replaces bb's opening-prompt title with the brief's name", async () => {
+    const current = renameHost({});
+    await plugin(current.bb);
+    await summarize(current);
+
+    expect(current.live.title).toBe("Sidebar grouping by status");
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("records the title it wrote, so it can tell its own name from yours", async () => {
+    const current = renameHost({});
+    await plugin(current.bb);
+    await summarize(current);
+
+    const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+    expect(stored?.appliedTitle).toBe("Sidebar grouping by status");
+    expect(stored?.fields.title).toBe("Sidebar grouping by status");
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("renames nothing while the setting is off", async () => {
+    const current = renameHost({ renameThreads: false });
+    await plugin(current.bb);
+    await summarize(current);
+
+    expect(current.live.title).toBe("Build me a thing that does...");
+    expect(current.harness.sdk.callsTo("threads.update")).toHaveLength(0);
+    // The name is still recorded, so turning the setting on later has one.
+    const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+    expect(stored?.fields.title).toBe("Sidebar grouping by status");
+    expect(stored?.appliedTitle).toBeNull();
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("writes nothing when the thread already shows the name", async () => {
+    const current = renameHost({ title: "Sidebar grouping by status" });
+    await plugin(current.bb);
+    await summarize(current);
+
+    // No PATCH, which also means no rename command dispatched to the
+    // environment for a title that did not move.
+    expect(current.harness.sdk.callsTo("threads.update")).toHaveLength(0);
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("stops renaming for good once the thread is renamed by hand", async () => {
+    const current = renameHost({});
+    await plugin(current.bb);
+    await summarize(current);
+    expect(current.live.title).toBe("Sidebar grouping by status");
+
+    // The user renames it. The summarizer still proposes its own name.
+    current.live.title = "DO NOT TOUCH — release cut";
+    await summarize(current);
+
+    expect(current.live.title).toBe("DO NOT TOUCH — release cut");
+    // And the record still points at our old name, which is what keeps it off.
+    const after = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+    expect(after?.appliedTitle).toBe("Sidebar grouping by status");
+
+    await summarize(current);
+    expect(current.live.title).toBe("DO NOT TOUCH — release cut");
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("does not clobber a rename made while the summarizer was thinking", async () => {
+    // The thread was read before the request; renaming during it is exactly the
+    // race the re-read before writing exists for.
+    const current: ReturnType<typeof renameHost> = renameHost({
+      onRequest: () => {
+        current.live.title = "Renamed mid-flight";
+      },
+    });
+    await plugin(current.bb);
+    await summarize(current);
+
+    expect(current.live.title).toBe("Renamed mid-flight");
+    expect(current.harness.sdk.callsTo("threads.update")).toHaveLength(0);
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("keeps the brief when the rename fails, and retries next time", async () => {
+    let fail = true;
+    const current = renameHost({
+      update: () => {
+        if (fail) throw new Error("thread is archived");
+      },
+    });
+    await plugin(current.bb);
+    await summarize(current);
+
+    const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+    expect(stored?.fields.goal).toBe(SUMMARY.goal);
+    // Nothing recorded as applied, so the thread is still eligible.
+    expect(stored?.appliedTitle).toBeNull();
+
+    fail = false;
+    await summarize(current);
+    expect(current.live.title).toBe("Sidebar grouping by status");
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("leaves the title alone when the model proposed no name", async () => {
+    const current = renameHost({ summaryTitle: "N/A" });
+    await plugin(current.bb);
+    await summarize(current);
+
+    expect(current.live.title).toBe("Build me a thing that does...");
+    expect(current.harness.sdk.callsTo("threads.update")).toHaveLength(0);
+    await current.harness.lifecycle.dispose();
+  });
+
+  it("titles a thread bb never managed to title at all", async () => {
+    const current = renameHost({ title: null });
+    await plugin(current.bb);
+    await summarize(current);
+
+    expect(current.live.title).toBe("Sidebar grouping by status");
+    await current.harness.lifecycle.dispose();
+  });
+});
