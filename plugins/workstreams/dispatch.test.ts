@@ -34,6 +34,15 @@ describe("dispatch candidate selection", () => {
     expect(selectCandidate(groups(mixedCase), "leaf", [], [], {})?.candidate.action).toBe("resolve-conflicts");
     expect(mixedCase.pr.reviewDecision).toBe("APPROVED");
   });
+  it("skips a PR another authority runs under any key, including a container, and takes the next one", () => {
+    // A v2 roster owns the first PR; a team container holding it still must not hand it to Auto.
+    const other = { ...unit, path: "/work/app-43", pr: { ...unit.pr!, url: "https://github.com/acme/app/pull/43" } };
+    const container = [{ ...groups()[0]!, key: "team:ABC", clusters: [{ ...groups()[0]!.clusters[0]!, units: [unit, other] }] }] as Board["groups"];
+    const v2 = (prUrl: string) => prUrl === URL;
+    expect(selectCandidate(container, "team:ABC", [], [], {}, v2)?.candidate).toMatchObject({ path: "/work/app-43", prUrl: other.pr!.url });
+    expect(selectCandidate(groups(), "leaf", [], [], {}, v2)).toBeNull();
+    expect(selectCandidate(container, "team:ABC", [], [])?.candidate.prUrl).toBe(URL);
+  });
   it("does not auto-dispatch written approval notes without an explicit resolution gate", () => {
     const noted = { ...unit, pr: { ...unit.pr!, mergeStateStatus: "CLEAN" as const, approvalHasBody: true } };
     expect(selectCandidate(groups(noted), "leaf", [], [])).toBeNull();

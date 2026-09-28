@@ -28,6 +28,8 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortV2, effortV2Contract } from "./effort-v2-server.js";
+import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
+import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
@@ -727,6 +729,7 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
     ...EFFORT_ROSTER_MIGRATIONS,
     PR_FACTS_MIGRATION,
+    ...EFFORT_EXECUTION_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -739,6 +742,14 @@ export default async function plugin(bb: BbPluginApi) {
     return hold ? `On hold${hold.reason ? `: ${hold.reason}` : ""}. Release the hold before advancing or merging this PR.` : null;
   };
   const effortStore = createEffortStore(db);
+  const effortWork = createEffortWorkStore(db);
+  /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
+  const v2Pointer = (effortId: string | null | undefined): string | null => {
+    const effort = effortId ? effortStore.get(effortId) : null;
+    return effort && effortWork.execution(effort.id).mode === "v2" ? `Managed by the ${effort.name} roster; instruct there.` : null;
+  };
+  const v2Managed = (prUrl: string): string | null => v2Pointer(effortWork.managedBy(prUrl));
+  const v2Excluded = (prUrl: string): boolean => v2Managed(prUrl) !== null;
   dispatch.closeStranded();
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
@@ -1823,7 +1834,7 @@ export default async function plugin(bb: BbPluginApi) {
     const dispatchAttempts = dispatch.attempts();
     const dispatchPaused = dispatchAttempts.some((attempt) =>
       attempt.status === "launching" || attempt.status === "running" || attempt.status === "verifying" || attempt.status === "needs-you");
-    const dispatchChoice = dispatchPaused ? null : selectCandidate(wired, dispatchPolicy.effort_key, dispatchAttempts, runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list());
+    const dispatchChoice = dispatchPaused ? null : selectCandidate(wired, dispatchPolicy.effort_key, dispatchAttempts, runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
     const established = await Promise.all(effortStore.list().map(async (effort) => {
       if (!effort.coordinatorThreadId) return effort;
       try {
@@ -3349,24 +3360,37 @@ export default async function plugin(bb: BbPluginApi) {
     const environment = "environment" in thread ? thread.environment : null;
     const urls = confirmedThreadPrUrls({ metadata, recordedUrls, environmentPath: environment?.path ?? null,
       scanned: scanned.filter((unit) => unit.observed?.pr === true), knownUrls: [...work.keys()] });
+    const cohorts = confirmedPrCohorts(urls, [...work.values()]);
+    // A v2 roster changes only through explicit membership, so linked work is suggested, never claimed.
+    if (v2Pointer(effort.id)) {
+      const suggested = cohorts.flatMap(({ members }) => [...members.tickets.filter((ticket) => !effortStore.owner("ticket", ticket)),
+        ...members.prUrls.filter((url) => !effortStore.owner("prUrl", url))]);
+      note(suggested.length ? `This effort runs on its roster, so linked work is not added automatically. Add it to the effort to put it on the roster: ${suggested.slice(0, 10).join(", ")}${suggested.length > 10 ? ", …" : ""}.` : null);
+      return;
+    }
     let claimed = false;
     let conflicts = 0;
-    for (const cohort of confirmedPrCohorts(urls, [...work.values()])) {
+    for (const cohort of cohorts) {
       const guard = { ...cohort.guard, checkoutPaths: [...new Set(cohort.guard.prUrls.flatMap((url) => work.get(prWorkItemKey(url))?.paths ?? []))] };
       const result = effortStore.claimUnowned(effort.key, cohort.members, guard);
       claimed ||= result.claimed.tickets.length + result.claimed.prUrls.length > 0;
       if (result.conflict) conflicts++;
     }
     note(conflicts ? `${conflicts} linked PR ${conflicts === 1 ? "group has" : "groups have"} work assigned to another effort. Review linked work to move it.` : null);
-    if (claimed) bb.realtime.publish(BOARD_CHANGED, { scanning });
+    if (claimed) {
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      await syncV2Targets();
+    }
   }
 
+  /** Runs after every board sync, so it also brings v2 targets up to date with membership and board facts. */
   async function reconcileAllThreadIntents(): Promise<void> {
     for (const threadId of intentIds()) {
       if (disposal.signal.aborted) break;
       try { await reconcileThreadIntent(threadId); }
       catch (error) { bb.log.warn(`thread ${threadId}: effort inheritance failed: ${String(error).slice(0, 200)}`); }
     }
+    await syncV2Targets();
   }
 
   const coordinators = createCoordinatorService(effortStore, {
@@ -3504,6 +3528,9 @@ export default async function plugin(bb: BbPluginApi) {
           blockers.push(`Finish pending thread sync for merged effort ${row.sourceId} before merging again.`);
       }
       if (!retry && (source.archivedAt || destination.archivedAt)) blockers.push("Restore archived efforts before merging them.");
+      // A merge never lifts a fence: a v2 effort's PRs may join only another v2 roster.
+      if (!retry && effortWork.execution(source.id).mode === "v2" && effortWork.execution(destination.id).mode === "legacy")
+        blockers.push(`${source.name} runs on its roster and ${destination.name} does not. Move ${source.name} back to legacy launchers, or ${destination.name} to its roster, before merging.`);
       if (!retry && [source.coordinatorState, destination.coordinatorState].includes("creating"))
         blockers.push("A coordinator launch is unresolved. Inspect it before merging.");
       if (!retry && [...sourceControllers, ...destinationControllers].some((controller) => controller.state === "creating"))
@@ -3555,7 +3582,8 @@ export default async function plugin(bb: BbPluginApi) {
       actions.set(threadId, { ...actions.get(threadId), threadId, ...patch });
     for (const thread of threads) if (thread.workIntent) add(thread.id, { workEffortId: destination.id,
       expectedWorkEffortId: thread.metadataWorkEffortId });
-    const coordinatorId = destination.coordinatorThreadId ?? source.coordinatorThreadId;
+    // A v2 effort's threads keep their parents: merging never moves a controller under a roster's parent.
+    const coordinatorId = v2Pointer(source.id) || v2Pointer(destination.id) ? null : destination.coordinatorThreadId ?? source.coordinatorThreadId;
     if (!destination.coordinatorThreadId && source.coordinatorThreadId) {
       const thread = threads.find((item) => item.id === source.coordinatorThreadId);
       if (thread) add(thread.id, { effortId: destination.id, expectedEffortId: thread.metadataEffortId,
@@ -3632,6 +3660,9 @@ export default async function plugin(bb: BbPluginApi) {
     const effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
       name: scope.name, goal: scope.goal, projectId, members: scope.members, coordinatorState: "none" });
     if (effort.archivedAt) throw new Error("Restore this effort before placing new work under it.");
+    // A v2 roster reuses existing threads and checkouts; it never creates a coordinator or controller.
+    const managed = v2Pointer(effort.id);
+    if (managed) throw new Error(managed);
     if (scope.establishedId && scope.establishedId !== effort.id) throw new Error("The effort changed before placement. Refresh the action.");
     return { parentThreadId: repo ? (await ensureRepoController(effort, repo, projectId, hostId)).threadId!
       : (await coordinators.ensureExisting(effort.id, projectId)).coordinatorThreadId!, effort };
@@ -3706,7 +3737,8 @@ export default async function plugin(bb: BbPluginApi) {
         (facts.reviewDecision === "CHANGES_REQUESTED" && facts.reviewFollowupPosted === false);
       const needsChecks = facts.checks === "failed";
       const needsWriter = repair || facts.needsPreparation || needsFeedback || needsChecks;
-      const held = holdMessage(prUrl);
+      // A v2 roster owns the PR by its targets, or by fresh ownership its targets have not caught up with yet.
+      const held = holdMessage(prUrl) ?? v2Managed(prUrl) ?? v2Pointer(scope?.establishedId);
       const eligible = held === null && facts.state === "OPEN" && facts.approvalFeedback.status !== "unknown" && (!needsWriter || (!facts.isCrossRepository && !!source));
       const feedbackDetail = facts.approvalFeedback.status === "unknown" ? "Approval feedback history is incomplete; refresh and verify the current review." :
         facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." : facts.detail;
@@ -3777,7 +3809,7 @@ export default async function plugin(bb: BbPluginApi) {
     recordFeedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
     controller: resolveRepoController,
     assertAdvanceAllowed: (prUrl) => {
-      const held = holdMessage(prUrl);
+      const held = holdMessage(prUrl) ?? v2Managed(prUrl);
       if (held) throw new Error(held);
     },
     repairCandidates: advanceRepairCandidates,
@@ -4057,7 +4089,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error("The proposal or preview changed or expired. Preview the selection again.");
       }
       for (const url of proposal.selectedPrUrls) {
-        const held = holdMessage(url);
+        const held = holdMessage(url) ?? v2Managed(url);
         if (held && !accepted) throw new Error(`${url}: ${held}`);
       }
       const batch = accepted ?? await advance.start(previewToken);
@@ -4274,14 +4306,14 @@ export default async function plugin(bb: BbPluginApi) {
     dispatching = true;
     try {
       const current = await board();
-      const choice = selectCandidate(current.groups, current.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list());
+      const choice = selectCandidate(current.groups, current.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
       if (choice === null) return;
       // The board may have been built from an old scan. Inspect this checkout before committing to a launch.
       if (!(await rescanPaths([choice.candidate.path]))) return;
       if (dispatch.policy().mode !== "auto" || disposal.signal.aborted) return;
       if (effortStore.source(dispatch.policy().effort_key ?? "")?.archivedAt) return;
       const fresh = await board();
-      const checked = selectCandidate(fresh.groups, fresh.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list());
+      const checked = selectCandidate(fresh.groups, fresh.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
       if (checked === null) return;
       if (checked.candidate.path !== choice.candidate.path || checked.candidate.prUrl !== choice.candidate.prUrl ||
         checked.candidate.action !== choice.candidate.action) {
@@ -4446,6 +4478,25 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** Each v2 effort's roster PRs, from the same ownership the roster reads: explicit PR members and PRs whose ticket it alone owns. */
+  async function v2Targets(): Promise<(effortId: string) => V2Target[]> {
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    return (effortId) => {
+      const effort = effortStore.get(effortId);
+      if (effort?.id !== effortId) return [];
+      const explicit = new Set(effort.members.prUrls.map(prWorkItemKey));
+      return rosterTargets(effort, work).map((target) => ({ target, source: explicit.has(target) ? "pr" : "ticket" }));
+    };
+  }
+  /** Rewrites run one at a time, each from a fresh read, so the last one reflects the latest membership. */
+  let targetSync: Promise<void> = Promise.resolve();
+  function syncV2Targets(): Promise<void> {
+    if (!effortWork.active()) return targetSync;
+    targetSync = targetSync.then(async () => effortWork.rewriteTargets(await v2Targets()))
+      .catch((error: unknown) => bb.log.warn(`v2 targets: rewrite failed: ${String(error).slice(0, 300)}`));
+    return targetSync;
+  }
+
   const effortV2 = createEffortV2({
     efforts: effortStore,
     numbers: createEffortRosterStore(db, effortStore).numbers,
@@ -4503,6 +4554,7 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
       if (result.ok && dispatch.policy().effort_key === input.groupKey) dispatch.setPolicy(dispatch.policy().mode, result.effort.key);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      await syncV2Targets();
       return result;
     },
     effort_admin_list: () => {
@@ -4603,6 +4655,7 @@ export default async function plugin(bb: BbPluginApi) {
           return effortStore.merge(result.preview.source.id, result.preview.destination.id);
         })();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
+        await syncV2Targets();
         const pendingThreadSync = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
         return { ok: true as const, effort, pendingThreadSync,
           notice: pendingThreadSync ? `${pendingThreadSync} thread assignments still need syncing. Retry this merge to finish.` : null };
@@ -4707,6 +4760,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
         intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
         db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
+        if (!established) await syncV2Targets();
       }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       if (destinationKey !== null) await reconcileThreadIntent(threadId, true);
@@ -4741,6 +4795,7 @@ export default async function plugin(bb: BbPluginApi) {
         established ? undefined : { name: destination.name, members: initial.members }); }
       catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      await syncV2Targets();
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return threadEffortContext(threadId);
     },
@@ -4765,6 +4820,7 @@ export default async function plugin(bb: BbPluginApi) {
         established ? undefined : { name: destination.name, members: initial.members }); }
       catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      await syncV2Targets();
       return cardEffortContext(target);
     },
     thread_effort_link_pr: async ({ threadId, prUrl }) => {
@@ -4790,6 +4846,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (mode === "auto" && effortKey === null) throw new Error("Choose an effort before enabling automatic dispatch.");
       if (mode === "auto" && effortKey && effortStore.source(effortKey)?.archivedAt)
         throw new Error("Restore this effort before enabling automatic dispatch.");
+      const managed = mode === "auto" && effortKey ? v2Pointer(effortStore.source(effortKey)?.id) : null;
+      if (managed) throw new Error(managed);
       if (effortKey !== null && !current.groups.some((group) => group.key === effortKey && !current.groups.some((child) => child.parentKey === group.key))) {
         throw new Error("That effort is no longer on the board. Refresh and choose an effort.");
       }
@@ -5158,6 +5216,8 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
       }
       const found = await scannedUnit(path);
+      const managed = found?.raw.pr ? v2Managed(found.raw.pr.url) : null;
+      if (managed) return { ok: false as const, error: managed };
       const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : found ? await checkoutScope(path) : null;
       const repo = found?.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found?.raw.githubRepo ?? null;
       const parentId = storedPlacementParent(repo, scope);

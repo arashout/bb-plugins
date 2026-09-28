@@ -388,6 +388,8 @@ export function createAdvanceService(db: RunDb, deps: {
     const preview = repairPlans.get(input.token);
     if (!preview || preview.plan.expiresAt < now()) throw new Error("This repair preview expired. Open it again.");
     const { batch, job } = findJob(preview.batchId, preview.jobId);
+    // A hold or a v2 roster placed after the preview refuses with its own reason, before any identity is recorded.
+    deps.assertAdvanceAllowed?.(job.prUrl);
     if (snapshot(job) !== preview.snapshot) throw new Error("This item changed since the preview. Open it again.");
     if (!preview.plan.modes.includes(input.mode)) throw new Error("That repair route is not available");
     const selected = preview.plan.candidates.find((candidate) => candidate.id === input.threadId);
