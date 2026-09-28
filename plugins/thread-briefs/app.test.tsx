@@ -9,6 +9,7 @@ import {
 } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { BriefState, RowSignal } from "./contract.js";
+import { BRIEFS_CHANGED_CHANNEL } from "./shared.js";
 
 const READY: BriefState = {
   state: "ready",
@@ -48,23 +49,38 @@ afterEach(() => {
 });
 
 describe("registrations", () => {
-  it("registers the overlay, header action and content script", async () => {
+  it("registers the overlay, panel action, header action and content script", async () => {
     const captured = await loadApp();
     expect(captured.appOverlays.map((entry) => entry.id)).toEqual(["brief-sync"]);
+    expect(captured.threadPanelActions.map((entry) => entry.id)).toEqual(["brief"]);
     expect(captured.threadHeaderActions.map((entry) => entry.id)).toEqual(["brief"]);
     expect(captured.contentScripts.map((entry) => entry.id)).toEqual(["row-glyphs"]);
     // Nothing may register a thread list: replacing bb's sidebar is out of scope.
     expect(captured.threadLists).toEqual([]);
   });
+
+  it("labels the tab the same way from the launcher as from the header", async () => {
+    const captured = await loadApp();
+    const action = captured.threadPanelActions[0]!;
+    const opens: Array<string | undefined> = [];
+    action.run!({
+      threadId: "thr_1",
+      openPanel: (options) => {
+        opens.push(options?.title);
+        return true;
+      },
+    });
+    expect(opens).toEqual(["Brief"]);
+  });
 });
 
-describe("the header popover", () => {
-  const render = async (options: {
-    getBrief?: () => BriefState;
-    setStageOverride?: (input: unknown) => BriefState;
-    refresh?: () => { queued: boolean };
-    isCompactViewport?: boolean;
-  }) => {
+/**
+ * The button holds no brief state: its whole job is to open the panel tab. That
+ * is what keeps the brief one click from the same place on every thread, since
+ * panel tabs are per-thread and per-device.
+ */
+describe("the header button", () => {
+  const render = async (options: { isCompactViewport?: boolean } = {}) => {
     const captured = await loadApp();
     return renderSlot(
       captured.threadHeaderActions[0]!,
@@ -73,6 +89,50 @@ describe("the header popover", () => {
         projectId: "proj_1",
         isCompactViewport: options.isCompactViewport ?? false,
       },
+      { openThreadPanel: () => true },
+    );
+  };
+
+  it("opens the brief panel tab", async () => {
+    const slot = await render();
+    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
+
+    expect(slot.inspection.navigateCalls).toEqual([
+      {
+        method: "openThreadPanel",
+        options: { actionId: "brief", title: "Brief" },
+      },
+    ]);
+    slot.lifecycle.unmount();
+  });
+
+  it("never fetches a brief of its own", async () => {
+    // The header mounts for every visible thread, including both panes of a
+    // split; the panel mounts only while its tab is on screen.
+    const slot = await render();
+    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
+    await waitFor(() => expect(slot.inspection.rpcCalls).toEqual([]));
+    slot.lifecycle.unmount();
+  });
+
+  it("drops the label on a compact viewport but keeps the control", async () => {
+    const slot = await render({ isCompactViewport: true });
+    expect(await slot.findByRole("button", { name: "Thread brief" })).toBeTruthy();
+    expect(slot.queryByText("Brief")).toBeNull();
+    slot.lifecycle.unmount();
+  });
+});
+
+describe("the brief panel", () => {
+  const render = async (options: {
+    getBrief?: () => BriefState;
+    setStageOverride?: (input: unknown) => BriefState;
+    refresh?: () => { queued: boolean };
+  }) => {
+    const captured = await loadApp();
+    return renderSlot(
+      captured.threadPanelActions[0]!,
+      { threadId: "thr_1", params: null },
       {
         rpc: {
           getBrief: options.getBrief ?? (() => READY),
@@ -86,8 +146,8 @@ describe("the header popover", () => {
 
   it("shows the populated fields and skips the empty ones", async () => {
     const slot = await render({});
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
 
+    // No click anywhere: the tab being on screen is the request.
     expect(await slot.findByText("Ship the thread-briefs plugin")).toBeTruthy();
     expect(await slot.findByText("Server and app written")).toBeTruthy();
     expect(await slot.findByText("Push the branch")).toBeTruthy();
@@ -97,22 +157,25 @@ describe("the header popover", () => {
     slot.lifecycle.unmount();
   });
 
-  it("does not fetch the brief until the popover is opened", async () => {
-    const slot = await render({});
-    await waitFor(() => expect(slot.inspection.rpcCalls).toEqual([]));
+  it("says how old the brief is, which a panel left open cannot assume", async () => {
+    const slot = await render({
+      getBrief: () => ({
+        state: "ready",
+        brief: { ...READY.brief!, lastSummarizedAt: Date.now() },
+      }),
+    });
+    expect(await slot.findByText("Summarized just now")).toBeTruthy();
     slot.lifecycle.unmount();
   });
 
   it("says so while a brief is still being summarized", async () => {
     const slot = await render({ getBrief: () => ({ state: "summarizing" }) });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
     expect(await slot.findByText("Summarizing…")).toBeTruthy();
     slot.lifecycle.unmount();
   });
 
   it("offers to summarize a thread that has no brief, rather than spinning", async () => {
     const slot = await render({ getBrief: () => ({ state: "absent" }) });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
 
     expect(await slot.findByText("No brief for this thread yet.")).toBeTruthy();
     // A dormant thread is never backfilled, so "Summarizing…" would never resolve.
@@ -131,7 +194,6 @@ describe("the header popover", () => {
     const slot = await render({
       getBrief: () => ({ state: "unconfigured", message: "Add an API key." }),
     });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
     expect(await slot.findByText("Add an API key.")).toBeTruthy();
     slot.lifecycle.unmount();
   });
@@ -143,66 +205,26 @@ describe("the header popover", () => {
         brief: { ...READY.brief!, nextStep: "", status: "done" },
       }),
     });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
     expect(await slot.findByText("No next step — this thread reads as done.")).toBeTruthy();
     slot.lifecycle.unmount();
   });
 
-  /**
-   * These assert the *inline style*, not class names. An earlier version
-   * checked `className` contained `w-[calc(100vw-1rem)]` and passed happily
-   * while the panel rendered unconstrained: the class name being present says
-   * nothing about whether a rule reached the element, and this content is
-   * portalled out of the plugin's scoped stylesheet.
-   */
-  const openPanel = async (isCompactViewport: boolean) => {
-    const slot = await render({ isCompactViewport });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
-    const panel = (
-      await slot.findByText("Ship the thread-briefs plugin")
-    ).closest("[style*='max-height']") as HTMLElement | null;
-    return { slot, panel };
-  };
+  it("reloads when the server announces a new brief", async () => {
+    let goal = "Ship the thread-briefs plugin";
+    const slot = await render({
+      getBrief: () => ({ state: "ready", brief: { ...READY.brief!, goal } }),
+    });
+    expect(await slot.findByText(goal)).toBeTruthy();
 
-  it("caps its height and scrolls, so a long brief is reachable on a phone", async () => {
-    const { slot, panel } = await openPanel(true);
-    expect(panel).not.toBeNull();
-    expect(panel?.style.maxHeight).toContain(
-      "--radix-popover-content-available-height",
-    );
-    expect(panel?.style.overflowY).toBe("auto");
+    goal = "Move the brief into the side panel";
+    await slot.behavior.emitRealtime(BRIEFS_CHANGED_CHANNEL, {});
+    expect(await slot.findByText(goal)).toBeTruthy();
+
     slot.lifecycle.unmount();
-  });
-
-  it("never exceeds the width Radix measured, so it cannot run off-screen", async () => {
-    const { slot, panel } = await openPanel(true);
-    // The bug this replaces: a 100vw-wide panel anchored near the right edge
-    // hangs off the screen and its text wraps out of sight.
-    expect(panel?.style.maxWidth).toContain(
-      "--radix-popover-content-available-width",
-    );
-    slot.lifecycle.unmount();
-  });
-
-  it("wraps long unbroken strings rather than widening", async () => {
-    const { slot, panel } = await openPanel(true);
-    expect(panel?.style.overflowWrap).toBe("anywhere");
-    slot.lifecycle.unmount();
-  });
-
-  it("goes near-full-width on a compact viewport and a fixed column otherwise", async () => {
-    const compact = await openPanel(true);
-    expect(compact.panel?.style.width).toBe("calc(100vw - 1rem)");
-    compact.slot.lifecycle.unmount();
-
-    const wide = await openPanel(false);
-    expect(wide.panel?.style.width).toBe("20rem");
-    wide.slot.lifecycle.unmount();
   });
 
   it("sets a manual stage", async () => {
     const slot = await render({});
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
     fireEvent.click(await slot.findByRole("button", { name: "Planning" }));
 
     await waitFor(() =>
@@ -223,7 +245,6 @@ describe("the header popover", () => {
       brief: { ...READY.brief!, stage: "planning", stageOverride: "planning" },
     };
     const slot = await render({ getBrief: () => overridden });
-    fireEvent.click(await slot.findByRole("button", { name: "Thread brief" }));
     fireEvent.click(await slot.findByRole("button", { name: /Planning/u }));
 
     await waitFor(() =>

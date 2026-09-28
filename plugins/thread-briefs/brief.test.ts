@@ -7,6 +7,7 @@ import {
   resolveBrief,
   rowDecoration,
   rowSignalFor,
+  summarizedAgo,
 } from "./brief.js";
 import { isLiveWorking } from "./shared.js";
 import type { StoredBrief } from "./contract.js";
@@ -318,5 +319,33 @@ describe("planRename", () => {
         applied: "Sidebar status grouping",
       }),
     ).toBe("Sidebar grouping teardown");
+  });
+});
+
+describe("summarizedAgo", () => {
+  const SECOND = 1_000;
+  const MINUTE = 60 * SECOND;
+  const HOUR = 60 * MINUTE;
+  const DAY = 24 * HOUR;
+  const ago = (delta: number) => summarizedAgo(10 * DAY - delta, 10 * DAY);
+
+  it("collapses the first minute into 'just now'", () => {
+    expect(ago(0)).toBe("just now");
+    expect(ago(59 * SECOND)).toBe("just now");
+  });
+
+  it("steps up a unit at a time, singular at one", () => {
+    expect(ago(MINUTE)).toBe("1 minute ago");
+    expect(ago(59 * MINUTE)).toBe("59 minutes ago");
+    expect(ago(HOUR)).toBe("1 hour ago");
+    expect(ago(23 * HOUR)).toBe("23 hours ago");
+    expect(ago(DAY)).toBe("1 day ago");
+    expect(ago(9 * DAY)).toBe("9 days ago");
+  });
+
+  it("does not count into the future when the clocks disagree", () => {
+    // The timestamp is the server's and `now` is the browser's, so a brief can
+    // legitimately read as written a few seconds from now.
+    expect(summarizedAgo(10 * DAY + 30 * SECOND, 10 * DAY)).toBe("just now");
   });
 });

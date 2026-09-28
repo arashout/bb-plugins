@@ -147,6 +147,27 @@ export function planRename(args: {
   return desired;
 }
 
+/**
+ * How long ago a brief was written, for the panel's staleness line.
+ *
+ * Coarse on purpose. The question it answers is "does this describe the turn I
+ * just watched, or one from this morning?", and a brief is only rewritten after
+ * a quiet period anyway, so minute precision on a two-hour-old one would be
+ * false precision. A `now` behind the timestamp — clock skew between the server
+ * that wrote it and the browser reading it — clamps to "just now" rather than
+ * counting into the future.
+ */
+export function summarizedAgo(lastSummarizedAt: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - lastSummarizedAt) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 export const STAGE_LABELS: Record<BriefStage, string> = {
   discovery: "Discovery",
   planning: "Planning",

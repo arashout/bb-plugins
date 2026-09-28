@@ -1,14 +1,22 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the manual stage override, and renaming threads to the brief's title.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the manual stage override, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
 
 Keeps one short, durable brief per thread — goal, current state, next step,
 blocked on, constraints — generated outside the working chat so the thread's own
-context stays clean. Briefs surface as a glyph on the sidebar row and in full
-behind the **Brief** control in the thread header.
+context stays clean. Briefs surface as a glyph on the sidebar row and in full in
+the **Brief** tab of the thread's side panel, opened by the **Brief** button in
+the thread header or from the panel's new-tab launcher under Actions.
+
+The panel is where the whole brief lives, so it stays open beside the transcript;
+the header button is only a way in, and holds no state of its own. Panel tabs are
+per-thread and per-device (bb keeps them in the browser's local storage, keyed by
+thread, and prunes idle ones), so a Brief tab open on one thread is not open on
+the next — which is why the header button exists rather than expecting the
+launcher every time.
 
 ## Settings
 
@@ -51,7 +59,7 @@ are accepted now.
    `conversationOutline().maxSeq` against `lastActivitySeen` and skips threads
    that have not actually moved.
 
-Re-summarize is available in the header popover; it bypasses the debounce.
+Re-summarize is available in the Brief panel; it bypasses the debounce.
 
 Hidden threads (plugin workers) and deleted threads never get briefs.
 
@@ -60,9 +68,9 @@ first brief from a turn happening while the plugin is running. The sweep will
 only give a *briefless* thread a first brief if its last activity postdates the
 current plugin load, which is activity whose `thread.idle` should have arrived
 and may have been missed. A thread that has been dormant since before the plugin
-started stays briefless, however old or recent, and the header popover says so
-with a **Summarize now** button. Work on it again and it gets a brief like any
-other thread.
+started stays briefless, however old or recent, and the Brief panel says so with
+a **Summarize now** button. Work on it again and it gets a brief like any other
+thread.
 
 This is deliberate: without the bound, every briefless thread would be
 re-enqueued on every sweep forever — an unbounded burst of requests across the
@@ -76,9 +84,9 @@ offer rather than a spinner. A failed summary drops back to `absent`.
 ## Stage and status
 
 `stage` is a semantic judgement from the transcript: discovery, planning,
-implementation, review. Pick a stage by hand in the header popover to override
-it; the override is anchored to the thread's activity cursor and retires itself
-on the next real turn. Clicking the active manual stage clears it.
+implementation, review. Pick a stage by hand in the Brief panel to override it;
+the override is anchored to the thread's activity cursor and retires itself on
+the next real turn. Clicking the active manual stage clears it.
 
 `status` is derived mechanically, so it stays correct between summaries. It has
 a live half and a stored half, and the live half wins:
@@ -150,7 +158,7 @@ meant to be a list of things you could go poke; if you cannot say who would be
 chased, it is not blocked.
 
 A thread whose brief disagrees with this bar is usually one written before the
-bar changed: **Re-summarize** from the header popover. That re-reads the
+bar changed: **Re-summarize** from the Brief panel. That re-reads the
 transcript under the current prompt, but note it also feeds the old brief back
 as a starting point, so a wrong `blockedOn` can survive if the transcript still
 reads as though it were true.
@@ -221,9 +229,9 @@ moment it goes idle. The live half is computed in the client from
 `experimental_useSidebarThreads()`, which is why no row needs a server round
 trip to stay current, and why `listRowSignals` does no per-thread lookups.
 
-One consequence worth knowing: the header popover shows the **stored** status,
-so a running thread whose brief says "Waiting on you" will say that in the
-popover while its row shows no glyph. The row is live; the popover is the brief.
+One consequence worth knowing: the Brief panel shows the **stored** status, so
+a running thread whose brief says "Waiting on you" will say that in the panel
+while its row shows no glyph. The row is live; the panel is the brief.
 
 ## Sidebar sections
 
@@ -277,10 +285,17 @@ no preference writes.
 - Sections exist but the sidebar still groups by project: check
   `bb thread-list prefs get organizationMode`. Something changed it back after
   the sync; the next reconcile will set it again.
-- No glyphs at all, but the header popover works: the bb client predates
+- No glyphs at all, but the Brief panel works: the bb client predates
   `experimental_setThreadRowStatus`, which the content script feature-detects.
 - Briefs stuck on "Summarizing…": check `apiKey` is set and
   `bb plugin logs thread-briefs` for HTTP errors from `baseUrl`.
+- A brief that describes work already finished: read the **Summarized …** line
+  under the status. Briefs are only rewritten after `quietSeconds` of quiet, so
+  one that predates the last few turns is expected rather than broken;
+  **Re-summarize** forces it.
+- The header **Brief** button does nothing: it opens a tab in the thread's side
+  panel, which only the main thread view has. A `ThreadChat` embedded elsewhere
+  has no panel to open, and the host logs the declined open.
 - "No brief for this thread yet" on an older thread is expected, not a fault —
   briefs are never backfilled. Work the thread, or use **Summarize now**.
 - A thread that stopped picking up new titles was renamed by hand at some point;

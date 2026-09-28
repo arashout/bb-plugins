@@ -78,17 +78,28 @@ it is the "the summarizer hasn't reached this yet" bucket as much as a catch-all
 Two things to know. There is **no section for running threads**: `working` is
 live state and never reaches a stored brief, so a thread whose agent is running
 sits in the section its last brief implies and keeps bb's own running indicator —
-the same live-vs-stored split as the popover. And a thread you filed in a section
+the same live-vs-stored split as the panel. And a thread you filed in a section
 of your own is left alone until it has a brief, but once it does the grouping
 takes it over; turning grouping off deletes the three sections and restores the
 sidebar preferences it changed, but cannot put a hand-made placement back.
 
-**Thread header** — a **Brief** control opens the full five fields (empty ones
-are skipped), the derived status, a stage control for the manual override, and
-Re-summarize. It works the same on mobile and desktop; nothing depends on hover.
+**The side panel** — a **Brief** tab holding the full five fields (empty ones
+are skipped), the derived status, when it was last summarized, a stage control
+for the manual override, and Re-summarize. The **Brief** button in the thread
+header opens it; so does the panel's own new-tab launcher, under Actions. It
+works the same on mobile and desktop — on a compact viewport the host reveals
+the panel drawer as part of the open — and nothing depends on hover.
+
+A panel rather than a popover because reading the whole brief is a deliberate
+shift out of chatting and into orienting: it wants to stay open beside the
+transcript while you scroll it, and a popover closes on the first click outside
+itself. The button stays because panel tabs are per-thread and per-device — a
+Brief tab open on one thread is not open on the next — so without a fixed
+control in the header, seeing a brief would mean walking the new-tab launcher on
+every thread, which is friction landing on exactly the moment this is for.
 
 Briefs are **never backfilled** — activity earns a brief. A thread that has been
-dormant since before the plugin started stays briefless, and the popover says so
+dormant since before the plugin started stays briefless, and the panel says so
 with **Summarize now** rather than showing a spinner that would never resolve.
 Work on it again and it gets a brief like any other thread. The alternative —
 summarizing every existing thread — is an unbounded burst the first time a key is
@@ -102,7 +113,7 @@ configured.
 | Summarizer input | `threads.conversationOutline()` head + tail with the middle elided, `threads.output()` for the last message in full, and the previous brief |
 | Storage | `bb.storage.kv`, one row per thread at `brief:<threadId>` |
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
-| Header UI | `experimental_threadHeaderAction` with a portalled popover |
+| Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |
 
@@ -114,8 +125,8 @@ replaces the whole sidebar list or touches none of it. The per-row hooks
 (`useSidebarThreadDraft`, `useSidebarThreadRowStatus`, …) are for a replacement
 list to *consume*, not injection points into bb's own list. Inline row
 expansion therefore means forking `plugins/thread-list` (~28k lines) and
-re-merging it forever, so this plugin uses the two additive surfaces bb
-supports instead: a row glyph and a header popover.
+re-merging it forever, so this plugin uses the additive surfaces bb supports
+instead: a row glyph, and a header button onto a side-panel tab.
 
 ### Why `thread.idle` rather than polling
 

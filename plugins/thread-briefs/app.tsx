@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
 import {
   definePluginApp,
   experimental_Icon as Icon,
   experimental_useSidebarThreads,
+  useBbNavigate,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -21,13 +21,27 @@ import {
   isLiveWorking,
   type BriefStage,
 } from "./shared.js";
-import { rowDecoration, STAGE_LABELS, STATUS_LABELS } from "./brief.js";
+import {
+  rowDecoration,
+  STAGE_LABELS,
+  STATUS_LABELS,
+  summarizedAgo,
+} from "./brief.js";
 
 type Decoration = {
   icon: string;
   label: string;
   tone: "default" | "error" | "running" | "success";
 };
+
+/** The `threadPanelAction` the header button opens. */
+const PANEL_ACTION_ID = "brief";
+
+/**
+ * The tab's label. Shorter than the action's own title because a tab strip is
+ * narrow and the launcher row, which is a list, has room for the longer name.
+ */
+const PANEL_TAB_TITLE = "Brief";
 
 /**
  * Row glyphs need two things bb keeps in different places: the briefs (server,
@@ -102,7 +116,7 @@ function BriefSync() {
   return null;
 }
 
-// ---------------------------------------------------------------- the popover
+// ------------------------------------------------------------------ the panel
 
 function Field({ label, value }: { label: string; value: string }) {
   if (value.trim() === "") return null;
@@ -162,10 +176,12 @@ function StageControl({
 }
 
 function BriefBody({
+  now,
   state,
   onPick,
   onRefresh,
 }: {
+  now: number;
   state: BriefState | null;
   onPick: (stage: BriefStage | null) => void;
   onRefresh: () => void;
@@ -205,14 +221,24 @@ function BriefBody({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-foreground">
-          {STATUS_LABELS[brief.status]}
-        </span>
+      <div className="flex items-start justify-between gap-2">
+        <div className="space-y-0.5">
+          <div className="text-xs font-medium text-foreground">
+            {STATUS_LABELS[brief.status]}
+          </div>
+          {/*
+            A panel stays open across turns, so unlike the popover it can be
+            read long after the brief it shows was written. Saying when says
+            whether the prose below describes the turn you just watched.
+          */}
+          <div className="text-[11px] text-muted-foreground">
+            Summarized {summarizedAgo(brief.lastSummarizedAt, now)}
+          </div>
+        </div>
         <button
           type="button"
           onClick={onRefresh}
-          className="text-[11px] text-muted-foreground hover:text-foreground"
+          className="shrink-0 text-[11px] text-muted-foreground hover:text-foreground"
         >
           Re-summarize
         </button>
@@ -242,15 +268,32 @@ function BriefBody({
   );
 }
 
-function BriefHeaderAction({
-  threadId,
-  isCompactViewport,
-}: {
-  threadId: string;
-  isCompactViewport: boolean;
-}) {
+/**
+ * Wall-clock time, re-read on an interval, for the "summarized N ago" line.
+ *
+ * Every other value in the panel changes by a realtime event; this one changes
+ * by nothing happening, which is the case a render-time `Date.now()` cannot
+ * see. Without the tick a brief written two hours ago reads "just now" for as
+ * long as the tab is left open — worse than saying nothing.
+ */
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+  return now;
+}
+
+/**
+ * The brief for one thread plus the two writes the panel offers.
+ *
+ * The panel mounts only while its tab is active in a visible pane, so it
+ * re-reads on every mount rather than trusting state from the last time it was
+ * on screen, and subscribes unconditionally while it is.
+ */
+function useBrief(threadId: string) {
   const rpc = useRpc<typeof rpcContract>();
-  const [open, setOpen] = useState(false);
   const [state, setState] = useState<BriefState | null>(null);
 
   const load = useCallback(() => {
@@ -265,20 +308,10 @@ function BriefHeaderAction({
       );
   }, [rpc, threadId]);
 
-  // Only fetch while the popover is open: the header mounts for every visible
-  // thread, including both panes of a split.
-  useEffect(() => {
-    if (open) load();
-  }, [open, load]);
+  useEffect(load, [load]);
+  useRealtime(BRIEFS_CHANGED_CHANNEL, load);
 
-  useRealtime(
-    BRIEFS_CHANGED_CHANNEL,
-    useCallback(() => {
-      if (open) load();
-    }, [open, load]),
-  );
-
-  const onPick = useCallback(
+  const setStage = useCallback(
     (stage: BriefStage | null) => {
       void rpc
         .call("setStageOverride", { threadId, stage })
@@ -288,55 +321,66 @@ function BriefHeaderAction({
     [rpc, threadId, load],
   );
 
-  const onRefresh = useCallback(() => {
+  const refresh = useCallback(() => {
     void rpc.call("refresh", { threadId }).then(() => {
       setState({ state: "summarizing" });
     });
   }, [rpc, threadId]);
 
+  return { state, setStage, refresh };
+}
+
+/**
+ * The whole brief, in a tab of the thread's side panel.
+ *
+ * A panel rather than a popover because reading the brief is a deliberate shift
+ * out of chatting and into orienting: it wants to stay open while the transcript
+ * is scrolled beside it, which a popover — dismissed by the first click outside
+ * it — cannot do. The host owns the padding, the scrolling and the width, so
+ * none of that is this component's problem.
+ */
+function BriefPanel({ threadId }: { threadId: string }) {
+  const { state, setStage, refresh } = useBrief(threadId);
+  const now = useNow(30_000);
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          aria-label="Thread brief"
-          className="flex h-7 items-center gap-1.5 rounded border border-border px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <Icon name="ListTodo" className="h-3.5 w-3.5" />
-          {isCompactViewport ? null : <span>Brief</span>}
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          align="end"
-          sideOffset={6}
-          collisionPadding={8}
-          // Every layout-critical property is an inline style. The plugin's
-          // Tailwind output is scoped to its own subtree, and this content is
-          // portalled, so leaning on those classes for sizing is a bet this
-          // panel does not need to take. Cosmetics stay in className, where a
-          // miss is only cosmetic.
-          style={{
-            // A five-field brief is easily taller than a phone viewport.
-            maxHeight: "var(--radix-popover-content-available-height, 70vh)",
-            // ...and `100vw` is not the room this panel has: it is anchored to
-            // a trigger near the right edge, so a viewport-wide panel hangs off
-            // the screen and its text wraps out of sight. Radix measures the
-            // width actually available from where it was placed; cap by that.
-            maxWidth: "var(--radix-popover-content-available-width, calc(100vw - 1rem))",
-            width: isCompactViewport ? "calc(100vw - 1rem)" : "20rem",
-            overflowY: "auto",
-            overscrollBehavior: "contain",
-            // Long unbroken strings (URLs, branch names) must not force the
-            // panel wider than its cap.
-            overflowWrap: "anywhere",
-          }}
-          className="z-50 rounded-md border border-border bg-card p-3 shadow-md"
-        >
-          <BriefBody state={state} onPick={onPick} onRefresh={onRefresh} />
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+    <BriefBody now={now} state={state} onPick={setStage} onRefresh={refresh} />
+  );
+}
+
+/**
+ * The header button. Opens the panel tab; holds no brief state of its own.
+ *
+ * It exists because panel tabs are per-thread and per-device: a Brief tab opened
+ * on one thread is not open on the next one, so without a fixed control in the
+ * header, seeing a brief would mean walking the panel's new-tab launcher on
+ * every thread — friction landing on exactly the moment this plugin is for.
+ */
+function BriefHeaderAction({
+  isCompactViewport,
+}: {
+  isCompactViewport: boolean;
+}) {
+  const navigate = useBbNavigate();
+  const onClick = useCallback(() => {
+    // Declines only where the surface has no side panel, and bb renders thread
+    // header actions in the main thread view alone — which always has one. On a
+    // compact viewport the host reveals the drawer as part of the open.
+    navigate.openThreadPanel({
+      actionId: PANEL_ACTION_ID,
+      title: PANEL_TAB_TITLE,
+    });
+  }, [navigate]);
+
+  return (
+    <button
+      type="button"
+      aria-label="Thread brief"
+      onClick={onClick}
+      className="flex h-7 items-center gap-1.5 rounded border border-border px-2 text-xs text-muted-foreground hover:text-foreground"
+    >
+      <Icon name="ListTodo" className="h-3.5 w-3.5" />
+      {isCompactViewport ? null : <span>Brief</span>}
+    </button>
   );
 }
 
@@ -344,6 +388,17 @@ function BriefHeaderAction({
 
 export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({ id: "brief-sync", component: BriefSync });
+
+  app.slots.threadPanelAction({
+    id: PANEL_ACTION_ID,
+    title: "Thread brief",
+    component: BriefPanel,
+    // Both entry points — this launcher row and the header button — label the
+    // tab the same short way.
+    run: ({ openPanel }) => {
+      openPanel({ title: PANEL_TAB_TITLE });
+    },
+  });
 
   app.slots.experimental_threadHeaderAction({
     id: "brief",
@@ -354,7 +409,7 @@ export default definePluginApp((app) => {
   app.contentScripts.register({
     id: "row-glyphs",
     mount({ signal, experimental_setThreadRowStatus: setRowStatus }) {
-      // Older 0.x clients do not ship the setter; the header popover still works.
+      // Older 0.x clients do not ship the setter; the header button still works.
       if (setRowStatus === undefined) return;
 
       let applied = new Map<string, Decoration>();
