@@ -60,16 +60,16 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
     return { label: pr.approvalFeedbackVerification === "head-changed" ? "Verification needs recheck" :
       pr.approvalFeedbackVerification === "feedback-changed" ? "New review feedback" : "Feedback verification needed", tone: "warn" };
   }
-  if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
   if (pr.mergeStateStatus === "BEHIND") return { label: "Branch behind", tone: "wait" };
   if (pr.isDraft) return { label: "Draft", tone: "wait" };
   if (pr.reviewDecision === "APPROVED" && (!pr.approvalFeedback || pr.approvalFeedback.status === "unknown")) return { label: "Review history unknown", tone: "wait" };
+  if (pr.mergeStateStatus === "UNKNOWN" ||
+    (pr.reviewDecision === "APPROVED" && pr.unresolvedReviewThreads === null)) return { label: "Status unknown", tone: "wait" };
+  if (behind !== null) return { label: `Behind #${behind}`, tone: "wait" };
   if (stage === "build") return { label: "In progress", tone: "wait" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && pr.reviewFollowupPosted) return { label: "Awaiting re-review", tone: "wait" };
   if (pr.reviewDecision === "APPROVED" && !checksGreen(pr.checkConclusions)) return { label: "Checks pending", tone: "wait" };
   if (pr.mergeStateStatus === "BLOCKED") return { label: "Rules block", tone: "wait" };
-  if (pr.mergeStateStatus === "UNKNOWN" ||
-    (pr.reviewDecision === "APPROVED" && pr.unresolvedReviewThreads === null)) return { label: "Status unknown", tone: "wait" };
   if (pr.reviewDecision !== "APPROVED" && pr.reviewRequests.length === 0) return { label: "No reviewer", tone: "wait" };
   if (pr.reviewDecision !== "APPROVED") return { label: "Awaiting review", tone: "wait" };
   return { label: "Clear", tone: "clear" };
@@ -104,8 +104,8 @@ export function primaryPipelineAction(stage: PipelineStage, blocker: PipelineBlo
   if (activity.state === "needs-you") return { kind: "fix", label: "Review blocker" };
   if (activity.state === "working") return stage === "build" && activity.threadId !== null ? { kind: "open-thread", label: "Open thread" } : null;
   if (stage === "build" && activity.threadId !== null) return { kind: "open-thread", label: "Open thread" };
-  if (behind !== null) return { kind: "open-parent", label: "Open parent", behind };
-  if (stage === "ready" && blocker.label === "Clear") return { kind: "merge", label: "Merge" };
+  if (behind !== null && (blocker.label === `Behind #${behind}` || (stage === "ready" && blocker.label === "Clear"))) return { kind: "open-parent", label: "Open parent", behind };
+  if (behind === null && stage === "ready" && blocker.label === "Clear") return { kind: "merge", label: "Merge" };
   if (stage === "review" && blocker.label === "No reviewer") return { kind: "open-pr", label: "Choose reviewer" };
   if (stage === "review" && blocker.label === "Awaiting review") return { kind: "nudge", label: "Nudge" };
   return { kind: "advance", label: "Advance" };
@@ -121,11 +121,12 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (activity.state === "needs-you") return "Review the agent result and remaining blocker.";
   if (pr === null) return "Open the checkout to continue branch work.";
   if (blocker.label === "Status unknown") return "Advance to refresh live PR status.";
-  if (behind !== null) return `Advance parent PR #${behind} first.`;
   if (blocker.label === "CI failing") return "Advance to investigate failing checks.";
   if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
   if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
   if (blocker.label === "Changes requested" || blocker.label === "New review feedback" || blocker.label === "Feedback verification needed" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
+  if (blocker.label === "Review history unknown") return "Advance to verify review history.";
+  if (behind !== null) return `Parent PR #${behind} must merge before this PR can merge.`;
   if (blocker.label === "Awaiting re-review") return "Wait for the reviewer to respond to the follow-up.";
   if (blocker.label === "Awaiting review") return "Nudge the requested reviewer or wait for review.";
   if (blocker.label === "No reviewer") return "Choose a reviewer on GitHub; Advance can recheck other gates.";

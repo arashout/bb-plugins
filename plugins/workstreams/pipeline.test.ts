@@ -36,12 +36,14 @@ describe("pipeline position and gates", () => {
     expect(stageFor("awaiting-merge", pr(1, { mergeStateStatus: "BEHIND" }))).toBe("feedback");
   });
 
-  it("keeps a stack child in Ready but opens the parent before merging", () => {
+  it("keeps a clean stack child in Ready but opens the parent before merging", () => {
     const parent = pr(2, { headRefName: "foundation" });
     const child = pr(3, { baseRefName: "foundation" });
     const cards = pipelineCards([entry(child), entry(parent)], [], now);
     const top = cards.find((card) => card.pr?.number === 3)!;
-    expect(top).toMatchObject({ stage: "ready", blocker: { label: "Behind #2" }, action: { kind: "open-parent", behind: 2 } });
+    expect(top).toMatchObject({ stage: "ready", blocker: { label: "Behind #2" }, action: { kind: "open-parent", behind: 2 },
+      nextStep: "Parent PR #2 must merge before this PR can merge." });
+    expect(primaryPipelineAction("ready", { label: "Clear", tone: "clear" }, top.activity, null, 2)).toMatchObject({ kind: "open-parent", behind: 2 });
     expect(pipelineColumns(cards).find((column) => column.stage === "ready")?.bulkCount).toBe(1);
   });
 
@@ -172,12 +174,34 @@ describe("pipeline position and gates", () => {
     expect(localCi).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" }, action: { kind: "advance" } });
   });
 
-  it("includes an approved parent-blocked Feedback PR in batch Advance even when its card opens the parent", () => {
+  it("lets a stacked child advance actionable feedback while preserving its parent gate", () => {
     const parent = pr(92, { headRefName: "foundation" });
     const child = pr(93, { baseRefName: "foundation", checkConclusions: ["FAILURE"] });
     const cards = pipelineCards([entry(child), entry(parent)], [], now);
-    expect(cards.find((card) => card.pr?.number === 93)).toMatchObject({ stage: "feedback", action: { kind: "open-parent" } });
+    const failed = cards.find((card) => card.pr?.number === 93)!;
+    expect(failed).toMatchObject({ stage: "feedback", blocker: { label: "CI failing" },
+      action: { kind: "advance" }, nextStep: "Advance to investigate failing checks." });
     expect(pipelineBulkCards(cards, "feedback").map((card) => card.pr?.number)).toEqual([93]);
+    expect(primaryPipelineAction(failed.stage, failed.blocker, { ...failed.activity, state: "working" }, null, 92)).toBeNull();
+    expect(primaryPipelineAction(failed.stage, failed.blocker, { ...failed.activity, state: "needs-you" }, null, 92)).toMatchObject({ kind: "fix" });
+    expect(primaryPipelineAction(failed.stage, failed.blocker, failed.activity, { reason: "Paused", heldAt: now }, 92)).toMatchObject({ kind: "release" });
+
+    const cases: [Partial<Pr>, string, string][] = [
+      [{ mergeStateStatus: "DIRTY" }, "Conflicts", "Advance to update the branch."],
+      [{ mergeStateStatus: "BEHIND" }, "Branch behind", "Advance to update the branch."],
+      [{ reviewDecision: "CHANGES_REQUESTED" }, "Changes requested", "Advance to address review feedback."],
+      [{ unresolvedReviewThreads: 2 }, "2 open threads", "Advance to address review feedback."],
+      [{ approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: false },
+        "Feedback verification needed", "Advance to address review feedback."],
+      [{ mergeStateStatus: "UNKNOWN" }, "Status unknown", "Advance to refresh live PR status."],
+      [{ approvalFeedback: undefined }, "Review history unknown", "Advance to verify review history."],
+    ];
+    for (const [patch, label, nextStep] of cases) {
+      const card = pipelineCards([entry(pr(94, { baseRefName: "foundation", ...patch })), entry(parent)], [], now)
+        .find((item) => item.pr?.number === 94)!;
+      expect(card).toMatchObject({ blocker: { label }, action: { kind: "advance" }, nextStep });
+      expect(card.backlog?.parent?.pr.number).toBe(92);
+    }
   });
 
   it("deduplicates inventory, cloned checkouts, and checkout-only PRs; retains effort keys", () => {

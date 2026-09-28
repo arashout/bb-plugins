@@ -555,8 +555,11 @@ export function createAdvanceService(db: RunDb, deps: {
     async recheck(id: string, jobId?: string, reveal = true): Promise<AdvanceBatch> {
       const batch = batches.get(id); if (!batch) throw new Error("Batch not found");
       const jobs = jobId === undefined ? batch.jobs : [findJob(id, jobId).job];
-      if (reveal && jobId !== undefined && !["merged", "closed"].includes(jobs[0]!.status)) update(batch, jobs[0]!, { hiddenFromProgress: false });
       for (const job of jobs) {
+        const updatedAtBeforeRecheck = job.updatedAt;
+        if (reveal && jobId !== undefined && job.hiddenFromProgress && !["merged", "closed"].includes(job.status)) {
+          update(batch, job, { hiddenFromProgress: false });
+        }
         if (["cancelled", "merged", "closed"].includes(job.status)) continue;
         let facts: AdvanceFacts;
         try { facts = await deps.inspect(job.prUrl); }
@@ -569,7 +572,7 @@ export function createAdvanceService(db: RunDb, deps: {
         if (ACTIVE.has(job.status) && !(job.status === "running" && job.uncertain)) continue;
         if (job.uncertain && !job.threadId) {
           const matches = await deps.recover(attemptId(job), batch.facts[job.id]!.projectId!);
-          if (matches.length === 0 && !working && now() - job.updatedAt > 30_000) { update(batch, job, { uncertain: false, detail: "No worker exists for this launch. Requested work did not start; fix this item with an agent." }); continue; }
+          if (matches.length === 0 && !working && now() - updatedAtBeforeRecheck > 30_000) { update(batch, job, { uncertain: false, detail: "No worker exists for this launch. Requested work did not start; fix this item with an agent." }); continue; }
           if (matches.length !== 1) { job.detail = "Cannot identify a unique worker. Inspect thread history before retrying."; save(batch); continue; }
           update(batch, job, { threadId: matches[0]! });
         }

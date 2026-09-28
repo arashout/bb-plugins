@@ -929,6 +929,27 @@ describe("finite Advance preparation", () => {
     expect(t.service.reserved(fact().prUrl, null)).toBe(false);
     expect(t.deps.spawn).toHaveBeenCalledTimes(1);
   });
+  it.each([false, true])("releases an old uncertain launch on an item recheck when hidden=%s", async (hidden) => {
+    const t = setup(); t.deps.spawn.mockRejectedValue(new Error("timeout")); const batch = await t.start();
+    const job = batch.jobs[0]!;
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    saved.jobs[0].hiddenFromProgress = hidden;
+    t.db.prepare("UPDATE advance_batches SET body = ? WHERE id = ?").run(JSON.stringify(saved), batch.id);
+    t.service.dispose();
+    const restored = createAdvanceService(t.db, t.deps);
+    t.time(40_000); await restored.recheck(batch.id, job.id);
+    expect(t.deps.recover).toHaveBeenCalledWith(job.id, "project");
+    expect(restored.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", uncertain: false,
+      hiddenFromProgress: false, detail: expect.stringContaining("No worker exists") });
+    expect(t.deps.spawn).toHaveBeenCalledTimes(1);
+    expect(t.deps.send).not.toHaveBeenCalled();
+  });
+  it("keeps a recent uncertain launch reserved when no worker is found yet", async () => {
+    const t = setup(); t.deps.spawn.mockRejectedValue(new Error("timeout")); const batch = await t.start();
+    t.time(20_000); await t.service.recheck(batch.id, batch.jobs[0]!.id);
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ uncertain: true, threadId: null });
+    expect(t.service.reserved(fact().prUrl, null)).toBe(true);
+  });
   it("does not confuse GitHub's historical base snapshot with the live verified base tip", async () => {
     const t = setup([fact(1, { needsPreparation: false, readiness: "ready" })]); await t.start();
     t.service.invalidate([{ url: fact().prUrl, headRefOid: fact().headOid, baseRefOid: "c".repeat(40),

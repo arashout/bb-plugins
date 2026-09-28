@@ -727,6 +727,11 @@ export function PipelineView({
           ) : (
             <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", BLOCKER_COLOR[card.blocker.tone])}>{card.blocker.label}</span>
           )}
+          {!behindTag && parent?.card ? (
+            <button type="button" onClick={() => goToCard(parent.card!)} aria-label={`Go to parent PR #${parent.number} card: ${parent.card.title}`} className="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">Behind #{parent.number}</button>
+          ) : !behindTag && parent?.url ? (
+            <UrlLink href={parent.url} aria-label={`Open parent PR #${parent.number} on GitHub`} className="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">Behind #{parent.number}</UrlLink>
+          ) : null}
           <button
             type="button"
             onClick={() => setEffortEditing(card)}
