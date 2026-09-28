@@ -81,8 +81,8 @@ describe("workstream attention", () => {
 
   it("labels a re-review separately from an initial review in the chooser and selected detail", () => {
     const [item] = workstreamAttention([
-      row("fail closed for Bridge clinician matching", "Fail closed for Bridge clinician matching", "waiting", "awaiting-rereview", "Awaiting re-review"),
-      row("fail closed for Bridge clinician matching", "Fail closed for Bridge clinician matching", "waiting", "awaiting-review", "In review"),
+      row("fail closed for Folio author matching", "Fail closed for Folio author matching", "waiting", "awaiting-rereview", "Awaiting re-review"),
+      row("fail closed for Folio author matching", "Fail closed for Folio author matching", "waiting", "awaiting-review", "In review"),
     ]);
     expect(item).toMatchObject({ waitingRereview: 1, waitingReview: 1 });
     expect(attentionLabel(item!)).toBe("1 awaiting re-review");

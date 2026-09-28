@@ -9,8 +9,8 @@ describe("checkoutBranch", () => {
       branch: "reader/abc-607-lock-gift-card-balance",
       rebasing: true,
     });
-    expect(checkoutBranch("HEAD", [{ present: false, name: null }, { present: true, name: "refs/heads/feature/dob" }])).toEqual({
-      branch: "feature/dob",
+    expect(checkoutBranch("HEAD", [{ present: false, name: null }, { present: true, name: "refs/heads/feature/isbn" }])).toEqual({
+      branch: "feature/isbn",
       rebasing: true,
     });
   });
@@ -28,7 +28,7 @@ describe("checkoutBranch", () => {
   });
 
   it("uses an attached branch while still treating leftover rebase metadata as in progress", () => {
-    expect(checkoutBranch("feature/dob", rebase("refs/heads/feature/dob"))).toEqual({ branch: "feature/dob", rebasing: true });
+    expect(checkoutBranch("feature/isbn", rebase("refs/heads/feature/isbn"))).toEqual({ branch: "feature/isbn", rebasing: true });
     expect(checkoutBranch("main", [])).toEqual({ branch: "main", rebasing: false });
   });
 });
