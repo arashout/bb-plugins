@@ -205,6 +205,7 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
         <button type="button" role="tab" aria-selected={false} onClick={onMap} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Map</button>
         <button type="button" role="tab" aria-selected={false} onClick={onPipeline} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Pipeline</button>
         <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">Work</button>
+        <button type="button" role="tab" aria-selected={false} onClick={() => navigate.toPluginPanel("board", { subPath: "efforts" })} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Efforts</button>
       </div>
       <button type="button" onClick={onHow} className="rounded px-2 py-1 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">How it works</button>
     </header>

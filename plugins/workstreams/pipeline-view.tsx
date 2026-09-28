@@ -1000,6 +1000,15 @@ export function PipelineView({
           >
             Work
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={false}
+            onClick={() => navigate.toPluginPanel("board", { subPath: "efforts" })}
+            className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Efforts
+          </button>
         </div>
         <div
           role="group"

@@ -8,6 +8,7 @@ describe("Workstreams view preference", () => {
     expect(viewFromSubPath("map")).toBe("map");
     expect(viewFromSubPath("pipeline/details")).toBe("pipeline");
     expect(viewFromSubPath("work/details")).toBe("work");
+    expect(viewFromSubPath("efforts/details")).toBe("efforts");
     expect(viewFromSubPath("board/details")).toBe("board");
     expect(viewFromSubPath("board-v2/details")).toBe("board");
     expect(viewFromSubPath("")).toBeNull();
@@ -31,6 +32,8 @@ describe("Workstreams view preference", () => {
     expect(readLastView()).toBe("pipeline");
     storeLastView("work");
     expect(readLastView()).toBe("work");
+    storeLastView("efforts");
+    expect(readLastView()).toBe("efforts");
     values.set(VIEW_STORAGE_KEY, "board-v2");
     expect(readLastView()).toBe("board");
     storeLastView("map");

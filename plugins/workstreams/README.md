@@ -148,6 +148,16 @@ implemented.
 
 ## Use the views
 
+- **Efforts:** Administer explicitly saved efforts from one list. Create an
+  effort without starting a thread, edit its name and goal, archive it, or
+  restore it. Archived efforts retain their work and history. **Merge into…**
+  previews combined membership and thread routing before applying the change.
+  The destination keeps its identity, and old effort IDs resolve to it.
+  Thread conversations remain separate. Resolve any preview blockers before
+  merging; pending thread updates remain visible for retry. Archiving waits
+  for queued or active preparation to settle and requires automatic dispatch
+  to be off. Renaming also updates an idle coordinator's title; if that update
+  fails, save again to retry.
 - **Work:** Follow saved planning conversations and preparation runs in a
   vertical list. Expand a request to inspect its exact PR scope, current
   facts, and execution history. Working, waiting, results to inspect, and

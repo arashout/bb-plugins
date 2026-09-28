@@ -26,8 +26,10 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
+import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
+import { effortTitle } from "./effort-title.js";
 import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
 import { cardEffortContextSchema, cardEffortMoveScope, cardEffortTargetSchema, type CardEffortReady, type CardEffortTarget } from "./card-effort.js";
 import { suggestThreadEfforts } from "./thread-effort-suggestions.js";
@@ -344,6 +346,12 @@ export const rpcContract = defineRpcContract({
   pr_hold_set: { input: z.object({ prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null, "Choose a valid GitHub PR URL"), held: z.boolean(), reason: z.string().max(1_000).optional() }).strict(), output: prHoldsSchema },
   effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
+  effort_admin_list: { input: z.null(), output: effortAdminListSchema },
+  effort_admin_create: { input: z.object({ name: z.string().max(500), goal: z.string().max(4_000), projectId: z.string().max(200).optional(), requestId: z.string().uuid() }).strict(), output: effortAdminResultSchema },
+  effort_admin_update: { input: z.object({ effortKey: z.string().min(1).max(500), name: z.string().max(500), goal: z.string().max(4_000), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminResultSchema },
+  effort_admin_archive: { input: z.object({ effortKey: z.string().min(1).max(500), archived: z.boolean(), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminResultSchema },
+  effort_admin_merge_preview: { input: z.object({ sourceKey: z.string().min(1).max(500), destinationKey: z.string().min(1).max(500) }).strict(), output: effortAdminPreviewResultSchema },
+  effort_admin_merge: { input: z.object({ sourceKey: z.string().min(1).max(500), destinationKey: z.string().min(1).max(500), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminMergeResultSchema },
   thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: threadEffortContextSchema },
   thread_effort_set: { input: z.object({ threadId: z.string().min(1).max(200), destinationKey: z.string().min(1).max(500).nullable(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_create: { input: z.object({ threadId: z.string().min(1).max(200), name: z.string().max(500), requestId: z.string().uuid(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
@@ -685,6 +693,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...PR_HOLD_MIGRATIONS,
     // Index only: the thread's plugin metadata is the sole source of effort intent.
     `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
+    `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
     REPO_CONTROLLER_MIGRATION,
     `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
     APPROVAL_FEEDBACK_MIGRATION,
@@ -3003,6 +3012,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function effortPlan(groupKey: string): Promise<EffortPlan> {
     const current = await board();
     const established = effortStore.source(groupKey);
+    if (established?.archivedAt) return { ok: false, error: "Restore this effort before coordinating it." };
     const group = current.groups.find((entry) => entry.key === groupKey);
     if (!group && !established) return { ok: false, error: "That group is no longer on the board. Refresh and choose its current effort." };
     if (!established && (group!.level !== "effort" || outsideGrouping(group!.key))) return { ok: false, error: "Choose an outcome-based effort rather than a catch-all container." };
@@ -3045,6 +3055,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const group of current.groups) {
       if (group.level !== "effort" || outsideGrouping(group.key) || efforts.some((effort) => effort.key === group.key)) continue;
       const established = effortStore.source(group.key);
+      if (established?.archivedAt) continue;
       const members = established?.members ?? normalizeMembers({
         tickets: [...group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.ticket ? [unit.ticket] : [])),
           ...(group.key.startsWith("ticket:") && group.clusters.length === 0 ? [group.key.slice(7)] : [])],
@@ -3265,7 +3276,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (duringSet) intentRecheck.delete(threadId);
     const effort = typeof metadata.workEffortId === "string" ? effortStore.get(metadata.workEffortId) : null;
-    if (!effort) return;
+    if (!effort || effort.archivedAt) return;
     const note = (value: string | null) => {
       const previous = intentNotes.get(threadId) ?? null;
       if (value === null) intentNotes.delete(threadId); else intentNotes.set(threadId, value);
@@ -3350,7 +3361,200 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  const adminName = (value: string) => value.trim().replace(/\s+/gu, " ");
+  const adminNameKey = (value: string) => adminName(value).toLocaleLowerCase();
+  const adminRecord = (key: string) => effortStore.getRecord(key.replace(/^effort:/u, ""));
+  function readAdminSync(sourceId: string): { destinationId: string; actions: EffortAdminSyncAction[] } | null {
+    const row = db.prepare(`SELECT destination_id AS destinationId, actions FROM effort_admin_sync WHERE source_id = ?`)
+      .get(sourceId) as { destinationId: string; actions: string } | undefined;
+    return row ? { destinationId: row.destinationId, actions: z.array(effortAdminSyncActionSchema).parse(JSON.parse(row.actions)) } : null;
+  }
+  function adminNameError(name: string, exceptId: string | null): string | null {
+    if (name.length < 1 || name.length > 120) return "Enter an effort name between 1 and 120 characters.";
+    if (effortStore.list().some((effort) => effort.id !== exceptId && adminNameKey(effort.name) === adminNameKey(name)))
+      return "An effort with that name already exists.";
+    return null;
+  }
+
+  async function adminThreads(source: NonNullable<ReturnType<typeof adminRecord>>,
+    destination: NonNullable<ReturnType<typeof adminRecord>>) {
+    const known = new Map<string, { effortId: string; role: string }>();
+    for (const effort of [source, destination]) {
+      if (effort.coordinatorThreadId) known.set(effort.coordinatorThreadId, { effortId: effort.id, role: "coordinator" });
+      for (const controller of effortStore.repoControllers(effort.id)) for (const id of [controller.threadId, ...controller.previousThreadIds])
+        if (id) known.set(id, { effortId: effort.id, role: "repo" });
+      for (const worker of effortStore.workersForEffort(effort.id)) known.set(worker.threadId, { effortId: effort.id, role: "worker" });
+    }
+    const syncIds = new Set(readAdminSync(source.id)?.actions.map((action) => action.threadId) ?? []);
+    const ids = new Set<string>([...intentIds(), ...known.keys(), ...syncIds]);
+    const rows = new Map<string, Awaited<ReturnType<typeof bb.sdk.threads.list>>[number]>();
+    for (let offset = 0; offset < 10_000; offset += 100) {
+      const page = await bb.sdk.threads.list({ originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+      for (const row of page) { rows.set(row.id, row); ids.add(row.id); }
+      if (page.length < 100) break;
+      if (offset === 9_900) throw new Error("Too many plugin threads to inspect safely. Narrow the thread inventory.");
+    }
+    const matched: { id: string; title: string; role: string; status: string; parentThreadId: string | null;
+      effortId: string; workIntent: boolean; metadataEffortId: string | null; metadataWorkEffortId: string | null }[] = [];
+    for (const id of ids) {
+      let row: { id: string; title: string | null; titleFallback: string | null; status: string; deletedAt: number | null;
+        parentThreadId: string | null } | undefined = rows.get(id);
+      if (!row) {
+        try { row = await bb.sdk.threads.get({ threadId: id }); }
+        catch (error) {
+          if ((error as { code?: string; status?: number }).code === "NOT_FOUND" || (error as { status?: number }).status === 404) continue;
+          throw new Error(`Thread ${id} could not be inspected: ${String(error).slice(0, 200)}`);
+        }
+      }
+      if (row.deletedAt !== null) continue;
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: id });
+      const workEffortId = typeof metadata.workEffortId === "string" ? metadata.workEffortId.replace(/^effort:/u, "") : null;
+      const boundEffortId = typeof metadata.effortId === "string" ? metadata.effortId.replace(/^effort:/u, "") : null;
+      const effortId = known.get(id)?.effortId ?? (syncIds.has(id) ? source.id : null) ??
+        (workEffortId === source.id || boundEffortId === source.id ? source.id :
+        workEffortId === destination.id || boundEffortId === destination.id ? destination.id : null);
+      if (!effortId) continue;
+      matched.push({ id, title: row.title ?? row.titleFallback ?? id, role: known.get(id)?.role ?? (typeof metadata.role === "string" ? metadata.role : "member"),
+        status: row.status, parentThreadId: row.parentThreadId, effortId, workIntent: workEffortId === source.id,
+        metadataEffortId: boundEffortId, metadataWorkEffortId: workEffortId });
+    }
+    return matched;
+  }
+
+  async function adminMergePreview(sourceKey: string, destinationKey: string) {
+    try {
+      const source = adminRecord(sourceKey);
+      const destination = adminRecord(destinationKey);
+      if (!source || !destination || source.id === destination.id || (source.mergedInto && source.mergedInto !== destination.id) || destination.mergedInto)
+        return { ok: false as const, error: "Choose an effort and its valid destination, then reopen the preview." };
+      const retry = source.mergedInto === destination.id;
+      const sourceControllers = effortStore.repoControllers(source.id);
+      const destinationControllers = effortStore.repoControllers(destination.id);
+      const threads = await adminThreads(source, destination);
+      const blockers: string[] = [];
+      const conflicts: string[] = [];
+      if (!retry) {
+        const pending = db.prepare(`SELECT source_id AS sourceId, actions FROM effort_admin_sync
+          WHERE source_id IN (?, ?) OR destination_id IN (?, ?)`).all(source.id, destination.id, source.id, destination.id) as
+          { sourceId: string; actions: string }[];
+        for (const row of pending) if (z.array(effortAdminSyncActionSchema).parse(JSON.parse(row.actions)).length)
+          blockers.push(`Finish pending thread sync for merged effort ${row.sourceId} before merging again.`);
+      }
+      if (!retry && (source.archivedAt || destination.archivedAt)) blockers.push("Restore archived efforts before merging them.");
+      if (!retry && [source.coordinatorState, destination.coordinatorState].includes("creating"))
+        blockers.push("A coordinator launch is unresolved. Inspect it before merging.");
+      if (!retry && [...sourceControllers, ...destinationControllers].some((controller) => controller.state === "creating"))
+        blockers.push("A repository controller launch is unresolved. Inspect it before merging.");
+      for (const controller of sourceControllers) {
+        const existing = destinationControllers.find((item) => item.repo === controller.repo);
+        if (!existing) continue;
+        if (!retry && (existing.projectId !== controller.projectId || existing.hostId !== controller.hostId))
+          blockers.push(`Repository ${controller.repo} uses different project or host bindings. Resolve that binding before merging.`);
+        else if (controller.threadId && existing.threadId && controller.threadId !== existing.threadId)
+          conflicts.push(`Repository ${controller.repo}: destination controller ${existing.threadId} remains primary; source controller ${controller.threadId} stays in history.`);
+      }
+      if (source.coordinatorThreadId && destination.coordinatorThreadId && source.coordinatorThreadId !== destination.coordinatorThreadId)
+        conflicts.push(`Destination coordinator ${destination.coordinatorThreadId} remains primary; source coordinator ${source.coordinatorThreadId} stays in history.`);
+      const affected = [source, destination];
+      const paths = new Set(affected.flatMap((effort) => effort.members.checkoutPaths ?? []));
+      const prs = new Set(affected.flatMap((effort) => effort.members.prUrls.map((url) => canonicalPrUrl(url) ?? url)));
+      const tickets = new Set(affected.flatMap((effort) => effort.members.tickets));
+      const touches = (path: string | null, prUrl: string | null, ticket?: string | null) =>
+        (path !== null && paths.has(path)) || (prUrl !== null && prs.has(canonicalPrUrl(prUrl) ?? prUrl)) ||
+        (ticket != null && tickets.has(ticket));
+      const policy = dispatch.policy();
+      if (!retry && policy.mode === "auto" && [source.id, destination.id].includes(effortStore.source(policy.effort_key ?? "")?.id ?? ""))
+        blockers.push("Turn off automatic dispatch for these efforts before merging.");
+      if (!retry && dispatching) blockers.push("Automatic dispatch is preparing a worker. Wait for it to settle before merging.");
+      for (const run of runs.recent(Number.MAX_SAFE_INTEGER)) if (run.status === "running" && touches(run.path, run.prUrl, run.ticket))
+        blockers.push(`Run ${run.id} is ${run.status} for affected work.`);
+      for (const attempt of dispatch.attempts()) if (["launching", "running", "verifying", "needs-you"].includes(attempt.status) && touches(attempt.path, attempt.prUrl))
+        blockers.push(`Dispatch attempt ${attempt.id} is ${attempt.status} for affected work.`);
+      for (const batch of advance.list()) for (const job of batch.jobs) if ((job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) &&
+        touches(job.path, job.prUrl)) blockers.push(`Advance job ${job.id} is ${job.status}${job.uncertain ? " and uncertain" : ""} for affected work.`);
+      for (const thread of threads) if (!["idle", "error"].includes(thread.status))
+        blockers.push(`Thread ${thread.id} is ${thread.status}. Wait for it to settle before merging.`);
+      const preview = { scope: effortAdminScope(source, destination, sourceControllers, destinationControllers,
+        threads.map((thread) => JSON.stringify([thread.id, thread.status, thread.parentThreadId, thread.metadataEffortId, thread.metadataWorkEffortId]))),
+        source, destination, members: { tickets: source.members.tickets.length, prUrls: source.members.prUrls.length,
+          checkoutPaths: source.members.checkoutPaths?.length ?? 0 },
+        threads: threads.filter((thread) => thread.effortId === source.id).map(({ id, title, role, status }) => ({ id, title, role, status })),
+        conflicts, blockers, pendingThreadSync: readAdminSync(source.id)?.actions.length ?? 0 };
+      return { ok: true as const, preview, threadDetails: threads };
+    } catch (error) { return { ok: false as const, error: `Effort merge preview could not be read: ${String(error).slice(0, 300)}` }; }
+  }
+
+  function prepareAdminSync(source: NonNullable<ReturnType<typeof adminRecord>>,
+    destination: NonNullable<ReturnType<typeof adminRecord>>,
+    threads: Awaited<ReturnType<typeof adminThreads>>): void {
+    const actions = new Map<string, EffortAdminSyncAction>();
+    const add = (threadId: string, patch: Partial<EffortAdminSyncAction>) =>
+      actions.set(threadId, { ...actions.get(threadId), threadId, ...patch });
+    for (const thread of threads) if (thread.workIntent) add(thread.id, { workEffortId: destination.id,
+      expectedWorkEffortId: thread.metadataWorkEffortId });
+    const coordinatorId = destination.coordinatorThreadId ?? source.coordinatorThreadId;
+    if (!destination.coordinatorThreadId && source.coordinatorThreadId) {
+      const thread = threads.find((item) => item.id === source.coordinatorThreadId);
+      if (thread) add(thread.id, { effortId: destination.id, expectedEffortId: thread.metadataEffortId,
+        title: effortTitle(destination.name), expectedTitle: thread.title });
+    }
+    for (const controller of effortStore.repoControllers(source.id)) {
+      if (!controller.threadId || effortStore.repoController(destination.id, controller.repo)) continue;
+      const thread = threads.find((item) => item.id === controller.threadId);
+      if (thread) add(thread.id, { effortId: destination.id, expectedEffortId: thread.metadataEffortId,
+        ...(coordinatorId ? { parentThreadId: coordinatorId, expectedParentThreadId: thread.parentThreadId } : {}) });
+    }
+    db.prepare(`INSERT INTO effort_admin_sync (source_id, destination_id, actions) VALUES (?, ?, ?)
+      ON CONFLICT(source_id) DO UPDATE SET destination_id = excluded.destination_id, actions = excluded.actions`)
+      .run(source.id, destination.id, JSON.stringify([...actions.values()]));
+  }
+
+  async function syncMergedThreadIntents(sourceId: string, destinationId: string): Promise<number> {
+    const plan = readAdminSync(sourceId);
+    if (!plan) return 0;
+    if (plan.destinationId !== destinationId) throw new Error("The saved thread sync targets a different effort. Inspect the merge history.");
+    const pending: EffortAdminSyncAction[] = [];
+    for (const action of plan.actions) {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId: action.threadId });
+        if (thread.deletedAt !== null) continue;
+        if (!["idle", "error"].includes(thread.status)) throw new Error(`thread is ${thread.status}`);
+        const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: action.threadId });
+        const set: Record<string, string> = {};
+        const workEffortId = typeof metadata.workEffortId === "string" ? metadata.workEffortId.replace(/^effort:/u, "") : null;
+        const boundEffortId = typeof metadata.effortId === "string" ? metadata.effortId.replace(/^effort:/u, "") : null;
+        if (action.workEffortId && workEffortId !== action.workEffortId) {
+          if (workEffortId !== action.expectedWorkEffortId) throw new Error("work assignment changed after the merge");
+          set.workEffortId = action.workEffortId;
+        }
+        if (action.effortId && boundEffortId !== action.effortId) {
+          if (boundEffortId !== action.expectedEffortId) throw new Error("controller assignment changed after the merge");
+          set.effortId = action.effortId;
+        }
+        if (Object.keys(set).length) await bb.sdk.threads.updatePluginMetadata({ threadId: action.threadId, set });
+        const update: { threadId: string; parentThreadId?: string | null; title?: string } = { threadId: action.threadId };
+        if (action.parentThreadId !== undefined && thread.parentThreadId !== action.parentThreadId) {
+          if (thread.parentThreadId !== action.expectedParentThreadId) throw new Error("parent changed after the merge");
+          update.parentThreadId = action.parentThreadId;
+        }
+        if (action.title && thread.title !== action.title) {
+          if (thread.title !== action.expectedTitle) throw new Error("title changed after the merge");
+          update.title = action.title;
+        }
+        if ("parentThreadId" in update || "title" in update) await bb.sdk.threads.update(update);
+      } catch (error) {
+        if ((error as { code?: string; status?: number }).code === "NOT_FOUND" || (error as { status?: number }).status === 404) continue;
+        pending.push(action);
+        bb.log.warn(`effort merge thread ${action.threadId}: sync failed: ${String(error).slice(0, 200)}`);
+      }
+    }
+    if (pending.length) db.prepare(`UPDATE effort_admin_sync SET actions = ? WHERE source_id = ?`).run(JSON.stringify(pending), sourceId);
+    else db.prepare(`DELETE FROM effort_admin_sync WHERE source_id = ?`).run(sourceId);
+    return pending.length;
+  }
+
   async function ensureRepoController(effort: NonNullable<ReturnType<typeof effortStore.get>>, repo: string, projectId: string, hostId: string) {
+    if (effort.archivedAt) throw new Error("Restore this effort before creating a repository controller.");
     const coordinated = await coordinators.ensureExisting(effort.id, projectId);
     if (!coordinated.coordinatorThreadId) throw new Error("The effort coordinator has no thread. Inspect it before launching PR work.");
     const controller = await repoControllers.ensure({ effort: coordinated, repo, projectId, hostId,
@@ -3364,6 +3568,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (hostId === null || projectId === "proj_personal") throw new Error("This effort needs a project source before its repository can be placed.");
     const effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
       name: scope.name, goal: scope.goal, projectId, members: scope.members, coordinatorState: "none" });
+    if (effort.archivedAt) throw new Error("Restore this effort before placing new work under it.");
     if (scope.establishedId && scope.establishedId !== effort.id) throw new Error("The effort changed before placement. Refresh the action.");
     return { parentThreadId: repo ? (await ensureRepoController(effort, repo, projectId, hostId)).threadId!
       : (await coordinators.ensureExisting(effort.id, projectId)).coordinatorThreadId!, effort };
@@ -4001,6 +4206,7 @@ export default async function plugin(bb: BbPluginApi) {
   let dispatching = false;
   async function dispatchOne(preflightPass = 0): Promise<void> {
     if (dispatching || disposal.signal.aborted || scanning || targeting || dispatch.policy().mode !== "auto") return;
+    if (effortStore.source(dispatch.policy().effort_key ?? "")?.archivedAt) return;
     dispatching = true;
     try {
       const current = await board();
@@ -4009,6 +4215,7 @@ export default async function plugin(bb: BbPluginApi) {
       // The board may have been built from an old scan. Inspect this checkout before committing to a launch.
       if (!(await rescanPaths([choice.candidate.path]))) return;
       if (dispatch.policy().mode !== "auto" || disposal.signal.aborted) return;
+      if (effortStore.source(dispatch.policy().effort_key ?? "")?.archivedAt) return;
       const fresh = await board();
       const checked = selectCandidate(fresh.groups, fresh.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list());
       if (checked === null) return;
@@ -4156,10 +4363,114 @@ export default async function plugin(bb: BbPluginApi) {
     repair_unassigned_thread: (input) => repairUnassignedThread(input),
     effort_plan: ({ groupKey }) => effortPlan(groupKey),
     effort_coordinate: async (input) => {
+      if (effortStore.source(input.groupKey)?.archivedAt) return { ok: false as const, error: "Restore this effort before coordinating it." };
       const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
       if (result.ok && dispatch.policy().effort_key === input.groupKey) dispatch.setPolicy(dispatch.policy().mode, result.effort.key);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       return result;
+    },
+    effort_admin_list: () => {
+      const efforts = effortStore.listAll();
+      return { efforts, scopes: Object.fromEntries(efforts.map((effort) => [effort.key, effortAdminRevision(effort)])) };
+    },
+    effort_admin_create: ({ name, goal, projectId, requestId }) => {
+      const trimmed = adminName(name);
+      const sourceKey = `admin-created:${requestId}`;
+      const existing = effortStore.source(sourceKey);
+      if (existing) return existing.name === trimmed && existing.goal === goal.trim() && existing.projectId === (projectId ?? "")
+        ? { ok: true as const, effort: existing } : { ok: false as const, error: "This create request already used different effort details." };
+      const error = adminNameError(trimmed, null);
+      if (error) return { ok: false as const, error };
+      const effort = effortStore.establish({ sourceKey, name: trimmed, goal: goal.trim(), projectId: projectId ?? "",
+        members: { tickets: [], prUrls: [] }, coordinatorState: "none" });
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return { ok: true as const, effort };
+    },
+    effort_admin_update: async ({ effortKey, name, goal, expectedScope }) => {
+      const record = adminRecord(effortKey);
+      if (!record || record.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the effort list." };
+      if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
+      const trimmed = adminName(name);
+      const error = adminNameError(trimmed, record.id);
+      if (error) return { ok: false as const, error };
+      if (trimmed !== record.name) {
+        const pending = db.prepare(`SELECT actions FROM effort_admin_sync WHERE destination_id = ?`).all(record.id) as { actions: string }[];
+        if (pending.some((row) => z.array(effortAdminSyncActionSchema).parse(JSON.parse(row.actions)).some((action) => action.title)))
+          return { ok: false as const, error: "Finish pending coordinator title sync before renaming this effort." };
+      }
+      const effort = effortStore.updateDetails(record.id, { name: trimmed, goal: goal.trim() });
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (record.coordinatorThreadId) {
+        try {
+          const thread = await bb.sdk.threads.get({ threadId: record.coordinatorThreadId });
+          if (thread.title === effortTitle(trimmed)) return { ok: true as const, effort, notice: null };
+          if (thread.deletedAt === null && thread.archivedAt === null && thread.status === "idle")
+            await bb.sdk.threads.update({ threadId: thread.id, title: effortTitle(trimmed) });
+          else return { ok: true as const, effort, notice: "Effort details saved. Coordinator title needs an idle, available thread; save again after it settles." };
+        } catch (error) { return { ok: true as const, effort, notice: `Effort details saved, but coordinator title did not update: ${String(error).slice(0, 200)}. Save again to retry.` }; }
+      }
+      return { ok: true as const, effort, notice: null };
+    },
+    effort_admin_archive: ({ effortKey, archived, expectedScope }) => {
+      const record = adminRecord(effortKey);
+      if (!record || record.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the effort list." };
+      if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
+      if (archived && dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === record.id)
+        return { ok: false as const, error: "Turn off automatic dispatch for this effort before archiving it." };
+      const paths = new Set(record.members.checkoutPaths ?? []);
+      const prs = new Set(record.members.prUrls.map((url) => canonicalPrUrl(url) ?? url));
+      if (archived && (advance.list().some((batch) => batch.jobs.some((job) =>
+        (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) &&
+        ((job.path && paths.has(job.path)) || prs.has(canonicalPrUrl(job.prUrl) ?? job.prUrl)))) ||
+        runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" &&
+          (paths.has(run.path) || (run.prUrl && prs.has(canonicalPrUrl(run.prUrl) ?? run.prUrl))))))
+        return { ok: false as const, error: "An affected worker or advance job is still active. Wait for it to settle before archiving." };
+      const effort = effortStore.setArchived(record.id, archived);
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return { ok: true as const, effort };
+    },
+    effort_admin_merge_preview: ({ sourceKey, destinationKey }) => adminMergePreview(sourceKey, destinationKey),
+    effort_admin_merge: async ({ sourceKey, destinationKey, expectedScope }) => {
+      const source = adminRecord(sourceKey);
+      const destination = adminRecord(destinationKey);
+      const result = await adminMergePreview(sourceKey, destinationKey);
+      if (!result.ok) return result;
+      if (result.preview.scope !== expectedScope) return { ok: false as const, error: "The efforts or their threads changed. Reopen the merge preview." };
+      if (result.preview.blockers.length) return { ok: false as const, error: result.preview.blockers.join(" ").slice(0, 2_000) };
+      if (source && destination && source.mergedInto === destination.id) {
+        try {
+          const pendingThreadSync = await syncMergedThreadIntents(source.id, destination.id);
+          return { ok: true as const, effort: effortStore.get(destination.id)!, pendingThreadSync,
+            notice: pendingThreadSync ? `${pendingThreadSync} thread assignments still need syncing. Retry this merge to finish.` : null };
+        } catch (error) { return { ok: false as const, error: `Thread assignment sync could not be checked: ${String(error).slice(0, 300)}. Retry this merge.` }; }
+      }
+      try {
+        const effort = db.transaction(() => {
+          const freshSource = adminRecord(sourceKey);
+          const freshDestination = adminRecord(destinationKey);
+          if (!freshSource || !freshDestination || effortAdminScope(freshSource, freshDestination,
+            effortStore.repoControllers(freshSource.id), effortStore.repoControllers(freshDestination.id),
+            result.threadDetails.map((thread) => JSON.stringify([thread.id, thread.status, thread.parentThreadId, thread.metadataEffortId, thread.metadataWorkEffortId]))) !== expectedScope)
+            throw new Error("Effort ownership or controller bindings changed. Reopen the merge preview.");
+          if (dispatching || (dispatch.policy().mode === "auto" && [freshSource.id, freshDestination.id].includes(effortStore.source(dispatch.policy().effort_key ?? "")?.id ?? "")))
+            throw new Error("Automatic dispatch is active for these efforts. Turn it off before merging.");
+          const paths = new Set([...(freshSource.members.checkoutPaths ?? []), ...(freshDestination.members.checkoutPaths ?? [])]);
+          const prs = new Set([...freshSource.members.prUrls, ...freshDestination.members.prUrls].map((url) => canonicalPrUrl(url) ?? url));
+          const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
+          const touches = (path: string | null, pr: string | null, ticket?: string | null) =>
+            (path !== null && paths.has(path)) || (pr !== null && prs.has(canonicalPrUrl(pr) ?? pr)) || (ticket != null && tickets.has(ticket));
+          if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && touches(run.path, run.prUrl, run.ticket)) ||
+            dispatch.attempts().some((attempt) => ["launching", "running", "verifying", "needs-you"].includes(attempt.status) && touches(attempt.path, attempt.prUrl)) ||
+            advance.list().some((batch) => batch.jobs.some((job) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.path, job.prUrl))))
+            throw new Error("Affected work became active or uncertain. Reopen the merge preview after it settles.");
+          prepareAdminSync(result.preview.source, result.preview.destination, result.threadDetails);
+          return effortStore.merge(result.preview.source.id, result.preview.destination.id);
+        })();
+        bb.realtime.publish(BOARD_CHANGED, { scanning });
+        const pendingThreadSync = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
+        return { ok: true as const, effort, pendingThreadSync,
+          notice: pendingThreadSync ? `${pendingThreadSync} thread assignments still need syncing. Retry this merge to finish.` : null };
+      } catch (error) { return { ok: false as const, error: `Effort merge could not finish: ${String(error).slice(0, 300)}. Reopen the preview or retry the merge.` }; }
     },
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
     thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {
@@ -4341,6 +4652,8 @@ export default async function plugin(bb: BbPluginApi) {
     dispatch_set: async ({ mode, effortKey }): Promise<DispatchState> => {
       const current = await board();
       if (mode === "auto" && effortKey === null) throw new Error("Choose an effort before enabling automatic dispatch.");
+      if (mode === "auto" && effortKey && effortStore.source(effortKey)?.archivedAt)
+        throw new Error("Restore this effort before enabling automatic dispatch.");
       if (effortKey !== null && !current.groups.some((group) => group.key === effortKey && !current.groups.some((child) => child.parentKey === group.key))) {
         throw new Error("That effort is no longer on the board. Refresh and choose an effort.");
       }

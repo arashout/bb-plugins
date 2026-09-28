@@ -426,6 +426,14 @@ that thread has newer activity.
 
 ## Views
 
+The **Efforts** administration view lists explicitly saved efforts. Create an
+effort without launching an agent, edit its name and goal, archive or restore
+it, and preview **Merge into…** before combining membership. The destination
+keeps its identity; old effort IDs resolve to it. Thread histories stay
+separate. Archived efforts retain linked work. Merge previews identify routing
+conflicts and blockers; resolve them before applying the merge. Retry pending
+thread updates when an external update fails.
+
 **Work** follows saved planning conversations and preparation runs in a
 vertical list, alongside Map and Pipeline. It preserves each conversation's
 original instruction and PR scope, shows current PR facts separately from

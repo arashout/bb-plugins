@@ -51,7 +51,7 @@ const MAP_KEYS: [string, string][] = [
 ];
 
 const BOTH_KEYS: [string, string][] = [
-  ["v", "Cycle through Map, Pipeline, and Work"],
+  ["v", "Cycle through Map, Pipeline, Work, and Efforts"],
   ["?", "Open this panel"],
 ];
 
