@@ -17,8 +17,8 @@ export const BLOCKER_KINDS = ["product-decision", "dependency", "environment", "
 /** What a worker's report maps through `otherwise`: its outcome, its first blocker, or a missing or invalid report. */
 export const WORKER_RESULTS = ["changed", "no-change", "failed", "report-invalid", ...BLOCKER_KINDS.map((kind) => `blocked:${kind}` as const)] as const;
 export const CODE_RESULTS = ["write-refused", "rate-limited", "failed-again"] as const;
-type WorkerRecipeId = "integrate_base" | "fix_failing_checks" | "address_review_feedback" | "validate_criteria" | "repair_report";
-type CodeRecipeId = "request_rereview" | "request_review" | "mark_ready_for_review" | "rerun_failed_checks";
+export type WorkerRecipeId = "integrate_base" | "fix_failing_checks" | "address_review_feedback" | "validate_criteria" | "repair_report";
+export type CodeRecipeId = "request_rereview" | "request_review" | "mark_ready_for_review" | "rerun_failed_checks";
 export type RecipeId = WorkerRecipeId | CodeRecipeId;
 type Route = "reverify" | "retry" | `wait:${string}` | `decision:${string}` | `recipe:${WorkerRecipeId}` | `code:${CodeRecipeId}` | `repair:${string}`;
 type Shared = { version: 1; goal: "prepared"; runsWhenFailing: Condition[]; requires: Condition[]; effects: Effect[]; instructions: string[]; verify: Condition[] };
@@ -33,7 +33,8 @@ const BLOCKERS = {
   "blocked:product-decision": "decision:product", "blocked:dependency": "wait:dependency", "blocked:environment": "wait:source-unavailable",
   "blocked:validation-failed": "retry", "blocked:access": "repair:access", "blocked:scope": "decision:authority", "blocked:other": "repair:worker-blocked",
 } satisfies Partial<WorkerRecipe["otherwise"]>;
-const WORKER = { changed: "reverify", "no-change": "reverify", failed: "retry", "report-invalid": "recipe:repair_report", ...BLOCKERS } satisfies WorkerRecipe["otherwise"];
+/** How a worker recipe routes each result, unless the recipe names its own route. */
+export const WORKER_ROUTES = { changed: "reverify", "no-change": "reverify", failed: "retry", "report-invalid": "recipe:repair_report", ...BLOCKERS } satisfies WorkerRecipe["otherwise"];
 const GITHUB_WRITE = { "write-refused": "repair:github-write", "rate-limited": "wait:rate-limit" } satisfies CodeRecipe["otherwise"];
 const SCOPED: Condition[] = ["open", "unheld", "scoped", "effort-active", "fresh"];
 
@@ -50,7 +51,7 @@ export const RECIPES: readonly Recipe[] = [
       "Push HEAD:refs/heads/<headBranch>; for rewritten history use --force-with-lease pinned to expectedHead.",
       "Emit one Workstreams result v1 line for the final head."],
     verify: ["head-matches-report", "no-conflict", "base-current"],
-    otherwise: WORKER, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
+    otherwise: WORKER_ROUTES, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
   { action: "fix_failing_checks", version: 1, goal: "prepared", executor: "worker", modelRole: "code",
     runsWhenFailing: ["checks-green"],
     requires: [...SCOPED, "writer-free", "not-fork", "checks-settled"],
@@ -61,7 +62,7 @@ export const RECIPES: readonly Recipe[] = [
       "Rerun the reproduced commands and push the changes.",
       "Report each check with its cause and passing command, or an environment blocker that names the failing checks with evidence."],
     verify: ["head-matches-report"],
-    otherwise: { ...WORKER, "blocked:environment": "code:rerun_failed_checks" }, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
+    otherwise: { ...WORKER_ROUTES, "blocked:environment": "code:rerun_failed_checks" }, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
   { action: "address_review_feedback", version: 1, goal: "prepared", executor: "worker", modelRole: "code",
     runsWhenFailing: ["threads-resolved", "feedback-verified", "changes-addressed"],
     requires: [...SCOPED, "writer-free", "not-fork"],
@@ -73,7 +74,7 @@ export const RECIPES: readonly Recipe[] = [
       "Resolve only review threads whose requests are addressed.",
       "Report evidence for each feedback item against the final head."],
     verify: ["head-matches-report", "feedback-verified", "threads-resolved", "changes-addressed"],
-    otherwise: WORKER, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
+    otherwise: WORKER_ROUTES, bound: { attemptsPerHead: 2, reportCorrections: 2 }, merge: false },
   { action: "validate_criteria", version: 1, goal: "prepared", executor: "worker", modelRole: "code",
     runsWhenFailing: ["criteria-satisfied"],
     requires: [...SCOPED, "writer-free", "not-fork"],
@@ -83,7 +84,7 @@ export const RECIPES: readonly Recipe[] = [
       "Change code or push only when this work order grants code-fix and push for the criterion; otherwise report a scope blocker.",
       "Report one criteria entry per listed id, with the command and result as evidence."],
     verify: ["head-matches-report", "criteria-satisfied"],
-    otherwise: { ...WORKER, "blocked:validation-failed": "decision:worker-question" }, bound: { attemptsPerHead: 1, reportCorrections: 2 }, merge: false },
+    otherwise: { ...WORKER_ROUTES, "blocked:validation-failed": "decision:worker-question" }, bound: { attemptsPerHead: 1, reportCorrections: 2 }, merge: false },
   { action: "repair_report", version: 1, goal: "prepared", executor: "worker", modelRole: "planning",
     runsWhenFailing: ["envelope-valid"],
     requires: ["attempt-completed", "same-thread-idle", "writer-free"],
