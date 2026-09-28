@@ -24,6 +24,7 @@ import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { AsksBlock, type AsksProps } from "./roster-asks";
 import { CommandBox, type CommandBoxProps, type RosterNote } from "./roster-command";
+import { MergePreviewDialog } from "./roster-merge-dialog";
 import type { RosterListEntry } from "./roster-parents";
 import { HATCH, RosterList, RosterTable, TONE_CLASS, type RowActions } from "./roster-rows";
 import { ROSTER_CHANGED } from "./roster-shared";
@@ -364,6 +365,8 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const [holding, setHolding] = useState<RosterLine | null>(null);
   const [resetting, setResetConfirm] = useState<ResetConfirm | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
+  /** The PRs whose fresh merge preview is open: a command such as `merge 9 16` names them, and grants nothing. */
+  const [merging, setMerging] = useState<{ target: string; n: number | null }[] | null>(null);
   const [wide, setWide] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   /** Rows this pane's own command changed settle at once: you caused the move, so it isn't news. */
@@ -457,6 +460,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
       result = { kind: "error", message: message(cause) };
     }
     if (result.kind === "admit") for (const n of [...rows, ...result.parts ? ackRows(result.parts) : []]) ownChanges.current.add(n);
+    if (result.kind === "admit" && result.mergePreviews.length) setMerging(result.mergePreviews);
     setNote(null);
     keep(text, requestId, result);
     return result;
@@ -537,6 +541,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     const line = "n" in effect ? lineOf(effect.n) : null;
     if (effect.kind === "answer") void answer(effect.ask, effect.reply);
     else if (effect.kind === "recover") void send(effect.command, "row", effect.ask.numbers);
+    else if (effect.kind === "preview") void send(effect.command, "row");
     else if (effect.kind === "row" && line) act(line, effect.id);
     else if (effect.kind === "menu") setMenuN(effect.n);
     else if (effect.kind === "order") toggleOrder();
@@ -574,6 +579,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
         onAnswer: (ask, reply) => { answered(ask); void answer(ask, reply); }, onField: (ask, field) => { answered(ask); void answer(ask, { field }); },
         onSubset: (ask, numbers) => setPane((current) => ({ ...current, subsets: new Map([...current.subsets, [answerKey(ask), numbers]]) })),
         onCompose: (text) => { setCommandText(text); inputRef.current?.focus(); }, onUndo: (receipt) => void undo(receipt),
+        onPreview: (ask) => void send(ask.command, "row"),
         onRecover: (ask, recovery) => {
           const intent = recoveryIntent(ask, recovery);
           if (intent.kind === "confirm") setResetConfirm(intent.reset);
@@ -591,6 +597,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     <HoldDialog line={holding} onClose={() => setHolding(null)} onHold={(line, command) => { setHolding(null); void send(command, "row", [line.n]); }} />
     <ResetDialog reset={resetting} thread={resetting?.threadId ? titles.get(resetting.threadId) ?? null : null} onClose={() => setResetConfirm(null)}
       onOpenThread={(id) => navigate.toThread(id)} onReset={(reset) => { setResetConfirm(null); void send(reset.command, "row", reset.numbers); }} />
+    <MergePreviewDialog targets={merging} rows={roster.rows} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} />
     <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
       <DialogContent className={cn("max-w-sm", POINTER_CURSORS)}>
         <DialogHeader><DialogTitle>Roster keys</DialogTitle><DialogDescription>They work while the roster has focus, never while you type.</DialogDescription></DialogHeader>

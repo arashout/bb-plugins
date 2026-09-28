@@ -12,7 +12,7 @@ const start = (roster: EffortRoster): PaneState => ({ focus: firstAsk(askCards(r
 function asks(options: { wide?: boolean; roster?: EffortRoster; state?: Partial<PaneState> } = {}) {
   const roster = options.roster ?? ROSTER;
   return renderToStaticMarkup(createElement(AsksBlock, { ...askCards(roster), state: { ...start(roster), ...options.state }, wide: options.wide ?? true, now: NOW,
-    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onOpenThread: noop, onOpenUrl: noop }));
+    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onPreview: noop, onOpenThread: noop, onOpenUrl: noop }));
 }
 const keyOf = (id: string, roster = ROSTER) => answerKey(askCards(roster).asks.find((ask) => ask.id === id) as DecisionAsk);
 const card = (html: string, id: string) => html.match(new RegExp(`<article data-roster-ask="${id}"[\\s\\S]*?</article>`, "u"))?.[0] ?? "";
@@ -101,5 +101,15 @@ describe("roster system issues", () => {
   it("keeps the first recovery on S1's line in a narrow pane", () => {
     const narrow = asks({ wide: false, state: { open: null } });
     expect(text(narrow)).toContain("S1 17 · system · Launch outcomes uncertain; new launches paused › Recheck launches");
+  });
+});
+
+describe("roster merge candidates", () => {
+  it("shows M in neutral with the candidates, the stack merging wakes, and one action that only opens the preview", () => {
+    const m = card(asks(), "M");
+    expect(m).not.toMatch(/amber|rose/u);
+    expect(text(m)).toBe("M 2 verified merge candidates 9 16 merging 9 wakes 10, 11 · separately authorized Thread merge 9 16 · m Preview merge · 2");
+    expect(m).toContain('title="Sends merge 9 16, which merges nothing, and opens a fresh preview; merging there takes ⌘↵ or a click"');
+    expect(text(asks({ wide: false, state: { open: null } }))).toContain("M 9 16 · merge · verified merge candidates › Preview merge · 2");
   });
 });

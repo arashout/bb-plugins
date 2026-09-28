@@ -5,7 +5,7 @@ import { effortRosterSchema, type EffortRoster } from "./effort-roster.js";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures.js";
 import { ANSWER_DELAY } from "./effort-v2-server.js";
 import { ackChips, ackDetails, ackRows, ackView, answerCommand, answerInput, answerKey, askCards, clock, commandInput, composeNumber, fieldAnswerInput, firstAsk, latestUndo, nextWake,
-  paneKey, recoveryIntent, rosterKey, rosterView, settle, shownCommand, UNDO_WINDOW, type AckParts, type CommandRecord, type DecisionAsk, type IssueAsk, type KeyEvent, type PaneEffect, type PaneState, type RosterGroup,
+  afterAnswer, paneKey, recoveryIntent, rosterKey, rosterView, settle, shownCommand, UNDO_WINDOW, type AckParts, type CommandRecord, type DecisionAsk, type IssueAsk, type KeyEvent, type PaneEffect, type PaneState, type RosterGroup,
   type RosterOrder } from "./roster-view-model.js";
 
 const view = (order: RosterOrder = "number", roster: EffortRoster = ROSTER, settled = settle(roster)) =>
@@ -286,7 +286,7 @@ describe("roster decisions", () => {
     .map((effect) => answerCommand((effect as Extract<PaneEffect, { kind: "answer" }>).ask, (effect as Extract<PaneEffect, { kind: "answer" }>).reply));
 
   it("offers D1's options without preselecting its recommendation, and preselects D2's recommended drafts with the reason for leaving 14 out", () => {
-    expect(asks.map((item) => [item.id, item.kind === "decision" ? item.answer : item.kind])).toEqual([["D1", "option"], ["D2", "subset"], ["S1", "issue"]]);
+    expect(asks.map((item) => [item.id, item.kind === "decision" ? item.answer : item.kind])).toEqual([["D1", "option"], ["D2", "subset"], ["S1", "issue"], ["M", "merge"]]);
     expect(ask("D1").options.map((option) => [option.key, option.id, option.recommended])).toEqual([["a", "A", true], ["b", "B", false]]);
     expect(ask("D1").recommended).toEqual([]);
     expect(ask("D2").recommended).toEqual([13, 15]);
@@ -363,7 +363,7 @@ describe("roster decisions", () => {
   it("shows an answer waiting for Undo as a receipt in place of its card, and takes back the newest on u", () => {
     const waiting = { ...ROSTER, pending: [{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000 }] };
     const cards = askCards(waiting);
-    expect(cards.asks.map((item) => item.id)).toEqual(["D2", "S1"]);
+    expect(cards.asks.map((item) => item.id)).toEqual(["D2", "S1", "M"]);
     expect(cards.receipts).toEqual([{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000, id: "D1", numbers: [7, 12] }]);
     const later = { ...cards.receipts[0]!, requestId: "req-d2", id: "D2", until: NOW + 9_000 };
     expect(latestUndo([cards.receipts[0]!, later], NOW)?.requestId).toBe("req-d2");
@@ -376,7 +376,7 @@ describe("roster decisions", () => {
     expect(rosterKey(key("r"), { control: false, held: false, ask: true })).toBeNull();
     expect(rosterKey(key("c"), { control: false, held: false })).toEqual({ kind: "row", id: "recheck" });
     // j walks from the asks into the rows.
-    expect(press(["j", "j", "j"]).state.focus).toEqual({ row: 1 });
+    expect(press(["j", "j", "j", "j"]).state.focus).toEqual({ row: 1 });
   });
 });
 
@@ -403,5 +403,69 @@ describe("roster system issues", () => {
     const step = paneKey(view("number", resetOnly), cards, at({ ask: "S1" }), key("Enter"), { control: false, wide: true });
     expect(step?.effect).toEqual({ kind: "hint", text: "Reset 17… needs your confirmation first: use its button" });
     expect(step?.state.focus).toEqual({ ask: "S1" });
+  });
+});
+
+describe("keyboard safety: Enter never merges", () => {
+  const { asks } = askCards(ROSTER);
+  const key = (name: string, chord = false): KeyEvent => ({ key: name, shiftKey: false, metaKey: chord, ctrlKey: false, altKey: false });
+  const at = (focus: PaneState["focus"]): PaneState => ({ focus, open: null, picks: new Map(), subsets: new Map(), hint: null });
+  function press(keys: (string | KeyEvent)[], state: PaneState, wide = true) {
+    const effects: (PaneEffect | null)[] = [];
+    for (const name of keys) {
+      const step = paneKey(view(), asks, state, typeof name === "string" ? key(name) : name, { control: false, wide });
+      effects.push(step?.effect ?? null);
+      if (step) state = step.state;
+    }
+    return { effects, state };
+  }
+  const kinds = (effects: readonly (PaneEffect | null)[]) => effects.map((effect) => effect === null ? null : effect.kind === "answer" || effect.kind === "recover"
+    || effect.kind === "preview" ? `${effect.kind} ${effect.kind === "answer" ? answerCommand(effect.ask, effect.reply) : effect.command}` : effect.kind);
+
+  it("clears the returning batch with a ⏎ ⏎ ⏎ m, and Enter pressed on after it only ever reaches the preview, never a merge", () => {
+    const { effects, state } = press(["a", "Enter", "Enter", "Enter", "m", "Enter", "Enter", "Enter", " ", "Enter"], at(firstAsk(asks)));
+    expect(kinds(effects)).toEqual([null, "answer D1 A", "answer D2 13 15", "recover recheck launches", "preview merge 9 16",
+      "preview merge 9 16", "preview merge 9 16", "preview merge 9 16", "seen", "preview merge 9 16"]);
+    // m leaves focus on M, where Enter reopens the same preview; the merge itself happens only in the preview, on a click or ⌘↵.
+    expect(state.focus).toEqual({ ask: "M" });
+  });
+
+  it("never moves focus onto M after an answer: after the last decision or system issue it rests on nothing", () => {
+    const { effects, state } = press(["a", "Enter", "Enter", "Enter", "Enter", "Enter", " ", "Enter"], at(firstAsk(asks)));
+    expect(kinds(effects).slice(4)).toEqual([null, null, "seen", null]);
+    expect(state.focus).toBeNull();
+    expect(afterAnswer(asks, at({ ask: "S1" }), "S1", true).focus).toBeNull();
+  });
+
+  it("gives no key on any ask or row an effect that merges: at most it opens the fresh preview", () => {
+    const places: PaneState["focus"][] = [null, ...asks.map((item) => ({ ask: item.id })), ...ROSTER.rows.map((row) => ({ row: row.n }))];
+    const allowed = new Set(["answer", "recover", "preview", "hint", "row", "menu", "order", "seen", "keys", "command", "undo"]);
+    for (const focus of places) for (const wide of [true, false]) {
+      const { effects } = press(["Enter", "Enter", " ", "m", key("Enter", true), "Enter"], at(focus), wide);
+      for (const effect of effects) {
+        if (effect) expect(allowed.has(effect.kind), `${JSON.stringify(focus)}: ${effect.kind}`).toBe(true);
+        if (effect?.kind === "preview") expect(effect.command).toMatch(/^merge \d+( \d+)*$/u);
+      }
+      // ⌘↵ belongs to the preview's own dialog; on the pane it does nothing.
+      expect(paneKey(view(), asks, at(focus), key("Enter", true), { control: false, wide })).toBeNull();
+    }
+  });
+
+  it("opens a Ready row's own preview on Enter, and names M's candidates and the stack they wake", () => {
+    expect(press(["Enter"], at({ row: 16 })).effects).toEqual([{ kind: "preview", command: "merge 16" }]);
+    expect(press(["Enter"], at({ row: 5 })).effects).toEqual([{ kind: "row", n: 5, id: "thread" }]);
+    expect(asks.find((item) => item.id === "M")).toEqual({ kind: "merge", id: "M", numbers: [9, 16], wakes: [{ n: 9, children: [10, 11] }], command: "merge 9 16" });
+    // A held Ready row isn't a candidate.
+    const held = { ...ROSTER, rows: ROSTER.rows.map((row) => row.n === 16 ? { ...row, hold: { reason: "", heldAt: NOW } } : row) };
+    expect(askCards(held).asks.find((item) => item.id === "M")).toMatchObject({ numbers: [9], command: "merge 9" });
+  });
+
+  it("reads merge 9 16 as a preview that grants nothing, so the command that opens the preview can't merge", () => {
+    const read = interpretEffortCommand("merge 9 16", { effortId: ROSTER.effort.id, issued: new Map(ROSTER.rows.map((row) => [row.n, row.target])), rows: new Map(), holds: {},
+      snapshot: { id: ROSTER.snapshotId!, effortId: ROSTER.effort.id, stale: false, rows: ROSTER.rows.map(({ n, target }) => ({ n, target })) }, instruction: null, lastRevision: 4,
+      decisions: [], ownerOf: () => ({ effortId: ROSTER.effort.id, name: ROSTER.effort.name }) });
+    if (read.kind !== "admit") throw new Error(read.message);
+    expect(read.mergePreviews.map((item) => item.n)).toEqual([9, 16]);
+    expect(read).toMatchObject({ instruction: null, interventions: [], answers: [], parts: { merge: false, added: [], notGranted: [] } });
   });
 });

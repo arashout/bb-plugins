@@ -10,6 +10,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "../inkwell-fixtures.js";
 import { ackView, askCards, rosterView, settle, type RosterOrder } from "../roster-view-model.js";
+import { MergePreviewBody, type MergePreview } from "../roster-merge-dialog.js";
 import { RosterPane } from "../roster-view.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -21,19 +22,27 @@ const pane = (wide: boolean, order: RosterOrder) => renderToStaticMarkup(createE
   command: { value: wide ? "" : "hold 8 because ", onValue: noop, onSubmit: noop, ack: ackView({ ...ROSTER.lastCommand!, fresh: wide }, NOW), open: wide, onToggle: noop,
     onLeave: noop, note: null },
   asks: { ...askCards(ROSTER), wide, now: NOW, state: { focus: { ask: "D1" }, open: wide ? null : "D1", picks: new Map(), subsets: new Map(), hint: null },
-    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onOpenThread: noop, onOpenUrl: noop },
+    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onPreview: noop, onOpenThread: noop, onOpenUrl: noop },
   history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop,
   onToggleGroup: noop, onOpenUrl: noop,
 }));
 const frame = (width: number, wide: boolean, order: RosterOrder) =>
   `<section style="width:${width}px;height:900px;border:1px solid #2a2a2a;flex:none" data-bb-plugin="workstreams">${pane(wide, order)}</section>`;
+const live = (head: string, stackedAbove: number[], approvalNotes: MergePreview["live"]["approvalNotes"] = []): MergePreview => ({ ok: true, live: { state: "OPEN",
+  isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", headRefOid: head.padEnd(40, "0"), stackedAbove, unresolvedThreads: 0, unresolvedAtLeast: false,
+  approvalNotes, approvalNotesMore: 0, approvalNotesComplete: true }, refusals: [], warnings: [], method: "squash", deleteBranch: true });
+const merge = renderToStaticMarkup(createElement(MergePreviewBody, { busy: false, notice: "Merging needs ⌘↵ or a click; Enter alone doesn't merge",
+  onToggle: noop, onMerge: noop, onCancel: noop, onOpenUrl: noop, selected: new Set([ROSTER.rows[8]!.target, ROSTER.rows[15]!.target]),
+  items: [9, 16].map((n) => ({ n, target: ROSTER.rows[n - 1]!.target, repo: ROSTER.rows[n - 1]!.repo.split("/")[1]!, number: ROSTER.rows[n - 1]!.number,
+    title: ROSTER.rows[n - 1]!.title, preview: n === 9 ? live("a41c9e0", [215, 217], [{ author: "tobyk", body: "Approving; keep the shelf label fallback before this ships.",
+      submittedAt: "2026-09-27T15:04:00Z", truncated: false }]) : live("9c2f1e7", []), result: null })) }));
 const html = `<!doctype html><html class="dark"><head><meta charset="utf-8"><title>Roster preview</title><style>
 :root{color-scheme:dark;--background:#151515;--foreground:#e6e6e6;--card:#1b1b1b;--popover:#1f1f1f;--popover-foreground:#e6e6e6;--muted:#232323;
 --muted-foreground:#9a9a9a;--border:#2c2c2c;--input:#333;--ring:#6b8afd;--destructive:#f07178;--state-hover:#ffffff10;--state-active:#ffffff18;--radius:6px}
 @layer theme,base,utilities;@layer base{*,::before,::after{box-sizing:border-box;margin:0;padding:0;border:0 solid}
 button,input{font:inherit;color:inherit;background:transparent;text-align:inherit}h2{font-size:inherit;font-weight:inherit}svg{display:block}}
 body{margin:0;padding:16px;background:#101010;color:var(--foreground);font:13px/1.45 system-ui,-apple-system,sans-serif;display:flex;gap:16px;align-items:flex-start}
-</style><style>${readFileSync(css, "utf8")}</style></head><body>${frame(1280, true, "number")}${frame(420, false, "number")}${frame(560, false, "state")}</body></html>`;
+</style><style>${readFileSync(css, "utf8")}</style></head><body>${frame(1280, true, "number")}${frame(420, false, "number")}${frame(560, false, "state")}<section style="width:560px;padding:24px;border:1px solid #2a2a2a;background:var(--background);flex:none" data-bb-plugin="workstreams">${merge}</section></body></html>`;
 const out = join(process.env.TMPDIR ?? tmpdir(), "roster-preview.html");
 writeFileSync(out, html);
 console.log(out);

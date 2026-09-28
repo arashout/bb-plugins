@@ -52,6 +52,8 @@ export type RosterLine = {
   /** It changed since you last marked seen. */
   changed: boolean;
   held: boolean; leftAlone: boolean;
+  /** A verified merge candidate, not held: Enter opens its fresh merge preview. */
+  ready: boolean;
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
   threadId: string | null;
@@ -404,7 +406,7 @@ export function rosterLine(row: RosterRow, roster: EffortRoster, options: { now:
     seen: { age: row.observedAt === null ? "never" : age(row.observedAt, now), stale: row.stale,
       failed: row.failedAt !== null && (row.observedAt === null || row.failedAt > row.observedAt) },
     changed: since.has(row.n) || (settled !== undefined && settled !== liveGroup(row, roster)),
-    held: row.hold !== null, leftAlone: row.membership === "excluded", depth: 0, branch: null, threadId: threadOf(row),
+    held: row.hold !== null, leftAlone: row.membership === "excluded", ready: row.state === "ready" && row.hold === null, depth: 0, branch: null, threadId: threadOf(row),
     menu: rowMenu(row, roster),
   };
 }
@@ -545,7 +547,7 @@ export function rosterView(roster: EffortRoster, options: { order: RosterOrder; 
  * A roster key: move, toggle the order, Mark seen, list the keys, type a command, take back the latest answer, open the row's menu, or
  * run one of its items; on an ask, pick one of its options or accept it.
  */
-export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" | "command" | "undo" | "accept" } | { kind: "row"; id: MenuItem["id"] }
+export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" | "command" | "undo" | "accept" | "merge" } | { kind: "row"; id: MenuItem["id"] }
   | { kind: "option"; index: number };
 export type KeyEvent = { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean };
 /**
@@ -567,6 +569,7 @@ export function rosterKey(event: KeyEvent, on: { control: boolean; held: boolean
     case "?": return { kind: "keys" };
     case "/": return { kind: "command" };
     case "u": return { kind: "undo" };
+    case "m": return { kind: "merge" };
     case ".": return { kind: "menu" };
     case "Enter": return on.control ? null : { kind: "row", id: "thread" };
     case "o": return { kind: "row", id: "pr" };
@@ -584,7 +587,10 @@ export function rosterKey(event: KeyEvent, on: { control: boolean; held: boolean
 export const ROSTER_KEYS: [string, string][] = [
   ["j / k", "Next / previous ask, then row"],
   ["a / b / c", "Pick an option on a product decision; Enter sends it"],
-  ["Enter", "Accept a lifecycle ask's subset, or open the row's thread; a product decision needs an option first"],
+  ["Enter", "Accept a lifecycle ask or run a system issue's recovery; on M or a Ready row, open the merge preview; else open the row's thread. "
+    + "A product decision needs an option first, and Enter never merges"],
+  ["m", "Open the fresh merge preview for M"],
+  ["⌘ Enter", "Merge from the preview (or click Merge)"],
   ["u", "Undo the latest answer within its 10 seconds"],
   [".", "Open the row's menu"],
   ["r", "Refresh the row from GitHub"],
@@ -631,7 +637,11 @@ export type Recovery = Issue["recovery"][number];
 export type IssueAsk = { kind: "issue"; id: string; issue: Issue; numbers: number[];
   /** What Enter runs: the first recovery that drops no claim. */
   primary: Recovery | null };
-export type Ask = DecisionAsk | IssueAsk;
+/** Verified merge candidates, merged only from their fresh preview: this ask opens it and never merges. */
+export type MergeAsk = { kind: "merge"; id: "M"; numbers: number[]; wakes: { n: number; children: number[] }[];
+  /** What opens the preview; it grants nothing. */
+  command: string };
+export type Ask = DecisionAsk | IssueAsk | MergeAsk;
 /** An answer the server holds for Undo, in place of its card. */
 export type Receipt = PendingAnswer & { id: string; numbers: number[] };
 export type AnswerReply = { optionId: string } | { numbers: number[] } | { text: string };
@@ -651,17 +661,29 @@ function decisionAsk(decision: Decision, rows: readonly RosterRow[]): DecisionAs
     recommended: decision.subkind ? (decision.recommendation?.numbers ?? numbersOf(decision.targets.filter((item) => item.recommended))).filter((n) => numbers.includes(n)) : [] };
 }
 
-/** The asks in the order you clear them: decisions by number, then system issues as raised. A decision whose answer waits for Undo shows as its receipt instead. */
+/**
+ * The asks in the order you clear them: decisions by number, system issues as raised, then M, the Ready rows no hold keeps back. A
+ * decision whose answer waits for Undo shows as its receipt instead.
+ */
 export function askCards(roster: EffortRoster, pending: readonly PendingAnswer[] = roster.pending): { asks: Ask[]; receipts: Receipt[] } {
   const waiting = new Set(pending.flatMap((item) => item.decisions));
   const decisions = [...roster.decisions].sort((a, b) => a.n - b.n);
   return {
     asks: [...decisions.filter((decision) => !waiting.has(decision.n)).map((decision): Ask => decisionAsk(decision, roster.rows)),
       ...roster.issues.map((issue, index): Ask => ({ kind: "issue", id: issue.ref ?? `S${index + 1}`, issue, numbers: issue.numbers,
-        primary: issue.recovery.find((item) => !item.confirm) ?? null }))],
+        primary: issue.recovery.find((item) => !item.confirm) ?? null })),
+      ...mergeAsk(roster.rows)],
     receipts: pending.map((item) => ({ ...item, id: item.decisions.map((n) => `D${n}`).join(" "),
       numbers: numbersOf(decisions.filter((decision) => item.decisions.includes(decision.n)).flatMap((decision) => decision.targets)) })),
   };
+}
+
+function mergeAsk(rows: readonly RosterRow[]): MergeAsk[] {
+  const ready = rows.filter((row) => row.state === "ready" && !row.hold).sort((a, b) => a.n - b.n);
+  const numbers = ready.map((row) => row.n);
+  const wakes = numbers.map((n) => ({ n, children: rows.filter((row) => row.stack?.parentN === n && row.state !== "done").map((row) => row.n).sort((a, b) => a - b) }))
+    .filter((wake) => wake.children.length > 0);
+  return numbers.length ? [{ kind: "merge", id: "M", numbers, wakes, command: `merge ${numbers.join(" ")}` }] : [];
 }
 
 /** The same answer as thread text: `D1 A`, `D2 13 15`, `D2 none`, or `D1` and your words. */
@@ -703,8 +725,12 @@ export type PaneFocus = { ask: string } | { row: number } | null;
 /** The asks' client state: focus, the one ask open in a narrow pane, each product decision's picked option and each lifecycle subset by answerKey, and a hint. */
 export type PaneState = { focus: PaneFocus; open: string | null; picks: ReadonlyMap<string, string>; subsets: ReadonlyMap<string, readonly number[]>;
   hint: { id: string; text: string } | null };
-/** What a key asks the container to do. Only `answer` and `recover` send, and nothing here merges. */
+/**
+ * What a key asks the container to do. Only `answer`, `recover`, and `preview` send, and `preview` sends `merge N`, which grants nothing
+ * and opens the fresh merge preview. No key merges: only the preview's own button, clicked or pressed with ⌘↵, does.
+ */
 export type PaneEffect = { kind: "answer"; ask: DecisionAsk; reply: AnswerReply } | { kind: "recover"; ask: IssueAsk; command: string } | { kind: "hint"; text: string }
+  | { kind: "preview"; command: string }
   | { kind: "row"; n: number; id: MenuItem["id"] } | { kind: "menu"; n: number } | { kind: "order" | "seen" | "keys" | "command" | "undo" };
 
 /** Asks an answer moves focus to: decisions and system issues, never merge candidates, so a run of Enter can't reach a merge. */
@@ -727,6 +753,8 @@ export function afterAnswer(asks: readonly Ask[], state: PaneState, id: string, 
 function accept(asks: readonly Ask[], ask: Ask, state: PaneState, wide: boolean): { state: PaneState; effect: PaneEffect | null } {
   if (!wide && state.open !== ask.id) return { state: { ...state, open: ask.id, hint: null }, effect: null };
   const hint = (text: string) => ({ state: { ...state, hint: { id: ask.id, text } }, effect: { kind: "hint" as const, text } });
+  // M only opens its preview, and focus stays on it.
+  if (ask.kind === "merge") return { state, effect: { kind: "preview", command: ask.command } };
   if (ask.kind === "issue") {
     // A recovery that drops a claim (`reset N release`) never runs on one key: it needs its confirm.
     if (ask.primary) return { state: afterAnswer(asks, state, ask.id, wide), effect: { kind: "recover", ask, command: ask.primary.command } };
@@ -775,7 +803,12 @@ export function paneKey(view: RosterView, asks: readonly Ask[], state: PaneState
       return decision && option ? done({ ...here, picks: new Map([...here.picks, [answerKey(decision), option.id]]), open: decision.id }) : done(here);
     }
     case "accept": return ask ? accept(asks, ask, here, on.wide) : done(here);
-    case "row": return done(here, line ? { kind: "row", n: line.n, id: action.id } : null);
+    // Enter on a Ready row opens its merge preview, never a merge.
+    case "row": return done(here, !line ? null : action.id === "thread" && line.ready ? { kind: "preview", command: `merge ${line.n}` } : { kind: "row", n: line.n, id: action.id });
+    case "merge": {
+      const merge = asks.find((item) => item.kind === "merge");
+      return done(merge ? { ...here, focus: { ask: merge.id } } : here, merge ? { kind: "preview", command: merge.command } : null);
+    }
     case "menu": return done(here, line ? { kind: "menu", n: line.n } : null);
     default: return done(here, { kind: action.kind });
   }

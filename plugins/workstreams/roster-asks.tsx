@@ -1,6 +1,7 @@
 // The asks above the roster (V2-UI-SPEC §4.2): decision cards, the receipts
-// that replace them while an answer waits ten seconds for Undo, and system
-// issues with their recovery commands.
+// that replace them while an answer waits ten seconds for Undo, system
+// issues with their recovery commands, and M, the merge candidates, whose
+// only action opens their fresh preview.
 // Each action control shows the command it sends before you use it, and each
 // card's footer carries the thread's text for the same answer, which a click
 // writes into the command box. Product decisions take an explicit option;
@@ -13,7 +14,7 @@ import { Checkbox } from "./components/ui/checkbox";
 import { cn } from "./lib/utils";
 import { formatTargets } from "./roster-shared";
 import { TONE_CLASS } from "./roster-rows";
-import { answerCommand, answerKey, askKind, clock, UNDO_WINDOW, type AnswerReply, type Ask, type DecisionAsk, type IssueAsk, type PaneState, type Receipt,
+import { answerCommand, answerKey, askKind, clock, UNDO_WINDOW, type AnswerReply, type Ask, type DecisionAsk, type IssueAsk, type MergeAsk, type PaneState, type Receipt,
   type Recovery } from "./roster-view-model";
 
 export type AskActions = {
@@ -30,6 +31,8 @@ export type AskActions = {
   onUndo(receipt: Receipt): void;
   /** Run a system issue's recovery; one marked confirm opens its confirmation instead. */
   onRecover(ask: IssueAsk, recovery: Recovery): void;
+  /** Send M's `merge N` and open the fresh merge preview; it merges nothing. */
+  onPreview(ask: MergeAsk): void;
   onOpenThread(threadId: string): void;
   onOpenUrl(url: string): void;
 };
@@ -57,12 +60,13 @@ function AskKey({ id, tone }: { id: string; tone: "decision" | "issue" | null })
     tone ? TONE_CLASS[tone] : "border-foreground/30")}>{id}</span>;
 }
 
-const toneOf = (ask: Ask) => ask.kind === "issue" ? "issue" as const : "decision" as const;
-/** The card frame: amber for decisions and rose for system issues; focused, it gets a ring. */
+const toneOf = (ask: Ask) => ask.kind === "issue" ? "issue" as const : ask.kind === "decision" ? "decision" as const : null;
+const BORDER = { issue: "border-rose-500/30", decision: "border-amber-500/30" } as const;
+/** The card frame: amber for decisions, rose for system issues, and neutral for merges; focused, it gets a ring. */
 function Card({ ask, focused, children, onFocusAsk }: { ask: Ask; focused: boolean; children: ReactNode; onFocusAsk(id: string): void }) {
-  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} onClick={() => onFocusAsk(ask.id)} data-tone={toneOf(ask)}
-    className={cn("min-w-0 rounded-md border bg-foreground/[0.03] px-3 py-2 text-[12px] outline-none", ask.kind === "issue" ? "border-rose-500/30" : "border-amber-500/30",
-      focused && "ring-2 ring-ring")}>
+  const tone = toneOf(ask);
+  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} onClick={() => onFocusAsk(ask.id)} data-tone={tone ?? undefined}
+    className={cn("min-w-0 rounded-md border bg-foreground/[0.03] px-3 py-2 text-[12px] outline-none", tone ? BORDER[tone] : "border-border", focused && "ring-2 ring-ring")}>
     {children}
   </article>;
 }
@@ -215,13 +219,33 @@ export function IssueCard({ ask, state, focused, now, ...actions }: AskActions &
   </Card>;
 }
 
-/** A narrow pane's ask: one line until it's open. A system issue's line carries its first recovery. */
-function AskLine({ ask, focused, onOpen, onRecover }: { ask: Ask; focused: boolean; onOpen(): void } & Pick<AskActions, "onRecover">) {
+const previewTitle = (ask: MergeAsk) => `Sends ${ask.command}, which merges nothing, and opens a fresh preview; merging there takes ⌘↵ or a click`;
+const wakesText = (ask: MergeAsk) => ask.wakes.map((wake) => `merging ${wake.n} wakes ${formatTargets(wake.children.map((n) => ({ target: "", n })))}`).join(" · ");
+
+/** M: the verified merge candidates. Its one action sends `merge N` and opens their fresh preview, where merging is a separate, explicit step. */
+export function MergeStrip({ ask, focused, ...actions }: Pick<AskActions, "onFocusAsk" | "onFocus" | "onPreview" | "onCompose"> & { ask: MergeAsk; focused: boolean }) {
+  const count = ask.numbers.length;
+  return <Card ask={ask} focused={focused} onFocusAsk={actions.onFocusAsk}>
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <AskKey id="M" tone={null} /><span className="font-medium">{count} verified merge {count === 1 ? "candidate" : "candidates"}</span>
+      <Numbers numbers={ask.numbers} onFocus={actions.onFocus} />
+      <span className="text-[11px] text-muted-foreground">{[wakesText(ask), "separately authorized"].filter(Boolean).join(" · ")}</span>
+      <span className="ml-auto inline-flex items-center gap-2 text-[11px] text-muted-foreground">
+        <ThreadText commands={[ask.command]} onCompose={actions.onCompose} /><span>· m</span>
+        <button type="button" onClick={(event) => { event.stopPropagation(); actions.onPreview(ask); }} title={previewTitle(ask)} className={cn(button, quiet)}>
+          Preview merge · {count}</button>
+      </span>
+    </div>
+  </Card>;
+}
+
+/** A narrow pane's ask: one line until it's open. A system issue's line carries its first recovery, and M's its preview. */
+function AskLine({ ask, focused, onOpen, onRecover, onPreview }: { ask: Ask; focused: boolean; onOpen(): void } & Pick<AskActions, "onRecover" | "onPreview">) {
   const tone = toneOf(ask);
-  const [kind, summary] = ask.kind === "issue" ? ["system", ask.issue.label]
+  const [kind, summary] = ask.kind === "issue" ? ["system", ask.issue.label] : ask.kind === "merge" ? ["merge", "verified merge candidates"]
     : [{ authority: "authority", worker: "worker question", product: "product", lifecycle: "lifecycle" }[askKind(ask)], ask.decision.question];
-  return <div data-tone={tone} className={cn("flex min-w-0 items-center gap-2 rounded-md border bg-foreground/[0.03] pr-1 text-[12px]",
-    tone === "issue" ? "border-rose-500/30" : "border-amber-500/30", focused && "ring-2 ring-ring")}>
+  return <div data-tone={tone ?? undefined} className={cn("flex min-w-0 items-center gap-2 rounded-md border bg-foreground/[0.03] pr-1 text-[12px]",
+    tone ? BORDER[tone] : "border-border", focused && "ring-2 ring-ring")}>
     <button type="button" data-roster-ask={ask.id} onClick={onOpen} aria-expanded={false}
       className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
       <AskKey id={ask.id} tone={tone} /><span className="shrink-0 tabular-nums text-muted-foreground">{ask.numbers.join(" ")}</span>
@@ -230,6 +254,8 @@ function AskLine({ ask, focused, onOpen, onRecover }: { ask: Ask; focused: boole
     </button>
     {ask.kind === "issue" && ask.primary ? <button type="button" onClick={() => onRecover(ask, ask.primary!)} title={`Sends ${ask.primary.command}`}
       className={cn(button, quiet, "h-6 shrink-0")}>{ask.primary.label}</button> : null}
+    {ask.kind === "merge" ? <button type="button" onClick={() => onPreview(ask)} title={previewTitle(ask)}
+      className={cn(button, quiet, "h-6 shrink-0")}>Preview merge · {ask.numbers.length}</button> : null}
   </div>;
 }
 
@@ -238,7 +264,8 @@ export function AsksBlock({ asks, receipts, state, wide, now, ...actions }: Asks
   if (asks.length === 0 && receipts.length === 0) return null;
   const focused = (ask: Ask) => state.focus !== null && "ask" in state.focus && state.focus.ask === ask.id;
   const card = (ask: Ask) => !wide && state.open !== ask.id
-    ? <AskLine key={ask.id} ask={ask} focused={focused(ask)} onOpen={() => actions.onFocusAsk(ask.id)} onRecover={actions.onRecover} />
+    ? <AskLine key={ask.id} ask={ask} focused={focused(ask)} onOpen={() => actions.onFocusAsk(ask.id)} onRecover={actions.onRecover} onPreview={actions.onPreview} />
+    : ask.kind === "merge" ? <MergeStrip key={ask.id} ask={ask} focused={focused(ask)} {...actions} />
     : ask.kind === "issue" ? <IssueCard key={ask.id} ask={ask} state={state} focused={focused(ask)} now={now} {...actions} />
     // A decision's card is keyed by its revision too, so words or numbers typed for a question that changed don't carry over.
     : ask.answer === "subset" ? <LifecycleDecisionCard key={answerKey(ask)} ask={ask} state={state} focused={focused(ask)} {...actions} />
