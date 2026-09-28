@@ -21,11 +21,14 @@ import type { RunDb } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
 
 const runners = vi.hoisted(() => [] as ReturnType<typeof createEffortRunner>[]);
+/** Each runner's dependencies, so a test can hold two instances at the same point. */
+const runnerDeps = vi.hoisted(() => [] as Parameters<typeof createEffortRunner>[0][]);
 vi.mock("./effort-runner.js", async (original) => {
   const actual = await original<typeof import("./effort-runner.js")>();
   return { ...actual, createEffortRunner: (deps: Parameters<typeof actual.createEffortRunner>[0]) => {
     const runner = actual.createEffortRunner(deps);
     runners.push(runner);
+    runnerDeps.push(deps);
     return runner;
   } };
 });
@@ -72,6 +75,8 @@ const full = (n: number, live: Live): AdvanceFacts => ({ prUrl: url(n), number: 
 const failed = (threadId: string, requestId: string) => ({ threadId, requestId, turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 }) as never;
 /** Let the event hooks record their signals and mark rows due. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 10));
+/** A call whose answer never comes: the process stopped, or restarted, while it waited. */
+const never = () => new Promise<never>(() => {});
 const result = (attemptId: string, n: number, headOid: string) =>
   `Workstreams result v1: ${JSON.stringify({ attemptId, target: url(n), actions: ["integrate_base"], outcome: "changed", headOid, baseOid: BASE })}`;
 
@@ -100,12 +105,19 @@ async function setup(numbers: number[], options: Options = {}) {
   const github = { fullError: null as string | null, resetAt: null as number | null, readback: null as Promise<void> | null,
     /** PRs whose full read fails for a reason other than a rate limit. */
     failFor: new Set<number>(),
-    /** Runs while a pass reads a launch's checkout, between planning the row and committing it. */
-    duringCheckoutRead: null as (() => void) | null,
-    /** Whether one write lands on GitHub, and what the host answers (an Error is a call that never answered); by default it lands and succeeds. */
-    write: null as ((request: { kind: string; prUrl: string }) => { lands: boolean; answer: { ok: true; detail: string } | { ok: false; error: string } | Error }) | null,
+    /** Runs while a pass reads a launch's checkout, between planning the row and committing it; the read waits for what it returns. */
+    duringCheckoutRead: null as (() => void | Promise<void>) | null,
+    /** A full read of a PR it names never answers, as when the process stops while GitHub is read. */
+    fullHangs: null as ((n: number) => boolean) | null,
+    /**
+     * Whether one write lands on GitHub, and what the host answers (an Error is a call that never answered, and `never` one the process
+     * stopped waiting for); by default it lands and succeeds.
+     */
+    write: null as ((request: { kind: string; prUrl: string }) => { lands: boolean; answer: { ok: true; detail: string } | { ok: false; error: string } | Error | "never" }) | null,
     /** PRs whose review requests the host can't read, with the error it answers. */
-    reviewersFail: new Map<number, string>() };
+    reviewersFail: new Map<number, string>(),
+    /** Heads whose failed checks GitHub reran. */
+    reran: [] as string[] };
   const checkout = (n: number): RawUnit => ({ path: `/p/folio-${n}`, dirName: `folio-${n}`, repo: "folio", githubRepo: "inkwell/folio", branch: `abc-${n}`, dirty: false, ahead: 0,
     behind: 0, lastCommitAt: "2026-09-27T12:00:00Z", defaultBranch: "main", pr: cheap(n, lives.get(n)!), shipped: null, changedPaths: [], observed: { status: true, pr: true } });
   const threads = new Map<string, ReturnType<typeof makeThreadResponse> & { environment: { hostId: string; path: string; branchName: string | null } }>();
@@ -184,11 +196,12 @@ async function setup(numbers: number[], options: Options = {}) {
     }
     if (method === "advanceInspect") {
       const n = number((input as { prUrl: string }).prUrl);
+      if (github.fullHangs?.(n)) return never();
       if (github.fullError || github.failFor.has(n)) return { ok: false, error: github.fullError ?? "GraphQL: Could not resolve to a PullRequest." };
       return { ok: true, facts: full(n, lives.get(n)!) };
     }
     if (method === "inspectCheckout") {
-      github.duringCheckoutRead?.();
+      await github.duringCheckoutRead?.();
       const n = Number((input as { path: string }).path.split("-").at(-1));
       return { ok: true, head: lives.get(n)!.headOid, branch: `abc-${n}`, clean: true, commonDir: "/p/folio/.git", relation: "at-head" };
     }
@@ -205,7 +218,12 @@ async function setup(numbers: number[], options: Options = {}) {
       const { lands, answer } = github.write?.(request) ?? { lands: true, answer: { ok: true, detail: "written" } };
       if (lands && request.kind === "nudge") live.reviewRequests = [...new Set([...live.reviewRequests, ...request.reviewers!])];
       if (lands && request.kind === "ready") live.isDraft = false;
-      if (lands && request.kind === "rerun-failed") live.checks = "pending";
+      // The host reruns a head's failed checks once, whoever asks: it finds a run already rerun and reruns nothing.
+      if (lands && request.kind === "rerun-failed" && !github.reran.includes(live.headOid)) {
+        github.reran.push(live.headOid);
+        live.checks = "pending";
+      }
+      if (answer === "never") return never();
       if (answer instanceof Error) throw answer;
       return answer;
     }
@@ -1339,3 +1357,346 @@ describe("roster answers held for Undo", () => {
   });
 });
 
+/**
+ * The plugin restarts over the same database, BB, and GitHub. A call the old instance still waits on never answers it, its handles close,
+ * and its background service is aborted, as a host reload leaves them.
+ */
+async function restart(from: Pick<Awaited<ReturnType<typeof setup>>, "harness">) {
+  const restarted = await from.harness.lifecycle.reload(plugin);
+  cleanups.push(() => restarted.harness.lifecycle.dispose());
+  const work = createEffortWorkStore(restarted.bb.storage.database());
+  expect((await restarted.harness.runCli(["refresh"])).exitCode).toBe(0);
+  return { harness: restarted.harness, work, reconciler: reconcilers.at(-1)!, row: (n: number) => work.row(url(n)) };
+}
+
+describe("one writer across restarts, disposal, and a second reconciler", () => {
+  /** The BB threads started to work a PR for v2, by their spawn metadata. */
+  const workers = (env: Awaited<ReturnType<typeof setup>>, n: number) => [...env.metadata].filter(([, meta]) => meta.prUrl === url(n)).map(([id]) => id);
+  /** One tick a minute past every poll: whatever was going to start has. */
+  async function quiet(env: Awaited<ReturnType<typeof setup>>, next: Awaited<ReturnType<typeof restart>>, from: number, minutes = 20) {
+    for (let minute = 1; minute <= minutes; minute++) {
+      env.at(from + minute * MINUTE);
+      await next.reconciler.tick();
+    }
+  }
+  const followedUp = (): Partial<Live> => ({ reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true, mergeStateStatus: "BLOCKED", reviewRequests: [],
+    latestReviews: [{ login: "ada", state: "CHANGES_REQUESTED" }] });
+
+  it("attaches a launch the service was disposed in the middle of to the one worker BB started, and never starts a second", async () => {
+    const env = await setup([901], { live: () => conflicting, execution: "on" });
+    // BB starts the worker, but its answer never reaches the service: the plugin reloads while the spawn is out.
+    const land = env.spawn.getMockImplementation()!;
+    env.spawn.mockImplementationOnce(async (args) => { await land(args); return never(); });
+    const { controller } = env.harness.runService("effort-v2");
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    expect(env.work.attempts(url(901))).toMatchObject([{ status: "launching", threadId: null }]);
+    const next = await restart(env);
+    expect(controller.signal.aborted).toBe(true);
+    // Pass 0 finds the launch no process is finishing, and reads BB back by its spawn metadata before any launch is admitted.
+    await next.reconciler.recoverAll();
+    const [worker] = workers(env, 901);
+    expect(next.work.attempts(url(901))).toMatchObject([{ status: "running", threadId: worker }]);
+    await next.reconciler.tick();
+    expect(next.row(901)).toMatchObject({ phase: "executing", body: { cause: "worker", owner: { kind: "v2-attempt" } } });
+    await quiet(env, next, 0);
+    expect([env.spawn.mock.calls.length, env.send.mock.calls.length, next.work.attempts(url(901)).length, workers(env, 901)]).toEqual([1, 0, 1, [worker]]);
+  });
+
+  it("starts work a restart cut off once more only after two readbacks a minute apart find no worker, and never a third time", async () => {
+    const env = await setup([902], { live: () => conflicting, execution: "on" });
+    // The spawn never reaches BB before the plugin reloads.
+    env.spawn.mockImplementationOnce(() => never());
+    env.harness.runService("effort-v2");
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    const next = await restart(env);
+    await next.reconciler.recoverAll();
+    const [lost] = next.work.attempts(url(902));
+    expect(lost).toMatchObject({ status: "uncertain", body: { emptyReadbackAt: expect.any(Number) } });
+    // Within the minute every readback finds nothing, and the claim holds: nothing starts.
+    for (const at of [15_000, 45_000]) {
+      env.at(at);
+      next.reconciler.due([url(902)]);
+      await next.reconciler.tick();
+    }
+    expect([env.spawn.mock.calls.length, next.work.attempt(lost!.id)?.status, next.work.claims().map((claim) => claim.id)]).toEqual([1, "uncertain", [lost!.id]]);
+    // The second empty readback, a minute after the first, releases the claim, and the work starts once more under a new launch key.
+    await quiet(env, next, 0);
+    const attempts = next.work.attempts(url(902));
+    expect(attempts.map((attempt) => [attempt.status, attempt.body.releasedReason])).toEqual([["running", null], ["released", "no-worker"]]);
+    expect(attempts[0]!.launchKey).not.toBe(attempts[1]!.launchKey);
+    expect([env.spawn.mock.calls.length, workers(env, 902)]).toEqual([2, [attempts[0]!.threadId]]);
+  });
+
+  it("finds a work order sent to a reused thread just before a restart by its marker, and never sends it twice", async () => {
+    const env = await setup([903], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [first] = env.work.attempts(url(903));
+    env.set(903, { ...ready(903), headOid: head(903, 1) });
+    await env.finish(first!.threadId!, result(first!.id, 903, head(903, 1)));
+    await env.reconciler.tick();
+    expect(env.row(903)?.phase).toBe("prepared");
+    // New review feedback goes to the thread that did the work. BB queues the order, but the plugin reloads before BB answers.
+    env.set(903, { reviewDecision: "CHANGES_REQUESTED", unresolvedThreads: 2, mergeStateStatus: "BLOCKED" });
+    const deliver = env.send.getMockImplementation()!;
+    env.send.mockImplementationOnce(async (args) => { await deliver(args); return never(); });
+    env.at(5 * MINUTE + 1_000);
+    void env.reconciler.tick();
+    await vi.waitFor(() => expect(env.send).toHaveBeenCalledTimes(1));
+    const next = await restart(env);
+    await next.reconciler.recoverAll();
+    expect(next.work.attempts(url(903))[0]).toMatchObject({ status: "running", threadId: first!.threadId, body: { mode: "send", recipes: ["address_review_feedback"] } });
+    await quiet(env, next, 5 * MINUTE);
+    expect([env.send.mock.calls.length, env.spawn.mock.calls.length, next.work.attempts(url(903)).length]).toEqual([1, 1, 2]);
+    expect(next.row(903)).toMatchObject({ phase: "executing", body: { owner: { kind: "v2-attempt", ref: next.work.attempts(url(903))[0]!.id } } });
+  });
+
+  it("reads a finished worker's report once after a restart cut its reading short, and verifies the PR on a fresh read with no new worker", async () => {
+    const env = await setup([904], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [attempt] = env.work.attempts(url(904));
+    env.set(904, { ...ready(904), headOid: head(904, 1) });
+    env.at(MINUTE);
+    await env.finish(attempt!.threadId!, result(attempt!.id, 904, head(904, 1)));
+    // The turn is read complete, and the fresh read its report is judged against never answers: the plugin reloads.
+    let reads = 0;
+    env.github.fullHangs = (n) => n === 904 && ++reads === 2;
+    void env.reconciler.tick();
+    await vi.waitFor(() => expect(reads).toBe(2));
+    expect(env.work.attempt(attempt!.id)).toMatchObject({ status: "completed", body: { report: { key: null } } });
+    env.github.fullHangs = null;
+    const next = await restart(env);
+    await next.reconciler.recoverAll();
+    await quiet(env, next, MINUTE, 3);
+    expect(next.work.attempt(attempt!.id)).toMatchObject({ status: "completed", body: { report: { key: "changed", headOid: head(904, 1) } } });
+    expect(next.row(904)).toMatchObject({ phase: "prepared", body: { observedHead: head(904, 1) } });
+    expect([env.spawn.mock.calls.length, env.send.mock.calls.length, next.work.attempts(url(904)).length]).toEqual([1, 0, 1]);
+  });
+
+  it("verifies a merge candidate whose full read a restart cut off on a fresh read after it, with no worker", async () => {
+    const env = await setup([905], { live: () => ({ checks: "pending", mergeStateStatus: "BLOCKED" }) });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(905)).toMatchObject({ phase: "waiting", body: { cause: "ci" } });
+    env.set(905, { checks: "passed", mergeStateStatus: "CLEAN" });
+    env.at(2 * MINUTE + 1_000);
+    env.github.fullHangs = (n) => n === 905;
+    void env.reconciler.tick();
+    await vi.waitFor(() => expect(env.calls("advanceInspect")).toHaveLength(2));
+    env.github.fullHangs = null;
+    const next = await restart(env);
+    await next.reconciler.recoverAll();
+    // The cheap read the cut tick kept shows the PR changed since its last full read, so no stale read makes it Ready.
+    await next.reconciler.tick();
+    expect(next.row(905)?.phase).not.toBe("prepared");
+    await quiet(env, next, 2 * MINUTE, 2);
+    expect(next.row(905)).toMatchObject({ phase: "prepared", body: { cause: "merge-candidate" } });
+    expect([env.spawn.mock.calls, env.send.mock.calls, next.work.attempts(url(905))]).toEqual([[], [], []]);
+  });
+
+  it.each([[true, 1], [false, 2]])("reads a code action a restart cut off back from GitHub before writing again, and lands it once (the first write landed: %s)",
+    async (lands, writes) => {
+      const env = await setup([906], { live: followedUp, execution: "on" });
+      env.github.write = () => ({ lands, answer: "never" });
+      await env.reconciler.recoverAll();
+      void env.reconciler.tick();
+      await vi.waitFor(() => expect(env.calls("prWrite")).toHaveLength(1));
+      // The action's key was in the row before the write went out.
+      expect(env.row(906)?.body.codeActions).toMatchObject([{ recipe: "request_rereview", status: "pending", tries: 0 }]);
+      env.github.write = null;
+      const next = await restart(env);
+      await next.reconciler.recoverAll();
+      // A write that landed shows on the board's read after the restart, so the PR is read in full before the key is read back, once the
+      // key's lease has passed.
+      await quiet(env, next, 0, 4);
+      expect(env.calls("prWrite")).toHaveLength(1);
+      await quiet(env, next, 4 * MINUTE, 6);
+      expect(env.calls("prWrite").map((call) => call.input)).toEqual(Array.from({ length: writes }, () => ({ kind: "nudge", prUrl: url(906), reviewers: ["ada"], comment: null })));
+      expect(env.lives.get(906)!.reviewRequests).toEqual(["ada"]);
+      expect(next.row(906)).toMatchObject({ phase: "waiting", body: { cause: "review", codeActions: [{ recipe: "request_rereview", status: "done" }] } });
+      // Someone takes ada's request off again on this head: it already had its one re-request, so v2 doesn't write another.
+      env.set(906, { reviewRequests: [] });
+      env.at(20 * MINUTE);
+      next.reconciler.due([url(906)]);
+      await next.reconciler.tick();
+      await next.reconciler.tick();
+      expect(env.calls("prWrite")).toHaveLength(writes);
+    });
+
+  /** Bring a PR to its code action: a granted review request, or a rerun after its worker reports an environment blocker on failing checks. */
+  async function toCodeAction(env: Awaited<ReturnType<typeof setup>>, n: number, recipe: "request_review" | "request_rereview" | "rerun_failed_checks") {
+    await env.reconciler.recoverAll();
+    if (recipe === "request_review") expect(await say(env, `request review ${env.row(n)!.body.n} from @ada`, "req-review")).toMatchObject({ kind: "admit" });
+    if (recipe !== "rerun_failed_checks") return;
+    await env.reconciler.tick();
+    const [attempt] = env.work.attempts(url(n));
+    await env.finish(attempt!.threadId!, `Workstreams result v1: ${JSON.stringify({ attemptId: attempt!.id, target: url(n), actions: ["fix_failing_checks"], outcome: "blocked",
+      headOid: head(n), baseOid: BASE, blockers: [{ kind: "environment", summary: "The shelf index runner lost its cache", checks: ["ci/shelf-index"] }] })}`);
+    await env.reconciler.tick();
+  }
+  const failingChecks = (): Partial<Live> => ({ checks: "failed", mergeStateStatus: "BLOCKED" });
+
+  it.each<[string, number, "request_review" | "rerun_failed_checks", Partial<Live>, number, string]>([
+    ["a rerun whose checks then passed", 921, "rerun_failed_checks", { checks: "passed", mergeStateStatus: "CLEAN" }, 1, "prepared:merge-candidate"],
+    // The next instance's call is the host's own check, which finds the head's run already rerun and reruns nothing.
+    ["a rerun whose checks failed again", 922, "rerun_failed_checks", { checks: "failed" }, 2, "repair-needed:ci-infrastructure"],
+    ["a review request its reviewer then approved", 923, "request_review",
+      { reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", reviewRequests: [], latestReviews: [{ login: "ada", state: "APPROVED" }] }, 1, "prepared:merge-candidate"],
+  ])("settles a code action a restart cut off whose effect changed while the plugin was down, and GitHub has it once: %s", async (_, n, recipe, whileDown, calls, final) => {
+    const env = await setup([n], { live: () => recipe === "request_review" ? { reviewDecision: null, mergeStateStatus: "BLOCKED" } : failingChecks(), execution: "on" });
+    await toCodeAction(env, n, recipe);
+    // The write lands, and a restart loses its answer.
+    env.github.write = () => ({ lands: true, answer: "never" });
+    void env.reconciler.tick();
+    await vi.waitFor(() => expect(env.calls("prWrite")).toHaveLength(1));
+    env.github.write = null;
+    const next = await restart(env);
+    env.set(n, whileDown);
+    await next.reconciler.recoverAll();
+    await quiet(env, next, 0, 10);
+    expect(env.calls("prWrite")).toHaveLength(calls);
+    // GitHub reran the head once, and asked ada for review once, before she approved.
+    expect(recipe === "request_review" ? env.calls("prWrite").map((call) => call.input.reviewers) : env.github.reran).toEqual(recipe === "request_review" ? [["ada"]] : [head(n)]);
+    expect([`${next.row(n)?.phase}:${next.row(n)?.body.cause}`, next.row(n)?.body.codeActions]).toEqual([final, [expect.objectContaining({ recipe, status: "done" })]]);
+  });
+
+  it.each([["request_rereview", 924], ["rerun_failed_checks", 925]] as const)(
+    "writes no second %s while the instance that keyed it may still be writing it, as when a reload runs the new instance beside the old one", async (recipe, n) => {
+      const env = await setup([n], { live: recipe === "request_rereview" ? followedUp : failingChecks, execution: "on" });
+      await toCodeAction(env, n, recipe);
+      // The old instance's write is out: it hasn't reached GitHub or answered.
+      env.github.write = () => ({ lands: false, answer: "never" });
+      void env.reconciler.tick();
+      await vi.waitFor(() => expect(env.calls("prWrite")).toHaveLength(1));
+      env.github.write = null;
+      let fresh!: typeof env.reconciler;
+      const next = await env.harness.lifecycle.reload(async (bb) => {
+        await plugin(bb);
+        fresh = reconcilers.at(-1)!;
+        await fresh.recoverAll();
+        await fresh.tick();
+        env.at(MINUTE);
+        fresh.due([url(n)]);
+        await fresh.tick();
+      });
+      cleanups.push(() => next.harness.lifecycle.dispose());
+      expect(env.calls("prWrite")).toHaveLength(1);
+      // The old write lands late. Past the key's lease, the new instance reads it back and writes nothing.
+      env.set(n, recipe === "request_rereview" ? { reviewRequests: ["ada"] } : { checks: "pending" });
+      for (let minute = 2; minute <= 12; minute++) {
+        env.at(minute * MINUTE);
+        await fresh.tick();
+      }
+      expect(env.calls("prWrite")).toHaveLength(1);
+      expect(createEffortWorkStore(next.bb.storage.database()).row(url(n))?.body.codeActions?.[0]).toMatchObject({ recipe, status: "done" });
+    });
+
+  it("leaves nothing half-written when disposed between planning a launch and committing it, and the next instance launches it once", async () => {
+    const env = await setup([911], { live: () => conflicting, execution: "on" });
+    const journal = () => env.db.prepare(`SELECT count(*) AS count FROM effort_transitions`).get() as { count: number };
+    const before = journal();
+    // The pass has planned the launch and is reading where it would run when the plugin reloads.
+    env.github.duringCheckoutRead = () => never();
+    env.harness.runService("effort-v2");
+    await vi.waitFor(() => expect(env.calls("inspectCheckout")).toHaveLength(1));
+    expect([journal(), env.work.claims(), env.row(911)?.body.plan]).toEqual([before, [], undefined]);
+    env.github.duringCheckoutRead = null;
+    const next = await restart(env);
+    expect([next.work.attempts(url(911)), next.work.claims()]).toEqual([[], []]);
+    await next.reconciler.recoverAll();
+    await quiet(env, next, 0, 5);
+    expect(next.work.attempts(url(911))).toMatchObject([{ status: "running" }]);
+    expect([env.spawn.mock.calls.length, workers(env, 911)]).toEqual([1, [next.work.attempts(url(911))[0]!.threadId]]);
+  });
+
+  it("gives two reconcilers planning the same first launches at once one claim and one worker per PR", async () => {
+    const env = await setup([909, 910], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    // A reload briefly runs the new instance beside the old one over the same database: both tick at once, twice.
+    const next = await env.harness.lifecycle.reload(async (bb) => {
+      await plugin(bb);
+      const [old, fresh] = reconcilers.slice(-2) as [typeof env.reconciler, typeof env.reconciler];
+      await fresh.recoverAll();
+      await Promise.all([old.tick(), fresh.tick()]);
+      env.at(MINUTE);
+      fresh.due([url(909), url(910)]);
+      await Promise.all([fresh.tick(), old.tick()]);
+    });
+    cleanups.push(() => next.harness.lifecycle.dispose());
+    const work = createEffortWorkStore(next.bb.storage.database());
+    for (const n of [909, 910]) {
+      expect(work.attempts(url(n))).toMatchObject([{ status: "running" }]);
+      expect(workers(env, n)).toEqual([work.attempts(url(n))[0]!.threadId]);
+    }
+    expect(env.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Hold both instances' runners as each plans the write it is about to commit for a PR (a launch's claim, or a code action's key) until
+   * both have: the interleaving the row's compare-and-swap and the claims' unique indexes must settle. Returns which PRs both reached.
+   */
+  function together(deps: readonly Parameters<typeof createEffortRunner>[0][]) {
+    const arrivals = new Map<string, { count: number; open: () => void; reached: Promise<void> }>();
+    for (const item of deps) {
+      const plan = item.plan;
+      item.plan = async (effortId, target, change) => {
+        const planned = await plan(effortId, target, change);
+        if (change.attempts[0]?.status === "launching" || change.codeActions?.[0]?.status === "pending") {
+          let gate = arrivals.get(target);
+          if (!gate) {
+            let open!: () => void;
+            const reached = new Promise<void>((resolve) => { open = resolve; });
+            arrivals.set(target, gate = { count: 0, open, reached });
+          }
+          if (++gate.count === deps.length) gate.open();
+          // Should only one instance get here, it goes on alone, and the test sees the race never happened.
+          await Promise.race([gate.reached, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+        }
+        return planned;
+      };
+    }
+    return () => [...arrivals].filter(([, gate]) => gate.count >= deps.length).map(([target]) => target).sort();
+  }
+
+  it("keeps one writer when two reconcilers act on the same planned step at once: one claim and one order in the worker's thread, and one GitHub write", async () => {
+    // 907's worker ends its turn in prose, so its thread is to be asked for its report; 908's re-request of review got an unclear answer.
+    const env = await setup([907, 908], { live: (n) => n === 907 ? conflicting : followedUp(), execution: "on" });
+    env.github.write = () => ({ lands: false, answer: new Error("socket hang up") });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [work] = env.work.attempts(url(907));
+    await env.finish(work!.threadId!, "Rebased onto main and pushed. Ready to merge.");
+    await env.reconciler.tick();
+    expect(env.row(907)).toMatchObject({ phase: "queued", body: { cause: "report-repair" } });
+    expect(env.row(908)).toMatchObject({ phase: "executing", body: { cause: "code-action", codeActions: [{ status: "pending", tries: 1 }] } });
+    env.github.write = null;
+    // Both instances plan the steps the rows already hold, so neither pass writes, and both act on them at once: each plans its claim or its
+    // action's key before either commits it. 907's report repair races first; 908's key is taken over only once its lease has passed.
+    let raced: () => string[] = () => [];
+    const next = await env.harness.lifecycle.reload(async (bb) => {
+      await plugin(bb);
+      const [old, fresh] = reconcilers.slice(-2) as [typeof env.reconciler, typeof env.reconciler];
+      raced = together(runnerDeps.slice(-2));
+      fresh.due([url(907), url(908)]);
+      await Promise.all([old.tick(), fresh.tick()]);
+      expect(env.calls("prWrite")).toHaveLength(1);
+      // A tick within the lease writes nothing; its pass records that the full reads went stale, so the next passes have nothing to write.
+      env.at(4 * MINUTE);
+      fresh.due([url(907), url(908)]);
+      await fresh.tick();
+      expect(env.calls("prWrite")).toHaveLength(1);
+      env.at(5 * MINUTE);
+      fresh.due([url(908)]);
+      await Promise.all([old.tick(), fresh.tick()]);
+    });
+    expect(raced()).toEqual([url(907), url(908)]);
+    cleanups.push(() => next.harness.lifecycle.dispose());
+    const store = createEffortWorkStore(next.bb.storage.database());
+    expect(store.attempts(url(907)).map((attempt) => [attempt.status, attempt.body.recipes])).toEqual([["running", ["repair_report"]], ["completed", ["integrate_base"]]]);
+    expect(env.send.mock.calls.map(([args]) => args.threadId)).toEqual([work!.threadId]);
+    expect(env.calls("prWrite")).toHaveLength(2);
+    expect(env.lives.get(908)!.reviewRequests).toEqual(["ada"]);
+    expect(store.row(url(908))?.body.codeActions?.[0]).toMatchObject({ status: "done", tries: 2 });
+  });
+});

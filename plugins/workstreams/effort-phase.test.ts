@@ -275,6 +275,13 @@ describe("decide()", () => {
     expect(decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "done", at: NOW - 10_000 }] }, changes)))
       .toMatchObject({ phase: "verifying", nextAction: "observe", detail: expect.stringContaining("reading GitHub after it") });
     expect(state(decide(row({ reviewers, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "pending" }] }, changes)))).toBe("executing:code-action");
+    // A pending write is read back even once a read shows it in effect, so if the request is taken off again, this head isn't re-requested twice.
+    const requested = { ...reviewers, reviewRequests: ["ada"] };
+    expect(state(decide(row({ reviewers: requested, codeActions: [{ recipe: "request_rereview", headOid: HEAD, retryEpoch: 0, status: "pending" }] }, changes))))
+      .toBe("executing:code-action");
+    expect(state(decide(row({ reviewers: requested }, changes)))).toBe("waiting:review");
+    expect(state(decide(row({ reviewers: requested, codeActions: [{ recipe: "request_rereview", headOid: OLD_HEAD, retryEpoch: 0, status: "pending" }] }, changes))))
+      .toBe("waiting:review");
     // A rate limit waits for its reset, then the action runs again on the same head.
     const limited = [{ recipe: "request_rereview" as const, headOid: HEAD, retryEpoch: 0, status: "rate-limited" as const, retryAt: NOW + 10 * MINUTE }];
     expect(decide(row({ reviewers, codeActions: limited }, changes))).toMatchObject({ phase: "waiting", cause: "rate-limit", wake: { dueAt: NOW + 10 * MINUTE } });

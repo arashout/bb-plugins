@@ -430,6 +430,10 @@ export function decide(input: DecideInput): Next {
   }
 
   // 9. Lifecycle code actions: re-request, mark ready, or request review, each once per head and only with its effect. Unread reviewers choose none.
+  // A write whose answer never came, as when a restart cut it off, is read back even once a read shows its need passed, so a later need on
+  // this head can't spend its once-per-head bound again. The runner settles it with no write when GitHub shows it in effect or no longer needed.
+  const unsettled = input.codeActions.find((action) => action.status === "pending" && action.headOid === facts.headOid && action.retryEpoch === input.retryEpoch);
+  if (unsettled) return code(unsettled.recipe)!;
   if (!facts.isDraft) {
     const step = (gates["rereview-requested"] === false ? code("request_rereview") : null) ?? (gates["review-requested"] === false ? code("request_review") : null);
     if (step) return step;

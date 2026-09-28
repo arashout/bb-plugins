@@ -156,7 +156,10 @@ export type CodeRun = {
   body: WorkRowBody;
   /** The full read the step was planned on, under two minutes old. */
   facts: AdvanceFacts;
-  /** Whom a review request names: for a re-request, each reviewer whose latest review asks for changes or was dismissed; for a new request, the granted logins. */
+  /**
+   * Whom a review request names: for a re-request, each reviewer whose latest review asks for changes or was dismissed; for a new request,
+   * each granted login with no review yet.
+   */
   reviewers: readonly string[];
 };
 /**
@@ -166,6 +169,11 @@ export type CodeRun = {
 export type CodeOutcome = "planned" | "done" | "refused" | "waiting" | "unclear" | "stale";
 /** A write whose answer stays unclear through this many tries is a refused write, a system issue that `retry N` starts over. */
 const CODE_TRIES = 6;
+/**
+ * A pending key younger than this may be a write another instance is still making, as when a reload runs the new instance beside the old
+ * one: the host waits up to 90 seconds for a review request's read and 90 more for the write. It isn't written again until then.
+ */
+const CODE_LEASE = 5 * MINUTE;
 
 /** Where a work order runs: an existing thread to message, or a new thread in a checkout, prepared first when it is a worktree. */
 type Place = { via: AttemptBody["resource"]["kind"]; mode: "spawn" | "send"; threadId: string | null; path: string | null; kind: "author" | "worktree"; hostId: string; projectId: string | null;
@@ -664,7 +672,8 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       const valid = run.reviewers.filter((login) => REVIEWER.test(login));
       const missing = valid.filter((login) => !requested.has(login.toLowerCase()));
       if (missing.length === 0) return answered(run, entry, { status: "done", tries: entry.tries,
-        detail: valid.length ? `Review is requested from ${valid.map((login) => `@${login}`).join(", ")}` : "No reviewer GitHub accepts a request for" });
+        detail: valid.length ? `Review is requested from ${valid.map((login) => `@${login}`).join(", ")}`
+          : run.reviewers.length ? "No reviewer GitHub accepts a request for" : "No one is left to ask for review" });
       request = { kind: "nudge", prUrl: run.facts.prUrl, reviewers: missing, comment: null };
     } else request = { kind: entry.recipe === "mark_ready_for_review" ? "ready" : "rerun-failed", prUrl: run.facts.prUrl, headOid: entry.headOid };
     let failure: string;
@@ -701,14 +710,16 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
     }
     const facts = await deps.read(run.target).catch(() => null);
     if (!facts || facts.headOid !== entry.headOid) return null;
+    // Checks that passed since need no rerun. Checks that failed again can't tell a rerun from none; the host reruns a head only once.
     return entry.recipe === "mark_ready_for_review" ? (!facts.isDraft ? "GitHub shows the PR ready for review" : null)
-      : facts.checks === "pending" ? "GitHub shows the failed checks running again" : null;
+      : facts.checks === "pending" ? "GitHub shows the failed checks running again" : facts.checks === "passed" ? "GitHub shows the checks passing" : null;
   }
 
   /**
    * Run one planned code action with v2 execution on: write its key into the row, then write to GitHub and record the answer.
-   * A key already pending is an answer that was unclear, or a write a restart cut short: it passes the same checks as a first
-   * write, then GitHub is read back first, and written again only when the read shows the action didn't land. A dry run writes nothing.
+   * A key already pending is an answer that was unclear, a write a restart cut short, or one another instance is still making: GitHub is
+   * read back first, and once the key's lease passes it is written again, through the same checks as a first write, only when the read
+   * shows the action didn't land. A dry run writes nothing.
    */
   function code(run: CodeRun): Promise<CodeOutcome> {
     const target = prWorkItemKey(run.target);
@@ -721,8 +732,16 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       const found = run.body.codeActions?.find((item) => item.key === key);
       // A rate-limited action runs again after its reset, and a pending one is read back; anything else already answered.
       if (found && found.status !== "pending" && found.status !== "rate-limited") return "stale";
-      const entry: StoredCodeAction = found?.status === "pending" ? found
-        : { recipe: id, headOid: run.facts.headOid, retryEpoch: epoch, key, status: "pending", retryAt: null, tries: found?.tries ?? 0, at: deps.now(), detail: null };
+      if (found?.status === "pending") {
+        if (id === "mark_ready_for_review" || id === "rerun_failed_checks") {
+          const landed = await readBack(run, found);
+          if (landed) return answered(run, found, { status: "done", tries: found.tries, detail: landed });
+        }
+        if (deps.now() < found.at + CODE_LEASE) return "unclear";
+      }
+      // Writing again takes the key over with a new lease.
+      const entry: StoredCodeAction = { ...found?.status === "pending" ? found
+        : { recipe: id, headOid: run.facts.headOid, retryEpoch: epoch, key, status: "pending", retryAt: null, tries: found?.tries ?? 0, detail: null }, at: deps.now() };
       // The key goes into the row before GitHub is written, at the revision the step was planned from, in the same transaction that reads
       // every writer outside v2: nothing on the PR writes between the check and the key. A pending key is written again the same way, so a
       // hold, a new head, or another writer since the pass stops a retry as it stops a first write.
@@ -732,10 +751,6 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
         if (!(error instanceof WriterBusy)) throw error;
         const row = await deps.plan(run.effortId, target, { attempts: deps.work.attempts(target).map(decideAttempt), writer: error.writer });
         return row && write(run, row) ? (deps.publish(run.effortId), "waiting") : "stale";
-      }
-      if (found?.status === "pending" && (id === "mark_ready_for_review" || id === "rerun_failed_checks")) {
-        const landed = await readBack(run, entry);
-        if (landed) return answered(run, entry, { status: "done", tries: entry.tries, detail: landed });
       }
       return writeCode(run, entry);
     });

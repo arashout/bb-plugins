@@ -834,6 +834,49 @@ describe("v2 claims", () => {
     expect(env.spawn).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["before a legacy Advance start on it runs", "v2"], ["while that start prepares its checkout", "v2"], ["while that start spawns its worker", "legacy"],
+    ["after that start's worker runs", "legacy"],
+  ] as const)("keeps one writer on an unowned PR a v2 command names %s", async (when, winner) => {
+    const env = await setup();
+    await env.optIn();
+    await env.harness.setSettings({ v2Execution: "on" });
+    // Returns desk's command names 16 from outside membership, and its reconciler acts at once.
+    let answer: unknown = null;
+    const v2 = async () => {
+      answer = await command(env, `move ${WRAP} forward`, "wrap-1");
+      await env.reconciler.recoverAll();
+      await env.reconciler.tick();
+    };
+    const plan = await env.rpc("advance_preview", { prUrls: [WRAP] }) as AdvancePreview;
+    expect(plan.jobs[0]).toMatchObject({ eligible: true });
+    if (when === "before a legacy Advance start on it runs") await v2();
+    if (when === "while that start prepares its checkout") env.beforeWorkspace.mockImplementationOnce(v2);
+    if (when === "while that start spawns its worker") {
+      const spawn = env.spawn.getMockImplementation()!;
+      env.spawn.mockImplementationOnce(async (args) => { await v2(); return spawn(args); });
+    }
+    const started = await env.rpc("advance_start", { token: plan.token }).then(() => true, () => false);
+    if (started) await vi.waitFor(async () => expect(["running", "needs-attention"]).toContain((await env.job(WRAP))?.status));
+    if (when === "after that start's worker runs") await v2();
+    // Whichever started first holds the PR; the other stays off it through every later pass. Exactly one writer: a v2 worker, or legacy Advance's.
+    for (let pass = 0; pass < 3; pass++) await env.reconciler.tick();
+    const legacy = await env.job(WRAP);
+    const v2Spawns = env.spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "v2-worker" && args.pluginMetadata.prUrl === WRAP).length;
+    expect([v2Spawns, env.work.attempts(WRAP).length, legacy?.threadId ? 1 : 0]).toEqual(winner === "v2" ? [1, 1, 0] : [0, 0, 1]);
+    if (winner === "v2") {
+      expect(answer).toMatchObject({ kind: "admit" });
+      expect(env.work.attempts(WRAP)).toMatchObject([{ status: "running", threadId: expect.stringMatching(/^thr-v2-worker-/u) }]);
+      // The start is refused outright, or its job stops at a fence before any worker.
+      expect(legacy === undefined || (legacy.status === "needs-attention" && legacy.threadId === null)).toBe(true);
+    } else {
+      // Legacy Advance placed 16 under an effort of its own before its worker started, so the command admits nothing and names that effort.
+      expect(answer).toMatchObject({ kind: "clarify", message: expect.stringContaining(`${WRAP} belongs to other efforts`) });
+      expect(legacy).toMatchObject({ status: "running" });
+      expect([env.work.claims(), env.work.row(WRAP)]).toEqual([[], null]);
+    }
+  });
+
   it("waits for a legacy Advance job the server finds inside the claim's transaction, and claims and starts nothing", async () => {
     const env = await setup();
     // A legacy job took 12 before its roster opted in, and drains.

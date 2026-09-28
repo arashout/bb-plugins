@@ -1187,9 +1187,11 @@ export function createEffortV2(deps: EffortV2Deps) {
       const grant = deps.work.instruction(effortId)?.scope.include.find((item) => prWorkItemKey(item.target) === row.target);
       if (!grant || !facts) return;
       const [id] = step.nextAction as CodeRecipeId[];
-      // A re-request names each reviewer whose latest review asks for changes or was dismissed; a new request names the reviewers you granted.
+      // A re-request names each reviewer whose latest review asks for changes or was dismissed; a new request names each reviewer you granted
+      // who hasn't reviewed, so a request that landed and was answered isn't made again.
+      const reviewed = new Set(reviews.filter((review) => review.state !== "PENDING").map((review) => review.login.toLowerCase()));
       const reviewers = id === "request_rereview" ? reviews.filter((review) => ["CHANGES_REQUESTED", "DISMISSED"].includes(review.state)).map((review) => review.login)
-        : id === "request_review" ? grant.reviewers : [];
+        : id === "request_review" ? grant.reviewers.filter((login) => !reviewed.has(login.toLowerCase())) : [];
       if (await deps.launches.code({ effortId, target: row.target, baseRevision: deps.work.lastRevision(effortId), expectedRevision: row.revision, step, body: row.body,
         facts, reviewers }) !== "planned") return;
     } else if (step.phase === "waiting" && step.cause === "legacy-drain" && legacy?.cause === "uncertain") {
