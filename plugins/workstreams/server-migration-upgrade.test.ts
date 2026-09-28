@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
+import { EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
@@ -117,6 +118,13 @@ describe("deployed Workstreams database upgrade", () => {
     await plugin(bb);
     const recorded = bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id < 35 ORDER BY id").all();
     expect(recorded).toEqual(pinnedMigrations.map((statement, id) => ({ id, hash: statementHash(statement) })));
+    await harness.lifecycle.dispose();
+  });
+  it("appends roster numbering after the pinned prefix", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    const recorded = bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id BETWEEN 35 AND 37 ORDER BY id").all();
+    expect(recorded).toEqual(EFFORT_ROSTER_MIGRATIONS.map((statement, index) => ({ id: 35 + index, hash: statementHash(statement) })));
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

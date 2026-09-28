@@ -26,6 +26,7 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
+import { EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
@@ -721,6 +722,7 @@ export default async function plugin(bb: BbPluginApi) {
     PR_OBSERVATIONS_MIGRATION,
     ...WORK_CONVERSATION_MIGRATIONS,
     `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
+    ...EFFORT_ROSTER_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
