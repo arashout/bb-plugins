@@ -1172,6 +1172,9 @@ describe("the v2 reconciler's bounded repairs", () => {
     expect([first.body.cause, second.body.cause]).toEqual(["source-unavailable", "source-unavailable"]);
     expect(first.body.detail).not.toBe(second.body.detail);
     const roster = await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster;
-    expect(roster.issues).toEqual([{ cause: "source-unavailable", label: "source-unavailable", numbers: [first.body.n, second.body.n].sort() }]);
+    const numbers = [first.body.n!, second.body.n!].sort();
+    expect(roster.issues).toEqual([{ ref: "S1", cause: "source-unavailable", label: "source-unavailable", numbers, raisedAt: expect.any(Number), likelyThreadId: null,
+      detail: numbers.map((n) => `${n}: ${(n === first.body.n ? first : second).body.detail}`).join("; "),
+      recovery: [{ command: `refresh ${numbers.join(", ")}`, label: `Refresh ${numbers.join(", ")}`, confirm: false }] }]);
   });
 });

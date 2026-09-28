@@ -28,7 +28,8 @@ import { capAcknowledgment, dryRunStopRefusal, EFFECTS, effortCommandResultSchem
   type AckParts, type CommandResult, type CommandRow, type CommandTarget, type DecisionAnswer, type EffortCommandResult, type InstructionScope } from "./effort-command.js";
 import { decide, PLANNED_POLL, PREPARED, RECOVERING_CAUSES, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
 import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
-import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
+import { activeWriters, BREAKER, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster,
+  type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
 import { recipe, RECIPES, type CodeRecipeId } from "./effort-recipes.js";
 import type { Admission, CodeOutcome, CodeRun, Launch, LaunchOutcome, V2Execution } from "./effort-runner.js";
@@ -349,7 +350,7 @@ export type EffortV2Deps = {
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
     | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction" | "journal" | "asked"
-    | "lastCommand">;
+    | "lastCommand" | "entered">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
@@ -443,9 +444,38 @@ export function createEffortV2(deps: EffortV2Deps) {
   async function roster(effortId: string, since?: number): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);
     const sources = await deps.sources();
+    const admission = await deps.launches.admission();
+    const uncertain = deps.work.claims().filter((attempt) => attempt.status === "uncertain");
     const read = effortRoster({ effort, redirectedFrom, sources, number: (targets) => deps.numbers(effort.id, targets, { assign: true }),
-      execution: deps.execution.get(effort.id), v2Execution: await deps.launches.execution(), v2: instructionView(effort, sources) });
-    return { ...read, lastCommand: lastCommand(effort.id), ...changesSince(effort.id, read.rows, since) };
+      execution: deps.execution.get(effort.id), v2Execution: await deps.launches.execution(), v2: instructionView(effort, sources),
+      launches: { ...admission, uncertain: uncertain.filter((attempt) => attempt.effortId === effort.id),
+        elsewhere: [...new Set(uncertain.flatMap((attempt) => attempt.effortId === effort.id ? [] : [deps.efforts.get(attempt.effortId)?.name ?? attempt.effortId]))].sort() } });
+    const issues = numberIssues(effort.id, read);
+    const changes = changesSince(effort.id, read.rows, since);
+    return { ...read, issues: issues.list, lastCommand: lastCommand(effort.id), ...changes,
+      since: changes.since && { ...changes.since, issuesOpened: issues.opened(since!) } };
+  }
+  type IssueRefs = { refs: Record<string, { ref: string; raisedAt: number; openedAfter: number }>; next: number };
+  /**
+   * Number the roster's open system issues S1, S2, … the way rows are numbered at read: an issue keeps its ref and when it was raised
+   * while it stays open, and a ref is never reused. A row issue was raised when its first PR entered it; the launch breaker, when its
+   * oldest uncertain launch went uncertain. The refs live in the effort's journal, so `since` can tell which opened after a read.
+   */
+  function numberIssues(effortId: string, read: EffortRoster) {
+    const [latest = { refs: {}, next: 1 }] = deps.work.notes(effortId, "issue-refs", 1) as IssueRefs[];
+    const through = deps.work.journal(effortId, Number.MAX_SAFE_INTEGER).through;
+    const targetOf = new Map(read.rows.map((row) => [row.n, row.target]));
+    let next = latest.next;
+    const refs: IssueRefs["refs"] = {};
+    for (const issue of read.issues) refs[issue.cause] = latest.refs[issue.cause] ?? { ref: `S${next++}`, openedAfter: through,
+      raisedAt: issue.cause === BREAKER ? Math.min(...read.launches?.uncertain.map((item) => item.since) ?? [], read.observedAt)
+        : Math.min(...issue.numbers.map((n) => deps.work.entered(targetOf.get(n)!, "repair-needed", issue.cause) ?? read.observedAt)) };
+    const canonical = (value: IssueRefs["refs"]) => JSON.stringify(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
+    if (canonical(refs) !== canonical(latest.refs)) deps.work.note(effortId, "issue-refs", { refs, next } satisfies IssueRefs);
+    const ordinal = (ref: string) => Number(ref.slice(1));
+    return { list: read.issues.map((issue) => ({ ...issue, ref: refs[issue.cause]!.ref, raisedAt: refs[issue.cause]!.raisedAt }))
+        .sort((a, b) => ordinal(a.ref) - ordinal(b.ref)),
+      opened: (since: number) => Object.values(refs).filter((item) => item.openedAfter >= since).map((item) => item.ref).sort((a, b) => ordinal(a) - ordinal(b)) };
   }
   /** The newest admitted command, with the revision it left active. */
   function lastCommand(effortId: string): EffortRoster["lastCommand"] {
@@ -460,7 +490,8 @@ export function createEffortV2(deps: EffortV2Deps) {
    * that keeps a row's step (a new observation, a dry run's plan) isn't. A launch or code action only queued hasn't been taken yet,
    * and a step ending in a decision or a system issue waits on you, so neither is a step v2 took.
    */
-  function changesSince(effortId: string, rows: readonly Pick<EffortRoster["rows"][number], "n" | "target">[], since: number | undefined): Pick<EffortRoster, "through" | "since"> {
+  function changesSince(effortId: string, rows: readonly Pick<EffortRoster["rows"][number], "n" | "target">[], since: number | undefined):
+    { through: number; since: Omit<NonNullable<EffortRoster["since"]>, "issuesOpened"> | null } {
     const { through, transitions, headBefore } = deps.work.journal(effortId, since ?? Number.MAX_SAFE_INTEGER);
     if (since === undefined) return { through, since: null };
     const numberOf = new Map(rows.map((row) => [row.target, row.n]));

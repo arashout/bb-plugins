@@ -366,6 +366,16 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       }
       return { through, transitions, headBefore };
     },
+    /** When a row entered the step it is in now: the first of its newest transitions that all end in this phase and cause; null when it isn't in it. */
+    entered(target: string, phase: Phase, cause: string): number | null {
+      let at: number | null = null;
+      for (const row of db.prepare(`SELECT at, to_phase AS phase, cause FROM effort_transitions WHERE target = ? ORDER BY seq DESC LIMIT 100`).all(prWorkItemKey(target)) as
+        { at: number; phase: string; cause: string }[]) {
+        if (row.phase !== phase || row.cause !== cause) break;
+        at = row.at;
+      }
+      return at;
+    },
     /** When each of the effort's open decisions was first asked, by id. */
     asked(effortId: string): Map<string, number> {
       return new Map((db.prepare(`SELECT id, created_at AS createdAt FROM effort_decisions WHERE effort_id = ? AND status = 'open'`).all(effortId) as

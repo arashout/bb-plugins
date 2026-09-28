@@ -14,7 +14,7 @@ import { dryRunStopRefusal, effortCommandResultSchema, formatTargets, interventi
 import { PLANNED_POLL, wakePoll } from "./effort-phase.js";
 import { recipe } from "./effort-recipes.js";
 import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
-import type { V2Execution } from "./effort-runner.js";
+import type { Admission, V2Execution } from "./effort-runner.js";
 import type { EstablishedEffort } from "./effort-store.js";
 import { USER_STATES, workRowBodySchema, type Execution, type StoredAttempt, type WorkRow } from "./effort-work-store.js";
 import { prTarget } from "./ghactions.js";
@@ -88,7 +88,16 @@ export const effortRosterSchema = z.object({
     outcomeValidated: z.boolean(), completed: z.boolean() }).nullable(),
   observedAt: z.number(),
   rows: z.array(rosterRowSchema),
-  issues: z.array(z.object({ cause: z.string(), label: z.string(), numbers: z.array(z.number()) })),
+  /**
+   * System issues, S1, S2, … in the order they were raised: a failure one or more PRs share, or new launches paused while launch outcomes
+   * are uncertain. `ref` and `raisedAt` stay while the issue is open; both are null where nothing numbers issues (a database copy).
+   * `detail` names each PR's own detail when they differ. Each recovery is a command, and `confirm` marks one that drops a claim.
+   */
+  issues: z.array(z.object({ ref: z.string().nullable(), cause: z.string(), label: z.string(), detail: z.string().nullable(), numbers: z.array(z.number()),
+    raisedAt: z.number().nullable(), recovery: z.array(z.object({ command: z.string(), label: z.string(), confirm: z.boolean() })), likelyThreadId: z.string().nullable() })),
+  /** Whether new v2 launches may start: the breaker opens while launch outcomes are uncertain. The uncertain launches listed are this effort's. */
+  launches: z.object({ breakerOpen: z.boolean(), capacityFull: z.boolean(),
+    uncertain: z.array(z.object({ n: z.number().nullable(), target: z.string(), attemptId: z.string(), threadId: z.string().nullable(), since: z.number() })) }).nullable(),
   ticketsWithoutPrs: z.array(ticketSchema),
   /** Derived board groups that already reach into this roster: suggestions, never membership. */
   suggestions: z.array(z.object({ key: z.string(), name: z.string(), tickets: z.array(z.string()), prUrls: z.array(z.string()), overlap: z.array(z.string()) })),
@@ -104,10 +113,10 @@ export const effortRosterSchema = z.object({
   through: z.number(),
   /**
    * What changed after the `since` the read named, or null without one: each row's first and last phase since then, decisions
-   * asked since and still open, rows on a new head, and the steps v2 took without a command.
+   * asked and system issues raised since and still open, rows on a new head, and the steps v2 took without a command.
    */
   since: z.object({ rows: z.array(z.object({ n: z.number(), from: z.string().nullable(), to: z.string(), cause: z.string(), at: z.number() })),
-    decisionsOpened: z.array(z.number()), newHeads: z.array(z.number()), handled: z.number() }).nullable(),
+    decisionsOpened: z.array(z.number()), issuesOpened: z.array(z.string()), newHeads: z.array(z.number()), handled: z.number() }).nullable(),
 });
 export type EffortRoster = z.infer<typeof effortRosterSchema>;
 export type RosterRow = z.infer<typeof rosterRowSchema>;
@@ -258,6 +267,13 @@ export type RosterInstruction = { rows: ReadonlyMap<string, WorkRow>; included: 
 /** How the effort runs, which decides whether a command item can be admitted at all. */
 type RosterMode = { name: string; execution: Execution; v2Execution: V2Execution };
 const DEFAULT_REFRESH = 10 * 60_000;
+/** The issue that holds new launches while readback resolves uncertain ones. */
+export const BREAKER = "launch-breaker";
+/** A recovery command; one that drops a claim needs you to confirm no worker is writing first. */
+const recovery = (command: string): EffortRoster["issues"][number]["recovery"][number] => {
+  const confirm = /\brelease$/u.test(command);
+  return { command, label: confirm ? `${command[0]!.toUpperCase()}${command.slice(1).replace(/ release$/u, "")}…` : `${command[0]!.toUpperCase()}${command.slice(1)}`, confirm };
+};
 
 /** Who performs a v2 step, where, and why there: the running claim's place, else the dry run's planned launch. */
 function workOf(body: WorkRow["body"], claim: StoredAttempt | null): NonNullable<RosterRow["work"]> {
@@ -357,6 +373,8 @@ export function effortRoster(input: {
   number(targets: string[]): { rows: { n: number; target: string; provisional: boolean }[]; snapshotId: string | null };
   /** The effort's execution mode and the v2Execution setting; legacy and a dry run when absent, as for a copy without them. */
   execution?: Execution; v2Execution?: V2Execution;
+  /** Whether a new launch may start, this effort's uncertain launches, and the other efforts with any; absent for a copy that can't tell. */
+  launches?: Admission & { uncertain: readonly StoredAttempt[]; elsewhere?: readonly string[] };
   /** The active instruction, its rows, its rollup, and its open decisions; absent for a legacy effort or a copy without them. */
   v2?: RosterInstruction & { active: Omit<NonNullable<EffortRoster["instruction"]>, "included" | "excluded"> | null; rollup: string[] | null;
     contract: EffortRoster["contract"]; decisions: EffortRoster["decisions"] };
@@ -380,11 +398,35 @@ export function effortRoster(input: {
   // A failure several PRs share is one issue naming each of them. Each row's detail names its own PR's facts (its head, its tries, its run),
   // so issues group by cause, labeled with the detail only when every PR in the issue shares it.
   const issues = new Map<string, EffortRoster["issues"][number]>();
+  const recoveries = new Map<string, Map<string, number[]>>();
+  const shared = new Map<string, { n: number; label: string }[]>();
   for (const row of rows) if (row.state === "issue") {
-    const issue = issues.get(row.cause) ?? { cause: row.cause, label: row.label, numbers: [] };
+    const issue = issues.get(row.cause) ?? { ref: null, cause: row.cause, label: row.label, detail: null, numbers: [], raisedAt: null, recovery: [], likelyThreadId: null };
     if (issue.label !== row.label) issue.label = row.cause;
     issue.numbers.push(row.n);
+    issue.likelyThreadId ??= row.claim?.threadId ?? null;
     issues.set(row.cause, issue);
+    shared.set(row.cause, [...shared.get(row.cause) ?? [], { n: row.n, label: row.label }]);
+    const byCommand = recoveries.get(row.cause) ?? new Map<string, number[]>();
+    for (const command of v2?.rows.get(row.target)?.body.recovery ?? []) byCommand.set(command, [...byCommand.get(command) ?? [], row.n]);
+    recoveries.set(row.cause, byCommand);
+  }
+  for (const [cause, issue] of issues) {
+    if (issue.label === cause && shared.get(cause)!.length > 1) issue.detail = shared.get(cause)!.map((item) => `${item.n}: ${item.label}`).join("; ");
+    issue.recovery = [...recoveries.get(cause)!].map(([command, numbers]) => recovery(command.replace(/\bN\b/u, formatTargets(numbers.map((n) => ({ target: "", n }))))));
+  }
+  // While the breaker is open no launch starts anywhere, and readback is how it closes: one issue for the effort, naming its own uncertain launches.
+  // `recheck launches` reads back only this effort's launches, so when only other efforts' are uncertain the issue names them and offers nothing here.
+  const uncertain = (input.launches?.uncertain ?? []).map((attempt) => ({ n: numberOf.get(attempt.target) ?? null, target: attempt.target, attemptId: attempt.id,
+    threadId: attempt.threadId, since: attempt.body.uncertainAt ?? attempt.createdAt })).sort((a, b) => a.since - b.since);
+  if (input.launches?.breakerOpen) {
+    const mine = uncertain.flatMap((item) => item.n === null ? [] : [{ target: item.target, n: item.n }]);
+    const others = input.launches.elsewhere ?? [];
+    issues.set(BREAKER, { ref: null, cause: BREAKER, label: "Launch outcomes uncertain; new launches paused", numbers: mine.map((item) => item.n), raisedAt: null,
+      detail: mine.length ? `Readback hasn't found the worker for ${formatTargets(mine)} or ruled one out; running work continues`
+        : `Launch outcomes in ${others.join(", ") || "another effort"} are uncertain; recheck launches from ${others.length > 1 ? "their rosters" : "its roster"}. Running work continues`,
+      recovery: mine.length ? [recovery("recheck launches"), ...mine.map((item) => recovery(`reset ${item.n} release`))] : [],
+      likelyThreadId: uncertain.find((item) => item.threadId)?.threadId ?? null });
   }
   const covered = new Set(rows.flatMap((row) => row.tickets.map((ticket) => ticket.id)));
   const uncovered = effort.members.tickets.filter((ticket) => !covered.has(ticket));
@@ -403,6 +445,7 @@ export function effortRoster(input: {
     instruction: v2?.active ? { ...v2.active, included: rows.filter((row) => row.membership === "included").map((row) => row.n),
       excluded: (v2.scope?.exclude ?? []).map(({ target, reason }) => ({ target: prWorkItemKey(target), n: numberOf.get(prWorkItemKey(target)) ?? null, reason })) } : null,
     rollup: v2?.rollup ?? null, contract: v2?.contract ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
+    launches: input.launches ? { breakerOpen: input.launches.breakerOpen, capacityFull: input.launches.capacityFull, uncertain } : null,
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
     suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
     lastCommand: null, through: 0, since: null,

@@ -913,12 +913,12 @@ describe("effort instructions", () => {
       expect(later.since).toEqual({
         rows: [{ n: 1, from: "verifying", to: "paused", cause: "hold", at: expect.any(Number) }, { n: 2, from: "verifying", to: "prepared", cause: "merge-candidate", at: expect.any(Number) },
           { n: 3, from: "verifying", to: "repair-needed", cause: "retry-exhausted", at: expect.any(Number) }, { n: 4, from: "verifying", to: "decision-needed", cause: "product", at: expect.any(Number) }],
-        decisionsOpened: [1], newHeads: [2],
+        decisionsOpened: [1], issuesOpened: ["S1"], newHeads: [2],
         // 2's two steps and 3's launch readback; not your hold, not the exhausted repair, not the question.
         handled: 3 });
       expect(later.through).toBeGreaterThan(seen);
       expect((await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id, since: later.through }) as EffortRoster).since)
-        .toEqual({ rows: [], decisionsOpened: [], newHeads: [], handled: 0 });
+        .toEqual({ rows: [], decisionsOpened: [], issuesOpened: [], newHeads: [], handled: 0 });
     });
 
     it("counts only moves: a read that keeps a row's step changes nothing, and a launch a dry run only planned is no step taken", async () => {
@@ -942,6 +942,104 @@ describe("effort instructions", () => {
       step(two!, "reconciler", "queued", { cause: "launching", userState: "waiting", modifiers: ["plan only"] });
       step(two!, "launch", "queued", { detail: "integrate base in a new thread: no idle thread" });
       expect((await since(waiting.through)).since).toMatchObject({ rows: [{ n: 2, from: "verifying", to: "queued", cause: "launching" }], handled: 0 });
+    });
+  });
+
+  describe("system issues", () => {
+    /** Move one row to a step, as the reconciler or a launch would. */
+    const step = (env: Awaited<ReturnType<typeof instructed>>, n: number, phase: "waiting" | "repair-needed", cause: string, recovery: string[] = []) => {
+      const target = env.first.rows[n - 1]!.target;
+      const row = env.work.row(target)!;
+      env.work.commit({ effortId: env.effort.id, baseRevision: env.work.lastRevision(env.effort.id), source: "launch", instruction: null, journal: null, rows: [{ target,
+        expectedRevision: row.revision, phase, dueAt: null, body: { ...row.body, cause, detail: `${cause} on ${n}`, userState: phase === "waiting" ? "waiting" : "issue", recovery } }] });
+    };
+    const issues = async (env: Awaited<ReturnType<typeof instructed>>) =>
+      (await env.roster(env.effort.id)).issues.map((issue) => [issue.ref, issue.cause, issue.numbers, issue.recovery.map((item) => item.command)]);
+    /** A launch readback couldn't settle: attempt A-n on this PR, row n's by default, for this effort by default. */
+    const uncertain = (env: Awaited<ReturnType<typeof instructed>>, n: number, target = env.first.rows[n - 1]!.target, effortId = env.effort.id) => {
+      env.work.claim({ id: `A-${n}`, target, effortId, instructionId: "I-x-r1", launchKey: `key-${n}`, threadId: null, hostId: "host-inkwell", path: null,
+        body: { instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
+          start: { headOid: "a".repeat(40), baseOid: "b".repeat(40), fingerprint: null, sourceIds: [] },
+          resource: { kind: "spawn", threadId: null, path: null, hostId: "host-inkwell", projectId: "project", reason: "no idle thread", workspace: null },
+          mode: "spawn", marker: "[Workstreams attempt]", settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null } });
+      env.work.recordAttempt(`A-${n}`, ["launching"], { status: "uncertain", threadId: `thr_likely_${n}`, body: { uncertainAt: Date.now() } });
+    };
+
+    it("numbers each system issue S1, S2, … for as long as it stays open, and never gives a closed issue's number to another", async () => {
+      const env = await instructed();
+      await env.admit("move 1-4 forward");
+      step(env, 1, "repair-needed", "retry-exhausted", ["retry N"]);
+      const raised = (await env.roster(env.effort.id)).issues[0]!.raisedAt;
+      step(env, 2, "repair-needed", "workspace", ["retry N"]);
+      expect(await issues(env)).toEqual([["S1", "retry-exhausted", [1], ["retry 1"]], ["S2", "workspace", [2], ["retry 2"]]]);
+      step(env, 3, "repair-needed", "retry-exhausted", ["retry N"]);
+      expect(await issues(env)).toEqual([["S1", "retry-exhausted", [1, 3], ["retry 1, 3"]], ["S2", "workspace", [2], ["retry 2"]]]);
+      // It was raised when its first PR entered it, however many join it later.
+      expect((await env.roster(env.effort.id)).issues[0]!.raisedAt).toBe(raised);
+      step(env, 1, "waiting", "ci");
+      step(env, 3, "waiting", "ci");
+      expect(await issues(env)).toEqual([["S2", "workspace", [2], ["retry 2"]]]);
+      step(env, 1, "repair-needed", "retry-exhausted", ["retry N"]);
+      expect(await issues(env)).toEqual([["S2", "workspace", [2], ["retry 2"]], ["S3", "retry-exhausted", [1], ["retry 1"]]]);
+      // The recovery is a command the grammar admits.
+      expect(await env.command("retry 1")).toMatchObject({ kind: "admit" });
+    });
+
+    it("dates an issue from when its PR entered it, though no roster was read then, and keeps that time through rewrites that stay in it", async () => {
+      const env = await instructed();
+      await env.admit("move 1 forward");
+      const target = env.first.rows[0]!.target;
+      // Overnight, with no pane open: the store writes at this clock.
+      let clock = Date.now() - 8 * 60 * 60_000;
+      const overnight = createEffortWorkStore(env.db, () => clock);
+      const write = (phase: "waiting" | "repair-needed", cause: string, detail: string) => {
+        const row = overnight.row(target)!;
+        overnight.commit({ effortId: env.effort.id, baseRevision: overnight.lastRevision(env.effort.id), source: "launch", instruction: null, journal: null, rows: [{ target,
+          expectedRevision: row.revision, phase, dueAt: null, body: { ...row.body, cause, detail, userState: phase === "waiting" ? "waiting" : "issue", recovery: ["retry N"] } }] });
+      };
+      const raised = clock;
+      write("repair-needed", "retry-exhausted", "Three tries failed");
+      clock += 60 * 60_000;
+      write("repair-needed", "retry-exhausted", "Three tries failed on the new head");
+      expect((await env.roster(env.effort.id)).issues).toMatchObject([{ ref: "S1", cause: "retry-exhausted", raisedAt: raised }]);
+      // It clears, then 1 fails again: a new issue, raised when 1 entered it again.
+      clock += 60 * 60_000;
+      write("waiting", "ci", "Checks running");
+      expect((await env.roster(env.effort.id)).issues).toEqual([]);
+      clock += 60 * 60_000;
+      write("repair-needed", "retry-exhausted", "Three tries failed again");
+      expect((await env.roster(env.effort.id)).issues).toMatchObject([{ ref: "S2", cause: "retry-exhausted", raisedAt: clock }]);
+    });
+
+    it("pauses new launches while two launch outcomes are uncertain, as admission does, naming each and its confirmed release", async () => {
+      const env = await instructed();
+      await env.admit("move 1-3 forward");
+      uncertain(env, 1);
+      expect((await env.roster(env.effort.id)).launches).toMatchObject({ breakerOpen: false, uncertain: [{ n: 1, attemptId: "A-1", threadId: "thr_likely_1" }] });
+      expect(await issues(env)).toEqual([]);
+      uncertain(env, 3);
+      const open = await env.roster(env.effort.id);
+      expect(open.launches).toMatchObject({ breakerOpen: true, capacityFull: false, uncertain: [{ n: 1 }, { n: 3 }] });
+      expect(open.issues).toEqual([{ ref: "S1", cause: "launch-breaker", label: "Launch outcomes uncertain; new launches paused", numbers: [1, 3], raisedAt: expect.any(Number),
+        detail: "Readback hasn't found the worker for 1, 3 or ruled one out; running work continues", likelyThreadId: "thr_likely_1",
+        recovery: [{ command: "recheck launches", label: "Recheck launches", confirm: false }, { command: "reset 1 release", label: "Reset 1…", confirm: true },
+          { command: "reset 3 release", label: "Reset 3…", confirm: true }] }]);
+      // You confirmed no worker writes 3: its release is a command the grammar admits, and one uncertain launch no longer pauses launches.
+      expect(await env.command("reset 3 release")).toMatchObject({ kind: "admit" });
+      expect(await env.roster(env.effort.id)).toMatchObject({ launches: { breakerOpen: false }, issues: [] });
+    });
+
+    it("names the effort whose uncertain launches pause launches here and offers no command, since recheck launches reads back only this effort's", async () => {
+      const env = await instructed();
+      await env.admit("move 1 forward");
+      const vault = env.efforts["Vault audits"]!;
+      const [first, second] = (await env.roster(vault.id)).rows.map((row) => row.target);
+      uncertain(env, 7, first, vault.id);
+      uncertain(env, 8, second, vault.id);
+      const catalog = await env.roster(env.effort.id);
+      expect(catalog.launches).toMatchObject({ breakerOpen: true, uncertain: [] });
+      expect(catalog.issues).toEqual([{ ref: "S1", cause: "launch-breaker", label: "Launch outcomes uncertain; new launches paused", numbers: [], raisedAt: expect.any(Number),
+        detail: "Launch outcomes in Vault audits are uncertain; recheck launches from its roster. Running work continues", recovery: [], likelyThreadId: null }]);
     });
   });
 

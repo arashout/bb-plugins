@@ -66,7 +66,7 @@ describe("effort roster rows", () => {
       legacy: new Map([[uncertain!, { ...base, cause: "uncertain", label: "Launch outcome uncertain" }], [merged!, { ...base, cause: "running" }]]),
     }, { [merged!]: pr(merged!, { state: "MERGED" }) });
     expect(result.rows.map((row) => [row.state, row.cause])).toEqual([["issue", "legacy-uncertain"], ["done", "merged"]]);
-    expect(result.issues).toEqual([{ cause: "legacy-uncertain", label: expect.any(String), numbers: [1] }]);
+    expect(result.issues).toEqual([{ ref: null, cause: "legacy-uncertain", label: expect.any(String), detail: null, numbers: [1], raisedAt: null, recovery: [], likelyThreadId: null }]);
   });
 
   it("groups a failure several instructed PRs share into one system issue naming each, though each PR's detail names its own head", () => {
@@ -85,9 +85,13 @@ describe("effort roster rows", () => {
     const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
       v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, contract: null, decisions: [] } });
-    // Details that differ only in each PR's own facts label the issue by its cause; a detail every PR shares labels it.
-    expect(result.issues).toEqual([{ cause: "ci-infrastructure", label: "ci-infrastructure", numbers: [1, 3] },
-      { cause: "report-unrepairable", label: unrepairable, numbers: [2, 4] }]);
+    // Details that differ only in each PR's own facts label the issue by its cause, and each PR's detail follows; a detail every PR shares labels it.
+    // Each lists the recovery its rows name, for all of them at once.
+    expect(result.issues).toEqual([
+      { ref: null, cause: "ci-infrastructure", label: "ci-infrastructure", detail: `1: ${rerun("3333333")}; 3: ${rerun("4444444")}`, numbers: [1, 3], raisedAt: null,
+        recovery: [{ command: "retry 1, 3", label: "Retry 1, 3", confirm: false }], likelyThreadId: null },
+      { ref: null, cause: "report-unrepairable", label: unrepairable, detail: null, numbers: [2, 4], raisedAt: null,
+        recovery: [{ command: "retry 2, 4", label: "Retry 2, 4", confirm: false }], likelyThreadId: null }]);
   });
 
   it("asks for a read of a PR the board read and then dropped, instead of calling it unobserved", () => {
@@ -285,5 +289,34 @@ describe("roster presentation facts", () => {
       [4, true, NOW - 30_000], [5, false, null]]);
     // Two minutes earlier the review wait was 29 minutes old: fresh.
     expect(read((target) => target === review ? { ...seen[review]!, checkedAt: new Date(NOW - 29 * MINUTE).toISOString() } : seen[target]!).rows[0]!.stale).toBe(false);
+  });
+
+  it("raises one issue for launches paused while outcomes are uncertain, naming this effort's uncertain launches and how each recovers", () => {
+    const [series, duplicated] = [url("folio", 421), url("quill", 191)];
+    const uncertain = { ...attempt(series, "uncertain", { kind: "spawn", threadId: "thr_folio_421", reason: null }), body: {
+      ...attempt(series, "uncertain", { kind: "spawn", threadId: "thr_folio_421", reason: null }).body, uncertainAt: NOW - 3 * MINUTE } };
+    const rows = [workRow(series, "repair-needed", body(1, { cause: "launch-uncertain", userState: "doing", modifiers: ["recovering"], recovery: [] })),
+      workRow(duplicated, "repair-needed", body(2, { cause: "duplicate-writer", detail: "More than one BB thread answers to attempt A-191", userState: "issue",
+        recovery: ["reset N release"] }))];
+    const read = (breakerOpen: boolean) => effortRoster({ effort: effort([series, duplicated]), redirectedFrom: null, execution: { mode: "v2", revision: 1 }, v2Execution: "on",
+      sources: { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null, facts: (target) => pr(target), feedback: () => null,
+        observation: () => null, tickets: () => new Map(), work: { items: new Map(), ownerForPr: () => null } },
+      number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: target === series ? 17 : 8, target, provisional: false })) }),
+      launches: { breakerOpen, capacityFull: false, uncertain: [uncertain] },
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set([series, duplicated]), scope: null, claims: new Map([[series, uncertain]]), active: null,
+        rollup: null, contract: null, decisions: [] } });
+    const open = read(true);
+    expect(open.launches).toEqual({ breakerOpen: true, capacityFull: false,
+      uncertain: [{ n: 17, target: series, attemptId: uncertain.id, threadId: "thr_folio_421", since: NOW - 3 * MINUTE }] });
+    expect(open.issues).toEqual([
+      { ref: null, cause: "duplicate-writer", label: "More than one BB thread answers to attempt A-191", detail: null, numbers: [8], raisedAt: null, likelyThreadId: null,
+        recovery: [{ command: "reset 8 release", label: "Reset 8…", confirm: true }] },
+      { ref: null, cause: "launch-breaker", label: "Launch outcomes uncertain; new launches paused", numbers: [17], raisedAt: null, likelyThreadId: "thr_folio_421",
+        detail: "Readback hasn't found the worker for 17 or ruled one out; running work continues",
+        recovery: [{ command: "recheck launches", label: "Recheck launches", confirm: false }, { command: "reset 17 release", label: "Reset 17…", confirm: true }] },
+    ]);
+    // 17 stays Doing while it recovers; only the open breaker makes it an issue for you.
+    expect(open.rows.find((row) => row.n === 17)).toMatchObject({ state: "doing", modifiers: ["recovering"], claim: { status: "uncertain" } });
+    expect(read(false).issues.map((issue) => issue.cause)).toEqual(["duplicate-writer"]);
   });
 });
