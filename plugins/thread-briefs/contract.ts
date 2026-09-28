@@ -182,7 +182,11 @@ export const rowSignalSchema = z
     threadId: z.string(),
     status: briefStatusSchema,
     stage: briefStageSchema,
-    /** Short accessible label for the glyph, e.g. "Waiting on you". */
+    /**
+     * Short accessible label for the glyph, e.g. "Review — Waiting on you".
+     * Stage first, because the glyph draws the stage and the label is the only
+     * thing that names it.
+     */
     label: z.string(),
   })
   .strict();

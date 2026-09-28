@@ -182,40 +182,84 @@ export const STATUS_LABELS: Record<BriefStatus, string> = {
   done: "Done",
 };
 
+/**
+ * The accessible label for a row glyph, naming both axes.
+ *
+ * Stage leads because the glyph now draws the stage, and a ring reads as "how
+ * far along" rather than as a word — the label is the only thing that says
+ * which stage that is. Status still has to appear: the sidebar's status
+ * grouping says it in the section header, but grouping is off by default and
+ * nothing else on an ungrouped row says it at all.
+ */
+export function rowLabelFor(stage: BriefStage, status: BriefStatus): string {
+  return `${STAGE_LABELS[stage]} — ${STATUS_LABELS[status]}`;
+}
+
 export function rowSignalFor(brief: ResolvedBrief): RowSignal {
   return {
     threadId: brief.threadId,
     status: brief.status,
     stage: brief.stage,
-    label: `${STATUS_LABELS[brief.status]} — ${STAGE_LABELS[brief.stage]}`,
+    label: rowLabelFor(brief.stage, brief.status),
   };
 }
 
-/** Glyph + tone per status. Names are real bb icon-registry entries. */
-const GLYPHS: Record<
-  BriefStatus,
-  { icon: string; tone: "default" | "error" | "running" | "success" }
-> = {
-  "waiting-on-me": { icon: "MessageQuestion", tone: "default" },
-  "waiting-on-other": { icon: "Pause", tone: "default" },
-  done: { icon: "CircleCheck", tone: "success" },
-  working: { icon: "Circle", tone: "default" },
-};
+/** bb's convention for a plugin's own icon-registry names: `<pluginId>/<name>`. */
+const ICON_PREFIX = "thread-briefs/";
+
+/**
+ * The registry name of the ring drawn for a stage — one quarter filled per
+ * stage reached, so `implementation` is three quarters and `review` closes the
+ * ring. The artwork is registered by `app.tsx`.
+ *
+ * Built from the stage rather than listed against it, so a stage added to
+ * `BRIEF_STAGES` cannot get a name without also getting artwork: `app.tsx`
+ * registers its icons by mapping this same function over the same list.
+ */
+export function stageRingIcon(stage: BriefStage): string {
+  return `${ICON_PREFIX}stage-${stage}`;
+}
+
+/**
+ * The closed, filled ring drawn for `done`, in place of any stage ring.
+ *
+ * `done` is a status, not a fifth stage: the arc is over, so which stage it
+ * ended in stops being the interesting fact about the row. Keeping it off the
+ * ring is also what holds the ring at four 90° segments, and four is the point
+ * where the fill's endpoint lands on a clock position you can read without
+ * counting marks. A fifth segment in a 16px glyph is where that stops working.
+ */
+export const DONE_RING_ICON = `${ICON_PREFIX}done`;
 
 /**
  * The row decoration for one signal, or null for a row that should keep bb's
  * own glyph.
  *
- * Precedence is live first, stored second: a thread whose agent is running or
- * queued is `working` no matter what its brief says. That *does* contradict a
- * stored `done` or `waiting-on-other`, by design — the brief describes the last
- * turn that finished, and a run in flight is newer information than any of it.
+ * The glyph draws the **stage**, not the status. Status is what the sidebar's
+ * own status grouping already puts in the section header, so a status glyph
+ * spends the row's one slot repeating its own heading; stage is orthogonal to
+ * it, and is the fact that says which of a dozen threads waiting on you is one
+ * turn from finished. Stage is also ordinal, which a ring can show and a set of
+ * unrelated glyphs cannot: you read four rings at a glance without reading any
+ * of them.
  *
- * `working` draws nothing, so the override reads as a suppression rather than a
- * glyph swap. That is deliberate: bb paints a plugin row status *in place of*
- * its unsent-draft pencil, so decorating every row would cost the draft
- * indicator everywhere to say what bb's own running indicator already says.
- * Only the three states that are news get a glyph.
+ * Status keeps the one channel a named icon leaves free — `tone` — for the one
+ * status with a treatment worth having, `done`. `waiting-on-me` and
+ * `waiting-on-other` therefore draw the same muted ring and are told apart by
+ * the section header, or by the label on hover when grouping is off.
+ *
+ * Precedence is live first, stored second: a thread whose agent is running or
+ * queued is `working` no matter what its brief says, and `working` still draws
+ * nothing. Three reasons, in order of how much they cost:
+ *
+ * - bb hides a plugin row status outright when its own indicator is `runtime`,
+ *   `unread-error` or `waiting-for-input`, so for a plain running thread a
+ *   decoration here is ignored anyway.
+ * - It is *not* hidden for `plan-mode`, `goal`, `workflow` or
+ *   `background-agent`, where it would displace a shimmering live glyph that
+ *   says something a stored brief cannot.
+ * - bb paints the status in place of the unsent-draft pencil, so decorating a
+ *   row always costs the pencil there.
  *
  * `liveWorking` is client-side truth the sidebar already holds, so applying it
  * here costs no server round trip — which is the whole reason `listRowSignals`
@@ -225,12 +269,11 @@ export function rowDecoration(
   signal: RowSignal,
   liveWorking: boolean,
 ): { icon: string; label: string; tone: "default" | "error" | "running" | "success" } | null {
-  const status: BriefStatus = liveWorking ? "working" : signal.status;
-  if (status === "working") return null;
-  const glyph = GLYPHS[status];
+  if (liveWorking) return null;
+  const isDone = signal.status === "done";
   return {
-    icon: glyph.icon,
-    tone: glyph.tone,
-    label: `${STATUS_LABELS[status]} — ${STAGE_LABELS[signal.stage]}`,
+    icon: isDone ? DONE_RING_ICON : stageRingIcon(signal.stage),
+    tone: isDone ? "success" : "default",
+    label: rowLabelFor(signal.stage, signal.status),
   };
 }

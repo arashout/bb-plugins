@@ -35,12 +35,33 @@ setting, the regeneration triggers, and how to diagnose it.
 
 ## Where briefs show up
 
-**Sidebar row** — a single glyph for the three statuses that are news:
-waiting-on-you, blocked, and done. A thread whose agent is running or queued
-keeps bb's own indicator instead, because bb draws a plugin row status in place
-of its unsent-draft pencil and displacing that everywhere would cost more than
-it says. The live status is folded in per row on the client, off the sidebar view
-it already holds, so `listRowSignals` needs no per-thread lookups.
+**Sidebar row** — a **ring** showing the stage: one of four quarters filled per
+stage reached, so `discovery` is a quarter, `implementation` is three quarters,
+`review` closes the ring, and a `done` thread gets the closed ring with its
+centre filled in.
+
+The glyph draws the stage rather than the status because status is what the
+sidebar's own [status grouping](#sidebar-sections) already puts in the section
+header — a status glyph spends the row's one slot repeating its own heading.
+Stage is orthogonal to it, and is the thing that says which of a dozen threads
+waiting on you is one turn from finished. It is also ordinal, which a ring can
+show and a set of unrelated glyphs cannot: four rings are read at a glance
+without reading any of them, and the fill's endpoint lands on a clock position
+rather than a count of marks. `done` is a status, not a fifth stage — keeping it
+off the ring is what holds the ring at four readable segments.
+
+Two consequences. `waiting-on-me` and `waiting-on-other` draw the **same** ring,
+told apart by the section header or the hover label (`Implementation —
+Blocked`). And a thread whose agent is running or queued keeps bb's own
+indicator: bb hides a plugin row status outright while its own is `runtime`, and
+where it does not — plan mode, a goal, a workflow — a ring would displace a live
+glyph that says more than a stored brief can. bb also paints the status in place
+of its unsent-draft pencil, so decorating a row is never free. The live status is
+folded in per row on the client, off the sidebar view it already holds, so
+`listRowSignals` needs no per-thread lookups.
+
+The same rings label the stage control in the Brief panel, which is where the
+vocabulary is learned: four rings in a row, each next to its name.
 
 **The thread title itself** — optionally, the brief's name replaces it:
 
@@ -113,6 +134,7 @@ configured.
 | Summarizer input | `threads.conversationOutline()` head + tail with the middle elided, `threads.output()` for the last message in full, and the previous brief |
 | Storage | `bb.storage.kv`, one row per thread at `brief:<threadId>` |
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
+| Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, since a row status takes an icon *name* and not a component |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |

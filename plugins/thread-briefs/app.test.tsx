@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import {
   loadPluginApp,
   mountPluginContentScripts,
@@ -57,6 +57,59 @@ describe("registrations", () => {
     expect(captured.contentScripts.map((entry) => entry.id)).toEqual(["row-glyphs"]);
     // Nothing may register a thread list: replacing bb's sidebar is out of scope.
     expect(captured.threadLists).toEqual([]);
+  });
+
+  it("registers a ring for every stage, plus the closed one for done", async () => {
+    // A stage with no artwork would draw bb's Zap fallback on the row, which is
+    // why the names are mapped off BRIEF_STAGES rather than listed.
+    const captured = await loadApp();
+    expect(captured.icons.map((entry) => entry.name)).toEqual([
+      "thread-briefs/stage-discovery",
+      "thread-briefs/stage-planning",
+      "thread-briefs/stage-implementation",
+      "thread-briefs/stage-review",
+      "thread-briefs/done",
+    ]);
+  });
+
+  /** The artwork one registered icon draws, rendered on its own. */
+  const drawIcon = async (name: string) => {
+    const captured = await loadApp();
+    const entry = captured.icons.find((icon) => icon.name === name)!;
+    const Artwork = entry.component;
+    const { container } = render(<Artwork />);
+    const paths = Array.from(container.querySelectorAll("path"));
+    return {
+      quarters: paths.length,
+      solid: paths.filter((path) => path.getAttribute("opacity") === "1").length,
+      hasCentre: container.querySelector("circle") !== null,
+    };
+  };
+
+  it("draws each stage ring one quarter fuller than the last", async () => {
+    // Reading the ring means reading where the fill stops, so the count is the
+    // whole glyph: an off-by-one puts a thread a stage ahead of where it is.
+    for (const [name, solid] of [
+      ["thread-briefs/stage-discovery", 1],
+      ["thread-briefs/stage-planning", 2],
+      ["thread-briefs/stage-implementation", 3],
+      ["thread-briefs/stage-review", 4],
+    ] as const) {
+      expect(await drawIcon(name)).toMatchObject({ quarters: 4, solid });
+    }
+  });
+
+  it("marks the done ring's centre, so it is not just the review ring again", async () => {
+    // Both close the ring, because done is not a fifth stage. At 16px the
+    // filled centre is the only thing telling them apart.
+    expect(await drawIcon("thread-briefs/done")).toMatchObject({
+      solid: 4,
+      hasCentre: true,
+    });
+    expect(await drawIcon("thread-briefs/stage-review")).toMatchObject({
+      solid: 4,
+      hasCentre: false,
+    });
   });
 
   it("labels the tab the same way from the launcher as from the header", async () => {
@@ -265,7 +318,7 @@ describe("sidebar row glyphs", () => {
     threadId: "thr_1",
     status: "done",
     stage: "review",
-    label: "Done — Review",
+    label: "Review — Done",
     ...overrides,
   });
 
@@ -298,14 +351,37 @@ describe("sidebar row glyphs", () => {
     return { scripts, slot };
   };
 
-  it("paints the done glyph on the row", async () => {
+  it("paints the closed ring on a finished row", async () => {
     const { scripts, slot } = await mountBoth({ signals: [signal()] });
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "CircleCheck",
-        label: "Done — Review",
+        icon: "thread-briefs/done",
+        label: "Review — Done",
         tone: "success",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("paints the stage ring on an unfinished row", async () => {
+    const { scripts, slot } = await mountBoth({
+      signals: [
+        signal({
+          status: "waiting-on-me",
+          stage: "planning",
+          label: "Planning — Waiting on you",
+        }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: "thread-briefs/stage-planning",
+        label: "Planning — Waiting on you",
+        tone: "default",
       }),
     );
 
@@ -316,7 +392,7 @@ describe("sidebar row glyphs", () => {
   it("leaves a running thread to bb's own indicator", async () => {
     // Live working outranks the brief, and working draws no glyph.
     const { scripts, slot } = await mountBoth({
-      signals: [signal({ status: "waiting-on-other", label: "Blocked — Review" })],
+      signals: [signal({ status: "waiting-on-other", label: "Review — Blocked" })],
       threads: [sidebarThread({ id: "thr_1", status: "active" })],
     });
 
@@ -329,14 +405,14 @@ describe("sidebar row glyphs", () => {
 
   it("draws the brief's glyph once the thread is no longer running", async () => {
     const { scripts, slot } = await mountBoth({
-      signals: [signal({ status: "waiting-on-me", label: "Waiting on you — Review" })],
+      signals: [signal({ status: "waiting-on-me", label: "Review — Waiting on you" })],
       threads: [sidebarThread({ id: "thr_1", status: "idle" })],
     });
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
-        icon: "MessageQuestion",
-        label: "Waiting on you — Review",
+        icon: "thread-briefs/stage-review",
+        label: "Review — Waiting on you",
         tone: "default",
       }),
     );

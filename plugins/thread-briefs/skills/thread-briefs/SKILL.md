@@ -84,9 +84,11 @@ offer rather than a spinner. A failed summary drops back to `absent`.
 ## Stage and status
 
 `stage` is a semantic judgement from the transcript: discovery, planning,
-implementation, review. Pick a stage by hand in the Brief panel to override it;
-the override is anchored to the thread's activity cursor and retires itself on
-the next real turn. Clicking the active manual stage clears it.
+implementation, review. It is what the sidebar row's ring draws — see
+[Sidebar glyphs](#sidebar-glyphs). Pick a stage by hand in the Brief panel to
+override it; the override is anchored to the thread's activity cursor and retires
+itself on the next real turn. Clicking the active manual stage clears it. The
+override moves the row's ring too, immediately.
 
 `status` is derived mechanically, so it stays correct between summaries. It has
 a live half and a stored half, and the live half wins:
@@ -213,25 +215,60 @@ Other things worth knowing:
 
 ## Sidebar glyphs
 
-bb paints a plugin row status **in place of** its own unsent-draft pencil, so
-only the three states that are news get a glyph — a `working` thread keeps bb's
-own running indicator:
+The row glyph is a **stage ring** — a circle in four quarters, filled up to the
+stage the thread has reached:
 
-| Status | Glyph |
+| What the row shows | Means |
 | --- | --- |
-| waiting-on-me | `MessageQuestion` |
-| waiting-on-other | `Pause` |
-| done | `CircleCheck`, success tone |
+| one quarter (fill ends at 3 o'clock) | discovery |
+| half (ends at 6) | planning |
+| three quarters (ends at 9) | implementation |
+| closed ring, hollow | review |
+| closed ring, centre filled, success tone | status `done`, any stage |
 
-Because `working` draws nothing, the live override reads as a **suppression**: a
-thread that is running shows no brief glyph, and its stored glyph comes back the
-moment it goes idle. The live half is computed in the client from
-`experimental_useSidebarThreads()`, which is why no row needs a server round
-trip to stay current, and why `listRowSignals` does no per-thread lookups.
+Names are registered by the app through `app.experimental_icons.register` as
+`thread-briefs/stage-<stage>` and `thread-briefs/done`; a row status takes an
+icon *name*, not a component, so the artwork has to go in the registry first.
+They are mapped off `BRIEF_STAGES`, so adding a stage adds its ring.
+
+**Why stage and not status.** With `sidebarGrouping status` on, the section
+header already says the status, so a status glyph spends the row's one slot
+repeating its own heading. Stage is orthogonal, ordinal, and answers the triage
+question the grouping cannot: which of the threads waiting on you is one turn
+from done. `done` stays off the ring as a status, not a fifth stage — four
+segments is where you can read the fill's endpoint as a clock position instead of
+counting marks.
+
+**What this costs.** `waiting-on-me` and `waiting-on-other` draw the **same**
+ring. Grouping tells them apart; with grouping off, only the hover label does
+(`Implementation — Blocked`). If that bites, the cheap fix is a centre mark on
+the blocked ring rather than a different glyph family.
+
+`working` still draws **nothing**, so the live override reads as a
+**suppression**: a running thread shows no brief glyph, and its stored ring comes
+back the moment it goes idle. Three reasons, and the first is not the plugin's
+choice:
+
+- bb hides a plugin row status outright when its own indicator is `runtime`,
+  `unread-error` or `waiting-for-input`, so a decoration on a plain running
+  thread is ignored anyway.
+- It is *not* hidden for `plan-mode`, `goal`, `workflow` or `background-agent`,
+  where a ring would displace a shimmering live glyph that says something a
+  stored brief cannot.
+- bb paints the status in place of the unsent-draft pencil, so any decorated row
+  loses its pencil.
+
+The live half is computed in the client from `experimental_useSidebarThreads()`,
+which is why no row needs a server round trip to stay current, and why
+`listRowSignals` does no per-thread lookups.
 
 One consequence worth knowing: the Brief panel shows the **stored** status, so
 a running thread whose brief says "Waiting on you" will say that in the panel
 while its row shows no glyph. The row is live; the panel is the brief.
+
+The panel is also where the ring is learned — the stage control draws each option
+beside its own ring, and the status line at the top draws the ring that thread's
+row is currently showing.
 
 ## Sidebar sections
 
@@ -287,6 +324,10 @@ no preference writes.
   the sync; the next reconcile will set it again.
 - No glyphs at all, but the Brief panel works: the bb client predates
   `experimental_setThreadRowStatus`, which the content script feature-detects.
+- A lightning bolt where a ring should be: that is bb's `Zap` fallback for an
+  unknown icon name, so the ring registrations did not take. The client predates
+  `app.experimental_icons`, or the app bundle is stale — rebuild with
+  `bb plugin build` and reload.
 - Briefs stuck on "Summarizing…": check `apiKey` is set and
   `bb plugin logs thread-briefs` for HTTP errors from `baseUrl`.
 - A brief that describes work already finished: read the **Summarized …** line

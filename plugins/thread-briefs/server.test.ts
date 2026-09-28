@@ -392,7 +392,7 @@ describe("summarizing", () => {
         threadId: "thr_1",
         status: "waiting-on-me",
         stage: "review",
-        label: "Waiting on you — Review",
+        label: "Review — Waiting on you",
       },
     ]);
   });

@@ -22,8 +22,10 @@ import {
   type BriefStage,
 } from "./shared.js";
 import {
+  DONE_RING_ICON,
   rowDecoration,
   STAGE_LABELS,
+  stageRingIcon,
   STATUS_LABELS,
   summarizedAgo,
 } from "./brief.js";
@@ -116,6 +118,77 @@ function BriefSync() {
   return null;
 }
 
+// ------------------------------------------------------------- the stage rings
+
+/**
+ * Quarter arcs of a ring in a 16×16 box, clockwise from twelve o'clock, with a
+ * gap either side of every boundary.
+ *
+ * Four separate arcs rather than one dashed circle. The segment ends have to sit
+ * exactly on the quarters, because what you actually read at this size is *where
+ * the fill stops* — three o'clock, six, nine, closed — and a `stroke-dasharray`
+ * on a circle puts the ends wherever the dash phase happens to fall. Butt caps
+ * for the same reason: a round cap extends each arc by half the stroke width,
+ * which here is wider than the gap and would close it.
+ */
+const RING_QUARTERS = [
+  "M8.94 2.07A6 6 0 0 1 13.93 7.06",
+  "M13.93 8.94A6 6 0 0 1 8.94 13.93",
+  "M7.06 13.93A6 6 0 0 1 2.07 8.94",
+  "M2.07 7.06A6 6 0 0 1 7.06 2.07",
+] as const;
+
+/**
+ * A ring with `filled` of its four quarters solid and the rest left as a track,
+ * optionally with the centre filled in.
+ *
+ * The track is what makes the glyph a ratio rather than a count: three quarters
+ * against a visible whole reads instantly at 16px, where three marks against
+ * nothing has to be counted. Everything is `currentColor`, so the host's tone
+ * class colours it — the ring carries the stage and the colour carries the
+ * status, and neither has to encode the other.
+ */
+function ring(filled: number, complete = false) {
+  return function StageRing({ className }: { className?: string }) {
+    return (
+      <svg
+        viewBox="0 0 16 16"
+        fill="none"
+        className={className}
+        aria-hidden="true"
+      >
+        {RING_QUARTERS.map((d, index) => (
+          <path
+            key={d}
+            d={d}
+            stroke="currentColor"
+            strokeWidth={2}
+            opacity={index < filled ? 1 : 0.25}
+          />
+        ))}
+        {complete ? (
+          <circle cx={8} cy={8} r={2.75} fill="currentColor" />
+        ) : null}
+      </svg>
+    );
+  };
+}
+
+/**
+ * One ring per stage, plus the closed filled ring for `done`.
+ *
+ * Mapped over `BRIEF_STAGES` in order, so the artwork and the names cannot
+ * drift: `stageRingIcon` is the same function the row decoration calls, and a
+ * stage added to the list gets its ring here without a second edit.
+ */
+const RING_ICONS = [
+  ...BRIEF_STAGES.map((stage, index) => ({
+    name: stageRingIcon(stage),
+    component: ring(index + 1),
+  })),
+  { name: DONE_RING_ICON, component: ring(RING_QUARTERS.length, true) },
+];
+
 // ------------------------------------------------------------------ the panel
 
 function Field({ label, value }: { label: string; value: string }) {
@@ -154,12 +227,22 @@ function StageControl({
               // Picking the stage that is already manually set clears the
               // override and hands the judgement back to the summarizer.
               onClick={() => onPick(isManual ? null : stage)}
-              className={`rounded border px-1.5 py-0.5 text-xs ${
+              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs ${
                 isActive
                   ? "border-border bg-card font-medium text-foreground"
                   : "border-transparent text-muted-foreground hover:bg-card"
               }`}
             >
+              {/*
+                Each option next to its own ring, which is where the sidebar's
+                glyph is learned: four labelled rings in a row say what a single
+                ring on a row cannot.
+              */}
+              <Icon
+                name={stageRingIcon(stage)}
+                className="h-3 w-3 shrink-0"
+                aria-hidden
+              />
               {STAGE_LABELS[stage]}
               {isManual ? " ·" : ""}
             </button>
@@ -223,7 +306,26 @@ function BriefBody({
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-2">
         <div className="space-y-0.5">
-          <div className="text-xs font-medium text-foreground">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            {/*
+              The glyph this thread's sidebar row draws, beside the words it
+              stands for. A done thread is the case that needs it: its row shows
+              a closed ring and no stage, so the stage control below cannot
+              explain it.
+            */}
+            <Icon
+              name={
+                brief.status === "done"
+                  ? DONE_RING_ICON
+                  : stageRingIcon(brief.stage)
+              }
+              className={`h-3.5 w-3.5 shrink-0 ${
+                brief.status === "done"
+                  ? "text-success-foreground"
+                  : "text-muted-foreground"
+              }`}
+              aria-hidden
+            />
             {STATUS_LABELS[brief.status]}
           </div>
           {/*
@@ -387,6 +489,11 @@ function BriefHeaderAction({
 // ------------------------------------------------------------- registration
 
 export default definePluginApp((app) => {
+  // Optional chaining because a client predating the app icon registry would
+  // otherwise throw here and take the panel and the header button down with it.
+  // Unregistered names fall back to bb's Zap glyph, so the row degrades alone.
+  for (const icon of RING_ICONS) app.experimental_icons?.register(icon);
+
   app.slots.experimental_appOverlay({ id: "brief-sync", component: BriefSync });
 
   app.slots.threadPanelAction({

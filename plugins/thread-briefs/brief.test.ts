@@ -9,7 +9,7 @@ import {
   rowSignalFor,
   summarizedAgo,
 } from "./brief.js";
-import { isLiveWorking } from "./shared.js";
+import { BRIEF_STAGES, isLiveWorking } from "./shared.js";
 import type { StoredBrief } from "./contract.js";
 
 const stored = (overrides: Partial<StoredBrief> = {}): StoredBrief => ({
@@ -187,32 +187,85 @@ describe("rowDecoration", () => {
     fields: { ...stored().fields, nextStep: "", blockedOn: "" },
   });
 
-  it("draws the waiting-on-me glyph for an idle thread with work left", () => {
+  it("draws the stage ring, not the status", () => {
     const decoration = rowDecoration(signalFor(stored()), false);
-    expect(decoration?.icon).toBe("MessageQuestion");
-    expect(decoration?.label).toBe("Waiting on you — Implementation");
+    expect(decoration?.icon).toBe("thread-briefs/stage-implementation");
+    expect(decoration?.tone).toBe("default");
   });
 
-  it("draws the blocked glyph for a thread waiting on someone else", () => {
-    expect(rowDecoration(signalFor(blocked), false)?.icon).toBe("Pause");
+  it("leads the label with the stage the ring draws, and still names the status", () => {
+    // The ring is the only thing on the row, so the label is the only place
+    // either word appears — and with grouping off, the only place at all.
+    expect(rowDecoration(signalFor(stored()), false)?.label).toBe(
+      "Implementation — Waiting on you",
+    );
+    expect(rowDecoration(signalFor(blocked), false)?.label).toBe(
+      "Implementation — Blocked",
+    );
   });
 
-  it("draws the done glyph for a finished thread", () => {
+  it("gives every stage its own ring, in order", () => {
+    expect(
+      BRIEF_STAGES.map(
+        (stage) =>
+          rowDecoration(signalFor(stored({ modelStage: stage })), false)?.icon,
+      ),
+    ).toEqual([
+      "thread-briefs/stage-discovery",
+      "thread-briefs/stage-planning",
+      "thread-briefs/stage-implementation",
+      "thread-briefs/stage-review",
+    ]);
+  });
+
+  it("follows a manual stage override, since that is what the panel shows", () => {
+    const overridden = stored({
+      stageOverride: "review",
+      stageOverrideSeq: 50,
+      lastActivitySeen: 50,
+    });
+    expect(rowDecoration(signalFor(overridden), false)?.icon).toBe(
+      "thread-briefs/stage-review",
+    );
+  });
+
+  it("draws the same ring for waiting-on-me and blocked", () => {
+    // Status is what the sidebar's own grouping puts in the section header, so
+    // the glyph spends its one slot on the stage instead. The label separates
+    // them; so does the section.
+    expect(rowDecoration(signalFor(blocked), false)?.icon).toBe(
+      rowDecoration(signalFor(stored()), false)?.icon,
+    );
+  });
+
+  it("closes the ring for a finished thread, whatever stage it ended in", () => {
+    // `done` is a status, not a fifth stage: the arc is over.
     const decoration = rowDecoration(signalFor(done), false);
-    expect(decoration?.icon).toBe("CircleCheck");
+    expect(decoration?.icon).toBe("thread-briefs/done");
     expect(decoration?.tone).toBe("success");
+    expect(
+      rowDecoration(
+        signalFor(
+          stored({ modelStage: "discovery", fields: { ...done.fields } }),
+        ),
+        false,
+      )?.icon,
+    ).toBe("thread-briefs/done");
   });
 
   it("draws nothing while the agent is running, whatever the brief says", () => {
-    // Live working outranks the stored status, and working draws no glyph so
-    // bb's own running indicator keeps the row.
+    // Live working outranks the stored status. bb hides a plugin row status for
+    // a running thread anyway, and would let one displace its plan-mode or goal
+    // glyph, which says more than a stored stage can.
     expect(rowDecoration(signalFor(blocked), true)).toBeNull();
     expect(rowDecoration(signalFor(done), true)).toBeNull();
     expect(rowDecoration(signalFor(stored()), true)).toBeNull();
   });
 
   it("restores the stored glyph once the thread goes idle again", () => {
-    expect(rowDecoration(signalFor(blocked), false)?.icon).toBe("Pause");
+    expect(rowDecoration(signalFor(blocked), false)?.icon).toBe(
+      "thread-briefs/stage-implementation",
+    );
   });
 });
 
