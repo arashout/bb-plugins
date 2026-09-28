@@ -111,6 +111,8 @@ const parentContextSchema = z.object({
   /** The open decisions the rollup names, which a command typed here answers. */
   decisions: z.array(shownDecisionSchema),
   counts: z.record(z.enum(USER_STATES), z.number()),
+  /** Open system issues as the roster lists them: one per failure cause its rows share, and one while new launches are paused. */
+  issues: z.number(),
   rollup: z.array(z.string()).nullable(),
 });
 
@@ -969,7 +971,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     nudge();
     return answer;
   }
-  /** The banner's view of an effort parent thread: its counts, rollup, and the snapshot and revision a command there reads. */
+  /** The banner's view of an effort parent thread: its counts, open system issues, rollup, and the snapshot and revision a command there reads. */
   async function parentContext(threadId: string): Promise<z.infer<typeof parentContextSchema> | null> {
     const effort = deps.efforts.list().find((item) => item.coordinatorThreadId === threadId);
     if (!effort || deps.execution.get(effort.id).mode !== "v2") return null;
@@ -977,9 +979,11 @@ export function createEffortV2(deps: EffortV2Deps) {
     const included = new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target)));
     const rows = deps.work.rows(effort.id).filter((row) => included.has(row.target));
     const decisions = deps.work.decisions(effort.id);
+    const { breakerOpen } = await deps.launches.admission();
     return { effort: { id: effort.id, key: effort.key, name: effort.name, archived: Boolean(effort.archivedAt) }, snapshotId: deps.snapshots.latest(effort.id),
       revision: active?.revision ?? null, lastRevision: deps.work.lastRevision(effort.id), decisions: decisions.map(({ n, revision }) => ({ n, revision })),
       counts: Object.fromEntries(USER_STATES.map((state) => [state, rows.filter((row) => row.body.userState === state).length])) as Record<UserState, number>,
+      issues: new Set(rows.flatMap((row) => row.body.userState === "issue" ? [row.body.cause] : [])).size + (breakerOpen ? 1 : 0),
       rollup: active ? rowContract(effort, active.scope, rows, (await deps.sources()).work, decisions, evidenceOf(rows.map((row) => row.target))).rollup : null };
   }
   const observing = new Map<string, ReturnType<EffortV2Deps["observe"]>>();

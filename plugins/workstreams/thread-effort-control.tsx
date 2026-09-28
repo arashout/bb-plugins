@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { useComposerView, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useBbNavigate, useComposerView, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
+import { ParentBannerStrip } from "./roster-command";
+import { rosterParents, subscribeRosterParents } from "./roster-parents";
+import { ROSTER_CHANGED } from "./roster-shared";
+import { ackView, bannerCommandInput, type CommandRecord, type ParentContext } from "./roster-view-model";
 import { threadEffortAssignmentScope, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort";
 import type { ThreadEffortSuggestions } from "./thread-effort-suggestions";
 import { Button } from "@/components/ui/button";
@@ -41,7 +45,59 @@ function SourceScope({ source }: { source: ThreadEffortReady["sources"][number] 
 export function ThreadEffortControl() {
   const view = useComposerView();
   if (view.scope.kind !== "thread") return null;
-  return <ThreadEffortForThread key={view.scope.threadId} threadId={view.scope.threadId} />;
+  return <>
+    <EffortParentBanner key={`parent:${view.scope.threadId}`} threadId={view.scope.threadId} />
+    <ThreadEffortForThread key={view.scope.threadId} threadId={view.scope.threadId} />
+  </>;
+}
+
+/**
+ * Parent mode, above the effort picker, in a v2 effort's parent thread only. Which threads are parents comes from the store the
+ * roster header buttons share, so no other thread asks the server anything more.
+ */
+function EffortParentBanner({ threadId }: { threadId: string }) {
+  const parent = useSyncExternalStore(subscribeRosterParents, () => rosterParents().get(threadId) ?? null, () => null);
+  return parent ? <EffortParentMode key={parent.effortId} threadId={threadId} /> : null;
+}
+
+function EffortParentMode({ threadId }: { threadId: string }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [context, setContext] = useState<ParentContext | null>(null);
+  const [text, setText] = useState("");
+  const [record, setRecord] = useState<CommandRecord | null>(null);
+  const request = useRef(0);
+  const effortId = useRef<string | null>(null);
+  effortId.current = context?.effort.id ?? null;
+  /** A send that failed before any reply reuses its request id for the same text, so a lost reply can't run it twice. */
+  const unanswered = useRef<{ text: string; requestId: string } | null>(null);
+  const load = useCallback(() => {
+    const id = ++request.current;
+    rpc.call("effort_parent_context", { threadId }).then((next) => { if (id === request.current) setContext(next); }, () => {});
+  }, [rpc, threadId]);
+  useEffect(() => { load(); return () => { request.current++; }; }, [load]);
+  useRealtime(ROSTER_CHANGED, (payload) => {
+    if (typeof payload === "object" && payload !== null && (payload as { effortId?: unknown }).effortId === effortId.current) load();
+  });
+  const send = async () => {
+    if (!context) return;
+    const sent = text.trim();
+    const requestId = unanswered.current?.text === sent ? unanswered.current.requestId : crypto.randomUUID();
+    unanswered.current = { text: sent, requestId };
+    let result: CommandRecord["result"];
+    try {
+      result = await rpc.call("effort_command", bannerCommandInput(context, sent, requestId));
+      unanswered.current = null;
+    } catch (cause) {
+      result = { kind: "error", message: errorMessage(cause) };
+    }
+    setRecord({ requestId, text: sent, origin: "banner", at: Date.now(), revision: result.kind === "admit" ? result.revision : context.revision,
+      snapshotId: context.snapshotId, result, fresh: true });
+    if (result.kind === "admit") setText((current) => current.trim() === sent ? "" : current);
+    load();
+  };
+  return <ParentBannerStrip context={context} value={text} onValue={setText} onSubmit={() => void send()} ack={record && ackView(record, Date.now())}
+    onOpenRoster={() => { if (context) navigate.openThreadPanel({ actionId: "effort-roster", title: `${context.effort.name} roster`, params: { effortId: context.effort.id } }); }} />;
 }
 
 function ThreadEffortForThread({ threadId }: { threadId: string }) {

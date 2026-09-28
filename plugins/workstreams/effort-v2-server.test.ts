@@ -836,10 +836,10 @@ describe("effort instructions", () => {
     env.store.save({ ...env.store.getRecord(env.effort.id)!, coordinatorThreadId: "thr_catalog_parent", coordinatorState: "ready" });
     const context = async (threadId: string) => env.harness.callRpc("effort_parent_context", { threadId });
     expect(await context("thr_catalog_parent")).toMatchObject({ revision: null, lastRevision: 0, rollup: null, snapshotId: env.first.snapshotId,
-      counts: { doing: 0, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 } });
+      counts: { doing: 0, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 }, issues: 0 });
     const admitted = await env.admit("move 1-3 forward");
     expect(await context("thr_catalog_parent")).toEqual({ effort: { id: env.effort.id, key: env.effort.key, name: "Catalog follow-ups", archived: false },
-      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, decisions: [], rollup: admitted.rollup, counts: { doing: 3, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 } });
+      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, decisions: [], rollup: admitted.rollup, counts: { doing: 3, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 }, issues: 0 });
     expect(await context("thr_someone_else")).toBeNull();
     createEffortWorkStore(env.db).setMode(env.effort.id, "legacy", 1, () => []);
     expect(await context("thr_catalog_parent")).toBeNull();
@@ -1095,6 +1095,22 @@ describe("effort instructions", () => {
       // You confirmed no worker writes 3: its release is a command the grammar admits, and one uncertain launch no longer pauses launches.
       expect(await env.command("reset 3 release")).toMatchObject({ kind: "admit" });
       expect(await env.roster(env.effort.id)).toMatchObject({ launches: { breakerOpen: false }, issues: [] });
+    });
+
+    it("counts for the parent's banner the system issues the roster lists, paused launches included, since those hold no row in an issue", async () => {
+      const env = await instructed();
+      env.store.save({ ...env.store.getRecord(env.effort.id)!, coordinatorThreadId: "thr_catalog_parent", coordinatorState: "ready" });
+      await env.admit("move 1-4 forward");
+      const banner = async () => (await env.harness.callRpc("effort_parent_context", { threadId: "thr_catalog_parent" }))!;
+      // Two rows that failed the same way are one issue.
+      step(env, 1, "repair-needed", "retry-exhausted", ["retry N"]);
+      step(env, 2, "repair-needed", "retry-exhausted", ["retry N"]);
+      expect(await banner()).toMatchObject({ counts: { issue: 2 }, issues: 1 });
+      uncertain(env, 3);
+      uncertain(env, 4);
+      const { issues: listed } = await env.roster(env.effort.id);
+      expect(listed.map((issue) => issue.cause)).toEqual(["retry-exhausted", "launch-breaker"]);
+      expect(await banner()).toMatchObject({ counts: { issue: 2 }, issues: listed.length });
     });
 
     it("names the effort whose uncertain launches pause launches here and offers no command, since recheck launches reads back only this effort's", async () => {

@@ -316,6 +316,27 @@ export function ackRows(parts: AckParts): number[] {
   return [...new Set(lists.flat().flatMap((item) => item.n === null ? [] : [item.n]))];
 }
 
+/** effort_parent_context: what the parent thread's composer banner shows, and the snapshot and decisions a command typed there reads. */
+export type ParentContext = { effort: { id: string; name: string; archived: boolean }; snapshotId: string | null; revision: number | null;
+  decisions: readonly { n: number; revision: number }[]; counts: Readonly<Record<"doing" | "waiting" | "decision" | "ready" | "issue" | "done", number>>;
+  /** Open system issues as the roster lists them, paused launches included, which hold no row in an issue. */
+  issues: number };
+
+/** The banner's one-line summary: the instruction's revision, then what needs you, counted by decision and system issue rather than by the rows that wait on them. */
+export function parentSummary(context: ParentContext): string {
+  const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const { decisions, issues, counts } = context;
+  return ["Effort parent", context.revision === null ? "no instruction" : `rev ${context.revision}`,
+    decisions.length ? plural(decisions.length, "decision", "decisions") : null, issues ? plural(issues, "system issue", "system issues") : null,
+    !decisions.length && !issues ? "no asks" : null, `${counts.ready} ready`, context.effort.archived ? "archived" : null].filter(Boolean).join(" · ");
+}
+
+/** A command typed in the parent's banner: its source is the banner, and it answers only decisions the banner's context showed. It never waits for Undo. */
+export function bannerCommandInput(context: ParentContext, text: string, requestId: string) {
+  return { effortId: context.effort.id, snapshotId: context.snapshotId, text, requestId, source: "banner" as const,
+    ...context.revision === null ? {} : { expectedRevision: context.revision }, decisions: context.decisions.map(({ n, revision }) => ({ n, revision })) };
+}
+
 /** A number cell's click composes into the command box: it appends the number, and with Shift turns the last number or range into a range to it. */
 export function composeNumber(text: string, n: number, shift: boolean): string {
   const last = shift ? /(\d+)(?:-\d+)?\s*$/u.exec(text) : null;

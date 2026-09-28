@@ -8,7 +8,7 @@ import type { RefObject } from "react";
 import { Icon } from "./components/ui/icon";
 import { cn } from "./lib/utils";
 import { HATCH } from "./roster-rows";
-import type { AckChip, AckView } from "./roster-view-model";
+import { parentSummary, type AckChip, type AckView, type ParentContext } from "./roster-view-model";
 
 /** A note that isn't a command's acknowledgment: a refresh's read, a hint, or an Undo's answer. */
 export type RosterNote = { command: string; lines: string[]; tone: "info" | "error" };
@@ -95,5 +95,34 @@ export function CommandBox(props: CommandBoxProps) {
         className="h-7 min-w-0 flex-1 bg-transparent font-mono text-[12px] outline-none placeholder:text-muted-foreground" />
       <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[11px] leading-4 text-muted-foreground">/</kbd>
     </form>
+  </div>;
+}
+
+/**
+ * Parent mode of the thread's effort banner (V2-UI-SPEC §4.7), in an effort parent thread only: what needs you, Open roster, and a
+ * command field that shows its chip row here and its details in the roster. A thread that isn't a v2 effort's parent renders nothing.
+ */
+export function ParentBannerStrip(props: { context: ParentContext | null; value: string; onValue(value: string): void; onSubmit(): void;
+  ack: AckView | null; onOpenRoster(): void }) {
+  const { context, ack } = props;
+  if (!context) return null;
+  const refused = ack?.kind === "clarify" || ack?.kind === "error";
+  return <div className="space-y-1 px-1 pb-1 text-[11px] text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 truncate" title={context.effort.name}><span className="font-medium text-foreground">{context.effort.name}</span> · {parentSummary(context)}</span>
+      <button type="button" onClick={props.onOpenRoster}
+        className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-foreground outline-none hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring">Open roster</button>
+    </div>
+    <form onSubmit={(event) => { event.preventDefault(); if (props.value.trim()) props.onSubmit(); }}
+      className="flex items-center gap-2 rounded-md border border-input bg-background px-2 focus-within:ring-2 focus-within:ring-ring">
+      <span aria-hidden className="font-mono">›</span>
+      <input value={props.value} onChange={(event) => props.onValue(event.target.value)} aria-label={`Command for ${context.effort.name}`} spellCheck={false} autoComplete="off"
+        maxLength={4_000} placeholder={`Command: move 4 forward, D1 A, hold 8 because…${context.snapshotId ? ` · numbers from roster ${context.snapshotId}` : ""}`}
+        className="h-7 min-w-0 flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground" />
+    </form>
+    {ack ? <div role="status" aria-live="polite" className="text-[12px] text-foreground">
+      <span className="font-mono text-[11px] text-muted-foreground">› {ack.command}</span>
+      {refused ? <ClarifyNote ack={ack} onUse={props.onValue} /> : ack.message ? <p className="text-muted-foreground">{ack.message}</p> : <AckChips chips={ack.chips} />}
+    </div> : null}
   </div>;
 }

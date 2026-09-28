@@ -3,8 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures";
-import { CommandBox, COMMAND_PLACEHOLDER, type CommandBoxProps } from "./roster-command";
-import { ackView, type CommandRecord } from "./roster-view-model";
+import { CommandBox, COMMAND_PLACEHOLDER, ParentBannerStrip, type CommandBoxProps } from "./roster-command";
+import { ackView, bannerCommandInput, parentSummary, type CommandRecord, type ParentContext } from "./roster-view-model";
 
 const noop = () => {};
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, "\"").replace(/&#x27;/gu, "'").replace(/\s+/gu, " ").trim();
@@ -49,5 +49,46 @@ describe("roster command box markup", () => {
     const source = readFileSync(new URL("./roster-view.tsx", import.meta.url), "utf8");
     expect(source).not.toMatch(/(?:window|document)\.addEventListener\(\s*["']key/u);
     expect(source).toMatch(/role="region"[^>]*tabIndex=\{-1\} onKeyDown=\{props\.onKeyDown\}/u);
+  });
+});
+
+describe("effort parent banner", () => {
+  /** effort_parent_context for the fixture's parent thread: five rows wait on two decisions, and S1 pauses launches without a row in an issue. */
+  const PARENT: ParentContext = { effort: { id: ROSTER.effort.id, name: ROSTER.effort.name, archived: false }, snapshotId: ROSTER.snapshotId, revision: 4,
+    decisions: [{ n: 1, revision: 1 }, { n: 2, revision: 1 }], counts: { doing: 4, waiting: 5, decision: 5, ready: 2, issue: 0, done: 2 }, issues: 1 };
+  const banner = (context: ParentContext | null, ack: CommandRecord | null = null) => renderToStaticMarkup(createElement(ParentBannerStrip,
+    { context, value: "", onValue: noop, onSubmit: noop, onOpenRoster: noop, ack: ack && ackView(ack, NOW) }));
+
+  it("shows what needs you, Open roster, and a command field in an effort parent thread", () => {
+    const html = banner(PARENT);
+    expect(text(html)).toContain("Shelving entry · Effort parent · rev 4 · 2 decisions · 1 system issue · 2 ready Open roster");
+    expect(html).toContain('aria-label="Command for Shelving entry"');
+    expect(html).toContain(`numbers from roster ${ROSTER.snapshotId}`);
+  });
+
+  it("renders nothing in any other thread, which leaves today's effort picker as the whole banner", () => {
+    expect(banner(null)).toBe("");
+  });
+
+  it("counts asks by decision and system issue, not by the rows that wait on them, and says so only when nothing asks", () => {
+    expect(parentSummary(PARENT)).toBe("Effort parent · rev 4 · 2 decisions · 1 system issue · 2 ready");
+    // Paused launches are an ask though no row is in an issue, so the banner never says "no asks" while they are.
+    expect(parentSummary({ ...PARENT, decisions: [], counts: { ...PARENT.counts, decision: 0 } })).toBe("Effort parent · rev 4 · 1 system issue · 2 ready");
+    expect(parentSummary({ ...PARENT, decisions: [], counts: { ...PARENT.counts, decision: 0, issue: 3 }, issues: 2 })).toBe("Effort parent · rev 4 · 2 system issues · 2 ready");
+    expect(parentSummary({ ...PARENT, revision: null, decisions: [], issues: 0, counts: { ...PARENT.counts, decision: 0, ready: 0 }, effort: { ...PARENT.effort, archived: true } }))
+      .toBe("Effort parent · no instruction · no asks · 0 ready · archived");
+  });
+
+  it("sends from the banner at once, answering only the decisions its context showed", () => {
+    expect(bannerCommandInput(PARENT, "D1 A", "req-9")).toEqual({ effortId: ROSTER.effort.id, snapshotId: ROSTER.snapshotId, text: "D1 A", requestId: "req-9", source: "banner",
+      expectedRevision: 4, decisions: [{ n: 1, revision: 1 }, { n: 2, revision: 1 }] });
+    expect(bannerCommandInput(PARENT, "D1 A", "req-9")).not.toHaveProperty("delayMs");
+  });
+
+  it("shows a command's chip row inline, and a clarification with nothing run", () => {
+    expect(text(banner(PARENT, { ...ROSTER.lastCommand!, origin: "banner", fresh: true }))).toContain("+4-6 added 1, 2 kept 3 left alone, not a hold 8 held, hold wins no merge");
+    const clarified = text(banner(PARENT, { ...ROSTER.lastCommand!, text: "D1", result: { kind: "clarify", message: "D1 takes one of its options (A, B).", normalized: null }, fresh: true }));
+    expect(clarified).toContain("› D1 Nothing ran. D1 takes one of its options (A, B).");
+    expect(clarified).not.toContain("no merge");
   });
 });
