@@ -25,9 +25,9 @@ import {
   type RawUnit,
   type Pr,
 } from "./contract.js";
-import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
-import { createEffortV2, effortV2Contract } from "./effort-v2-server.js";
+import { createEffortV2, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
 import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
 import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
@@ -3393,6 +3393,19 @@ export default async function plugin(bb: BbPluginApi) {
     await syncV2Targets();
   }
 
+  /** Unarchived coordinator threads this plugin started for an effort, found by their metadata. */
+  async function coordinatorThreads(effortId: string, projectId: string): Promise<string[]> {
+    const matches: string[] = [];
+    for (let offset = 0; offset < 2000; offset += 100) {
+      const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
+      for (const thread of rows) {
+        const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
+        if (metadata.effortId === effortId && metadata.role === "coordinator" && thread.archivedAt === null && thread.deletedAt === null) matches.push(thread.id);
+      }
+      if (rows.length < 100) break;
+    }
+    return matches;
+  }
   const coordinators = createCoordinatorService(effortStore, {
     get: (threadId) => bb.sdk.threads.get({ threadId }),
     rename: (threadId, title) => bb.sdk.threads.update({ threadId, title }),
@@ -3406,18 +3419,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!source) throw new Error("The selected project has no available source for its coordinator.");
       return bb.sdk.threads.spawn({ ...args, ...(await modelFor("planning")), environment: await contextWorkspace(source.hostId) });
     },
-    recover: async (effortId, projectId) => {
-      const matches: string[] = [];
-      for (let offset = 0; offset < 2000; offset += 100) {
-        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
-        for (const thread of rows) {
-          const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
-          if (metadata.effortId === effortId && metadata.role === "coordinator" && thread.archivedAt === null && thread.deletedAt === null) matches.push(thread.id);
-        }
-        if (rows.length < 100) break;
-      }
-      return matches;
-    },
+    recover: coordinatorThreads,
   });
   const repoControllers = createRepoControllerService(effortStore, {
     get: async (threadId) => {
@@ -4488,13 +4490,42 @@ export default async function plugin(bb: BbPluginApi) {
       return rosterTargets(effort, work).map((target) => ({ target, source: explicit.has(target) ? "pr" : "ticket" }));
     };
   }
-  /** Rewrites run one at a time, each from a fresh read, so the last one reflects the latest membership. */
-  let targetSync: Promise<void> = Promise.resolve();
-  function syncV2Targets(): Promise<void> {
-    if (!effortWork.active()) return targetSync;
-    targetSync = targetSync.then(async () => effortWork.rewriteTargets(await v2Targets()))
-      .catch((error: unknown) => bb.log.warn(`v2 targets: rewrite failed: ${String(error).slice(0, 300)}`));
-    return targetSync;
+  /** Target writes run one at a time, each from a fresh read, so the last one reflects the latest membership. */
+  let targetWrites: Promise<unknown> = Promise.resolve();
+  function writeV2Targets<T>(write: (targetsOf: (effortId: string) => V2Target[]) => T): Promise<T> {
+    const run = targetWrites.then(async () => write(await v2Targets()));
+    targetWrites = run.catch(() => undefined);
+    return run;
+  }
+  async function syncV2Targets(): Promise<void> {
+    if (!effortWork.active()) return;
+    try { await writeV2Targets((targetsOf) => effortWork.rewriteTargets(targetsOf)); }
+    catch (error) { bb.log.warn(`v2 targets: rewrite failed: ${String(error).slice(0, 300)}`); }
+  }
+  /** The coordinator, the thread that created the effort, and idle threads linked to its PRs, when they run on the planning provider. */
+  async function parentCandidates(effort: EstablishedEffort, targets: readonly string[]): Promise<ParentCandidate[]> {
+    const planning = await modelFor("planning");
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const origin = /^thread-created:([^:]+):/u.exec(effortStore.sourceKey(effort.id) ?? "")?.[1] ?? null;
+    // An unresolved launch cleared the pointer; a thread it started is found by its metadata and linked, never started twice.
+    const launched = effort.coordinatorState === "creating" ? await coordinatorThreads(effort.id, effort.projectId) : [];
+    const reasons = new Map<string, ParentCandidate["reason"]>();
+    for (const [threadId, reason] of [[effort.coordinatorThreadId, "coordinator"], ...launched.map((id) => [id, "coordinator"] as const), [origin, "origin"],
+      ...targets.flatMap((target) => work.directThreadIds(target).map((id) => [id, "linked"] as const))] as const) {
+      if (threadId && !reasons.has(threadId) && reasons.size < 20) reasons.set(threadId, reason);
+    }
+    const taken = new Set(effortStore.list().flatMap((other) => other.id !== effort.id && other.coordinatorThreadId ? [other.coordinatorThreadId] : []));
+    const candidates: ParentCandidate[] = [];
+    for (const [threadId, reason] of reasons) {
+      if (taken.has(threadId)) continue;
+      try {
+        const thread = await bb.sdk.threads.get({ threadId });
+        if (thread.archivedAt !== null || thread.deletedAt !== null || configuredProviderError(thread, planning) !== null ||
+          (threadId !== effort.coordinatorThreadId && thread.status !== "idle")) continue;
+        candidates.push({ threadId, title: (thread.title ?? thread.titleFallback ?? threadId).slice(0, 200), reason, canSpawnChild: thread.canSpawnChild });
+      } catch { /* A thread that cannot be read is not a candidate. */ }
+    }
+    return candidates;
   }
 
   const effortV2 = createEffortV2({
@@ -4502,6 +4533,28 @@ export default async function plugin(bb: BbPluginApi) {
     numbers: createEffortRosterStore(db, effortStore).numbers,
     observe: observePr,
     realtime: bb.realtime,
+    execution: {
+      get: (effortId) => effortWork.execution(effortId),
+      set: async (effortId, mode, expectedRevision) => {
+        const execution = await writeV2Targets((targetsOf) => effortWork.setMode(effortId, mode, expectedRevision, targetsOf));
+        bb.realtime.publish(BOARD_CHANGED, { scanning });
+        return execution;
+      },
+    },
+    parent: {
+      candidates: parentCandidates,
+      adopt: (effortId, threadId) => coordinators.adopt(effortId, threadId),
+      start: (effortId, prompt) => coordinators.start(effortId, prompt),
+    },
+    legacy: {
+      jobs: () => advance.list().flatMap((batch) => batch.jobs.map((job) => ({ batchId: batch.id, job }))),
+      cancelQueued: (batchId, jobId) => {
+        const job = advance.get(batchId)?.jobs.find((entry) => entry.id === jobId);
+        if (job?.status !== "queued" || job.uncertain) return false;
+        return advance.progressVisibility(batchId, jobId, true).jobs.find((entry) => entry.id === jobId)?.status === "cancelled";
+      },
+    },
+    autoDispatches: (effortId) => dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effortId,
     async sources() {
       const current = await board();
       const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());

@@ -55,6 +55,41 @@ describe("coordinator identity and launch safety", () => {
       effort: { id: rejected.id, coordinatorState: "ready", coordinatorThreadId: "spawned" } });
     expect(sdk.spawn).toHaveBeenCalledTimes(2);
   });
+  it("adopts an idle thread as the coordinator by retitling and associating it, never replacing another effort's", async () => {
+    const { store, sdk, service } = setup();
+    const effort = store.establish({ ...input, sourceKey: "adopting", coordinatorState: "none" });
+    const other = store.establish({ ...input, sourceKey: "other", members: { tickets: ["ABC-202"], prUrls: [] }, coordinatorState: "none" });
+    store.save({ ...other, coordinatorThreadId: "taken", coordinatorState: "ready" });
+    await expect(service.adopt(effort.id, "taken")).rejects.toThrow("another effort");
+    vi.mocked(sdk.get).mockResolvedValueOnce({ id: "busy", projectId: "proj-1", title: null, status: "active", archivedAt: null, deletedAt: null, canSpawnChild: true });
+    await expect(service.adopt(effort.id, "busy")).rejects.toThrow("idle");
+    expect(await service.adopt(effort.id, "existing")).toMatchObject({ coordinatorThreadId: "existing", coordinatorState: "ready" });
+    expect(sdk.rename).toHaveBeenCalledExactlyOnceWith("existing", "🔍 Improve review");
+    expect(sdk.associate).toHaveBeenCalledExactlyOnceWith("existing", effort.id);
+    expect(await service.adopt(effort.id, "existing")).toMatchObject({ coordinatorThreadId: "existing" });
+    expect(sdk.rename).toHaveBeenCalledTimes(1);
+    expect(sdk.spawn).not.toHaveBeenCalled();
+  });
+  it("starts one coordinator with the caller's prompt, recording the launch first so an ambiguous one is never repeated", async () => {
+    const { store, sdk, service } = setup();
+    const effort = store.establish({ ...input, sourceKey: "starting", coordinatorState: "none" });
+    store.save({ ...effort, coordinatorThreadId: "old", coordinatorState: "ready" });
+    vi.mocked(sdk.spawn).mockRejectedValueOnce(new Error("transport lost"));
+    await expect(service.start(effort.id, "Reply only: Ready.")).rejects.toThrow("transport lost");
+    expect(store.get(effort.id)).toMatchObject({ coordinatorThreadId: null, coordinatorState: "creating" });
+    await expect(service.start(effort.id, "Reply only: Ready.")).rejects.toThrow("unresolved");
+    expect(sdk.spawn).toHaveBeenCalledExactlyOnceWith({ projectId: "proj-1", title: "🔍 Improve review", prompt: "Reply only: Ready.",
+      pluginMetadata: { effortId: effort.id, role: "coordinator" } });
+  });
+  it("keeps the coordinator a new one would replace when BB refuses the new one's workspace before creating it", async () => {
+    const { store, sdk, service } = setup();
+    const effort = store.establish({ ...input, sourceKey: "refused", coordinatorState: "none" });
+    store.save({ ...effort, coordinatorThreadId: "old", coordinatorState: "ready" });
+    vi.mocked(sdk.spawn).mockRejectedValueOnce(Object.assign(new Error(
+      "Workspace path is inside bb-managed storage but is not a workspace of this project"), { status: 409 }));
+    await expect(service.start(effort.id, "Reply only: Ready.")).rejects.toThrow("bb-managed storage");
+    expect(store.get(effort.id)).toMatchObject({ coordinatorThreadId: "old", coordinatorState: "ready" });
+  });
   it("does not reset a coordinator claim changed after the rejected attempt", () => {
     const { store } = setup();
     const claim = store.establish({ ...input, sourceKey: "claim" });

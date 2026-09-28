@@ -204,13 +204,13 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
         });
       })();
     },
-    /** Release only the exact coordinator claim whose workspace BB rejected before thread creation. */
-    resetRejectedCoordinator(record: EstablishedEffort): boolean {
+    /** Release only the exact coordinator claim whose workspace BB rejected before thread creation, restoring the pointer it replaced. */
+    resetRejectedCoordinator(record: EstablishedEffort, previous?: EstablishedEffort): boolean {
       return db.transaction(() => {
         const current = get(record.id);
         if (!current || current.coordinatorState !== "creating" || current.coordinatorThreadId !== null ||
           JSON.stringify(current) !== JSON.stringify(establishedEffortSchema.parse(record))) return false;
-        save({ ...current, coordinatorState: "none" });
+        save({ ...current, coordinatorThreadId: previous?.coordinatorThreadId ?? null, coordinatorState: previous?.coordinatorState ?? "none" });
         return true;
       })();
     },

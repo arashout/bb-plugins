@@ -1,6 +1,8 @@
 // Once an effort runs on its v2 roster, no legacy launcher may start work on a
 // PR that roster owns, including a PR it owns only through a ticket. Each test
 // pairs the v2 PR with a legacy effort's PR, which must behave exactly as before.
+// Opting in links or starts one parent thread and cancels queued legacy jobs; it
+// never changes membership or reparents a thread.
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
@@ -9,6 +11,8 @@ import { cardEffortMoveScope, type CardEffortReady } from "./card-effort.js";
 import type { RawUnit } from "./contract.js";
 import { createDispatchStore } from "./dispatch.js";
 import { createEffortStore, type EstablishedEffort } from "./effort-store.js";
+import { effortTitle } from "./effort-title.js";
+import type { EffortV2Preview } from "./effort-v2-server.js";
 import { createEffortWorkStore } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
 import { createRunStore, type RunDb } from "./runstore.js";
@@ -42,13 +46,13 @@ const facts = (number: number): AdvanceFacts => ({ prUrl: url(number), number, t
   approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
 
 /** A legacy Advance batch saved by an earlier run, which the service loads when the plugin starts. */
-function saveBatch(db: RunDb, number: number, status: "queued" | "needs-attention") {
+function saveBatch(db: RunDb, number: number, status: "queued" | "running" | "needs-attention", saved: { uncertain?: boolean; threadId?: string } = {}) {
   const id = `00000000-0000-4000-8000-0000000000${number}`;
   const jobId = `00000000-0000-4000-8000-0000000001${number}`;
   const routing = { ...facts(number), eligible: true, workspace: "create", projectId: PROJECT, hostId: HOST, sourcePath: `/p/folio-${number}`,
     path: `/p/folio-${number}`, effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null };
   const job = { ...routing, id: jobId, hiddenFromProgress: false, status, attemptId: null, dedicated: false, previousAttempts: [],
-    threadId: null, checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
+    threadId: saved.threadId ?? null, checkedHeadOid: null, updatedAt: Date.now(), uncertain: saved.uncertain ?? false };
   db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(id, JSON.stringify({ id, token: `00000000-0000-4000-8000-0000000002${number}`,
     createdAt: Date.now(), cancelled: false, jobs: [job], facts: { [jobId]: routing }, pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
 }
@@ -60,6 +64,7 @@ async function setup() {
   const hostCalls: { method: string; input: any }[] = [];
   let failWorkspace = false;
   const beforeWorkspace = vi.fn(async () => {});
+  const beforeGet = vi.fn(async (_threadId: string) => {});
   let spawned = 0;
   const spawn = vi.fn(async (args: Record<string, any>) => {
     const role = args.pluginMetadata?.role;
@@ -80,6 +85,7 @@ async function setup() {
         activity: { activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 } })) as never,
       spawn, send,
       get: async ({ threadId }: { threadId: string }) => {
+        await beforeGet(threadId);
         const thread = threads.get(threadId);
         if (!thread) throw Object.assign(new Error("missing thread"), { status: 404 });
         return thread as never;
@@ -138,7 +144,7 @@ async function setup() {
   const workedOn = (prUrl: string) => [
     ...spawn.mock.calls.filter(([args]) => args.pluginMetadata?.prUrl === prUrl || args.environment?.workspace?.path?.includes(`folio-${prUrl.split("/").at(-1)}`)),
     ...hostCalls.filter((call) => call.method === "advanceWorkspace" && call.input.prUrl === prUrl)];
-  return { bb, harness, db, store, work, returns, used, rpc, optIn, preview, job, workedOn, spawn, send, threads, metadata, hostCalls, beforeWorkspace,
+  return { bb, harness, db, store, work, returns, used, rpc, optIn, preview, job, workedOn, spawn, send, threads, metadata, hostCalls, beforeWorkspace, beforeGet,
     failWorkspace: (value: boolean) => { failWorkspace = value; } };
 }
 
@@ -381,5 +387,231 @@ describe("v2 execution fence", () => {
     expect(await env.rpc("thread_message", { prUrl: RETURNS, threadId: "thr-author", message: "Also rerun the shelf tests." }))
       .toMatchObject({ ok: true });
     expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-author" }));
+  });
+});
+
+describe("v2 opt-in", () => {
+  type Preview = EffortV2Preview;
+  /** A thread on the planning provider unless patched, linked to a PR through a finished action when one is named. */
+  function thread(env: Awaited<ReturnType<typeof setup>>, id: string, patch: Partial<ReturnType<typeof makeThreadResponse>> = {}, linkedPr?: number) {
+    env.threads.set(id, makeThreadResponse({ id, projectId: PROJECT, status: "idle", providerId: "codex", title: `Thread ${id}`, ...patch }));
+    if (linkedPr === undefined) return;
+    const runs = createRunStore(env.db);
+    runs.settle(runs.begin({ path: `/p/folio-${linkedPr}`, ticket: `ABC-${linkedPr}`, prUrl: url(linkedPr), prNumber: linkedPr,
+      action: "resolve-conflicts", mode: "new", threadId: id }), true, "Done");
+  }
+  const giftWrap = (env: Awaited<ReturnType<typeof setup>>) => env.store.establish({ sourceKey: "thread-created:thr-origin:11111111-1111-4111-8111-111111111111",
+    name: "Gift wrap", goal: "", projectId: PROJECT, coordinatorState: "none", members: { tickets: ["ABC-16"], prUrls: [] } });
+  const noThreadWrites = (env: Awaited<ReturnType<typeof setup>>) =>
+    expect([...env.threads.values()].every((entry) => entry.parentThreadId === null)).toBe(true);
+
+  it("offers the coordinator, the thread that created the effort, and idle linked threads on the planning provider as parents", async () => {
+    const env = await setup();
+    const gifts = giftWrap(env);
+    thread(env, "thr-origin");
+    thread(env, "thr-linked", {}, 16);
+    thread(env, "thr-other-provider", { providerId: "claude-code" }, 16);
+    thread(env, "thr-busy", { status: "active" }, 16);
+    thread(env, "thr-used-parent", {}, 16);
+    env.store.save({ ...env.used, coordinatorThreadId: "thr-used-parent", coordinatorState: "ready" });
+    const candidates = async () => (await env.rpc("effort_v2_preview", { effortId: gifts.id }) as Preview).parent;
+    expect(await candidates()).toEqual({ recommended: "thr-origin", reason: "The thread that created this effort becomes its parent.", candidates: [
+      { threadId: "thr-origin", title: "Thread thr-origin", reason: "origin", canSpawnChild: true },
+      { threadId: "thr-linked", title: "Thread thr-linked", reason: "linked", canSpawnChild: true }] });
+    // A thread the preview left out is refused at opt-in too, before anything is written.
+    await expect(env.rpc("effort_v2_set", { effortId: gifts.id, mode: "v2", expectedRevision: 0, parentThreadId: "thr-other-provider" }))
+      .rejects.toThrow("can't be this effort's parent");
+    expect([env.work.execution(gifts.id).mode, env.metadata.has("thr-other-provider")]).toEqual(["legacy", false]);
+    thread(env, "thr-coordinator");
+    env.store.save({ ...env.store.get(gifts.id)!, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
+    expect(await candidates()).toMatchObject({ recommended: "thr-coordinator",
+      candidates: [{ threadId: "thr-coordinator", reason: "coordinator" }, { threadId: "thr-origin" }, { threadId: "thr-linked" }] });
+    // Returns desk has no coordinator, no originating thread, and no linked thread: it would start one new parent.
+    expect((await env.rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview).parent).toMatchObject({ candidates: [], recommended: null });
+  });
+
+  it("links a chosen thread as the parent by retitling and associating it, sends nothing, and fences the roster at once", async () => {
+    const env = await setup();
+    const gifts = giftWrap(env);
+    thread(env, "thr-origin");
+    const result = await env.rpc("effort_v2_set", { effortId: gifts.id, mode: "v2", expectedRevision: 0, parentThreadId: "thr-origin" });
+    expect(result).toEqual({ execution: { mode: "v2", revision: 1 }, parentThreadId: "thr-origin", cancelled: [], draining: [] });
+    expect(env.threads.get("thr-origin")?.title).toBe(effortTitle("Gift wrap"));
+    expect(env.metadata.get("thr-origin")).toEqual({ effortId: gifts.id, role: "coordinator" });
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(env.send).not.toHaveBeenCalled();
+    noThreadWrites(env);
+    // The parent lives only in the coordinator pointer; membership is unchanged.
+    expect(env.store.get(gifts.id)).toMatchObject({ coordinatorThreadId: "thr-origin", members: gifts.members });
+    expect((env.db.prepare("PRAGMA table_info(effort_execution)").all() as { name: string }[]).map((column) => column.name))
+      .toEqual(["effort_id", "mode", "revision", "updated_at"]);
+    expect(env.work.managedBy(WRAP)).toBe(gifts.id);
+  });
+
+  it("refuses a second opt-in while the first is changing the effort, so the parent it reports is the one saved", async () => {
+    const env = await setup();
+    const gifts = giftWrap(env);
+    thread(env, "thr-origin");
+    thread(env, "thr-linked", {}, 16);
+    const settled = await Promise.allSettled(["thr-origin", "thr-linked"].map((parentThreadId) =>
+      env.rpc("effort_v2_set", { effortId: gifts.id, mode: "v2", expectedRevision: 0, parentThreadId })));
+    const joined = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+    expect(joined).toHaveLength(1);
+    expect(settled.find((outcome) => outcome.status === "rejected")).toMatchObject({ reason: expect.objectContaining({ message: expect.stringContaining("already changing") }) });
+    expect(env.store.get(gifts.id)?.coordinatorThreadId).toBe(joined[0].parentThreadId);
+    expect(env.metadata.has(joined[0].parentThreadId === "thr-origin" ? "thr-linked" : "thr-origin")).toBe(false);
+  });
+
+  it("refuses an opt-in whose preview was still reading when another landed, before it starts or links a parent", async () => {
+    const env = await setup();
+    const gifts = giftWrap(env);
+    thread(env, "thr-origin");
+    // The late request's preview read revision 0, then waits on a thread read while the other opt-in lands.
+    let resume!: () => void;
+    const reading = new Promise<void>((started) => env.beforeGet.mockImplementationOnce(async () => {
+      started();
+      await new Promise<void>((resolve) => { resume = resolve; });
+    }));
+    const late = env.rpc("effort_v2_set", { effortId: gifts.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
+    await reading;
+    expect(await env.rpc("effort_v2_set", { effortId: gifts.id, mode: "v2", expectedRevision: 0, parentThreadId: "thr-origin" }))
+      .toMatchObject({ execution: { mode: "v2", revision: 1 }, parentThreadId: "thr-origin" });
+    resume();
+    await expect(late).rejects.toThrow("execution mode changed");
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(env.store.get(gifts.id)?.coordinatorThreadId).toBe("thr-origin");
+  });
+
+  it("offers the thread an unresolved parent launch started, and blocks opt-in while it finds none", async () => {
+    const env = await setup();
+    const launch = env.spawn.getMockImplementation()!;
+    // Returns desk's launch started a thread before its answer was lost; Used books' launch left no thread.
+    env.spawn.mockImplementationOnce(async (args) => { await launch(args); throw new Error("socket hang up"); })
+      .mockRejectedValueOnce(new Error("socket hang up"));
+    const optIn = (effort: EstablishedEffort, parentThreadId: string | null) =>
+      env.rpc("effort_v2_set", { effortId: effort.id, mode: "v2", expectedRevision: 0, parentThreadId });
+    const preview = async (effort: EstablishedEffort) => await env.rpc("effort_v2_preview", { effortId: effort.id }) as Preview;
+    await expect(optIn(env.returns, null)).rejects.toThrow("socket hang up");
+    await expect(optIn(env.used, null)).rejects.toThrow("socket hang up");
+    expect(await preview(env.returns)).toMatchObject({ blockers: [],
+      parent: { recommended: "thr-coordinator-1", candidates: [{ threadId: "thr-coordinator-1", reason: "coordinator" }] } });
+    await expect(optIn(env.returns, null)).rejects.toThrow("unresolved");
+    expect(await optIn(env.returns, "thr-coordinator-1")).toMatchObject({ execution: { mode: "v2" }, parentThreadId: "thr-coordinator-1" });
+    const blocker = "A coordinator launch is unresolved. Inspect it before moving this effort to its roster.";
+    expect(await preview(env.used)).toMatchObject({ blockers: [blocker], parent: { candidates: [] } });
+    await expect(optIn(env.used, null)).rejects.toThrow(blocker);
+    expect(env.spawn).toHaveBeenCalledTimes(2);
+    expect(env.work.execution(env.used.id).mode).toBe("legacy");
+  });
+
+  it("starts one new parent on the planning model with the minimal prompt when none is chosen", async () => {
+    const env = await setup();
+    const result = await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.spawn.mock.calls[0]![0]).toMatchObject({ providerId: "codex", model: "gpt-6-sol", reasoningLevel: "medium", projectId: PROJECT,
+      title: effortTitle("Returns desk"), pluginMetadata: { effortId: env.returns.id, role: "coordinator" },
+      prompt: "This is the effort parent thread for Returns desk. Workstreams posts rosters and decisions here. Reply only: Ready." });
+    expect(env.spawn.mock.calls[0]![0]).not.toHaveProperty("parentThreadId");
+    expect(env.send).not.toHaveBeenCalled();
+    expect(result.parentThreadId).toBe(env.store.get(env.returns.id)!.coordinatorThreadId);
+    expect(env.work.managedBy(RETURNS)).toBe(env.returns.id);
+  });
+
+  it("cancels each queued legacy job at opt-in and lists running or uncertain ones as draining", async () => {
+    const env = await setup();
+    // Used books' PR and the gift-wrap ticket join Returns desk, so its roster is 12, 14, and 16.
+    env.store.transfer(env.returns.key, { tickets: ["ABC-14", "ABC-16"], prUrls: [USED] });
+    thread(env, "thr-folio-16", { status: "active" });
+    saveBatch(env.db, 12, "queued");
+    // A running and an uncertain worker fill Advance's two slots, so the queued job is still waiting at opt-in.
+    saveBatch(env.db, 14, "needs-attention", { uncertain: true });
+    saveBatch(env.db, 16, "running", { threadId: "thr-folio-16" });
+    const restarted = await env.harness.lifecycle.reload(plugin);
+    cleanups.push(() => restarted.harness.lifecycle.dispose());
+    const rpc = (method: string, input: unknown) => restarted.harness.callRpc(method as never, input as never) as Promise<any>;
+    const preview = await rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview;
+    expect(preview).toMatchObject({ v2Execution: "dry-run", blockers: [],
+      consequence: "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
+      members: { tickets: 3, prUrls: 1, prs: 3, open: 3 } });
+    expect(preview.legacy.queued.map((job) => [job.number, job.status])).toEqual([[12, "queued"]]);
+    expect(preview.legacy.draining.map((job) => [job.number, job.status, job.uncertain]).sort()).toEqual([[14, "needs-attention", true], [16, "running", false]]);
+    const result = await rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
+    expect(result).toMatchObject({ cancelled: preview.legacy.queued, draining: preview.legacy.draining });
+    const jobs = (await rpc("advance_get", null) as AdvanceBatch[]).flatMap((batch) => batch.jobs);
+    expect(jobs.map((job) => [job.number, job.status, job.uncertain]).sort())
+      .toEqual([[12, "cancelled", false], [14, "needs-attention", true], [16, "running", false]]);
+    expect(env.workedOn(RETURNS)).toEqual([]);
+  });
+
+  it("reports a queued job that launched while the parent was being linked as draining, not cancelled", async () => {
+    const env = await setup();
+    thread(env, "thr-coordinator");
+    env.store.save({ ...env.returns, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
+    thread(env, "thr-linked", {}, 12);
+    let prepared!: () => void;
+    env.beforeWorkspace.mockImplementationOnce(() => new Promise<void>((resolve) => { prepared = resolve; }));
+    await env.rpc("advance_start", { token: (await env.rpc("advance_preview", { prUrls: [RETURNS] }) as AdvancePreview).token });
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+    expect((await env.rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview).legacy.queued).toMatchObject([{ prUrl: RETURNS }]);
+    // Its checkout is ready as opt-in reads the chosen parent a second time, to link it, so the job launches before the fence lands.
+    let reads = 0;
+    env.beforeGet.mockImplementation(async (threadId) => {
+      if (threadId !== "thr-linked" || ++reads !== 2) return;
+      prepared();
+      await vi.waitFor(async () => expect(await env.job(RETURNS)).toMatchObject({ status: "running" }));
+    });
+    expect(await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: "thr-linked" }))
+      .toMatchObject({ cancelled: [], draining: [{ prUrl: RETURNS, status: "running" }] });
+  });
+
+  it("refuses opt-in for an archived or merged effort, or while Auto dispatch targets it, and changes nothing", async () => {
+    const env = await setup();
+    const refused = async (effort: EstablishedEffort, blocker: string) => {
+      expect((await env.rpc("effort_v2_preview", { effortId: effort.id }) as Preview).blockers).toEqual([blocker]);
+      await expect(env.rpc("effort_v2_set", { effortId: effort.id, mode: "v2", expectedRevision: 0, parentThreadId: null })).rejects.toThrow(blocker);
+    };
+    const dispatch = createDispatchStore(env.db);
+    dispatch.setPolicy("auto", env.used.key);
+    await refused(env.used, "Turn off automatic dispatch for this effort before moving it to its roster.");
+    dispatch.setPolicy("off", null);
+    env.store.setArchived(env.returns.id, true);
+    await refused(env.returns, "Restore this effort before moving it to its roster.");
+    const gifts = giftWrap(env);
+    env.store.merge(gifts.id, env.used.id);
+    await refused(gifts, "This effort was merged into Used books. Opt in Used books instead.");
+    expect([env.returns, env.used, gifts].map((effort) => env.work.execution(effort.id).mode)).toEqual(["legacy", "legacy", "legacy"]);
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
+  it("opts out at the current revision only, keeping the parent and every record and lifting the fence", async () => {
+    const env = await setup();
+    const joined = await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
+    await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 1, parentThreadId: null })).rejects.toThrow("already runs on its roster");
+    await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 0 })).rejects.toThrow("execution mode changed");
+    await expect(env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 1, parentThreadId: null })).rejects.toThrow("keeps the parent");
+    expect(await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "legacy", expectedRevision: 1 }))
+      .toEqual({ execution: { mode: "legacy", revision: 2 }, parentThreadId: joined.parentThreadId, cancelled: [], draining: [] });
+    expect(env.store.get(env.returns.id)).toMatchObject({ coordinatorThreadId: joined.parentThreadId, members: env.returns.members });
+    expect(env.work.managedBy(RETURNS)).toBeNull();
+    expect(await env.preview([RETURNS])).toMatchObject([{ eligible: true }]);
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("previews and opts in from the CLI with the revision the preview showed", async () => {
+    const env = await setup();
+    const preview = await env.harness.runCli(["v2", "preview", "Returns", "desk"]);
+    expect(preview).toMatchObject({ exitCode: 0 });
+    expect(preview.stdout!.split("\n").slice(0, 4)).toEqual(["Returns desk · legacy · revision 0",
+      "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
+      "PRs: 1 (1 open) from 1 tickets and 0 PRs",
+      "Parent: a new thread. No coordinator or originating thread is available on the planning model, so one new parent starts unless you choose a linked thread."]);
+    const stale = await env.harness.runCli(["v2", "set", "Returns", "desk", "--mode", "v2", "--revision", "3", "--new-parent"]);
+    expect(stale).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("execution mode changed") });
+    // A stale request is refused before it starts a parent, not after.
+    expect(env.spawn).not.toHaveBeenCalled();
+    const joined = await env.harness.runCli(["v2", "set", "Returns", "desk", "--mode", "v2", "--revision", "0", "--new-parent"]);
+    expect(joined).toMatchObject({ exitCode: 0,
+      stdout: `Runs on its roster (revision 1). Parent: ${env.store.get(env.returns.id)!.coordinatorThreadId}.\nCancelled: none. Draining: none.` });
+    expect(env.work.managedBy(RETURNS)).toBe(env.returns.id);
   });
 });
