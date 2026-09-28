@@ -13,7 +13,8 @@ function setup() {
   const db = new Database(":memory:"); dbs.push(db); EFFORT_MIGRATIONS.forEach((sql) => db.exec(sql)); db.exec(REPO_CONTROLLER_MIGRATION);
   const store = createEffortStore(db);
   const sdk: CoordinatorSdk = { get: vi.fn(async (id) => ({ id, projectId: "proj-1", title: null, status: "idle", archivedAt: null, deletedAt: null, canSpawnChild: true })),
-    rename: vi.fn(async () => undefined), associate: vi.fn(async () => undefined), recover: vi.fn(async () => []), spawn: vi.fn(async () => ({ id: "spawned" })) };
+    rename: vi.fn(async () => undefined), associate: vi.fn(async () => undefined), recover: vi.fn(async () => []), spawn: vi.fn(async () => ({ id: "spawned" })),
+    models: async () => ({ code: { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" }, planning: { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "medium" } }) };
   return { store, sdk, service: createCoordinatorService(store, sdk) };
 }
 describe("coordinator identity and launch safety", () => {
@@ -69,9 +70,10 @@ describe("coordinator identity and launch safety", () => {
     const stableKey = store.source(input.groupKey)!.key;
     const second = service.coordinate(input, plan);
     const third = service.coordinate({ ...input, groupKey: stableKey }, plan);
-    expect(sdk.spawn).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(sdk.spawn).toHaveBeenCalledTimes(1));
     finish({ id: "spawned" });
     expect(await first).toEqual(await second); expect(await second).toEqual(await third);
+    expect(sdk.spawn).toHaveBeenCalledTimes(1);
   });
   it("recovers a completed spawn after reload without creating a second coordinator", async () => {
     const { store, sdk } = setup();

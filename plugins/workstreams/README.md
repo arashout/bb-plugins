@@ -56,7 +56,7 @@ context needed to name a group. Automatic grouping calls happen when semantic
 inputs change; an unchanged rescan reuses cached decisions. The optional **Fetch Linear details
 via agent** action starts a BB thread only when you confirm it.
 
-Workstreams starts planning and context threads with Codex gpt-6-sol at medium reasoning and work or repair threads at high reasoning. Existing threads from another provider remain available as history; choose **New agent** to continue through Workstreams on Sol.
+Workstreams starts planning and context threads with the **Planning model** setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the **Code-work model** setting (`codeModel`, default `codex/gpt-6-sol/high`). Each value is `providerId/model/reasoningLevel`. Existing threads from another provider remain available as history; choose **New agent** to continue through Workstreams on the configured provider.
 
 ## Organize work from a thread
 

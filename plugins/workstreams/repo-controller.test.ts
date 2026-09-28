@@ -18,6 +18,7 @@ function setup() {
   const sdk: RepoControllerSdk = {
     get: vi.fn(async (id) => { const thread = threads.get(id); if (!thread) throw new Error("unavailable"); return thread; }),
     recover: vi.fn(async () => []),
+    models: async () => ({ code: { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" }, planning: { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "medium" } }),
     spawn: vi.fn(async (args) => {
       const id = `repo-${++index}`;
       threads.set(id, { id, projectId: args.projectId, parentThreadId: args.parentThreadId, status: "active", canSpawnChild: true,

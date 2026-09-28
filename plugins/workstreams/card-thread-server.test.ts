@@ -110,6 +110,18 @@ it("keeps a legacy provider thread as history and refuses to send another turn t
   expect(env.send).not.toHaveBeenCalled();
 });
 
+it("starts and messages context agents on the configured planning model, whatever its provider", async () => {
+  const env = await setup({ remoteOnly: true });
+  await expect(env.harness.behavior.setSettings({ planningModel: "claude-opus/max" })).rejects.toThrow();
+  await env.harness.behavior.setSettings({ planningModel: "claude-code/claude-opus/max" });
+  const created = await env.message({ prUrl: URL }, null) as { ok: true; threadId: string };
+  expect(env.spawn.mock.calls.map(([args]) => [args.pluginMetadata.role, args.providerId, args.model, args.reasoningLevel])).toEqual([
+    ["coordinator", "claude-code", "claude-opus", "max"], ["repo", "codex", "gpt-6-sol", "high"], ["context", "claude-code", "claude-opus", "max"],
+  ]);
+  expect(await env.message({ prUrl: URL }, created.threadId)).toMatchObject({ ok: true, created: false });
+  expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: created.threadId, model: "claude-opus", reasoningLevel: "max" }));
+});
+
 it("keeps a newly created PR context in the first twenty links while thread facts catch up", async () => {
   const initialThreads = Array.from({ length: 24 }, (_, index) => ({ id: `thr-history-${index}`,
     patch: { status: "active" }, metadata: { linkedPrUrl: URL } }));

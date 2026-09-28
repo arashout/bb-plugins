@@ -6,7 +6,7 @@
 import { z } from "zod";
 import type { LinearDetail } from "./linear.js";
 import { projectForPath } from "./spawn.js";
-import { SOL_MEDIUM } from "./execution.js";
+import type { ModelChoice } from "./execution.js";
 
 /** The most tickets one fallback run asks about. */
 export const AGENT_FETCH_MAX = 60;
@@ -94,13 +94,10 @@ export type LinearFetchSdk = {
     list(): Promise<readonly { id: string; sources: readonly { hostId: string; path: string }[] }[]>;
   };
   threads: {
-    spawn(args: {
+    spawn(args: ModelChoice & {
       projectId: string;
       environment: { type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } };
       prompt: string;
-      providerId: "codex";
-      model: "gpt-6-sol";
-      reasoningLevel: "medium";
       pluginMetadata: { purpose: string };
     }): Promise<{ id: string }>;
   };
@@ -115,6 +112,7 @@ export async function startLinearFetch(
   sdk: LinearFetchSdk,
   roots: readonly string[],
   tickets: readonly string[],
+  model: ModelChoice,
 ): Promise<{ ok: true; threadId: string; root: string; asked: string[] } | { ok: false; error: string }> {
   if (tickets.length === 0) return { ok: false, error: "Every ticket on the board already has Linear detail or is covered by a key." };
   const projects = await sdk.projects.list();
@@ -123,7 +121,7 @@ export async function startLinearFetch(
     if (project === null) continue;
     const asked = tickets.slice(0, AGENT_FETCH_MAX);
     const thread = await sdk.threads.spawn({
-      ...SOL_MEDIUM,
+      ...model,
       projectId: project.projectId,
       environment: { type: "host", hostId: project.hostId, workspace: { type: "unmanaged", path: root } },
       prompt: agentFetchPrompt(asked),

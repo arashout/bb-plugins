@@ -190,6 +190,7 @@ describe("the agent fallback", () => {
 });
 
 describe("starting the agent fallback", () => {
+  const PLANNING = { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "medium" } as const;
   function fakeSdk(projects: { id: string; sources: { hostId: string; path: string }[] }[]) {
     const spawned: unknown[] = [];
     return {
@@ -211,11 +212,12 @@ describe("starting the agent fallback", () => {
       { id: "prj-home", sources: [{ hostId: "host-a", path: "/Users/inkwell" }] },
       { id: "prj-inkwell", sources: [{ hostId: "host-a", path: "/Users/inkwell/checkouts" }] },
     ]);
-    const result = await startLinearFetch(sdk, ["/Users/inkwell/checkouts"], ["SHOP-12", "SHOP-13"]);
+    const result = await startLinearFetch(sdk, ["/Users/inkwell/checkouts"], ["SHOP-12", "SHOP-13"], PLANNING);
     expect(result).toEqual({ ok: true, threadId: "thr-fetch-1", root: "/Users/inkwell/checkouts", asked: ["SHOP-12", "SHOP-13"] });
     expect(spawned).toHaveLength(1);
     expect(spawned[0]).toEqual(
       expect.objectContaining({
+        ...PLANNING,
         projectId: "prj-inkwell",
         environment: { type: "host", hostId: "host-a", workspace: { type: "unmanaged", path: "/Users/inkwell/checkouts" } },
         prompt: agentFetchPrompt(["SHOP-12", "SHOP-13"]),
@@ -225,16 +227,16 @@ describe("starting the agent fallback", () => {
 
   it("spawns nothing when there is nothing to ask, or no project holds the checkouts", async () => {
     const empty = fakeSdk([{ id: "prj-inkwell", sources: [{ hostId: "host-a", path: "/Users/inkwell/checkouts" }] }]);
-    expect((await startLinearFetch(empty.sdk, ["/Users/inkwell/checkouts"], [])).ok).toBe(false);
+    expect((await startLinearFetch(empty.sdk, ["/Users/inkwell/checkouts"], [], PLANNING)).ok).toBe(false);
     const orphan = fakeSdk([{ id: "prj-other", sources: [{ hostId: "host-a", path: "/elsewhere" }] }]);
-    expect((await startLinearFetch(orphan.sdk, ["/Users/inkwell/checkouts"], ["SHOP-12"])).ok).toBe(false);
+    expect((await startLinearFetch(orphan.sdk, ["/Users/inkwell/checkouts"], ["SHOP-12"], PLANNING)).ok).toBe(false);
     expect([...empty.spawned, ...orphan.spawned]).toEqual([]);
   });
 
   it("caps the tickets one run asks about", async () => {
     const { sdk } = fakeSdk([{ id: "prj-inkwell", sources: [{ hostId: "host-a", path: "/c" }] }]);
     const many = Array.from({ length: AGENT_FETCH_MAX + 10 }, (_, index) => `SHOP-${index + 1}`);
-    const result = await startLinearFetch(sdk, ["/c"], many);
+    const result = await startLinearFetch(sdk, ["/c"], many, PLANNING);
     expect(result.ok && result.asked).toHaveLength(AGENT_FETCH_MAX);
   });
 });

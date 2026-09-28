@@ -82,7 +82,8 @@ export function createAdvanceService(db: RunDb, deps: {
   controller(facts: AdvanceFacts): Promise<string | null>;
   spawn(facts: AdvanceFacts, path: string, prompt: string, jobId: string): Promise<string>;
   send(threadId: string, prompt: string): Promise<void>;
-  thread(threadId: string): Promise<{ status: string; archivedAt: number | null; deletedAt: number | null; output: string }>;
+  /** `reusable` is false when the thread's fixed provider differs from the configured Code-work provider. */
+  thread(threadId: string): Promise<{ status: string; archivedAt: number | null; deletedAt: number | null; output: string; reusable: boolean }>;
   recover(jobId: string, projectId: string): Promise<string[]>;
   changed(): void;
   verified(prUrl: string, originalPath: string | null): void;
@@ -266,7 +267,7 @@ export function createAdvanceService(db: RunDb, deps: {
               if (threadId) {
                 const thread = await deps.thread(threadId);
                 if (thread.status !== "idle" && thread.status !== "error") throw new Error("Repository worker is still active; inspect it before continuing this queue");
-                if (thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) threadId = null;
+                if (thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null || !thread.reusable) threadId = null;
               }
               if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) {
                 update(batch, job, { status: "needs-attention", detail: "Another thread or action is working on this PR or checkout" }); continue;
@@ -279,6 +280,7 @@ export function createAdvanceService(db: RunDb, deps: {
               deps.assertAdvanceAllowed?.(job.prUrl);
               if (facts.effortKey !== null) threadId = await deps.controller(facts);
               if (facts.effortKey !== null && threadId === null) throw new Error("The effort's repository controller could not be resolved. Refresh the preview.");
+              if (threadId && facts.effortKey !== null && !(await deps.thread(threadId)).reusable) throw new Error("The repository controller runs on another provider than the Code-work model, and a thread's provider is fixed at creation.");
               if (await deps.busy(job.prUrl, facts.path, threadId ?? undefined)) throw new Error("Another writer started before launch");
               if (interrupted(batch, job)) continue;
               const launchConflict = reservationConflict(facts, path, job.id, true);
@@ -334,7 +336,7 @@ export function createAdvanceService(db: RunDb, deps: {
     } else if (job.uncertain) {
       throw new Error("The previous launch is uncertain. Recheck the item to identify its worker before starting a repair.");
     }
-    const canContinue = job.threadId !== null && job.path !== null && thread?.status === "idle" && thread.archivedAt === null && thread.deletedAt === null &&
+    const canContinue = job.threadId !== null && job.path !== null && thread?.status === "idle" && thread.reusable && thread.archivedAt === null && thread.deletedAt === null &&
       !otherOwner(job, job.threadId) && !batch.jobs.some((entry) => entry.id !== job.id && entry.repo === job.repo && entry.status === "queued");
     return { canContinue };
   }

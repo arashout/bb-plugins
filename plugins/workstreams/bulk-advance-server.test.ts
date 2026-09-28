@@ -154,6 +154,21 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     savedBatch: (id: string) => bb.storage.database().prepare("SELECT id, body FROM advance_batches WHERE id = ?").get(id) as { id: string; body: string }, preview: async (prUrl = url) => await harness.callRpc("advance_preview", { prUrls: [prUrl] }) as AdvancePreview };
 }
 
+/** An established effort whose coordinator and repository controller already exist on the default provider. */
+async function seedRepoController(env: Awaited<ReturnType<typeof setup>>) {
+  const board = await env.harness.callRpc("board_get", null) as { groups: { key: string; name: string; level: string; clusters: { ticket: string }[] }[] };
+  const group = board.groups.find((entry) => entry.level === "effort" && entry.clusters.some((cluster) => cluster.ticket === "ABC-42"))!;
+  const store = createEffortStore(env.bb.storage.database());
+  const effort = store.establish({ sourceKey: group.key, name: group.name, goal: "", projectId: "project-example",
+    members: { tickets: ["ABC-42"], prUrls: [env.url] }, coordinatorState: "none" });
+  store.save({ ...effort, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
+  env.threads.set("thr-coordinator", makeThreadResponse({ id: "thr-coordinator", projectId: "project-example", status: "idle", providerId: "codex" }));
+  env.threads.set("thr-repo", { ...makeThreadResponse({ id: "thr-repo", projectId: "project-example", status: "idle", providerId: "codex" }),
+    parentThreadId: "thr-coordinator", environment: { hostId: HOST } } as never);
+  const record = store.claimRepoController({ effortId: effort.id, repo: "example/widget", projectId: "project-example", hostId: HOST });
+  store.saveRepoController({ ...record.record, threadId: "thr-repo", state: "ready" });
+}
+
 async function failedBatch(env: Awaited<ReturnType<typeof setup>>) {
   const batch = await env.harness.callRpc("advance_start", { token: (await env.preview()).token }) as AdvanceBatch;
   await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "needs-attention" }] }]));
@@ -267,6 +282,28 @@ describe("bulk advance server integration", () => {
     expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "running", threadId: "thr-repo" }] }]);
     expect(env.send).toHaveBeenCalledOnce();
   });
+  it("starts the repository controller on the Code-work provider, because Advance hands it code work", async () => {
+    const env = await setup();
+    await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
+    await env.harness.callRpc("advance_start", { token: (await env.preview()).token });
+    await vi.waitFor(() => expect(env.send).toHaveBeenCalledOnce());
+    expect(env.spawn.mock.calls.map(([args]) => [args.pluginMetadata.role, args.providerId, args.model, args.reasoningLevel])).toEqual([
+      ["coordinator", "codex", "gpt-6-sol", "medium"], ["repo", "claude-code", "claude-opus", "high"]]);
+    expect(env.spawn.mock.calls[0]![0].prompt).toContain("claude-code/claude-opus/high for work agents and codex/gpt-6-sol/medium for planning agents");
+    expect(env.spawn.mock.calls[1]![0].prompt).toContain("claude-code/claude-opus/high for work agents and codex/gpt-6-sol/medium for planning agents");
+    expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-repo", model: "claude-opus", reasoningLevel: "high" }));
+    expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "running", threadId: "thr-repo", uncertain: false }] }]);
+  });
+  it("refuses a controller on another provider before recording a launch, so no uncertain owner blocks the PR", async () => {
+    const env = await setup();
+    await seedRepoController(env);
+    await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
+    await env.harness.callRpc("advance_start", { token: (await env.preview()).token });
+    await vi.waitFor(async () => expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ jobs: [{ status: "needs-attention",
+      uncertain: false, detail: expect.stringContaining("repository controller runs on another provider") }] }]));
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect(env.send).not.toHaveBeenCalled();
+  });
   it("rechecks a saved failed PR after it leaves tracked inventory and confirms it merged", async () => {
     const env = await setup({ remoteOnly: true, failFirstWorkspace: true });
     const ids = await failedBatch(env);
@@ -328,6 +365,32 @@ describe("bulk advance server integration", () => {
       pluginMetadata: { role: "rebase-worker", prUrl: env.url } });
     expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" });
     expect(env.spawn.mock.calls[2]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");
+  });
+
+  it("starts Advance repository parents on the Planning model and its worker on the Code-work model", async () => {
+    const env = await setup({ remoteOnly: true });
+    await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high", planningModel: "claude-code/claude-sonnet/low" });
+    await env.harness.callRpc("advance_start", { token: (await env.preview()).token });
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(3));
+    expect(env.spawn.mock.calls.map(([args]) => [args.pluginMetadata.role, args.providerId, args.model, args.reasoningLevel])).toEqual([
+      ["unassigned-root", "claude-code", "claude-sonnet", "low"], ["unassigned-repo", "claude-code", "claude-sonnet", "low"],
+      ["rebase-worker", "claude-code", "claude-opus", "high"]]);
+  });
+
+  it("starts an Advance repair and a manual PR worker on the Code-work model", async () => {
+    const env = await setup({ remoteOnly: true, failFirstWorkspace: true });
+    const ids = await failedBatch(env);
+    await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
+    const plan = await env.harness.callRpc("advance_repair_plan", ids) as AdvanceRepairPlan;
+    await env.harness.callRpc("advance_repair_run", { token: plan.token, mode: "new", threadId: null, instruction: "Fix the failure." });
+    expect(env.spawn.mock.calls.at(-1)![0]).toMatchObject({ providerId: "claude-code", model: "claude-opus", reasoningLevel: "high",
+      pluginMetadata: { role: "advance-repair" } });
+    const manual = await setup();
+    await manual.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
+    expect(await manual.harness.callRpc("agent_run", { path: PATH, action: "resolve-conflicts", mode: "new", threadId: null,
+      prompt: "Repair the checkout." })).toMatchObject({ ok: true });
+    expect(manual.spawn.mock.calls.at(-1)![0]).toMatchObject({ providerId: "claude-code", model: "claude-opus", reasoningLevel: "high",
+      pluginMetadata: { role: "pr" } });
   });
 
   it("previews and starts an inferred-effort manual PR worker beneath its repository controller", async () => {
@@ -633,17 +696,7 @@ describe("bulk advance server integration", () => {
   it("revalidates the repository controller's child capability before launching a repair", async () => {
     const env = await setup({ failFirstWorkspace: true });
     const ids = await failedBatch(env);
-    const board = await env.harness.callRpc("board_get", null) as { groups: { key: string; name: string; level: string; clusters: { ticket: string }[] }[] };
-    const group = board.groups.find((entry) => entry.level === "effort" && entry.clusters.some((cluster) => cluster.ticket === "ABC-42"))!;
-    const store = createEffortStore(env.bb.storage.database());
-    const effort = store.establish({ sourceKey: group.key, name: group.name, goal: "", projectId: "project-example",
-      members: { tickets: ["ABC-42"], prUrls: [env.url] }, coordinatorState: "none" });
-    store.save({ ...effort, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
-    env.threads.set("thr-coordinator", makeThreadResponse({ id: "thr-coordinator", projectId: "project-example", status: "idle" }));
-    env.threads.set("thr-repo", { ...makeThreadResponse({ id: "thr-repo", projectId: "project-example", status: "idle" }),
-      parentThreadId: "thr-coordinator", environment: { hostId: HOST } } as never);
-    const record = store.claimRepoController({ effortId: effort.id, repo: "example/widget", projectId: "project-example", hostId: HOST });
-    store.saveRepoController({ ...record.record, threadId: "thr-repo", state: "ready" });
+    await seedRepoController(env);
     const plan = await env.harness.callRpc("advance_repair_plan", ids) as AdvanceRepairPlan;
     expect(plan.candidates).toContainEqual(expect.objectContaining({ id: "thr-repo", canSpawnChild: true }));
     env.blockedParents.add("thr-repo");

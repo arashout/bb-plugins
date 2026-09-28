@@ -8,6 +8,7 @@ import {
   type ThreadCapabilities,
   type ThreadMode,
 } from "./actions.js";
+import type { ModelChoice } from "./execution.js";
 import { startThread, type SpawnSdk, type StartResult } from "./spawn.js";
 import type { ThreadTier } from "./threads.js";
 
@@ -100,15 +101,16 @@ export async function runAgent(
     threadId: string | null;
     prompt: string;
     linked: readonly string[];
+    model: ModelChoice;
   },
 ): Promise<StartResult> {
-  const { unit, mode, threadId, prompt, linked } = request;
+  const { unit, mode, threadId, prompt, linked, model } = request;
   if (mode === "continue") {
     return { ok: false, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
   }
-  if (mode === "new") return startThread(sdk, unit, prompt);
+  if (mode === "new") return startThread(sdk, unit, prompt, model);
   if (threadId === null || !linked.includes(threadId)) {
     return { ok: false, error: "That thread is not linked to this row any more. Reopen the dialog." };
   }
-  return startThread(sdk, unit, prompt, threadId);
+  return startThread(sdk, unit, prompt, model, threadId);
 }

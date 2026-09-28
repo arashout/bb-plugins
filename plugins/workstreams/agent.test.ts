@@ -80,7 +80,8 @@ describe("planAgent", () => {
 });
 
 describe("runAgent", () => {
-  const base = { unit: UNIT, prompt: "Address the review on folio #47.", linked: ["thr_a"] };
+  const base = { unit: UNIT, prompt: "Address the review on folio #47.", linked: ["thr_a"],
+    model: { providerId: "codex", model: "gpt-6-sol", reasoningLevel: "high" } as const };
 
   it("refuses continue before sending a message or spawning a thread", async () => {
     const { sdk, sent, spawned } = fakeSdk({});

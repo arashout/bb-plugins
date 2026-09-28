@@ -2,7 +2,7 @@
 // Kept out of server.ts behind a narrow SDK interface, so the exact spawn
 // request can be tested against a fake without a live BB.
 import { withinPath } from "./threads.js";
-import { SOL_HIGH } from "./execution.js";
+import type { ModelChoice } from "./execution.js";
 
 /** The slice of `bb.sdk` this needs. */
 export type SpawnSdk = {
@@ -10,7 +10,7 @@ export type SpawnSdk = {
     list(): Promise<readonly { id: string; sources: readonly { hostId: string; path: string }[] }[]>;
   };
   threads: {
-    spawn(args: {
+    spawn(args: ModelChoice & {
       projectId: string;
       environment: {
         type: "host";
@@ -18,9 +18,6 @@ export type SpawnSdk = {
         workspace: { type: "unmanaged"; path: string };
       };
       prompt: string;
-      providerId: "codex";
-      model: "gpt-6-sol";
-      reasoningLevel: "high";
       pluginMetadata: { ticket: string };
       /** Set for a subthread: BB files it under this parent and tells the parent when it finishes. */
       parentThreadId?: string;
@@ -65,6 +62,7 @@ export async function startThread(
   sdk: SpawnSdk,
   unit: { path: string; ticket: string } | undefined,
   prompt: string,
+  model: ModelChoice,
   parentThreadId?: string,
 ): Promise<StartResult> {
   if (unit === undefined) return { ok: false, error: "That checkout is not on the board any more. Rescan and try again." };
@@ -78,7 +76,7 @@ export async function startThread(
     };
   }
   const thread = await sdk.threads.spawn({
-    ...SOL_HIGH,
+    ...model,
     projectId: project.projectId,
     environment: { type: "host", hostId: project.hostId, workspace: { type: "unmanaged", path: unit.path } },
     prompt: text,

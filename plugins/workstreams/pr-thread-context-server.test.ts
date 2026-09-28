@@ -155,6 +155,20 @@ describe("PR thread context and messaging", () => {
     ]);
   });
 
+  it("sends PR turns only to a thread on the configured code-work provider, with its configured model", async () => {
+    const env = await setup({ remoteOnly: true, metadata: { "thr-remote": { linkedPrUrl: URL } },
+      initialThreads: [{ id: "thr-remote", title: "Remote PR author" }] });
+    await vi.waitFor(async () => expect((await env.context()).recommendedThreadId).toBe("thr-remote"));
+    await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
+    expect(await env.message("thr-remote")).toEqual({ ok: false,
+      error: "This thread runs on codex, not the configured claude-code provider. Choose New agent to start a claude-code thread; its history stays available." });
+    expect(env.send).not.toHaveBeenCalled();
+    expect(await env.harness.callRpc("runs_open", null)).toEqual([]);
+    await env.harness.behavior.setSettings({ codeModel: "codex/gpt-6-sol/xhigh" });
+    expect(await env.message("thr-remote")).toEqual({ ok: true, delivery: "sent" });
+    expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-remote", model: "gpt-6-sol", reasoningLevel: "xhigh" }));
+  });
+
   it("keeps an Advance worker linked by PR metadata after its batch history is gone", async () => {
     const env = await setup({ remoteOnly: true,
       metadata: { "thr-advance": { role: "rebase-worker", advanceJobId: "old-job", prUrl: URL } },

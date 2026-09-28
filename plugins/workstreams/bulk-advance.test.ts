@@ -296,7 +296,7 @@ function setup(facts = [fact()]) {
     controller: vi.fn(async (_facts: AdvanceFacts): Promise<string | null> => null),
     workspace: vi.fn(async (_: AdvanceFacts, _batch: string, id: string) => ({ path: `/isolated/${id}`, workerPath: "/isolated" })),
     spawn: vi.fn(async (_facts: AdvanceFacts, _path: string, _prompt: string, _jobId: string) => "thread"), send: vi.fn(async (_threadId: string, _prompt: string) => {}),
-    thread: vi.fn(async () => ({ status: "idle", archivedAt: null, deletedAt: null, output: "" })),
+    thread: vi.fn(async () => ({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: "" })),
     recover: vi.fn(async (): Promise<string[]> => []), changed: vi.fn(), verified: vi.fn(), now: () => time,
     recordFeedback: vi.fn((prUrl: string, threadId: string, report: Parameters<typeof feedbackStore.save>[2]) => { feedbackStore.save(prUrl, threadId, report, time); }),
   };
@@ -343,7 +343,7 @@ describe("finite Advance preparation", () => {
       approvalFeedback: snapshot, approvalFeedbackVerified: false }]);
     expect(t.service.list()[0]!.jobs[0]!.status).toBe("needs-attention");
     expect(t.feedbackStore.carryEquivalent(facts.prUrl, oldRecord, snapshot, newHead, tree, tree, 2_000)).not.toBeNull();
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output });
     await t.service.recheck(batch.id, job.id);
     expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", checkedHeadOid: newHead });
     expect(t.deps.spawn).toHaveBeenCalledTimes(1);
@@ -610,11 +610,11 @@ describe("finite Advance preparation", () => {
     const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
     await t.service.signal("thread", "idle", `Workstreams job ${job.id} complete: blocked`);
     t.service.progressVisibility(batch.id, job.id, true);
-    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     await t.service.recheck(batch.id);
     expect(job).toMatchObject({ status: "running", hiddenFromProgress: false });
     await t.service.signal("thread", "idle", `Workstreams job ${job.id} complete: blocked`);
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     t.service.progressVisibility(batch.id, job.id, true);
     const plan = await t.service.repairPlan(batch.id, job.id);
     await t.service.repairRun({ token: plan.token, mode: "new", threadId: null, instruction: "" });
@@ -644,6 +644,17 @@ describe("finite Advance preparation", () => {
     expect(t.deps.workspace).toHaveBeenCalledTimes(2);
     expect(t.service.list()[0]!.jobs[0]!.status).toBe("ready");
     expect(t.service.list()[0]!.jobs[1]!.status).toBe("running");
+  });
+  it("starts a fresh worker rather than reuse one whose fixed provider is no longer the Code-work provider", async () => {
+    const one = fact(1, { needsPreparation: false, needsFeedback: true });
+    const two = fact(2, { needsPreparation: false, needsFeedback: true });
+    const t = setup([one, two]); const batch = await t.start();
+    t.current.set(one.prUrl, { ...one, needsFeedback: false, readiness: "ready", detail: "Feedback addressed" });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: false, output: "" });
+    await t.service.signal("thread", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: prepared`); await drain();
+    expect(t.deps.send).not.toHaveBeenCalled();
+    expect(t.deps.spawn).toHaveBeenCalledTimes(2);
+    expect(t.service.list()[0]!.jobs[1]).toMatchObject({ status: "running", uncertain: false });
   });
   it("keeps blocked feedback work blocked when GitHub looks ready but completion was not confirmed", async () => {
     const feedback = fact(1, { needsPreparation: false, needsFeedback: true });
@@ -915,11 +926,11 @@ describe("finite Advance preparation", () => {
     const batch = await t.start();
     expect(t.service.list()[0]!.jobs[0]!.uncertain).toBe(true);
     const restored = createAdvanceService(t.db, t.deps); t.deps.recover.mockResolvedValue(["existing"]);
-    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     await restored.recheck(batch.id);
     expect(restored.reserved(fact().prUrl, null)).toBe(true);
     expect(t.deps.spawn).toHaveBeenCalledTimes(1);
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     await restored.recheck(batch.id);
     expect(restored.reserved(fact().prUrl, null)).toBe(false);
   });
@@ -998,7 +1009,7 @@ describe("finite Advance preparation", () => {
     const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
     await t.service.signal("thread", "failed");
     t.current.set(job.prUrl, fact(1, { needsPreparation: false, readiness: "ready" }));
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output: `Workstreams job ${job.id} complete: prepared` });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: `Workstreams job ${job.id} complete: prepared` });
     await t.service.recheck(batch.id);
     expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "ready", uncertain: false });
     expect(t.deps.send).not.toHaveBeenCalled();
@@ -1040,7 +1051,7 @@ describe("finite Advance preparation", () => {
   });
   it("refuses repair while the uncertain original worker is still active", async () => {
     const t = setup(); const batch = await t.start(); await t.service.signal("thread", "failed");
-    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "active", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     await expect(t.service.repairPlan(batch.id, batch.jobs[0]!.id)).rejects.toThrow("still active");
     expect(t.service.reserved(fact().prUrl, null)).toBe(true);
     expect(t.deps.repairSpawn).not.toHaveBeenCalled();
@@ -1072,6 +1083,18 @@ describe("finite Advance preparation", () => {
     expect(t.deps.send.mock.calls[0]?.[1]).toContain("preserve unfinished changes");
     expect(t.deps.repairSpawn).not.toHaveBeenCalled();
   });
+  it("does not offer to continue a stopped worker on another provider, so a refused send never leaves an uncertain launch", async () => {
+    const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
+    await t.service.signal("thread", "idle", `Workstreams job ${job.id} complete: blocked`);
+    t.deps.repairCandidates.mockResolvedValue({ candidates: [{ id: "thread", title: "Repository worker", tier: "started", running: false, updatedAt: 0, contextUsed: null, canSpawnChild: false }], recommendation: { mode: "continue", threadId: "thread", reason: "Continue stopped work" } });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: false, output: "" });
+    const plan = await t.service.repairPlan(batch.id, job.id);
+    expect(plan.candidates[0]!.canContinue).toBe(false);
+    expect(plan.modes).toEqual(["new"]);
+    await expect(t.service.repairRun({ token: plan.token, mode: "continue", threadId: "thread", instruction: "Keep going" })).rejects.toThrow();
+    expect(t.deps.send).not.toHaveBeenCalled();
+    expect(t.service.list()[0]!.jobs[0]).toMatchObject({ status: "needs-attention", uncertain: false });
+  });
   it("can repair a failed item after its original queue was stopped", async () => {
     const t = setup(); const batch = await t.start(); const job = batch.jobs[0]!;
     await t.service.signal("thread", "idle", `Workstreams job ${job.id} complete: blocked`);
@@ -1093,7 +1116,7 @@ describe("finite Advance preparation", () => {
   it("starts a fresh repository worker when the stopped previous worker is unusable", async () => {
     const t = setup([fact(1), fact(2)]); const batch = await t.start();
     await t.service.signal("thread", "failed");
-    t.deps.thread.mockResolvedValue({ status: "error", archivedAt: null, deletedAt: null, output: "" });
+    t.deps.thread.mockResolvedValue({ status: "error", archivedAt: null, deletedAt: null, reusable: true, output: "" });
     await t.service.recheck(batch.id); await drain();
     expect(t.deps.spawn).toHaveBeenCalledTimes(2);
     expect(t.deps.send).not.toHaveBeenCalled();
@@ -1120,7 +1143,7 @@ describe("finite Advance preparation", () => {
     const attempt = t.service.list()[0]!.jobs[0]!.attemptId!;
     const restored = createAdvanceService(t.db, t.deps);
     t.deps.recover.mockResolvedValue(["repair-thread"]);
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output: `Workstreams job ${attempt} complete: prepared` });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: `Workstreams job ${attempt} complete: prepared` });
     t.current.set(job.prUrl, fact(1, { needsPreparation: false, readiness: "ready" }));
     await restored.recheck(batch.id);
     expect(t.deps.recover).toHaveBeenCalledWith(attempt, "project");
@@ -1156,7 +1179,7 @@ describe("finite Advance preparation", () => {
     expect(t.service.list()[0]!.jobs[0]!.previousAttempts[0]).toMatchObject({ attemptId: oldJobId, threadId: "thread" });
     t.service.dispose();
     t.deps.recover.mockImplementation(async (id?: string) => id === oldJobId ? ["thread"] : []);
-    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, output: `Workstreams job ${oldJobId} complete: prepared` });
+    t.deps.thread.mockResolvedValue({ status: "idle", archivedAt: null, deletedAt: null, reusable: true, output: `Workstreams job ${oldJobId} complete: prepared` });
     const restored = createAdvanceService(t.db, t.deps);
     await restored.tick(true);
     expect(t.deps.recover).toHaveBeenCalledWith(attempt, "project");
