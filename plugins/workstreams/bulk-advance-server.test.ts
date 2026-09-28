@@ -13,10 +13,12 @@ const HEAD = "a".repeat(40), BASE = "b".repeat(40);
 const PLACEMENT_BATCH = "00000000-0000-4000-8000-000000000042";
 const PLACEMENT_JOB = "00000000-0000-4000-8000-000000000043";
 const PLACEMENT_ATTEMPT = "00000000-0000-4000-8000-000000000046";
+const OBSERVATION_BATCH = "00000000-0000-4000-8000-000000000052";
+const OBSERVATION_JOB = "00000000-0000-4000-8000-000000000053";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string }; misparentWorker?: boolean; seedPlacementRepair?: boolean; seedPlacementRepairAttempt?: boolean; seedUncertainConflict?: boolean } = {}) {
+async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready?: boolean; fork?: boolean; projectAvailable?: boolean; omitLaunchedThreadsFromList?: boolean; feedback?: "threads" | "approval-note"; failFirstWorkspace?: boolean; author?: boolean; terminal?: "MERGED" | "CLOSED"; savedBatch?: { id: string; body: string }; misparentWorker?: boolean; seedPlacementRepair?: boolean; seedPlacementRepairAttempt?: boolean; seedUncertainConflict?: boolean; seedObservationJob?: "never-launched" | "failed-worker"; duplicateScanUnit?: boolean } = {}) {
   const repo = options.mixedCase ? "Example/Widget" : "example/widget";
   const url = `https://github.com/${repo}/pull/42`;
   const pr = { ...parsePrList(JSON.stringify([{ number: 42, url, state: options.terminal ?? "OPEN", title: "ABC-42 Fix account lookup", reviewDecision: "APPROVED",
@@ -88,7 +90,8 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
   }, experimental_callHostRpc: async ({ method, input }) => {
     calls.push({ method, input });
     if (method === "contextWorkspace") return { path: `/synthetic/workstreams/context/${++contextWorkspaces}` };
-    if (method === "scan" || method === "inspectPaths") return { units: [unit], warnings: [] };
+    if (method === "scan" || method === "inspectPaths") return { units: options.duplicateScanUnit
+      ? [unit, { ...unit, path: `${PATH}-duplicate`, dirName: "widget-checkout-duplicate" }] : [unit], warnings: [] };
     if (method === "authoredPrs") return { owners: [repo.split("/")[0]], entries: pr.state === "OPEN" ? [{ repo, pr }] : [], discoveryComplete: true,
       repositories: [{ repo, complete: true }], complete: true, warnings: [] };
     if (method === "advanceInspect") return { ok: true, facts };
@@ -130,6 +133,20 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
       facts: { [PLACEMENT_JOB]: routing, ...(options.seedUncertainConflict ? { [competingId]: routing } : {}) },
       pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
   }
+  if (options.seedObservationJob) {
+    const db = bb.storage.database();
+    db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
+    const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: OBSERVATION_JOB,
+      status: "needs-attention", attemptId: null, dedicated: false, previousAttempts: [],
+      threadId: options.seedObservationJob === "failed-worker" ? "thr-failed" : null, path: PATH,
+      detail: options.seedObservationJob === "failed-worker" ? "Worker reported incomplete work or failed validation" : "PR changed before launch",
+      checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
+    const routing = { ...facts, eligible: true, workspace: "create", projectId: "project-example", hostId: HOST, sourcePath: PATH, path: PATH,
+      effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null };
+    db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(OBSERVATION_BATCH, JSON.stringify({ id: OBSERVATION_BATCH,
+      token: "00000000-0000-4000-8000-000000000054", createdAt: Date.now(), cancelled: false,
+      jobs: [job], facts: { [OBSERVATION_JOB]: routing }, pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
+  }
   await plugin(bb); cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
   return { bb, harness, calls, spawn, send, facts, pr, unit, url, threads, threadMetadata, blockedParents, beforeWorkspace,
@@ -144,6 +161,46 @@ async function failedBatch(env: Awaited<ReturnType<typeof setup>>) {
 }
 
 describe("bulk advance server integration", () => {
+  it("reconciles a never-launched saved job on fresh PR observations without spawning a worker", async () => {
+    const env = await setup({ seedObservationJob: "never-launched", duplicateScanUnit: true });
+    const nextHead = "c".repeat(40);
+    Object.assign(env.pr, { headRefOid: nextHead, reviewDecision: "", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE" });
+    Object.assign(env.facts, { headOid: nextHead, reviewDecision: "", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE",
+      needsPreparation: false, readiness: "waiting-review", detail: "Waiting for approval on the current PR" });
+
+    expect(await env.harness.callRpc("pr_refresh", { prUrl: env.url })).toMatchObject({ status: "checked" });
+    expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ id: OBSERVATION_BATCH,
+      jobs: [{ id: OBSERVATION_JOB, status: "waiting-review", checkedHeadOid: nextHead, threadId: null }] }]);
+    expect(env.spawn).not.toHaveBeenCalled();
+    const inspected = env.calls.filter((call) => call.method === "advanceInspect").length;
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(env.calls.filter((call) => call.method === "advanceInspect")).toHaveLength(inspected);
+
+    Object.assign(env.pr, { reviewDecision: "APPROVED", approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
+    Object.assign(env.facts, { reviewDecision: "APPROVED", readiness: "ready", detail: "Approved and ready to merge" });
+    const beforeApproval = env.calls.filter((call) => call.method === "advanceInspect").length;
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(env.calls.filter((call) => call.method === "advanceInspect")).toHaveLength(beforeApproval + 1);
+    expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ id: OBSERVATION_BATCH,
+      jobs: [{ id: OBSERVATION_JOB, status: "ready", detail: "Approved and ready to merge", threadId: null }] }]);
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a failed worker when a fresh PR observation looks ready", async () => {
+    const env = await setup({ seedObservationJob: "failed-worker" });
+    const inspected = env.calls.filter((call) => call.method === "advanceInspect").length;
+    Object.assign(env.pr, { mergeStateStatus: "CLEAN", mergeable: "MERGEABLE" });
+    Object.assign(env.facts, { mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false,
+      readiness: "ready", detail: "Approved and ready to merge" });
+
+    expect(await env.harness.callRpc("pr_refresh", { prUrl: env.url })).toMatchObject({ status: "checked" });
+    expect(await env.harness.callRpc("advance_get", null)).toMatchObject([{ id: OBSERVATION_BATCH,
+      jobs: [{ id: OBSERVATION_JOB, status: "needs-attention", threadId: "thr-failed",
+        detail: "Worker reported incomplete work or failed validation" }] }]);
+    expect(env.calls.filter((call) => call.method === "advanceInspect")).toHaveLength(inspected);
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
   it("carries complete saved feedback across a code-identical head during a targeted read-only refresh", async () => {
     const env = await setup({ ready: true, feedback: "approval-note" });
     const snapshot = env.facts.approvalFeedback;

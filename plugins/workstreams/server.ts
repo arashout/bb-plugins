@@ -865,13 +865,47 @@ export default async function plugin(bb: BbPluginApi) {
         head, proof.priorTreeOid, proof.currentTreeOid, Date.now()) !== null;
     } catch { return false; }
   }
-  async function recheckCarriedFeedback(urls: readonly string[]): Promise<void> {
-    const keys = new Set(urls.map((url) => canonicalPrUrl(url)));
-    const jobs = pendingAdvanceJobs().filter(({ job }) => keys.has(canonicalPrUrl(job.prUrl)) &&
-      !["queued", "launching", "running", "verifying"].includes(job.status) && !job.uncertain);
-    for (const { batchId, job } of jobs) {
-      try { await advance.recheck(batchId, job.id); }
-      catch (error) { bb.log.warn(`Advance feedback recheck: ${String(error).slice(0, 300)}`); }
+  const firstAdvanceObservation = new Set<string>();
+  function advanceObservationKey(pr: Pr | null): string {
+    if (!pr) return "";
+    return JSON.stringify([pr.state, pr.isDraft, pr.headRefOid, pr.baseRefOid, pr.reviewDecision, pr.reviewFollowupPosted,
+      pr.mergeable, pr.mergeStateStatus, pr.checkConclusions, pr.unresolvedReviewThreads, pr.reviewRequests,
+      pr.approvalFeedback, pr.approvalFeedbackVerified]);
+  }
+  function previousAdvanceObservations(prs: readonly Pr[]): Map<string, string> {
+    return new Map(prs.map((pr) => {
+      const cached = inventory.get(pr.url)?.pr;
+      return [canonicalPrUrl(pr.url)!, advanceObservationKey(cached ? withApprovalFeedback(cached) : null)] as const;
+    }));
+  }
+  async function recheckObservedAdvanceJobs(prs: readonly Pr[], previous: ReadonlyMap<string, string>, carried: readonly string[]): Promise<void> {
+    const carriedKeys = new Set(carried.map((url) => canonicalPrUrl(url)));
+    const jobs = pendingAdvanceJobs();
+    const selected: { batchId: string; jobId: string }[] = [];
+    const selectedIds = new Set<string>();
+    for (const raw of prs) {
+      const pr = withApprovalFeedback(raw);
+      const key = canonicalPrUrl(pr.url);
+      if (key === null) continue;
+      const changed = previous.get(key) !== advanceObservationKey(pr);
+      for (const { batchId, job } of jobs) {
+        if (canonicalPrUrl(job.prUrl) !== key || ["queued", "launching", "running", "verifying"].includes(job.status) || job.uncertain) continue;
+        const neverLaunched = job.threadId === null && job.attemptId === null && !job.dedicated && job.previousAttempts.length === 0;
+        const first = neverLaunched && job.status === "needs-attention" && !firstAdvanceObservation.has(job.id);
+        if (first) firstAdvanceObservation.add(job.id);
+        const recheckable = job.status !== "needs-attention" || neverLaunched ||
+          job.detail === "PR state changed since verification. Recheck its current state." || carriedKeys.has(key);
+        if (recheckable && (changed || first || carriedKeys.has(key)) && !selectedIds.has(job.id)) {
+          selected.push({ batchId, jobId: job.id });
+          selectedIds.add(job.id);
+        }
+      }
+    }
+    for (let offset = 0; offset < selected.length; offset += 4) {
+      await Promise.all(selected.slice(offset, offset + 4).map(async ({ batchId, jobId }) => {
+        try { await advance.recheck(batchId, jobId, false); }
+        catch (error) { bb.log.warn(`Advance observation recheck: ${String(error).slice(0, 300)}`); }
+      }));
     }
   }
   async function refreshInventory(signal = disposal.signal): Promise<boolean> {
@@ -883,12 +917,13 @@ export default async function plugin(bb: BbPluginApi) {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       if (hostId === null) throw new Error("No primary BB host is available to read authored PRs.");
       const result = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+      const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
       const carried: string[] = [];
       for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
       inventory.apply(result);
       intentEvidenceVersion++;
       advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
-      await recheckCarriedFeedback(carried);
+      await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
         const repo = prTarget(job.prUrl)?.slug.toLowerCase();
@@ -923,12 +958,13 @@ export default async function plugin(bb: BbPluginApi) {
       if (hostId === null) return true;
       for (let offset = 0; offset < urls.length; offset += 100) {
         const result = await host.call("inspectPrs", { prUrls: urls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: SCAN_TIMEOUT_MS });
+        const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
         const carried: string[] = [];
         for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
         inventory.inspect(result);
         intentEvidenceVersion++;
         advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
-        await recheckCarriedFeedback(carried);
+        await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
         const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         const closed = new Set(result.closed.map((url) => url.toLowerCase()));
         // The inventory reports closed URLs without distinguishing merged from
@@ -1088,8 +1124,11 @@ export default async function plugin(bb: BbPluginApi) {
       );
       writeUnits(result.units);
       recordTransitions(result.units);
-      inventory.observe(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
-      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [withApprovalFeedback(unit.pr)]));
+      const observedPrs = result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]);
+      const previous = previousAdvanceObservations(observedPrs);
+      inventory.observe(observedPrs);
+      advance.invalidate(observedPrs.map(withApprovalFeedback));
+      await recheckObservedAdvanceJobs(observedPrs, previous, []);
       await refreshInventory(signal);
       warnings.push(...result.warnings);
 
@@ -2212,8 +2251,11 @@ export default async function plugin(bb: BbPluginApi) {
       })();
       intentEvidenceVersion++;
       recordTransitions(readUnits());
-      inventory.observe(result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]));
-      advance.invalidate(result.units.flatMap((unit) => unit.pr === null ? [] : [withApprovalFeedback(unit.pr)]));
+      const observedPrs = result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]);
+      const previous = previousAdvanceObservations(observedPrs);
+      inventory.observe(observedPrs);
+      advance.invalidate(observedPrs.map(withApprovalFeedback));
+      await recheckObservedAdvanceJobs(observedPrs, previous, []);
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
       bb.log.info(`rescanned ${paths.length} checkout(s) after row actions finished`);

@@ -714,6 +714,145 @@ describe("finite Advance preparation", () => {
       expect(t.deps.spawn).not.toHaveBeenCalled();
     }
   });
+  it("prepares a queued PR from its fresh head and reduced work scope", async () => {
+    const selected = fact(1, { needsChecks: true });
+    const fresh = { ...selected, headOid: "b".repeat(40), needsChecks: false };
+    const t = setup([selected]);
+    let reads = 0;
+    t.deps.inspect.mockImplementation(async () => ++reads >= 3 ? fresh : selected);
+    t.deps.spawn.mockImplementation(async (_facts, _path, _prompt, jobId) => {
+      const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches").get() as { body: string }).body);
+      expect(saved.jobs[0]).toMatchObject({ status: "launching", headOid: fresh.headOid, needsChecks: false });
+      expect(saved.facts[jobId]).toMatchObject({ headOid: fresh.headOid, needsChecks: false });
+      return "thread";
+    });
+
+    const batch = await t.start();
+    expect(t.deps.workspace).toHaveBeenCalledWith(fresh, batch.id, batch.jobs[0]!.id);
+    expect(t.deps.spawn).toHaveBeenCalledWith(fresh, "/isolated", expect.stringContaining(`"expectedHead":"${fresh.headOid}"`), batch.jobs[0]!.id);
+    const prompt = t.deps.spawn.mock.calls[0]![2];
+    expect(prompt).toContain(`"expectedBaseOid":"${fresh.baseOid}"`);
+    expect(prompt).toContain(`Workstreams job ${batch.jobs[0]!.id} complete: prepared`);
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    expect(saved.jobs[0]).toMatchObject({ headOid: fresh.headOid, baseOid: fresh.baseOid, needsChecks: false, status: "running" });
+    expect(saved.facts[batch.jobs[0]!.id]).toMatchObject({ headOid: fresh.headOid, baseOid: fresh.baseOid, needsChecks: false });
+  });
+  it("passes a selected parent's new head as the queued child's base lease", async () => {
+    const parent = fact(1);
+    const child = fact(2, { baseRefName: parent.headRefName, baseOid: parent.headOid });
+    const t = setup([parent, child]);
+    const batch = await t.start();
+    const newHead = "d".repeat(40);
+    t.current.set(parent.prUrl, { ...parent, headOid: newHead, needsPreparation: false, readiness: "ready" });
+    t.current.set(child.prUrl, { ...child, baseOid: newHead });
+
+    await t.service.signal("thread", "idle", `Workstreams job ${batch.jobs[0]!.id} complete: prepared`); await drain();
+    expect(t.deps.send).toHaveBeenCalledTimes(1);
+    expect(t.deps.workspace.mock.calls[1]?.[0]).toMatchObject({ number: 2, baseOid: newHead });
+    expect(t.deps.send.mock.calls[0]?.[1]).toContain(`"expectedBaseOid":"${newHead}"`);
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    expect(saved.jobs[1].baseOid).toBe(newHead);
+    expect(saved.facts[batch.jobs[1]!.id].baseOid).toBe(newHead);
+  });
+  it("blocks a queued worker when the fresh PR changes its selected scope", async () => {
+    const changes: Partial<AdvanceFacts>[] = [
+      { needsFeedback: true },
+      { approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] } },
+      { prUrl: "https://github.com/acme/app/pull/9" }, { repo: "acme/other" }, { number: 9 },
+      { projectId: "other-project" }, { hostId: "other-host" }, { path: "/checkout/other" },
+      { effortKey: "other-effort" }, { headRefName: "other-branch" }, { eligible: false },
+    ];
+    for (const change of changes) {
+      const selected = fact();
+      const fresh = { ...selected, headOid: "b".repeat(40), ...change };
+      const t = setup([selected]);
+      let reads = 0;
+      t.deps.inspect.mockImplementation(async () => ++reads >= 3 ? fresh : selected);
+      const batch = await t.start();
+      expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: null });
+      expect(t.deps.workspace).not.toHaveBeenCalled();
+      expect(t.deps.spawn).not.toHaveBeenCalled();
+    }
+  });
+  it("does not carry a worker onto a different approval feedback fingerprint", async () => {
+    const selected = fact(1, { needsPreparation: false, needsFeedback: true,
+      approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] } });
+    const fresh = { ...selected, headOid: "b".repeat(40),
+      approvalFeedback: { status: "present" as const, fingerprint: "c".repeat(64), sourceIds: ["review-1"] } };
+    const t = setup([selected]);
+    let reads = 0;
+    t.deps.inspect.mockImplementation(async () => ++reads >= 3 ? fresh : selected);
+
+    const batch = await t.start();
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: null });
+    expect(t.deps.workspace).not.toHaveBeenCalled();
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+  it("still blocks a fresh queued lease when another writer starts before launch", async () => {
+    const selected = fact();
+    const fresh = { ...selected, headOid: "b".repeat(40) };
+    const t = setup([selected]);
+    let reads = 0, busyReads = 0;
+    t.deps.inspect.mockImplementation(async () => ++reads >= 3 ? fresh : selected);
+    t.deps.busy.mockImplementation(async () => ++busyReads >= 3);
+
+    const batch = await t.start();
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: null, detail: expect.stringContaining("Another thread or action") });
+    expect(t.deps.workspace).not.toHaveBeenCalled();
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+  it("uses fresh readiness and continues the queue when prelaunch work is no longer needed", async () => {
+    const first = fact(1);
+    const second = fact(2, { needsPreparation: false, readiness: "ready" });
+    const fresh = { ...first, headOid: "b".repeat(40), needsPreparation: false, readiness: "waiting-review" as const,
+      detail: "Waiting for approval on the current PR" };
+    const t = setup([first, second]);
+    let firstReads = 0;
+    t.deps.inspect.mockImplementation(async (url) => url === first.prUrl && ++firstReads >= 3 ? fresh : { ...t.current.get(url)! });
+
+    const batch = await t.start();
+    expect(t.service.get(batch.id)?.jobs).toMatchObject([
+      { status: "waiting-review", checkedHeadOid: fresh.headOid, threadId: null },
+      { status: "ready", threadId: null },
+    ]);
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+    expect(t.deps.send).not.toHaveBeenCalled();
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    expect(saved.prepared[batch.jobs[0]!.id]).toBeUndefined();
+  });
+  it("rechecks an old never-launched job against current readiness without claiming preparation", async () => {
+    const old = fact(1);
+    const stale = { ...old, headOid: "b".repeat(40), needsFeedback: true };
+    const current = { ...stale, needsPreparation: false, needsFeedback: false, readiness: "waiting-review" as const,
+      detail: "Waiting for approval on the current PR" };
+    const t = setup([old]);
+    let reads = 0;
+    t.deps.inspect.mockImplementation(async () => ++reads >= 3 ? stale : old);
+    const batch = await t.start();
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: null, uncertain: false });
+    t.deps.inspect.mockResolvedValue(current);
+
+    await t.service.recheck(batch.id, batch.jobs[0]!.id);
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "waiting-review", checkedHeadOid: current.headOid, threadId: null });
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+    const saved = JSON.parse((t.db.prepare("SELECT body FROM advance_batches WHERE id = ?").get(batch.id) as { body: string }).body);
+    expect(saved.prepared[batch.jobs[0]!.id]).toBeUndefined();
+
+    t.deps.inspect.mockResolvedValue({ ...current, reviewDecision: "APPROVED", readiness: "ready", detail: "Ready to merge" });
+    await t.service.recheck(batch.id, batch.jobs[0]!.id);
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "ready", detail: "Ready to merge", threadId: null });
+    expect(t.deps.spawn).not.toHaveBeenCalled();
+  });
+  it("keeps an uncertain launch blocked when fresh GitHub facts need no work", async () => {
+    const t = setup();
+    t.deps.spawn.mockRejectedValueOnce(new Error("Launch timed out"));
+    const batch = await t.start();
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", uncertain: true, threadId: null });
+    t.current.set(fact().prUrl, fact(1, { needsPreparation: false, readiness: "ready" }));
+
+    await t.service.recheck(batch.id, batch.jobs[0]!.id);
+    expect(t.service.get(batch.id)?.jobs[0]).toMatchObject({ status: "needs-attention", uncertain: true, threadId: null });
+  });
   it("keeps PR/repo reserved while waiting for input and ignores stale completion markers", async () => {
     const t = setup([fact(1), fact(2)]); const batch = await t.start();
     await t.service.signal("thread", "pending");

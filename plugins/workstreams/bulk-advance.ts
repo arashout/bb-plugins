@@ -59,6 +59,16 @@ const needsWorker = (job: Pick<AdvancePreviewJob, "needsPreparation" | "needsFee
 const workLabel = (job: AdvancePreviewJob) => [job.needsPreparation && "branch preparation", job.needsFeedback && "review feedback", job.needsChecks && "failing checks"].filter(Boolean).join(", ");
 const fingerprint = (facts: AdvanceFacts) => JSON.stringify([facts.headOid, facts.baseOid, facts.needsPreparation, facts.needsFeedback, facts.needsChecks, facts.reviewDecision, facts.isDraft, facts.baseRefName, facts.headRefName, facts.projectId, facts.hostId, facts.sourcePath, facts.path, facts.eligible, facts.effortKey,
   facts.effortMembers === null ? null : normalizeMembers(facts.effortMembers), facts.approvalFeedback]);
+const safeQueuedWorkerDrift = (selected: AdvanceFacts, fresh: AdvanceFacts) => selected.eligible && fresh.eligible &&
+  needsWorker(selected) && needsWorker(fresh) &&
+  (!fresh.needsPreparation || selected.needsPreparation) && (!fresh.needsFeedback || selected.needsFeedback) &&
+  (!fresh.needsChecks || selected.needsChecks) &&
+  (canonicalPrUrl(selected.prUrl) ?? selected.prUrl.toLowerCase()) === (canonicalPrUrl(fresh.prUrl) ?? fresh.prUrl.toLowerCase()) &&
+  selected.repo === fresh.repo && selected.number === fresh.number && selected.effortId === fresh.effortId &&
+  selected.workspace === fresh.workspace && selected.blockedBy === fresh.blockedBy &&
+  fingerprint({ ...fresh, headOid: selected.headOid, baseOid: selected.baseOid,
+    needsPreparation: selected.needsPreparation, needsFeedback: selected.needsFeedback,
+    needsChecks: selected.needsChecks }) === fingerprint(selected);
 const publicBatch = ({ facts: _facts, token: _token, pollUntil: _poll, prepared: _prepared, repairs: _repairs, ...batch }: Saved): AdvanceBatch => batch;
 
 export function createAdvanceService(db: RunDb, deps: {
@@ -178,7 +188,10 @@ export function createAdvanceService(db: RunDb, deps: {
       const facts = inspected ?? await deps.inspect(job.prUrl);
       if (stopped || batch.cancelled) return;
       if (finishTerminal(batch, job, facts)) { deps.verified(job.prUrl, batch.facts[job.id]!.path); return; }
-      const failedPreparation = (job.dedicated || needsWorker(job)) && !batch.prepared[job.id];
+      const neverLaunched = job.threadId === null && job.attemptId === null && !job.dedicated &&
+        job.previousAttempts.length === 0 && !job.uncertain;
+      const failedPreparation = (job.dedicated || needsWorker(job)) && !batch.prepared[job.id] &&
+        !(neverLaunched && facts.eligible && !needsWorker(facts));
       if (facts.readiness === "waiting-checks" && previousStatus !== "waiting-checks") batch.pollUntil = Math.max(batch.pollUntil, now() + 30 * 60_000);
       update(batch, job, { status: failedPreparation ? "needs-attention" : facts.readiness,
         detail: failedPreparation ? `Requested work was not confirmed. GitHub: ${facts.detail}` : facts.detail,
@@ -236,11 +249,14 @@ export function createAdvanceService(db: RunDb, deps: {
               if (interrupted(batch, job)) continue;
               if (finishTerminal(batch, job, facts)) continue;
               deps.assertAdvanceAllowed?.(job.prUrl);
+              const selected = batch.facts[job.id]!;
               // A selected parent may legitimately advance this child's base during this batch.
               const completedParent = batch.jobs.find((parent) => parent.repo === repo && parent.headRefName === job.baseRefName && parent.checkedHeadOid === facts.baseOid);
-              if (completedParent) batch.facts[job.id]!.baseOid = facts.baseOid;
-              if (fingerprint(facts) !== fingerprint(batch.facts[job.id]!)) {
-                update(batch, job, { status: "needs-attention", detail: completedParent && !batch.facts[job.id]!.needsPreparation && facts.needsPreparation ? "Selected parent advanced; preview this PR again for branch preparation" : "PR head, approval, feedback, base, or workspace changed since preview. Preview it again." }); continue;
+              // Only a fresh lease for the selected PR and a subset of its work may reach a worker.
+              if (!safeQueuedWorkerDrift(selected, facts) && (fingerprint(facts) !== fingerprint(selected) || needsWorker(facts))) {
+                if (facts.eligible && !needsWorker(facts)) await verify(batch, job, facts);
+                else update(batch, job, { status: "needs-attention", detail: completedParent && !selected.needsPreparation && facts.needsPreparation ? "Selected parent advanced; preview this PR again for branch preparation" : "PR head, approval, feedback, base, or workspace changed since preview. Preview it again." });
+                continue;
               }
               if (reservationConflict(facts, null, job.id, true)) continue;
               if (!needsWorker(facts)) { batch.prepared[job.id] = true; await verify(batch, job); continue; }
@@ -271,12 +287,13 @@ export function createAdvanceService(db: RunDb, deps: {
                 const thread = await deps.thread(threadId);
                 if (thread.status !== "idle" || thread.archivedAt !== null || thread.deletedAt !== null) throw new Error("Repository worker changed while preparing the workspace. Inspect it before continuing this queue.");
               }
-              const prompt = preparationPrompt(job, path, false, false, batch.instruction) + `\nIf all requested work and validation succeeded, finish with the exact line: ${marker(job)}\nIf tests fail, work is incomplete, or you stop for any blocker, finish with: ${blockedMarker(job)}`;
+              const prompt = preparationPrompt(facts, path, false, false, batch.instruction) + `\nIf all requested work and validation succeeded, finish with the exact line: ${marker(job)}\nIf tests fail, work is incomplete, or you stop for any blocker, finish with: ${blockedMarker(job)}`;
               deps.assertAdvanceAllowed?.(job.prUrl);
               if (threadId && otherOwner(job, threadId)) throw new Error("Another Advance item owns this repository thread. Recheck its progress before retrying.");
               if (workerCapacityFull()) { waitForCapacity(batch, job); continue; }
               // Persist intent before the SDK write. A timeout never triggers an automatic duplicate.
-              update(batch, job, { status: "launching", path, threadId, detail: `Starting ${workLabel(job)}` });
+              batch.facts[job.id] = facts;
+              update(batch, job, { ...advancePreviewJobSchema.parse(facts), status: "launching", path, threadId, detail: `Starting ${workLabel(facts)}` });
               if (threadId) {
                 await deps.send(threadId, prompt);
                 if (job.status === "launching") update(batch, job, { status: "running", detail: `Working on ${workLabel(job)} in the repository controller` });
@@ -535,10 +552,10 @@ export function createAdvanceService(db: RunDb, deps: {
       void pump();
       return publicBatch(batch);
     },
-    async recheck(id: string, jobId?: string): Promise<AdvanceBatch> {
+    async recheck(id: string, jobId?: string, reveal = true): Promise<AdvanceBatch> {
       const batch = batches.get(id); if (!batch) throw new Error("Batch not found");
       const jobs = jobId === undefined ? batch.jobs : [findJob(id, jobId).job];
-      if (jobId !== undefined && !["merged", "closed"].includes(jobs[0]!.status)) update(batch, jobs[0]!, { hiddenFromProgress: false });
+      if (reveal && jobId !== undefined && !["merged", "closed"].includes(jobs[0]!.status)) update(batch, jobs[0]!, { hiddenFromProgress: false });
       for (const job of jobs) {
         if (["cancelled", "merged", "closed"].includes(job.status)) continue;
         let facts: AdvanceFacts;
