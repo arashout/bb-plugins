@@ -3,11 +3,15 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
-import { EFFORT_MIGRATIONS } from "./effort-store.js";
+import { EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
+import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
+import { PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
 import { LINEAR_DETAIL_MIGRATION } from "./linearsync.js";
 import { PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
 import { RUNS_MIGRATION } from "./runstore.js";
+import { UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
+import { WORK_CONVERSATION_MIGRATIONS } from "./work-conversation.js";
 import plugin from "./server.js";
 
 // The deployed migration prefix must remain byte-for-byte and index-for-index
@@ -36,8 +40,30 @@ const deployedMigrations = [
   ...PR_HOLD_MIGRATIONS,
   `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
 ];
+const latestDeployedMigrations = [
+  ...deployedMigrations,
+  REPO_CONTROLLER_MIGRATION,
+  `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
+  APPROVAL_FEEDBACK_MIGRATION,
+  UNASSIGNED_PLACEMENT_MIGRATION,
+  PR_OBSERVATIONS_MIGRATION,
+  ...WORK_CONVERSATION_MIGRATIONS,
+];
 
 describe("deployed Workstreams database upgrade", () => {
+  it("appends effort admin storage after every previously deployed migration", async () => {
+    expect(createHash("sha256").update(JSON.stringify(latestDeployedMigrations)).digest("hex"))
+      .toBe("2ed0183b4fcf2441ea9b20eb932317905836ad3b54c1db921fbb8fc173a77f82");
+    const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" },
+      sdk: { system: { config: async () => ({ primaryHostId: "host-synthetic" }) as never },
+        threads: { list: async () => [] as never, getPluginMetadata: async () => ({}) as never,
+          events: { list: async () => [] } } } });
+    bb.storage.migrate(bb.storage.database(), latestDeployedMigrations);
+    const upgraded = await harness.lifecycle.reload(plugin);
+    expect(upgraded.bb.storage.database().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get("effort_admin_sync")).toEqual({ name: "effort_admin_sync" });
+    await upgraded.harness.lifecycle.dispose();
+  });
   it("reloads the old migration prefix and preserves existing data", async () => {
     expect(createHash("sha256").update(JSON.stringify(deployedMigrations)).digest("hex"))
       .toBe("b51b3353d856547221cd0acf493d59a5b5482bd2a6b42bed6663bc91b4fc0eb6");

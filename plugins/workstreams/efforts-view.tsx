@@ -144,7 +144,7 @@ export function EffortsView({ board }: { board: Board | null }) {
       setSelectedKey(result.effort.key);
       setName(result.effort.name);
       setGoal(result.effort.goal);
-      setNotice(creating ? "Effort created." : "Effort updated.");
+      setNotice(result.notice ?? (creating ? "Effort created." : "Effort updated."));
       const list = await refresh();
       setEditScope(list?.scopes[result.effort.key] ?? "");
     } catch (cause) { setError(message(cause)); }
@@ -281,7 +281,7 @@ export function EffortsView({ board }: { board: Board | null }) {
             <textarea value={goal} onChange={(event) => setGoal(event.target.value)} disabled={busy || Boolean(selected?.mergedInto)} maxLength={4000} rows={3}
               className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-[12px] font-normal leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" />
           </label>
-          {!selected?.mergedInto ? <div className="flex flex-wrap gap-2"><Button type="button" size="sm" disabled={busy || !name.trim() || !creating && name === selected?.name && goal === selected?.goal} onClick={() => void save()}>{busy ? "Saving…" : creating ? "Create effort" : "Save changes"}</Button>
+          {!selected?.mergedInto ? <div className="flex flex-wrap gap-2"><Button type="button" size="sm" disabled={busy || !name.trim()} onClick={() => void save()}>{busy ? "Saving…" : creating ? "Create effort" : "Save changes"}</Button>
             {selected ? <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void setArchived()}>{selected.archivedAt ? "Restore" : "Archive"}</Button> : null}</div> : null}
         </div>
         {selected ? <section className="mt-8 max-w-xl border-t border-border/70 pt-5">

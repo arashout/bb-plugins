@@ -693,13 +693,13 @@ export default async function plugin(bb: BbPluginApi) {
     ...PR_HOLD_MIGRATIONS,
     // Index only: the thread's plugin metadata is the sole source of effort intent.
     `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
-    `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
     REPO_CONTROLLER_MIGRATION,
     `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
     APPROVAL_FEEDBACK_MIGRATION,
     UNASSIGNED_PLACEMENT_MIGRATION,
     PR_OBSERVATIONS_MIGRATION,
     ...WORK_CONVERSATION_MIGRATIONS,
+    `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
