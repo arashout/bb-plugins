@@ -130,8 +130,6 @@ export function createAdvanceService(db: RunDb, deps: {
   const interrupted = (batch: Saved, job: AdvanceJob) => stopped || batch.cancelled || job.status !== "queued";
   function save(batch: Saved) {
     db.prepare("INSERT OR REPLACE INTO advance_batches (id, body) VALUES (?, ?)").run(batch.id, JSON.stringify(batch));
-    const completed = [...batches.values()].filter((entry) => !entry.jobs.some(owns)).sort((a, b) => b.createdAt - a.createdAt);
-    for (const old of completed.slice(10)) { batches.delete(old.id); db.prepare("DELETE FROM advance_batches WHERE id = ?").run(old.id); }
     deps.changed();
   }
   function update(batch: Saved, job: AdvanceJob, patch: Partial<AdvanceJob>) {
@@ -462,11 +460,7 @@ export function createAdvanceService(db: RunDb, deps: {
         }
       }
     },
-    list: () => {
-      const ordered = [...batches.values()].sort((a, b) => b.createdAt - a.createdAt);
-      let completed = 0;
-      return ordered.filter((batch) => batch.jobs.some(owns) || completed++ < 10).map(publicBatch);
-    },
+    list: () => [...batches.values()].sort((a, b) => b.createdAt - a.createdAt).map(publicBatch),
     get: (id: string): AdvanceBatch | null => {
       const batch = batches.get(id);
       return batch ? publicBatch(batch) : null;

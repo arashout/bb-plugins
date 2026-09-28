@@ -267,7 +267,7 @@ describe("bulk advance server integration", () => {
     expect(env.spawn.mock.calls[1]?.[0]).toMatchObject({ title: "example/widget", parentThreadId: "thr-unassigned", pluginMetadata: { role: "unassigned-repo" } });
     expect(env.spawn.mock.calls[2]?.[0]).toMatchObject({ title: "example/widget PR #42", projectId: "project-example", parentThreadId: "thr-unassigned-repo",
       environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/batch/repo" } },
-      pluginMetadata: { role: "rebase-worker" } });
+      pluginMetadata: { role: "rebase-worker", prUrl: env.url } });
     expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("model");
     expect(env.spawn.mock.calls[2]?.[0]).not.toHaveProperty("providerId");
     expect(env.spawn.mock.calls[2]?.[0].prompt).toContain("/synthetic/workstreams/batch/repo/job");

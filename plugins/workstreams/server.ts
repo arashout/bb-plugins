@@ -3521,7 +3521,7 @@ export default async function plugin(bb: BbPluginApi) {
       const thread = await bb.sdk.threads.spawn({ projectId: facts.projectId, parentThreadId,
         title: `${facts.repo} PR #${facts.number}`, prompt,
         environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
-        pluginMetadata: { advanceJobId: jobId, role: "rebase-worker" } });
+        pluginMetadata: { advanceJobId: jobId, role: "rebase-worker", prUrl: facts.prUrl } });
       await placedThread(thread.id, parentThreadId);
       return thread.id;
     },

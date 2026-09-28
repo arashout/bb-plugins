@@ -155,6 +155,15 @@ describe("PR thread context and messaging", () => {
     ]);
   });
 
+  it("keeps an Advance worker linked by PR metadata after its batch history is gone", async () => {
+    const env = await setup({ remoteOnly: true,
+      metadata: { "thr-advance": { role: "rebase-worker", advanceJobId: "old-job", prUrl: URL } },
+      initialThreads: [{ id: "thr-advance", title: "PR worker" }] });
+    expect((await env.context()).recommendedThreadId).toBe("thr-advance");
+    const board = await env.harness.callRpc("board_get", null) as Board;
+    expect(board.prThreadLinks[URL]).toContain("thr-advance");
+  });
+
   it("shows one thread's two recorded PRs in both thread choices and board indicators", async () => {
     const env = await setup({ remoteOnly: true, initialThreads: [{ id: "thr-shared", title: "Two PR review" }] });
     const runs = createRunStore(env.bb.storage.database());

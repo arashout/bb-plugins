@@ -230,6 +230,28 @@ describe("scoped Advance admissions", () => {
     expect(t.service.list().flatMap((batch) => batch.jobs).filter((job) => job.status === "queued")).toHaveLength(9);
   });
 
+  it("retains blocked job history after more than ten later batches complete and the service restarts", async () => {
+    const blocked = fact(1);
+    const ready = Array.from({ length: 11 }, (_, index) => fact(index + 2, { needsPreparation: false, readiness: "ready" }));
+    const t = setup([blocked, ...ready]);
+    const preview = await t.service.preview([blocked.prUrl]);
+    const old = await t.service.start(preview.token); await drain();
+    await t.service.signal("thread", "idle", `Workstreams job ${old.jobs[0]!.id} complete: blocked`);
+    expect(t.service.get(old.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: "thread" });
+
+    for (const item of ready) {
+      await t.service.start((await t.service.preview([item.prUrl])).token);
+      await drain();
+    }
+
+    t.service.dispose();
+    const restored = createAdvanceService(t.db, t.deps);
+    expect(restored.list()).toHaveLength(12);
+    expect(restored.get(old.id)?.jobs[0]).toMatchObject({ status: "needs-attention", threadId: "thread" });
+    expect(restored.started(preview.token)?.id).toBe(old.id);
+    expect((t.db.prepare("SELECT count(*) AS count FROM advance_batches").get() as { count: number }).count).toBe(12);
+  });
+
   it("recovers its admission lane after a failed preflight and keeps same-token starts idempotent", async () => {
     const one = fact(1), two = fact(2);
     const t = setup([one, two]);
