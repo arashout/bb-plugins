@@ -88,7 +88,7 @@ describe("completion envelope v1", () => {
     const report = parseCompletion(v1(envelope({ outcome: "blocked", headOid: LATER, feedback: undefined, blockers: [product] })), expected({ headOid: LATER }));
     const attempt: Attempt = { id: "A-7", status: "completed", threadId: "thr_worker", path: "/Users/reader/src/folio-abc-340", workspace: null,
       recipes: ["address_review_feedback"], retryEpoch: 0, headOid: HEAD, fingerprint: FINGERPRINT, endedAt: NOW - 120_000, result: report.key, blocker: report.blocker,
-      failure: null, releasedReason: null, interactionPending: false, turnFailed: false, turnRetries: 0, readbackFailures: 0 };
+      failure: null, releasedReason: null, interactionPending: false, stopRequested: false, turnFailed: false, turnRetries: 0, readbackFailures: 0 };
     const facts: AdvanceFacts = { prUrl: PR_URL, number: 313, title: "ABC-340 Keep shelf order on reload", repo: "inkwell/folio", headRefName: "abc-340", baseRefName: "main",
       headOid: LATER, baseOid: BASE, state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE",
       needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "pending", basePrNumber: null,

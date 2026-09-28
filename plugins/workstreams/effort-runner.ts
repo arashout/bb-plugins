@@ -106,6 +106,8 @@ export type EffortRunnerDeps = {
    */
   retrying(threadId: string, requestId: string | null): Promise<boolean>;
   retry(args: { threadId: string; turnRequestId?: string; sendAt: number }): Promise<unknown>;
+  /** `stop N`: interrupt the thread's running turn. BB may leave it stopping when it can't confirm the interrupt. */
+  stop(threadId: string): Promise<unknown>;
   /** A fresh full read of the PR, kept where the roster reads it; null when GitHub couldn't be read. */
   read(prUrl: string): Promise<AdvanceFacts | null>;
   /** Save feedback evidence a report proved on fresh facts, with worker provenance. */
@@ -510,14 +512,20 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
         await recover(attemptId);
         attempt = deps.work.attempt(attemptId)!;
       }
+      // A worker you asked to stop is stopped, never retried or read for a result.
+      const stopping = attempt.status === "running" && attempt.body.stopRequestedAt != null;
+      if (stopping) {
+        await stopWorker(attempt);
+        attempt = deps.work.attempt(attemptId)!;
+      }
       let asked = false;
-      if (attempt.status === "running" && attempt.body.turnFailure) {
+      if (!stopping && attempt.status === "running" && attempt.body.turnFailure) {
         asked = await retryTurn(attempt);
         attempt = deps.work.attempt(attemptId)!;
       }
       // A failure the thread already moved past no longer keeps its turn from being read. A retry just asked for is read once it
       // has run: until then the thread may still show the error, beside the retry's own turn request.
-      if (attempt.status === "running" && !attempt.body.turnFailure && !asked) {
+      if (!stopping && attempt.status === "running" && !attempt.body.turnFailure && !asked) {
         // A pending interaction is read again at its poll, in case the event that cleared it never reached us.
         if (attempt.body.interactionPending && await deps.interactions(attempt.threadId!).catch(() => 1) === 0)
           attempt = record(attempt, ["running"], { status: "running", body: { interactionPending: false } }) ?? attempt;
@@ -543,7 +551,8 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
     if (event.kind === "gone") note({ threadGone: true });
     else if (event.kind === "turn-failed") {
       if (attempt.status !== "running") return null;
-      note({ turnFailure: { requestId: event.requestId, sendAt: retryAt(event.rateLimits, deps.now()) } });
+      // A turn you asked to stop isn't retried; its row reads the thread again.
+      if (attempt.body.stopRequestedAt == null) note({ turnFailure: { requestId: event.requestId, sendAt: retryAt(event.rateLimits, deps.now()) } });
     } else if (event.kind === "interaction") note({ interactionPending: true });
     else if (event.kind === "events") {
       // BB has no "interaction answered" event; the thread's events move when you answer, so its interactions are read again then.
@@ -555,6 +564,45 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       note({ releasedReason: "user-cancelled" }, "released");
     }
     return heard;
+  }
+
+  /**
+   * `stop N`: interrupt our running worker with threads.stop, only with v2 execution on, and release its claim as stopped once a read
+   * after the stop shows its thread idle or failed. BB may leave the thread stopping when it can't confirm the interrupt; the claim then
+   * holds, and the next signal or poll reads the thread again and asks again. A thread that went away has nothing left to stop.
+   */
+  async function stopWorker(attempt: StoredAttempt): Promise<void> {
+    const threadId = attempt.threadId!;
+    if (!attempt.body.threadGone) {
+      // A dry run asks BB for nothing, so the claim holds until execution is on again.
+      if ((await deps.settings()).execution !== "on") return;
+      const turn = await deps.turn(threadId).catch(() => null);
+      if (!turn) return;
+      // In a thread we reused, a work order that hasn't started isn't what runs there, so it isn't ours to stop. The claim holds until ours
+      // starts, or until two reads a minute apart on the idle thread find it neither queued nor started.
+      if (attempt.body.mode === "send" && !turn.requests.some((request) => request.text.includes(attempt.body.marker))) {
+        if (turn.status === "idle") await complete(attempt);
+        return;
+      }
+      // Asked even when the thread already reads idle or failed: an explicit stop wins over a turn the machine still runs.
+      try { await deps.stop(threadId); }
+      catch (error) { record(attempt, ["running"], { status: "running", body: { error: message(error) } }); return; }
+      if (!["idle", "error"].includes((await deps.turn(threadId).catch(() => null))?.status ?? "active")) return;
+    }
+    record(attempt, ["running"], { status: "released", body: { releasedReason: "stopped", endedAt: deps.now() } });
+  }
+
+  /**
+   * The compatibility adapter over a settled legacy Advance worker's last output, with no model turn and no send: feedback evidence its
+   * report proves against these fresh facts is saved with worker provenance. Null when BB can't read the thread, or it isn't idle, now.
+   */
+  async function adopt(target: string, legacy: { attemptId: string; threadId: string }, facts: AdvanceFacts):
+    Promise<{ saved: boolean; compat: string[]; rejection: string | null } | null> {
+    const turn = await deps.turn(legacy.threadId).catch(() => null);
+    if (turn?.status !== "idle") return null;
+    const { feedback, compat, rejection } = parseCompletion(turn.output ?? "", { attemptId: legacy.attemptId, target, fresh: facts });
+    if (feedback) deps.feedback(target, legacy.threadId, feedback);
+    return { saved: feedback !== null, compat, rejection };
   }
 
   /** Recheck: read the latest attempt's turn again, and its report against these fresh facts, even a report already read. The caller re-plans. */
@@ -693,5 +741,5 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
     });
   }
 
-  return { launch, recover, admission: open, launching, signal, advance, recheck, code };
+  return { launch, recover, admission: open, launching, signal, advance, recheck, code, adopt };
 }

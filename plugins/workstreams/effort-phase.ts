@@ -39,6 +39,8 @@ export type Attempt = ResourceAttempt & {
   failure: string | null;
   releasedReason: "no-worker" | "user-cancelled" | "stopped" | null;
   interactionPending: boolean;
+  /** `stop N` asked this running worker to stop; its claim holds until a read shows its thread no longer active. */
+  stopRequested: boolean;
   turnFailed: boolean;
   turnRetries: number;
   /** Readbacks in a row that couldn't read BB. */
@@ -238,6 +240,8 @@ export function decide(input: DecideInput): Next {
       }
       return recovering("launch-uncertain", "Launch outcome uncertain; reading BB back by its launch key", "recover-launch", "readback finds or rules out its worker");
     }
+    if (attempt.stopRequested) return next("executing", "worker", `Stopping the worker in ${attempt.threadId}; nothing new starts`,
+      { nextAction: "attach", owner, modifiers: ["draining"] });
     // Past the bound, the runner ends the attempt, so `retry N` can start a new one.
     if (attempt.turnFailed) return recovering("turn-retry", attempt.turnRetries < TURN_RETRIES ? `The worker's turn failed; retry ${attempt.turnRetries + 1} of ${TURN_RETRIES}`
       : `The worker's turn failed ${TURN_RETRIES + 1} times; ending the attempt`, "retry-turn", "the retried turn starts");
@@ -309,6 +313,10 @@ export function decide(input: DecideInput): Next {
 
   // 5. Verifying: a finished attempt's report routes through its recipes, within its retry epoch.
   if (latest && latest.retryEpoch === input.retryEpoch) {
+    // The report corrections the worker's thread was asked for since its work attempt, newest first, and that work attempt.
+    const epoch = attempts.filter((item) => item.retryEpoch === input.retryEpoch);
+    const leading = epoch.findIndex((item) => item.recipes.length !== 1 || item.recipes[0] !== "repair_report");
+    const corrections = leading === -1 ? epoch.length : leading;
     if (latest.status === "failed" && latest.failure === "workspace") {
       // Its checkout couldn't be prepared, so nothing started: like a source that didn't read, it backs off on its head, and a new head reverifies.
       const failed = attempts.filter((item) => item.retryEpoch === input.retryEpoch && item.headOid === latest.headOid && item.status === "failed" && item.failure === "workspace").length;
@@ -343,8 +351,12 @@ export function decide(input: DecideInput): Next {
         // A product question asks once across PRs; authority is granted per target.
         return value === "worker-question" ? worker() : ask(value!, question, latest.blocker?.options.length ? latest.blocker.options : [{ id: "text", label: "Answer in your own words" }],
           `${value}:${value === "authority" ? `${target}:` : ""}${question.trim().toLowerCase()}`);
-      } else if (kind === "recipe") {
-        // The worker that did the work re-emits its report; no one else can.
+      } else if (kind === "recipe" || (key === "report-invalid" && corrections > 0)) {
+        // The worker that did the work re-emits its report; no one else can. Its thread gets at most the work recipes' reportCorrections
+        // requests; a correction that is still unreadable after them is a named issue.
+        const bound = Math.min(...(epoch[corrections]?.recipes ?? ["repair_report"]).map((id) => (recipe(id) as WorkerRecipe).bound.reportCorrections ?? 0));
+        if (corrections >= bound)
+          return issue("report-unrepairable", `The worker's report still can't be read after ${corrections} ${corrections === 1 ? "correction" : "corrections"} in its thread`);
         if (!latest.threadId) return issue("report-unrepairable", "The worker's report can't be corrected: its thread is unknown");
         const busy = prWriter(input.resources);
         if (busy) return fromResource(busy);

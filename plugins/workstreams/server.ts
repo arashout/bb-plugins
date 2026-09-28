@@ -4702,7 +4702,7 @@ export default async function plugin(bb: BbPluginApi) {
     realtime: bb.realtime,
     launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
       launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh), launch: (input) => runner.launch(input),
-      code: (input) => runner.code(input), advance: (attemptId) => runner.advance(attemptId) },
+      code: (input) => runner.code(input), adopt: (target, legacy, facts) => runner.adopt(target, legacy, facts), advance: (attemptId) => runner.advance(attemptId) },
     reconciler: {
       now: Date.now,
       cheapAt: (prUrl) => Math.max(Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0, prFacts.get(prUrl)?.cheapAt ?? 0) || null,
@@ -4822,6 +4822,7 @@ export default async function plugin(bb: BbPluginApi) {
       return requestId !== null && newest?.type === "client/turn/requested" && newest.data.requestId !== requestId;
     },
     retry: (args) => bb.sdk.threads.retry(args),
+    stop: (threadId) => bb.sdk.threads.stop({ threadId }),
     // Within the reconciler's budget of full reads, and never while GitHub's rate limit holds reads.
     read: async (prUrl) => await effortV2.reconciler.readFull(prUrl) ? prFacts.get(prUrl)?.facts ?? null : null,
     feedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },

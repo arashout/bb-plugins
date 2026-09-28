@@ -89,6 +89,7 @@ function setup(options: Options = {}) {
     interactions: vi.fn(async (_threadId: string) => 0),
     retrying: vi.fn(async (_threadId: string, _requestId: string | null) => false),
     retry: vi.fn(async (_args: { threadId: string; turnRequestId?: string; sendAt: number }) => ({ ok: true })),
+    stop: vi.fn(async (_threadId: string) => ({ ok: true })),
     /** A fresh full read returns the facts the test set, read now. */
     read: vi.fn(async (_prUrl: string): Promise<AdvanceFacts | null> => { world.readAt = clock.now; return { ...facts(), ...world.pr }; }),
     feedback: vi.fn(),
@@ -110,7 +111,7 @@ function setup(options: Options = {}) {
     workspace: (request) => sdk.workspace(request), spawn: (args) => sdk.spawn(args), send: (args, role) => sdk.send(args, role),
     spawned: (projectId, attemptId) => sdk.spawned(projectId, attemptId), marked: (threadId, marker) => sdk.marked(threadId, marker),
     turn: (threadId) => sdk.turn(threadId), interactions: (threadId) => sdk.interactions(threadId), retrying: (threadId, requestId) => sdk.retrying(threadId, requestId),
-    retry: (args) => sdk.retry(args), read: (prUrl) => sdk.read(prUrl), feedback: (prUrl, threadId, report) => sdk.feedback(prUrl, threadId, report), publish: () => {},
+    retry: (args) => sdk.retry(args), stop: (threadId) => sdk.stop(threadId), read: (prUrl) => sdk.read(prUrl), feedback: (prUrl, threadId, report) => sdk.feedback(prUrl, threadId, report), publish: () => {},
     // No code action runs here; the reconciler's tests drive them through the host.
     requested: async () => { throw new Error("unexpected review read"); }, write: async () => { throw new Error("unexpected GitHub write"); }, rateLimit: async () => null,
   });
@@ -416,6 +417,8 @@ describe("launch recovery", () => {
       await env.first.recover(attempt.id);
       expect([env.sdk.spawned, env.sdk.marked].map((call) => call.mock.calls.length)).toEqual([0, 0]);
       expect([claimOf(env), env.work.row(PR)?.phase, env.work.row(PR)?.body.cause]).toEqual([null, "repair-needed", "project-source"]);
+      // A system issue with its recovery, never a question for you.
+      expect(env.work.row(PR)?.body).toMatchObject({ userState: "issue", recovery: ["retry N"], decision: null });
     }
   });
 

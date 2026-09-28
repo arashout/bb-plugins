@@ -866,7 +866,7 @@ describe("v2 claims", () => {
     expect([env.work.claims(), env.spawn.mock.calls, env.send.mock.calls]).toEqual([[], [], []]);
   });
 
-  it("reads each row's claim into the plan, and refuses stop N rather than admitting a stop it can't make yet", async () => {
+  it("reads each row's claim into the plan, and refuses stop N in a dry run, which writes nothing to BB", async () => {
     const env = await setup();
     await env.optIn();
     await command(env, `move ${RETURNS} forward`, "returns-1");
@@ -874,9 +874,10 @@ describe("v2 claims", () => {
     expect(await command(env, `hold ${RETURNS}`, "returns-2")).toMatchObject({ kind: "admit" });
     // The hold arrives mid-turn: the turn finishes, and nothing new starts.
     expect(env.work.row(RETURNS)).toMatchObject({ phase: "executing", body: { cause: "worker", modifiers: ["draining"], owner: { kind: "v2-attempt", ref: "A-12" } } });
+    const n = formatTargets([{ target: RETURNS, n: env.work.row(RETURNS)?.body.n ?? null }]);
     expect(await command(env, `stop ${RETURNS}`, "returns-3")).toEqual({ kind: "clarify", normalized: null,
-      message: "stop N arrives with bounded repairs; until then, hold N lets the current turn finish and starts nothing new. Nothing was admitted." });
-    expect(env.work.attempt("A-12")?.status).toBe("running");
+      message: `v2 execution is a dry run, so v2 stops no worker. Stop ${n} in thr-v2-worker yourself. Nothing was admitted.` });
+    expect([env.work.attempt("A-12")?.status, env.work.attempt("A-12")?.body.stopRequestedAt]).toEqual(["running", undefined]);
   });
 
   it("reads every unfinished launch back from BB on recheck launches, attaching the one thread its spawn metadata names", async () => {

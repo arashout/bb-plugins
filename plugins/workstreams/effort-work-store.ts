@@ -166,6 +166,8 @@ const attemptBodySchema = z.object({
   turnRetries: z.number().int().nonnegative().optional(),
   /** Readbacks in a row that couldn't read BB; one that reads clears it. */
   readbackFailures: z.number().int().nonnegative().optional(),
+  /** When `stop N` asked this running worker to stop. Its claim holds until a read shows its thread no longer active. */
+  stopRequestedAt: z.number().nullable().optional(),
 }).strict();
 export type AttemptBody = z.infer<typeof attemptBodySchema>;
 export type AttemptReport = z.infer<typeof reportSchema>;
@@ -177,7 +179,8 @@ export function decideAttempt({ id, status, threadId, path, body }: StoredAttemp
     recipes: body.recipes, retryEpoch: body.retryEpoch, headOid: body.start.headOid, fingerprint: body.start.fingerprint,
     endedAt: status === "failed" || status === "completed" ? body.endedAt ?? body.settledAt : null,
     result: status === "completed" ? body.report?.key ?? null : null, blocker: body.report?.blocker ?? null, failure: body.failure, releasedReason: body.releasedReason,
-    interactionPending: body.interactionPending ?? false, turnFailed: Boolean(body.turnFailure), turnRetries: body.turnRetries ?? 0,
+    interactionPending: body.interactionPending ?? false, stopRequested: status === "running" && body.stopRequestedAt != null, turnFailed: Boolean(body.turnFailure),
+    turnRetries: body.turnRetries ?? 0,
     readbackFailures: body.readbackFailures ?? 0 };
 }
 /**
@@ -413,6 +416,16 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       const { body } = readAttempt(current);
       db.prepare(`UPDATE effort_attempts SET status = 'released', body = ?, updated_at = ? WHERE id = ?`)
         .run(JSON.stringify({ ...body, releasedReason: "no-worker" }), now(), current.id);
+    },
+    /**
+     * `stop N`: ask our running worker on a PR to stop. Call it inside the command's commit, so the request is journaled with the command;
+     * the runner then stops the thread and releases the claim once it reads the thread no longer active.
+     */
+    requestStop(target: string): void {
+      const current = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE target = ? AND status = 'running'`).get(prWorkItemKey(target)) as AttemptRow | undefined;
+      if (!current) throw new StaleWriteError(`${target}'s worker is no longer running. Reload the roster and send it again.`);
+      const { body } = readAttempt(current);
+      db.prepare(`UPDATE effort_attempts SET body = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify({ ...body, stopRequestedAt: now() }), now(), current.id);
     },
     /** The result an admitted command returned, so a repeated request gets the same answer and changes nothing. */
     command(effortId: string, requestId: string): unknown {

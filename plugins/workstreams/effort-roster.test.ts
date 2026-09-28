@@ -3,6 +3,7 @@ import type { Pr } from "./contract.js";
 import { effortRoster, type RosterSources } from "./effort-roster.js";
 import { cheapSignature } from "./effort-roster-store.js";
 import type { EstablishedEffort } from "./effort-store.js";
+import type { WorkRow } from "./effort-work-store.js";
 import { INKWELL_ADVANCE_BATCHES, INKWELL_ADVANCE_EFFORTS, INKWELL_ROSTER } from "./inkwell-fixtures.js";
 import type { PrObservation } from "./inventory-store.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
@@ -66,6 +67,27 @@ describe("effort roster rows", () => {
     }, { [merged!]: pr(merged!, { state: "MERGED" }) });
     expect(result.rows.map((row) => [row.state, row.cause])).toEqual([["issue", "legacy-uncertain"], ["done", "merged"]]);
     expect(result.issues).toEqual([{ cause: "legacy-uncertain", label: expect.any(String), numbers: [1] }]);
+  });
+
+  it("groups a failure several instructed PRs share into one system issue naming each, though each PR's detail names its own head", () => {
+    const [first, second, third, fourth] = urls;
+    const issue = (target: string, n: number, cause: string, detail: string): WorkRow => ({ target, effortId: "reader", instructionId: "I-reader-r1", phase: "repair-needed",
+      revision: 1, dueAt: null, body: { n, cause, detail, userState: "issue", modifiers: [], nextAction: null, owner: { kind: "user", ref: null }, wake: null, decision: null,
+        recovery: ["retry N"], offers: [], retryEpoch: 0, observedHead: null, observedAt: null, gates: null, tickets: [] } });
+    // As decide() writes them: the rerun's detail names the head it reran.
+    const rerun = (head: string) => `Checks still fail on this head after its one rerun (Reran the failed jobs of 1 GitHub Actions run on ${head}.)`;
+    const unrepairable = "The worker's report still can't be read after 2 corrections in its thread";
+    const rows = [issue(first!, 1, "ci-infrastructure", rerun("3333333")), issue(second!, 2, "report-unrepairable", unrepairable),
+      issue(third!, 3, "ci-infrastructure", rerun("4444444")), issue(fourth!, 4, "report-unrepairable", unrepairable)];
+    const sources: RosterSources = { now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
+      work: { items: new Map(), ownerForPr: () => null }, facts: (url) => pr(url), observation: () => null, feedback: () => null, tickets: () => new Map() };
+    const targets = [first!, second!, third!, fourth!];
+    const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
+      number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), active: null, rollup: null, decisions: [] } });
+    // Details that differ only in each PR's own facts label the issue by its cause; a detail every PR shares labels it.
+    expect(result.issues).toEqual([{ cause: "ci-infrastructure", label: "ci-infrastructure", numbers: [1, 3] },
+      { cause: "report-unrepairable", label: unrepairable, numbers: [2, 4] }]);
   });
 
   it("asks for a read of a PR the board read and then dropped, instead of calling it unobserved", () => {

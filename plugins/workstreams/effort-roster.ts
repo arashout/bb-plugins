@@ -254,9 +254,12 @@ export function effortRoster(input: {
   const outside = new Set([...v2?.included ?? []].filter((target) => !owned.has(target)));
   const numbered = input.number(rosterTargets(effort, sources.work, [...outside]));
   const rows = numbered.rows.map((row) => rosterRow(row.target, row, sources, v2, outside)).sort((a, b) => a.n - b.n);
+  // A failure several PRs share is one issue naming each of them. Each row's detail names its own PR's facts (its head, its tries, its run),
+  // so issues group by cause, labeled with the detail only when every PR in the issue shares it.
   const issues = new Map<string, EffortRoster["issues"][number]>();
   for (const row of rows) if (row.state === "issue") {
     const issue = issues.get(row.cause) ?? { cause: row.cause, label: row.label, numbers: [] };
+    if (issue.label !== row.label) issue.label = row.cause;
     issue.numbers.push(row.n);
     issues.set(row.cause, issue);
   }

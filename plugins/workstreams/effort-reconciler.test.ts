@@ -48,7 +48,7 @@ const head = (n: number, version = 0) => `${n}${version}`.padEnd(40, "a");
 /** GitHub's side of one PR. */
 type Live = { state: "OPEN" | "MERGED" | "CLOSED"; headOid: string; checks: "passed" | "pending" | "failed"; mergeStateStatus: string; mergeable: string;
   reviewDecision: string | null; unresolvedThreads: number; basePrNumber: number | null; isDraft: boolean; reviewRequests: string[];
-  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean };
+  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean; approvalFeedback?: AdvanceFacts["approvalFeedback"] };
 const ready = (n: number): Live => ({ state: "OPEN", headOid: head(n), checks: "passed", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", reviewDecision: "APPROVED",
   unresolvedThreads: 0, basePrNumber: null, isDraft: false, reviewRequests: [], latestReviews: [] });
 const conflicting = { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" } satisfies Partial<Live>;
@@ -64,7 +64,8 @@ const full = (n: number, live: Live): AdvanceFacts => ({ prUrl: url(n), number: 
   headOid: live.state === "OPEN" ? live.headOid : "", baseOid: live.state === "OPEN" ? BASE : "", state: live.state, isDraft: live.isDraft, isCrossRepository: false,
   reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable, needsPreparation: false, readiness: "ready", detail: "",
   unresolvedThreads: live.unresolvedThreads, threadsComplete: true, checks: live.checks, basePrNumber: live.basePrNumber,
-  ...live.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: live.reviewFollowupPosted }, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
+  ...live.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: live.reviewFollowupPosted },
+  approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] } });
 /** BB's turn.failed for a worker's turn, with no rate limit to wait out. */
 const failed = (threadId: string, requestId: string) => ({ threadId, requestId, turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 }) as never;
 /** Let the event hooks record their signals and mark rows due. */
@@ -72,14 +73,14 @@ const settled = () => new Promise((resolve) => setTimeout(resolve, 10));
 const result = (attemptId: string, n: number, headOid: string) =>
   `Workstreams result v1: ${JSON.stringify({ attemptId, target: url(n), actions: ["integrate_base"], outcome: "changed", headOid, baseOid: BASE })}`;
 
-/** A legacy Advance job on this PR that launched with an outcome no one confirmed; its batch loads when the plugin restarts. */
-function saveUncertainJob(db: RunDb, n: number): string {
+/** A legacy Advance job on this PR, by default one that launched with an outcome no one confirmed; its batch loads when the plugin restarts. */
+function saveLegacyJob(db: RunDb, n: number, patch: Record<string, unknown> = {}): string {
   const id = `00000000-0000-4000-8000-000000000${n}`;
   const jobId = `00000000-0000-4000-8000-000000001${n}`;
   const routing = { ...full(n, ready(n)), eligible: true, workspace: "create", projectId: PROJECT, hostId: HOST, sourcePath: `/p/folio-${n}`, path: `/p/folio-${n}`,
     effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null };
   const job = { ...routing, id: jobId, hiddenFromProgress: false, status: "running", attemptId: null, dedicated: false, previousAttempts: [], threadId: null,
-    checkedHeadOid: null, updatedAt: START - 10 * MINUTE, uncertain: true };
+    checkedHeadOid: null, updatedAt: START - 10 * MINUTE, uncertain: true, ...patch };
   db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(id, JSON.stringify({ id, token: `00000000-0000-4000-8000-000000002${n}`,
     createdAt: START - 10 * MINUTE, cancelled: false, jobs: [job], facts: { [jobId]: routing }, pollUntil: START + MINUTE, prepared: {}, repairs: {} }));
   return jobId;
@@ -112,6 +113,12 @@ async function setup(numbers: number[], options: Options = {}) {
   /** The interactions waiting on you in each thread. */
   const pending = new Map<string, unknown[]>();
   /** BB queues a retry, which runs as the thread's next turn request. */
+  /** BB can't confirm the interrupt of a running turn at once: the thread stays stopping until the test lets its turn end. A thread that reads idle stays idle. */
+  const stop = vi.fn(async ({ threadId }: { threadId: string }) => {
+    const thread = threads.get(threadId)!;
+    if (thread.status === "active") threads.set(threadId, { ...thread, status: "stopping" });
+    return { ok: true } as never;
+  });
   const retry = vi.fn(async (args: { threadId: string; turnRequestId?: string }) => {
     const list = requests.get(args.threadId) ?? [];
     requests.set(args.threadId, [{ type: "client/turn/requested", seq: 100 + list.length,
@@ -156,6 +163,7 @@ async function setup(numbers: number[], options: Options = {}) {
       queuedMessages: { list: async () => [] as never },
       interactions: { list: async ({ threadId }: { threadId: string }) => (pending.get(threadId) ?? []) as never },
       retry: retry as never,
+      stop: stop as never,
     },
   }, experimental_callHostRpc: async ({ method, input }) => {
     hostCalls.push({ method, input });
@@ -216,7 +224,7 @@ async function setup(numbers: number[], options: Options = {}) {
   expect(admitted).toMatchObject({ kind: "admit" });
   const reconciler = reconcilers.at(-1)!;
   return {
-    bb, harness, db, work, effort, admitted, reconciler, runner: runners.at(-1)!, spawn, send, threads, metadata, hostCalls, github, lives, retry, pending, outputs, requests,
+    bb, harness, db, work, effort, admitted, reconciler, runner: runners.at(-1)!, spawn, send, threads, metadata, hostCalls, github, lives, retry, stop, pending, outputs, requests,
     row: (n: number) => work.row(url(n)),
     /** GitHub changes for one PR. */
     set: (n: number, patch: Partial<Live>) => { lives.set(n, { ...lives.get(n)!, ...patch }); },
@@ -461,7 +469,7 @@ describe("the v2 reconciler", () => {
   it("rechecks an uncertain legacy Advance job holding a PR every ten minutes, at most six times, then names it a system issue", async () => {
     // 311 needs its base integrated, which the legacy job may still be doing.
     const env = await setup([311], { live: () => conflicting });
-    const jobId = saveUncertainJob(env.db, 311);
+    const jobId = saveLegacyJob(env.db, 311);
     // Two threads answer to that job's launch, so no recheck can settle it.
     for (const id of ["thr-legacy-a", "thr-legacy-b"]) {
       env.threads.set(id, { ...makeThreadResponse({ id, projectId: PROJECT, providerId: "codex", status: "idle", originPluginId: "workstreams" }),
@@ -969,5 +977,201 @@ describe("the v2 reconciler's code actions", () => {
     await env.reconciler.tick();
     expect(env.row(762)?.body.codeActions?.[0]).toMatchObject({ retryEpoch: 1, status: "done" });
     expect(writes(env).filter((request) => request.prUrl === url(762))).toHaveLength(2);
+  });
+});
+
+describe("the v2 reconciler's bounded repairs", () => {
+  const fingerprint = "e".repeat(64);
+  /** GitHub shows the PR's review feedback, which this fingerprint names. */
+  const feedback = (n: number) => ({ status: "present" as const, fingerprint, sourceIds: [`review:${n}`] });
+  /**
+   * A settled legacy Advance job on each PR, whose worker's last output reports its feedback fixed on `reportHead` in the older field names
+   * legacy Advance rejected. The plugin restarts, so the jobs' batches load.
+   */
+  async function legacyReports(env: Awaited<ReturnType<typeof setup>>, numbers: number[], reportHead: (n: number) => string) {
+    for (const n of numbers) {
+      const threadId = `thr-legacy-${n}`;
+      saveLegacyJob(env.db, n, { status: "needs-attention", uncertain: false, threadId, attemptId: `L-${n}`,
+        detail: "Requested work was not confirmed. GitHub: Approval feedback needs verified follow-up." });
+      env.threads.set(threadId, { ...makeThreadResponse({ id: threadId, projectId: PROJECT, providerId: "codex", status: "idle", originPluginId: "workstreams" }),
+        environment: { hostId: HOST, path: `/p/folio-${n}`, branchName: null } });
+      const evidence = { attemptId: `L-${n}`, finalHeadOid: reportHead(n), approvalFeedbackFingerprint: fingerprint, blockers: [],
+        findings: [{ sourceId: `review:${n}`, resolution: "fixed", evidence: "Returned books keep their shelf order after a reload", validation: { outcome: "passed", detail: "npm test -- shelf" } }] };
+      env.outputs.set(threadId, `Kept shelf order on reload.\nWorkstreams approval feedback evidence: ${JSON.stringify(evidence)}\nWorkstreams job L-${n} complete: prepared`);
+    }
+    const restarted = await env.harness.lifecycle.reload(plugin);
+    cleanups.push(() => restarted.harness.lifecycle.dispose());
+    return { restarted, work: createEffortWorkStore(restarted.bb.storage.database()), reconciler: reconcilers.at(-1)! };
+  }
+
+  it("asks the worker's own thread to re-emit its report at most twice, then names an issue; retry N starts one new epoch per command and keeps the history", async () => {
+    const env = await setup([801], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [work] = env.work.attempts(url(801));
+    // Three turns in a row end in prose with no result line: the work, then two corrections in the same thread.
+    for (let round = 1; round <= 3; round++) {
+      env.at(round * MINUTE);
+      await env.finish(work!.threadId!, "Rebased onto main and pushed. Ready to merge.");
+      await env.reconciler.tick();
+      await env.reconciler.tick();
+    }
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+    expect(env.send.mock.calls.map(([args]) => args.threadId)).toEqual([work!.threadId, work!.threadId]);
+    expect(env.work.attempts(url(801)).map((attempt) => attempt.body.recipes)).toEqual([["repair_report"], ["repair_report"], ["integrate_base"]]);
+    expect(env.row(801)).toMatchObject({ phase: "repair-needed", body: { cause: "report-unrepairable", userState: "issue", recovery: ["retry N"],
+      detail: "The worker's report still can't be read after 2 corrections in its thread" } });
+    const exhausted = env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target = ?`).get(url(801)) as { count: number };
+    // retry N starts a new epoch, so the same work on the same head launches again under a new key; a repeated request changes nothing more.
+    const n = env.row(801)!.body.n;
+    const first = await say(env, `retry ${n}`, "req-retry");
+    expect(first).toMatchObject({ kind: "admit" });
+    expect(await say(env, `retry ${n}`, "req-retry")).toEqual(first);
+    expect(env.row(801)?.body.retryEpoch).toBe(1);
+    env.at(4 * MINUTE);
+    await env.reconciler.tick();
+    const attempts = env.work.attempts(url(801));
+    expect(attempts.map((attempt) => [attempt.body.recipes, attempt.body.retryEpoch])).toEqual([[["integrate_base"], 1], [["repair_report"], 0], [["repair_report"], 0], [["integrate_base"], 0]]);
+    expect(attempts[0]!.launchKey).not.toBe(attempts[3]!.launchKey);
+    // The exhausted repair's history stays: every attempt, and every transition that led to it.
+    expect((env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target = ?`).get(url(801)) as { count: number }).count).toBeGreaterThan(exhausted.count);
+    expect(env.db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE target = ? AND cause = 'report-unrepairable'`).get(url(801))).toEqual({ count: 1 });
+  });
+
+  it("clears a settled legacy worker's report that matches fresh facts through the adapter, with no send, and launches only where it doesn't match", async () => {
+    const env = await setup([802, 803], { live: (n) => ({ approvalFeedback: feedback(n) }), execution: "on" });
+    // 803's report names a head that is no longer the PR's.
+    const { work, reconciler } = await legacyReports(env, [802, 803], (n) => n === 802 ? head(n) : head(n, 9));
+    await reconciler.recoverAll();
+    await reconciler.tick();
+    expect(work.row(url(802))).toMatchObject({ phase: "prepared" });
+    expect(work.attempts(url(802))).toEqual([]);
+    expect(work.attempts(url(803))).toMatchObject([{ body: { recipes: ["address_review_feedback"] } }]);
+    expect([...env.spawn.mock.calls, ...env.send.mock.calls].map(([args]) => args.pluginMetadata?.prUrl ?? args.threadId)).toEqual([expect.stringMatching(/803/u)]);
+    expect(work.notes(env.effort.id, "legacy-adapter").map((note) => [(note as { target: string }).target, (note as { saved: boolean }).saved,
+      (note as { compat: string[] }).compat])).toEqual(expect.arrayContaining([
+      [url(802), true, ["legacy completion marker: prepared", "legacy feedback evidence line", "finalHeadOid → headOid", "approvalFeedbackFingerprint → fingerprint"]],
+      [url(803), false, ["legacy completion marker: prepared", "legacy feedback evidence line"]]]));
+  });
+
+  it("stops only our worker's thread on stop N, releases its claim once BB shows the thread stopped, and pauses the row until retry N", async () => {
+    const env = await setup([811, 812], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [ours] = env.work.attempts(url(811));
+    const [other] = env.work.attempts(url(812));
+    expect(await say(env, `stop ${env.row(811)!.body.n}`, "req-stop")).toMatchObject({ kind: "admit", acknowledgment: expect.arrayContaining([expect.stringMatching(/^Stop: /u)]) });
+    expect(env.row(811)).toMatchObject({ phase: "executing", body: { modifiers: ["draining"], detail: expect.stringContaining("Stopping the worker") } });
+    await env.reconciler.tick();
+    // BB can't confirm the interrupt yet, so the claim holds.
+    expect(env.stop.mock.calls).toEqual([[{ threadId: ours!.threadId }]]);
+    expect(env.work.attempt(ours!.id)?.status).toBe("running");
+    env.threads.set(ours!.threadId!, { ...env.threads.get(ours!.threadId!)!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get(ours!.threadId!)!, lastAssistantText: "" });
+    await settled();
+    await env.reconciler.tick();
+    expect(env.work.attempt(ours!.id)).toMatchObject({ status: "released", body: { releasedReason: "stopped" } });
+    expect(env.row(811)).toMatchObject({ phase: "paused", body: { cause: "stopped", owner: { kind: "user" } } });
+    expect(env.work.attempt(other!.id)?.status).toBe("running");
+    expect(env.stop.mock.calls.every(([args]) => args.threadId === ours!.threadId)).toBe(true);
+    expect(await say(env, `retry ${env.row(811)!.body.n}`, "req-retry")).toMatchObject({ kind: "admit" });
+    env.at(MINUTE);
+    await env.reconciler.tick();
+    expect(env.work.attempts(url(811))[0]).toMatchObject({ status: "running", body: { retryEpoch: 1, recipes: ["integrate_base"] } });
+  });
+
+  it("reads a legacy worker's report once per job, head, and feedback, so evidence that leaves a gate failing lets the worker launch", async () => {
+    // The legacy worker fixed the feedback, but a review thread is still open, which only a worker can resolve.
+    const env = await setup([804], { live: (n) => ({ approvalFeedback: feedback(n), unresolvedThreads: 1 }), execution: "on" });
+    const { work, reconciler } = await legacyReports(env, [804], head);
+    await reconciler.recoverAll();
+    await reconciler.tick();
+    await reconciler.tick();
+    expect(work.notes(env.effort.id, "legacy-adapter")).toMatchObject([{ target: url(804), saved: true }]);
+    expect(work.attempts(url(804))).toMatchObject([{ status: "running", body: { recipes: ["address_review_feedback"] } }]);
+  });
+
+  it("leaves a legacy worker's report unread in a dry run, which keeps its plans in row bodies and saves no evidence", async () => {
+    const env = await setup([805], { live: (n) => ({ approvalFeedback: feedback(n) }) });
+    const { restarted, work, reconciler } = await legacyReports(env, [805], head);
+    await reconciler.recoverAll();
+    await reconciler.tick();
+    await reconciler.tick();
+    expect(work.row(url(805))).toMatchObject({ phase: "queued", body: { nextAction: ["address_review_feedback"], modifiers: ["plan only"] } });
+    expect([work.attempts(url(805)), work.claims(), work.notes(env.effort.id, "legacy-adapter"), env.spawn.mock.calls, env.send.mock.calls]).toEqual([[], [], [], [], []]);
+    expect(restarted.bb.storage.database().prepare("SELECT count(*) AS count FROM approval_feedback_verifications").get()).toEqual({ count: 0 });
+  });
+
+  it("asks BB to stop a worker whose thread already reads idle, asks nothing in a dry run, and never retries a turn you stopped", async () => {
+    const env = await setup([813, 814, 815], { live: () => conflicting, execution: "on", concurrency: 3 });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const [idle, failing, running] = [813, 814, 815].map((n) => env.work.attempts(url(n))[0]!);
+    // 814's turn fails before you stop it.
+    await env.harness.emitThreadEvent("turn.failed", failed(failing.threadId!, "req-1"));
+    await settled();
+    for (const n of [813, 814, 815]) expect(await say(env, `stop ${env.row(n)!.body.n}`, `req-stop-${n}`)).toMatchObject({ kind: "admit" });
+    // 813's thread reads idle, though BB may still run its turn, and that turn fails after you stopped it.
+    env.threads.set(idle.threadId!, { ...env.threads.get(idle.threadId!)!, status: "idle" });
+    await env.harness.emitThreadEvent("turn.failed", failed(idle.threadId!, "req-1"));
+    await settled();
+    // Back to a dry run before the reconciler acts: BB is asked nothing, and every claim holds.
+    await env.harness.setSettings({ v2Execution: "dry-run" });
+    await env.reconciler.tick();
+    expect(env.stop).not.toHaveBeenCalled();
+    expect([idle, failing, running].map((attempt) => env.work.attempt(attempt.id)?.status)).toEqual(["running", "running", "running"]);
+    await env.harness.setSettings({ v2Execution: "on" });
+    env.reconciler.due([813, 814, 815].map(url));
+    await env.reconciler.tick();
+    expect(env.stop.mock.calls.map(([args]) => args.threadId).sort()).toEqual([idle, failing, running].map((attempt) => attempt.threadId).sort());
+    expect(env.work.attempt(idle.id)).toMatchObject({ status: "released", body: { releasedReason: "stopped" } });
+    expect(env.work.attempt(idle.id)?.body.turnFailure ?? null).toBeNull();
+    expect(env.retry).not.toHaveBeenCalled();
+  });
+
+  it("stops no one else's turn in a thread v2 reused while v2's work order waits in its queue, stops the order once it starts, and releases one gone from the queue", async () => {
+    const env = await setup([816, 817], { live: () => conflicting, execution: "on" });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const threadOf = (n: number) => env.work.attempts(url(n))[0]!.threadId!;
+    const [queued, deleted] = [threadOf(816), threadOf(817)];
+    // Each worker's turn ends in prose, so its thread is asked to re-emit its report, and BB queues that message.
+    env.send.mockImplementation(async () => ({ ok: true, delivery: "queued" }) as never);
+    for (const threadId of [queued, deleted]) await env.finish(threadId, "Rebased onto main and pushed.");
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    const [first, second] = [env.work.attempts(url(816))[0]!, env.work.attempts(url(817))[0]!];
+    expect([first, second]).toMatchObject([816, 817].map(() => ({ status: "running", body: { recipes: ["repair_report"], mode: "send" } })));
+    // A turn you started in 816's thread runs ahead of v2's message; you deleted 817's message from its queue, and BB's event for that was lost.
+    env.threads.set(queued, { ...env.threads.get(queued)!, status: "active" });
+    for (const n of [816, 817]) expect(await say(env, `stop ${env.row(n)!.body.n}`, `req-stop-${n}`)).toMatchObject({ kind: "admit" });
+    await env.reconciler.tick();
+    env.at(MINUTE + 1_000);
+    env.reconciler.due([url(816), url(817)]);
+    await env.reconciler.tick();
+    expect(env.stop).not.toHaveBeenCalled();
+    expect(env.work.attempt(first.id)?.status).toBe("running");
+    expect(env.work.attempt(second.id)).toMatchObject({ status: "released", body: { releasedReason: "user-cancelled" } });
+    // v2's message starts as 816's thread's next turn: that turn is v2's to stop.
+    env.requests.set(queued, [{ type: "client/turn/requested", seq: 70, data: { requestId: "req-repair", input: [{ type: "text", text: first.body.marker, mentions: [] }],
+      senderThreadId: null } }, ...env.requests.get(queued)!]);
+    env.reconciler.due([url(816)]);
+    await env.reconciler.tick();
+    expect(env.stop.mock.calls).toEqual([[{ threadId: queued }]]);
+  });
+
+  it("names a failure several PRs share once among the roster's issues, with each PR's number, though decide() names each PR in its detail", async () => {
+    const env = await setup([521, 522]);
+    for (const n of [521, 522]) env.github.failFor.add(n);
+    await env.reconciler.recoverAll();
+    for (let minute = 0; minute <= 31; minute++) {
+      env.at(minute * MINUTE + 1_000);
+      await env.reconciler.tick();
+    }
+    const [first, second] = [env.row(521)!, env.row(522)!];
+    expect([first.body.cause, second.body.cause]).toEqual(["source-unavailable", "source-unavailable"]);
+    expect(first.body.detail).not.toBe(second.body.detail);
+    const roster = await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster;
+    expect(roster.issues).toEqual([{ cause: "source-unavailable", label: "source-unavailable", numbers: [first.body.n, second.body.n].sort() }]);
   });
 });

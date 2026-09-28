@@ -355,7 +355,7 @@ export type EffortV2Deps = {
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
-    | "attempts" | "attempt" | "claims" | "release" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction">;
+    | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
@@ -366,6 +366,8 @@ export type EffortV2Deps = {
     launch(input: Launch): Promise<LaunchOutcome>;
     /** A code action's GitHub write, its key recorded first, or its read back after an unclear answer. */
     code(input: CodeRun): Promise<CodeOutcome>;
+    /** The compatibility adapter over a settled legacy worker's last output: whether it saved feedback evidence; null when BB can't read it now. */
+    adopt(target: string, legacy: { attemptId: string; threadId: string }, facts: AdvanceFacts): Promise<{ saved: boolean; compat: string[]; rejection: string | null } | null>;
     /** An attempt's next step: read back its launch, retry its failed turn, read its finished turn, or read its report. */
     advance(attemptId: string): Promise<void> };
   /** The reconciler's reads and clock. */
@@ -456,10 +458,11 @@ export function createEffortV2(deps: EffortV2Deps) {
   const unreadable = new Map<string, NonNullable<DecideInput["unreadable"]>>();
   /** Criteria evidence from our attempts' reports on these PRs. */
   const evidenceOf = (targets: Iterable<string>) => attemptEvidence([...targets].flatMap((target) => deps.work.attempts(target)));
-  /** Our attempts on a PR as decide() reads them; a claim `reset N release` drops is read as released. */
-  function attemptsOf(target: string, released?: ReadonlySet<string>): Attempt[] {
+  /** Our attempts on a PR as decide() reads them; a claim `reset N release` drops is read as released, and a worker `stop N` stops as stopping. */
+  function attemptsOf(target: string, released?: ReadonlySet<string>, stopping?: ReadonlySet<string>): Attempt[] {
     return deps.work.attempts(target).map(decideAttempt).map((attempt) => released?.has(target) && (attempt.status === "launching" || attempt.status === "uncertain")
-      ? { ...attempt, status: "released" as const, releasedReason: "no-worker" as const } : attempt);
+      ? { ...attempt, status: "released" as const, releasedReason: "no-worker" as const }
+      : stopping?.has(target) && attempt.status === "running" ? { ...attempt, stopRequested: true } : attempt);
   }
   /**
    * Plan the included PRs and any row still open under the effort, the writes for the rows whose step changed, and the
@@ -468,6 +471,7 @@ export function createEffortV2(deps: EffortV2Deps) {
    */
   async function replan(effort: EstablishedEffort, scope: InstructionScope | null, sources: RosterSources,
     options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string>; decisions: readonly Decision[]; released?: ReadonlySet<string>;
+      stopping?: ReadonlySet<string>;
       change?: RowChange & { target: string };
       resources?: ReadonlyMap<string, ResourceParts>; rateLimitedUntil?: number | null; legacyRechecks?(target: string): number }) {
     const open = deps.work.rows(effort.id).filter((row) => row.phase !== "finished").map((row) => row.target);
@@ -479,7 +483,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const { change } = options;
     const planned = planRows({ effort, mode: deps.execution.get(effort.id).mode, execution: await deps.launches.execution(), scope, sources, models: await deps.models(), held: options.held,
       admission: change?.admission ?? await deps.launches.admission(),
-      attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released), evidence: evidenceOf(targets),
+      attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released, options.stopping), evidence: evidenceOf(targets),
       writer: (target) => change?.target === target ? change.writer ?? null : null,
       resources: (target) => options.resources?.get(target), rateLimitedUntil: options.rateLimitedUntil ?? null, ...options.legacyRechecks ? { legacyRechecks: options.legacyRechecks } : {},
       unreadable: (target) => unreadable.get(target) ?? null,
@@ -636,8 +640,10 @@ export function createEffortV2(deps: EffortV2Deps) {
     const active = deps.work.instruction(effort.id);
     const lastRevision = deps.work.lastRevision(effort.id);
     if (result.postRoster) return refuse("post roster arrives with parent-thread reports; open the roster instead. Nothing was admitted.");
-    if (result.interventions.some((item) => item.action === "stop"))
-      return refuse("stop N arrives with bounded repairs; until then, hold N lets the current turn finish and starts nothing new. Nothing was admitted.");
+    // `stop N` interrupts our running worker through BB, which a dry run never writes to.
+    const stops = result.interventions.filter((item) => item.action === "stop");
+    if (stops.length && await deps.launches.execution() !== "on") return refuse(`v2 execution is a dry run, so v2 stops no worker. Stop ${formatTargets(stops)} in `
+      + `${stops.map((item) => deps.work.attempts(item.target).find((attempt) => attempt.status === "running")?.threadId ?? "its worker's thread").join(", ")} yourself. Nothing was admitted.`);
     if (effort.archivedAt && (result.instruction || result.answers.length)) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
     // A launch this process is still making settles its own claim when BB answers; releasing it first would let its worker start unrecorded.
     const making = result.interventions.filter((item) => item.release && deps.launches.launching(item.target));
@@ -688,7 +694,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     const held = (target: string) => result.holds.some((item) => item.target === target)
       || (!result.releases.some((item) => item.target === target) && prHoldFor(target, sources.holds) !== null);
     const touched = new Set([...result.holds, ...result.releases, ...result.interventions].map((item) => item.target));
-    const { planned, writes, decisions } = await replan(effort, scope, sources, { held, released, decisions: open.filter((item) => !answered.some((other) => other.id === item.id)),
+    const stopping = new Set(stops.map((item) => prWorkItemKey(item.target)));
+    const { planned, writes, decisions } = await replan(effort, scope, sources, { held, released, stopping, decisions: open.filter((item) => !answered.some((other) => other.id === item.id)),
       retry: new Set([...result.interventions.filter((item) => item.action === "reset" || item.action === "retry").map((item) => item.target), ...asked]),
       // An answer alone re-plans only the PRs that asked it, and other rows keep their revisions, unless it changed which PRs the
       // instruction includes: a whole-effort criterion follows that set to another PR.
@@ -715,9 +722,12 @@ export function createEffortV2(deps: EffortV2Deps) {
         for (const item of result.holds) deps.holds.set(item.target, true, item.reason);
         for (const item of result.releases) deps.holds.set(item.target, false);
         for (const target of released) deps.work.release(target);
+        for (const target of stopping) deps.work.requestStop(target);
       } });
     if (result.holds.length || result.releases.length) deps.holds.changed();
     deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+    // The reconciler's next tick stops the worker; commands only record what to do.
+    if (stopping.size) markDue([...stopping]);
     nudge();
     return answer;
   }
@@ -894,6 +904,26 @@ export function createEffortV2(deps: EffortV2Deps) {
       return due;
     });
   }
+  type Adapted = { target: string; job: string; head: string; fingerprint: string | null; saved: boolean; compat: string[]; rejection: string | null };
+  /**
+   * Before a launch that would address review feedback, the compatibility adapter reads the PR's settled legacy Advance worker's last
+   * output, once per head and feedback fingerprint, with no model turn and no send. Evidence it proves on fresh facts clears the feedback
+   * gate, so no worker starts for work a legacy worker already did. Each read is journaled. True when it saved evidence. A dry run keeps
+   * its plans in row bodies, so the adapter saves nothing until v2 execution is on.
+   */
+  async function adoptLegacy(effortId: string, target: string, step: Next, legacy: LegacyAttempt | null, facts: AdvanceFacts): Promise<boolean> {
+    const job = legacy?.job;
+    if (!legacy || !job?.threadId || legacy.cause === "uncertain" || ["queued", "launching", "running", "verifying"].includes(job.status)
+      || facts.approvalFeedback.status !== "present" || !(step.nextAction as string[]).includes("address_review_feedback")
+      || await deps.launches.execution() !== "on") return false;
+    const read = { target, job: `${legacy.batchId}/${job.id}`, head: facts.headOid, fingerprint: facts.approvalFeedback.fingerprint };
+    if ((deps.work.notes(effortId, "legacy-adapter") as Adapted[]).some((note) => note.target === read.target && note.job === read.job && note.head === read.head
+      && note.fingerprint === read.fingerprint)) return false;
+    const adapted = await deps.launches.adopt(target, { attemptId: job.attemptId ?? job.id, threadId: job.threadId }, facts);
+    if (!adapted) return false;
+    deps.work.note(effortId, "legacy-adapter", { ...read, ...adapted } satisfies Adapted);
+    return adapted.saved;
+  }
   /** Act on one row a pass planned: take its attempt's next step, launch its work order, run its code action, or recheck the legacy job it waits on. */
   async function act(effortId: string, { row, step, criteria, facts, legacy, reviews }: Due): Promise<void> {
     const now = deps.reconciler.now();
@@ -905,6 +935,7 @@ export function createEffortV2(deps: EffortV2Deps) {
       const scope = deps.work.instruction(effortId)?.scope;
       const grant = scope?.include.find((item) => prWorkItemKey(item.target) === row.target);
       if (!scope || !grant || !facts) return;
+      if (await adoptLegacy(effortId, row.target, step, legacy, facts)) return settle(effortId, "legacy-adapter", new Set([row.target]));
       const outcome = await deps.launches.launch({ effortId, target: row.target, baseRevision: deps.work.lastRevision(effortId), expectedRevision: row.revision, step, body: row.body,
         order: { revision: scope.revision, facts, granted: grant.effects, parentMerged: false, tickets: row.body.tickets, threads: [], direction: null,
           criteria: criteria.map((id) => ({ id, text: scope.criteria.find((item) => item.id === id)?.text ?? id, fixAuthorized: false })),

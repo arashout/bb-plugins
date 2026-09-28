@@ -34,7 +34,7 @@ const scope = (include = [grant()], removed: InstructionScope["removed"] = []): 
 const attempt = (overrides: Partial<Attempt> = {}): Attempt => ({
   id: "A-1", status: "completed", threadId: "thr_origin", path: AUTHOR, workspace: null, recipes: ["address_review_feedback"], retryEpoch: 0,
   headOid: HEAD, fingerprint: FINGERPRINT, endedAt: NOW - 2 * MINUTE, result: "changed", blocker: null, failure: null, releasedReason: null,
-  interactionPending: false, turnFailed: false, turnRetries: 0, readbackFailures: 0, ...overrides,
+  interactionPending: false, stopRequested: false, turnFailed: false, turnRetries: 0, readbackFailures: 0, ...overrides,
 });
 const author = { path: AUTHOR, githubRepo: "inkwell/folio", branch: "abc-340", prUrl: PR_URL, projectId: "proj_folio", hostId: HOST };
 const source = { ...author, path: SOURCE, branch: "main", prUrl: null };
@@ -168,12 +168,18 @@ describe("decide()", () => {
     expect(decide(row({ decision, feedback: verified(OLD_HEAD) }, FEEDBACK))).toMatchObject({ phase: "decision-needed", cause: "product", decision: { key: decision.key } });
   });
 
-  it("asks the worker's own thread to re-emit a missing report, and names an issue when the correction fails too", () => {
-    expect(decide(row({ attempts: [attempt({ result: "report-invalid" })] }, FEEDBACK)))
-      .toMatchObject({ nextAction: ["repair_report"], resource: { kind: "same-thread", threadId: "thr_origin" } });
-    const correction = attempt({ id: "A-2", recipes: ["repair_report"], result: "report-invalid" });
-    expect(decide(row({ attempts: [correction, attempt({ result: "report-invalid" })] }, FEEDBACK)))
-      .toMatchObject({ phase: "repair-needed", cause: "report-unrepairable", recovery: ["retry N"] });
+  it("asks the worker's own thread to re-emit a missing report at most twice, then names an issue that retry N starts over", () => {
+    const work = attempt({ result: "report-invalid" });
+    const correction = (id: string) => attempt({ id, recipes: ["repair_report"], result: "report-invalid" });
+    for (const attempts of [[work], [correction("A-2"), work]])
+      expect(decide(row({ attempts }, FEEDBACK))).toMatchObject({ phase: "queued", nextAction: ["repair_report"], resource: { kind: "same-thread", threadId: "thr_origin" } });
+    const exhausted = [correction("A-3"), correction("A-2"), work];
+    expect(decide(row({ attempts: exhausted }, FEEDBACK))).toMatchObject({ phase: "repair-needed", cause: "report-unrepairable", recovery: ["retry N"],
+      detail: "The worker's report still can't be read after 2 corrections in its thread" });
+    // Corrections count within one retry epoch, from the work they correct: a retry, or new work after a correction that routed on, starts over.
+    expect(state(decide(row({ attempts: exhausted, retryEpoch: 1 }, FEEDBACK)))).toBe("queued:launching");
+    expect(state(decide(row({ attempts: [attempt({ id: "A-4", result: "report-invalid" }), attempt({ id: "A-3", recipes: ["repair_report"], result: "failed" }), work] }, FEEDBACK))))
+      .toBe("queued:report-repair");
     // A report not parsed yet is read first; prose alone never makes a row Ready.
     expect(state(decide(row({ attempts: [attempt({ result: null })] })))).toBe("verifying:parse-report");
   });
