@@ -30,7 +30,7 @@ import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROS
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
 import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS,
-  type V2Target } from "./effort-work-store.js";
+  currentRow, USER_STATES, type V2Target } from "./effort-work-store.js";
 import type { ResourceThread } from "./effort-resources.js";
 import type { CheckoutInspection } from "./advance-contract.js";
 import { rosterTargets } from "./effort-roster.js";
@@ -317,6 +317,9 @@ const boardSchema = z.object({
       status: z.enum(["launching", "running", "verifying", "verified", "needs-you", "failed"]),
       detail: z.string(), threadId: z.string().nullable(), startedAt: z.number() })),
   }),
+  /** PRs a v2 roster manages, by PR key, as their roster rows stand: their legacy cards show the roster's state and start no legacy work. */
+  v2Managed: z.record(z.string(), z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(),
+    state: z.enum([...USER_STATES, "not-in-instruction"]), owner: z.string().nullable(), modifiers: z.array(z.string()) })).default({}),
 });
 
 /** What the lens control remembers across a reload. */
@@ -1942,7 +1945,24 @@ export default async function plugin(bb: BbPluginApi) {
         candidate: dispatchPolicy.mode === "off" ? null : dispatchChoice?.candidate ?? null,
         attempts: dispatchAttempts.slice(0, 50).map(({ fingerprint: _fingerprint, ...attempt }) => attempt),
       },
+      v2Managed: v2ManagedPrs(established),
     };
+  }
+  /**
+   * Every PR a v2 roster manages, as its roster row stands, the fences' own ownership: legacy cards show the roster's state in place of
+   * their own. A member no instruction includes, or one the instruction let go, is not in the instruction.
+   */
+  function v2ManagedPrs(efforts: readonly EstablishedEffort[]): Board["v2Managed"] {
+    const names = new Map(efforts.map((effort) => [effort.id, effort.name]));
+    return Object.fromEntries(effortWork.managed().flatMap(({ target, effortId }) => {
+      const effortName = names.get(effortId);
+      if (effortName === undefined || effortWork.execution(effortId).mode !== "v2") return [];
+      const row = effortWork.row(target);
+      const mine = row?.effortId === effortId ? row : null;
+      const current = mine && currentRow(mine) ? mine : null;
+      return [[target, { effortId, effortName, n: mine?.body.n ?? null, state: current?.body.userState ?? "not-in-instruction",
+        owner: current?.body.owner?.kind ?? null, modifiers: current?.body.modifiers ?? [] }]];
+    }));
   }
 
   // ---- BB threads: read, link, open. Only row actions write to them. -----
@@ -3990,7 +4010,7 @@ export default async function plugin(bb: BbPluginApi) {
     const recent = batches.flatMap((batch) => batch.jobs);
     const cards = new Map(pipelineCards(current.prInventory.entries, [...inboxRows(current, Date.now()).values()].flat(), Date.now(), {
       holds: current.prHolds, batches, dispatch: current.dispatch, runs: current.runs,
-      observations: current.prObservations,
+      observations: current.prObservations, v2: current.v2Managed,
     }).flatMap((card) => card.pr ? [[canonicalPrUrl(card.pr.url), card] as const] : []));
     return scope.map((prUrl) => {
       const known = knownPr(prUrl);

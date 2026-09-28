@@ -3,8 +3,10 @@ import { prSchema, type Pr } from "./contract.js";
 import { checkConclusions } from "./gh.js";
 import type { Row } from "./inbox-rows.js";
 import type { BacklogEntry } from "./pr-backlog.js";
-import { activityFor, blockerFor, orderPipelineCards, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, pipelineStackGraph, primaryPipelineAction, stageFor, togglePipelineSelection } from "./pipeline.js";
+import { activityFor, blockerFor, managedLabel, orderPipelineCards, pipelineBulkCards, pipelineCards, pipelineColumns, pipelineEfforts, pipelineStackGraph, primaryPipelineAction, selectablePipelineCard,
+  stageFor, togglePipelineSelection, type ManagedPr, type PipelineCard, type PipelineSources } from "./pipeline.js";
 import { reconcileAdvanceSelection, selectVisibleOpen } from "./bulk-advance-selection.js";
+import { prWorkItemKey } from "./work-item-index.js";
 import type { Lifecycle } from "./workstreams.js";
 
 const now = Date.parse("2026-09-25T00:00:00Z");
@@ -362,5 +364,69 @@ describe("explicit Advance selection", () => {
     expect(active.activity.state).toBe("working");
     expect(selectVisibleOpen([], [active.pr!])).toEqual([active.pr!.url]);
     expect(togglePipelineSelection(empty, { ...active, hold: { reason: "Waiting", heldAt: now } }).urls).toEqual([]);
+  });
+});
+
+describe("legacy cards for PRs a v2 roster manages", () => {
+  const managed = (patch: Partial<ManagedPr> = {}): ManagedPr => ({ effortId: "e-shelving", effortName: "Shelving entry", n: 5, state: "waiting", owner: "ci", modifiers: [], ...patch });
+  const byNumber = (cards: readonly PipelineCard[], number: number) => cards.find((card) => card.pr?.number === number)!;
+
+  it("shows the roster's state where the card's gate was, and offers no Advance, Fix, or dispatch action, whatever legacy history says", () => {
+    // 60's checks fail after a legacy Advance job needed attention; 61 conflicts after a dispatch attempt stopped for you; 62 conflicts with no history.
+    const [failing, dispatched, conflicting] = [pr(60, { checkConclusions: ["FAILURE"] }), pr(61, { mergeStateStatus: "DIRTY" }), pr(62, { mergeStateStatus: "DIRTY" })];
+    const entries = [entry(failing), entry(dispatched), entry(conflicting)];
+    const sources = { batches: [{ id: "batch", createdAt: now - 1000, cancelled: false, jobs: [{ id: "job", prUrl: failing.url, status: "needs-attention",
+      detail: "Earlier attempt failed", threadId: "thread-1", updatedAt: now - 1000 }] }],
+      dispatch: { attempts: [{ id: 1, path: "/work/catalog-61", prUrl: dispatched.url, action: "resolve-conflicts", status: "needs-you", detail: "Stopped", threadId: "thread-2",
+        startedAt: now - 1000 }] } } as unknown as PipelineSources;
+    // Without its roster, each card would start legacy work.
+    const legacy = pipelineCards(entries, [], now, sources);
+    expect([60, 61, 62].map((number) => byNumber(legacy, number).action?.kind)).toEqual(["fix", "fix", "advance"]);
+    expect(pipelineBulkCards(legacy, "feedback")).toHaveLength(3);
+
+    const cards = pipelineCards(entries, [], now, { ...sources, v2: { [prWorkItemKey(failing.url)]: managed(), [prWorkItemKey(dispatched.url)]: managed({ n: 6, state: "decision", owner: "user" }),
+      [prWorkItemKey(conflicting.url)]: managed({ n: 7, state: "waiting", owner: null, modifiers: ["plan only"] }) } });
+    expect([60, 61, 62].map((number) => { const { blocker, action, activity, nextStep, managed: roster } = byNumber(cards, number); return { blocker, action, activity, nextStep, roster }; }))
+      .toEqual([
+        { blocker: { label: "Managed by Shelving entry roster: Waiting on CI", tone: "wait" }, roster: { effortId: "e-shelving", effortName: "Shelving entry", n: 5, state: "waiting", label: "Waiting on CI" } },
+        { blocker: { label: "Managed by Shelving entry roster: Decision", tone: "warn" }, roster: { effortId: "e-shelving", effortName: "Shelving entry", n: 6, state: "decision", label: "Decision" } },
+        { blocker: { label: "Managed by Shelving entry roster: Planned · execution off", tone: "wait" }, roster: { effortId: "e-shelving", effortName: "Shelving entry", n: 7, state: "waiting", label: "Planned · execution off" } },
+      ].map((expected) => ({ ...expected, action: null, activity: { state: "none", detail: "", threadId: null, source: null }, nextStep: "Instruct it in the Shelving entry roster." })));
+    // No bulk Advance, and no explicit Advance selection, reaches them.
+    expect(pipelineBulkCards(cards, "feedback")).toEqual([]);
+    expect(cards.filter(selectablePipelineCard)).toEqual([]);
+    const empty = { urls: [], removed: 0 };
+    expect(togglePipelineSelection(empty, byNumber(cards, 62))).toBe(empty);
+  });
+
+  it("names the roster's state in its own words: who a wait is on, and a step a dry run only plans", () => {
+    const states: [Partial<ManagedPr>, string][] = [
+      [{ state: "doing", owner: "v2-attempt" }, "Doing"], [{ state: "waiting", owner: "ci" }, "Waiting on CI"], [{ state: "waiting", owner: "reviewer" }, "Waiting on review"],
+      [{ state: "waiting", owner: "pr" }, "Waiting on another PR"], [{ state: "waiting", owner: "legacy-job" }, "Waiting on legacy Advance"],
+      [{ state: "waiting", owner: "user" }, "Waiting on you"], [{ state: "waiting", owner: null, modifiers: ["plan only"] }, "Planned · execution off"],
+      [{ state: "decision", owner: "user" }, "Decision"], [{ state: "ready", owner: "user" }, "Ready"], [{ state: "issue", owner: "user" }, "System issue"],
+      [{ state: "done", owner: null }, "Done"], [{ state: "not-in-instruction", owner: null }, "Not in instruction"],
+    ];
+    expect(states.map(([patch]) => managedLabel(managed(patch)))).toEqual(states.map(([, label]) => label));
+    // A hold on the board shows as the hold, and a held card still offers no legacy work.
+    const held = pr(63, { mergeStateStatus: "DIRTY" });
+    expect(pipelineCards([entry(held)], [], now, { holds: { [held.url]: { reason: "Copy review", heldAt: now } }, v2: { [prWorkItemKey(held.url)]: managed({ state: "waiting", owner: "user" }) } })[0])
+      .toMatchObject({ blocker: { label: "Managed by Shelving entry roster: On hold", tone: "wait" }, action: null, managed: { label: "On hold" } });
+  });
+
+  it("leaves every card of a PR no roster manages exactly as it was", () => {
+    const parent = pr(70);
+    const child = pr(71, { baseRefName: "book-70", mergeStateStatus: "DIRTY" });
+    const held = pr(72, { checkConclusions: ["FAILURE"] });
+    const draft = pr(73, { isDraft: true });
+    const ours = pr(74, { mergeStateStatus: "DIRTY" });
+    const entries = [entry(parent), entry(child, { effortKey: "effort:legacy", effortName: "Legacy shelving" }), entry(held), entry(draft), entry(ours)];
+    const locals = [local(null), local(pr(75, { state: "MERGED" }), { unit: { ...local(pr(75)).unit, lifecycle: "merged" } })];
+    const sources = { holds: { [held.url]: { reason: "Copy review", heldAt: now } } };
+    const before = pipelineCards(entries, locals, now, sources);
+    const after = pipelineCards(entries, locals, now, { ...sources, v2: { [prWorkItemKey(ours.url)]: managed() } });
+    expect(after.filter((card) => card.managed === null)).toEqual(before.filter((card) => card.key !== prWorkItemKey(ours.url)));
+    expect(before.every((card) => card.managed === null)).toBe(true);
+    expect(after.filter((card) => card.managed !== null).map((card) => card.key)).toEqual([prWorkItemKey(ours.url)]);
   });
 });

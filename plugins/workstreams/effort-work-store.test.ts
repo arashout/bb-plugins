@@ -168,6 +168,17 @@ describe("effort instructions and rows", () => {
       rows: [write(folio, 2, "verifying", "observe"), write(quill, 1, "verifying", "observe")], journal: null });
     expect([folio, quill].map((target) => work.row(target)?.effortId)).toEqual(["gifts", "gifts"]);
   });
+
+  it("lists exactly the PRs the fences read as managed, so the board labels no other card", () => {
+    const { work } = open();
+    const [spine, catalog] = [pr("spine", 18), pr("catalog", 20)];
+    work.setMode("gifts", "v2", 0, targetsOf);
+    work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: revise(1, [folio, quill, spine, catalog]), journal: null,
+      rows: [write(folio, 0, "waiting", "ci"), write(quill, 0, "finished", "cancelled"), write(spine, 0, "paused", "membership-moved"), write(catalog, 0, "paused", "hold")] });
+    const listed = new Map(work.managed().map((item) => [item.target, item.effortId]));
+    expect([folio, quill, atlas, spine, catalog].map((target) => listed.get(target) ?? null)).toEqual([folio, quill, atlas, spine, catalog].map(work.managedBy));
+    expect(listed).toEqual(new Map([[atlas, "gifts"], [folio, "returns"], [catalog, "returns"]]));
+  });
 });
 
 describe("effort decisions", () => {

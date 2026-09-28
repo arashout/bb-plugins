@@ -3,9 +3,11 @@ import type { Pr } from "./contract.js";
 import type { Row } from "./inbox-rows.js";
 import type { AdvanceBatch, AdvanceJob } from "./bulk-advance.js";
 import type { DispatchState } from "./dispatch.js";
+import type { UserState } from "./effort-work-store.js";
 import type { PrHold, PrHolds } from "./pr-holds.js";
 import { canonicalPrUrl } from "./pr-holds.js";
 import { prBacklog, type BacklogEntry, type BacklogRow } from "./pr-backlog.js";
+import { STATE_LABEL } from "./roster-shared.js";
 import type { WireRun } from "./server.js";
 import { advancePrKey, selectVisibleOpen, type AdvanceSelection } from "./bulk-advance-selection.js";
 import { displayTitle, isTicketlessClone, prLifecycle, type Lifecycle } from "./workstreams.js";
@@ -17,14 +19,37 @@ export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type PipelineBlocker = { label: string; tone: "bad" | "warn" | "wait" | "clear" };
 export type PipelineActivity = { state: "none" | "working" | "done" | "needs-you"; detail: string; threadId: string | null; source: "advance" | "dispatch" | "run" | null };
 export type PipelineAction = { kind: "merge" | "advance" | "fix" | "nudge" | "open-parent" | "open-thread" | "open-pr" | "release"; label: string; behind?: number } | null;
+/**
+ * A PR a v2 effort's roster manages, as its effort_pr_work row stands: the row's user state, the owner of its wait, and its
+ * modifiers. A member no instruction includes has no current row.
+ */
+export type ManagedPr = { effortId: string; effortName: string; n: number | null; state: UserState | "not-in-instruction"; owner: string | null;
+  modifiers: readonly string[] };
 export type PipelineCard = {
   key: string; repo: string; title: string; pr: Pr | null; local: Row | null; backlog: BacklogRow | null;
   effortKey: string | null; effortName: string | null; hold: PrHold | null;
   stage: PipelineStage; blocker: PipelineBlocker; activity: PipelineActivity; action: PipelineAction; nextStep: string;
   ageSince: number | null; stale: boolean;
+  /** Set when a v2 roster manages the PR: that roster is its one state authority, and no legacy launcher may start work on it. */
+  managed: (Pick<ManagedPr, "effortId" | "effortName" | "n" | "state"> & { label: string }) | null;
 };
+/** `v2` is keyed by prWorkItemKey. */
 export type PipelineSources = { holds?: PrHolds; batches?: readonly AdvanceBatch[]; dispatch?: DispatchState; runs?: readonly WireRun[];
-  observations?: Readonly<Record<string, { checkedAt: string | null; failedAt: string | null }>> };
+  observations?: Readonly<Record<string, { checkedAt: string | null; failedAt: string | null }>>; v2?: Readonly<Record<string, ManagedPr>> };
+
+/** The roster's own state words, so a card and its roster row never name a state differently. */
+const MANAGED_STATE: Record<ManagedPr["state"], string> = STATE_LABEL;
+const MANAGED_TONE: Record<ManagedPr["state"], PipelineBlocker["tone"]> = { doing: "wait", waiting: "wait", decision: "warn", ready: "clear", issue: "bad", done: "clear",
+  "not-in-instruction": "wait" };
+/** Who a roster wait is on, by its row's owner kind. */
+const WAITING_ON: Record<string, string> = { ci: "CI", reviewer: "review", pr: "another PR", github: "GitHub", thread: "another writer", "legacy-job": "legacy Advance",
+  "v2-attempt": "a v2 worker slot", user: "you" };
+/** A managed PR's state in the roster's words: a wait names who it is on, and a step a dry run only plans says so. */
+export function managedLabel(managed: Pick<ManagedPr, "state" | "owner" | "modifiers">): string {
+  if (managed.state !== "waiting") return MANAGED_STATE[managed.state];
+  if (managed.modifiers.includes("plan only")) return "Planned · execution off";
+  return managed.owner ? `Waiting on ${WAITING_ON[managed.owner] ?? managed.owner}` : MANAGED_STATE.waiting;
+}
 
 const ACTIVE_JOBS = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 const NONE: PipelineActivity = { state: "none", detail: "", threadId: null, source: null };
@@ -157,7 +182,9 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
     const behind = remote?.parent?.pr.number ?? local?.unit.stack?.blockedBelow ?? null;
     const hold = remote?.hold ?? local?.hold ?? null;
     const stage = stale && pr !== null && !pr.isDraft ? "review" : stageFor(lifecycle, pr, behind);
-    const blocker = blockerFor(pr, stage, hold, behind, stale);
+    const v2 = pr === null ? undefined : sources.v2?.[prWorkItemKey(pr.url)];
+    const managed = v2 ? { effortId: v2.effortId, effortName: v2.effortName, n: v2.n, state: v2.state, label: hold ? "On hold" : managedLabel(v2) } : null;
+    let blocker = blockerFor(pr, stage, hold, behind, stale);
     let activity = hold === null ? activityFor(pr?.url ?? null, local?.key ?? null, sources) : NONE;
     if (hold === null && stage === "build" && activity.state === "none" && local?.cluster.units.length === 1 && local.cluster.threads.some((thread) => thread.active)) {
       const thread = local.cluster.threads.find((item) => item.active)!;
@@ -166,12 +193,20 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
     if (stage === "ready" && blocker.label === "Clear" && activity.state === "needs-you") activity = NONE;
     let action = primaryPipelineAction(stage, blocker, activity, hold, behind);
     if (pr?.state !== "OPEN" && action?.kind === "advance") action = null;
-    const nextStep = nextStepFor(pr, stage, blocker, activity, hold, behind);
+    let nextStep = nextStepFor(pr, stage, blocker, activity, hold, behind);
+    // The roster is the one state authority: its state replaces the board's gate, a legacy attempt is history there, and every action goes
+    // through the roster, so the card offers none of its own.
+    if (managed) {
+      blocker = { label: `Managed by ${managed.effortName} roster: ${managed.label}`, tone: hold ? "wait" : MANAGED_TONE[managed.state] };
+      if (activity.state !== "working") activity = NONE;
+      action = null;
+      nextStep = `Instruct it in the ${managed.effortName} roster.`;
+    }
     if (pr !== null) covered.add(prWorkItemKey(pr.url));
     cards.push({ key: pr === null ? local!.key : prWorkItemKey(pr.url), repo: pr === null ? local!.repo : repoOf(pr, remote?.repo ?? local!.repo),
       title: pr === null ? local!.title : displayTitle(pr.title), pr, local, backlog: remote,
       effortKey: remote?.effortKey ?? local?.effortKey ?? null, effortName: remote?.effortName ?? local?.effort ?? null,
-      hold, stage, blocker, activity, action, nextStep, ageSince: ageOf(pr, local), stale });
+      hold, stage, blocker, activity, action, nextStep, ageSince: ageOf(pr, local), stale, managed });
   };
   for (const row of backlog) add(row.local, row);
   for (const local of [...locals].sort((a, b) => Number(b.unit.pr?.state === "MERGED" && b.unit.lifecycle === "shipped") - Number(a.unit.pr?.state === "MERGED" && a.unit.lifecycle === "shipped") ||
@@ -275,7 +310,7 @@ export type PipelineColumn = { stage: PipelineStage; cards: PipelineCard[]; bulk
 export function pipelineBulkCards(cards: readonly PipelineCard[], stage: PipelineStage, graph = pipelineStackGraph(cards)): PipelineCard[] {
   const bulk = stage === "build" || stage === "review" || stage === "feedback" ? "advance" : stage === "ready" ? "merge" : null;
   if (bulk === null) return [];
-  return orderPipelineCards(cards, graph).filter((card) => card.stage === stage && card.hold === null &&
+  return orderPipelineCards(cards, graph).filter((card) => card.stage === stage && card.hold === null && card.managed === null &&
     (bulk === "advance" ? card.pr?.state === "OPEN" : card.action?.kind === bulk));
 }
 export function pipelineColumns(cards: readonly PipelineCard[]): PipelineColumn[] {
@@ -287,7 +322,7 @@ export function pipelineColumns(cards: readonly PipelineCard[]): PipelineColumn[
   });
 }
 
-export const selectablePipelineCard = (card: PipelineCard): boolean => card.pr?.state === "OPEN" && card.hold === null;
+export const selectablePipelineCard = (card: PipelineCard): boolean => card.pr?.state === "OPEN" && card.hold === null && card.managed === null;
 
 export function togglePipelineSelection(selection: AdvanceSelection, card: PipelineCard): AdvanceSelection {
   if (!selectablePipelineCard(card)) return selection;

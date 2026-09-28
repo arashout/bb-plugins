@@ -234,6 +234,8 @@ type WorkDb = RunDb & { transaction<T>(fn: () => T): () => T };
  * effort left v2: then the owning effort's command may take the row over. Rows pause only once their claims drain.
  */
 export const holdsPr = (row: Pick<WorkRow, "phase" | "body">) => row.phase !== "finished" && !(row.phase === "paused" && ["membership-moved", "v2-off"].includes(row.body.cause));
+/** Whether a row's state is its PR's current state: unfinished, or finished by a merge or close. A row its instruction let go (dropped, superseded, or cancelled) isn't. */
+export const currentRow = (row: Pick<WorkRow, "phase" | "body">) => row.phase !== "finished" || ["merged", "closed"].includes(row.body.cause);
 
 const ROW = `target, effort_id AS effortId, instruction_id AS instructionId, phase, revision, due_at AS dueAt, body`;
 type StoredRow = Omit<WorkRow, "body"> & { body: string };
@@ -304,6 +306,14 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       if (member) return member.effortId;
       const held = row(prUrl);
       return held && holdsPr(held) ? held.effortId : null;
+    },
+    /** Every PR managedBy() names, with its effort: the members of every v2 roster, then PRs an instruction holds from outside membership. */
+    managed(): { target: string; effortId: string }[] {
+      const members = db.prepare(`SELECT target, effort_id AS effortId FROM effort_v2_targets`).all() as { target: string; effortId: string }[];
+      const listed = new Set(members.map((member) => member.target));
+      const held = (db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE phase <> 'finished'`).all() as StoredRow[]).map(readRow)
+        .filter((item) => !listed.has(item.target) && holdsPr(item));
+      return [...members, ...held.map((item) => ({ target: item.target, effortId: item.effortId }))];
     },
     /** The effort's active instruction, if any. */
     instruction: activeInstruction,

@@ -21,7 +21,7 @@ const card = (number: number, action: PipelineCard["action"], patch: Partial<Pip
   key: pr(number), repo: "example/widgets", title: `Widget ${number}`, pr: { url: pr(number) } as PipelineCard["pr"],
   local: null, backlog: null, effortKey: null, effortName: null, hold: null, stage: "review",
   blocker: { label: "Awaiting review", tone: "wait" }, activity: { state: "none", detail: "", threadId: null, source: null },
-  action, nextStep: "Wait for the reviewer.", ageSince: null, stale: false, ...patch,
+  action, nextStep: "Wait for the reviewer.", ageSince: null, stale: false, managed: null, ...patch,
 });
 
 describe("Work request presentation", () => {

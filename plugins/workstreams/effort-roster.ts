@@ -16,7 +16,7 @@ import { recipe } from "./effort-recipes.js";
 import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
 import type { Admission, V2Execution } from "./effort-runner.js";
 import type { EstablishedEffort } from "./effort-store.js";
-import { USER_STATES, workRowBodySchema, type Execution, type StoredAttempt, type WorkRow } from "./effort-work-store.js";
+import { currentRow, USER_STATES, workRowBodySchema, type Execution, type StoredAttempt, type WorkRow } from "./effort-work-store.js";
 import { prTarget } from "./ghactions.js";
 import type { PrObservation } from "./inventory-store.js";
 import type { LegacyAttempt } from "./legacy-history.js";
@@ -317,7 +317,7 @@ function rosterRow(target: string, number: { n: number; provisional: boolean }, 
   const { pr, observation, cheapAt, stored, full, facts } = observedFacts(target, sources);
   // A PR the instruction let go (dropped, superseded, or cancelled) shows its observed need again.
   const work = instruction?.rows.get(target);
-  const current = work && (work.phase !== "finished" || ["merged", "closed"].includes(work.body.cause)) ? work : null;
+  const current = work && currentRow(work) ? work : null;
   const feedback = sources.feedback(target);
   const gates = full ? prGates({ facts: full.facts, observedAt: full.at, now: sources.now, held: hold !== null, feedback, reviewers: pr })
     : pr && facts ? cheapGates(facts, pr, hold !== null, feedback, sources.now) : null;

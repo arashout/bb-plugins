@@ -14,9 +14,11 @@ import { createEffortStore } from "./effort-store.js";
 import type { createEffortV2, EffortCommandResult } from "./effort-v2-server.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
+import { inboxRows } from "./inbox-rows.js";
+import { pipelineCards } from "./pipeline.js";
 import { createPrHoldStore } from "./pr-hold-store.js";
 import type { RunDb } from "./runstore.js";
-import plugin from "./server.js";
+import plugin, { type Board } from "./server.js";
 
 const runners = vi.hoisted(() => [] as ReturnType<typeof createEffortRunner>[]);
 vi.mock("./effort-runner.js", async (original) => {
@@ -90,10 +92,11 @@ const cleanups: (() => Promise<void>)[] = [];
 beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(START); });
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-type Options = { live?: (n: number) => Partial<Live>; parents?: number[]; execution?: "dry-run" | "on"; concurrency?: number };
+/** `others` are open PRs on the board that no effort owns. */
+type Options = { live?: (n: number) => Partial<Live>; parents?: number[]; others?: number[]; execution?: "dry-run" | "on"; concurrency?: number };
 /** An effort on its v2 roster, "Shelving entry", owning these PRs, each checked out on the primary host, instructed to move all forward. */
 async function setup(numbers: number[], options: Options = {}) {
-  const lives = new Map([...numbers, ...options.parents ?? []].map((n) => [n, { ...ready(n), ...options.live?.(n) }]));
+  const lives = new Map([...numbers, ...options.parents ?? [], ...options.others ?? []].map((n) => [n, { ...ready(n), ...options.live?.(n) }]));
   const github = { fullError: null as string | null, resetAt: null as number | null, readback: null as Promise<void> | null,
     /** PRs whose full read fails for a reason other than a rate limit. */
     failFor: new Set<number>(),
@@ -168,7 +171,7 @@ async function setup(numbers: number[], options: Options = {}) {
   }, experimental_callHostRpc: async ({ method, input }) => {
     hostCalls.push({ method, input });
     const number = (prUrl: string) => Number(prUrl.split("/").at(-1));
-    const open = () => numbers.filter((n) => lives.get(n)!.state === "OPEN");
+    const open = () => [...numbers, ...options.others ?? []].filter((n) => lives.get(n)!.state === "OPEN");
     if (method === "scan") return { units: open().map(checkout), warnings: [] };
     if (method === "inspectPaths") return { units: open().map(checkout).filter((unit) => (input as { paths: string[] }).paths.includes(unit.path)), warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: open().map((n) => ({ repo: "inkwell/folio", pr: cheap(n, lives.get(n)!) })),
@@ -591,6 +594,52 @@ describe("the v2 reconciler's reads beside the board's", () => {
     env.at(MINUTE);
     expect(await env.harness.callRpc("pr_refresh", { prUrl: url(348) })).toMatchObject({ status: "checked" });
     expect(env.row(348)?.dueAt).toBe(START + MINUTE);
+  });
+
+  it("labels the board's card of a PR its roster runs with the roster's state and no legacy action, and leaves an unowned PR's card as it was", async () => {
+    const env = await setup([349], { live: (n) => n === 349 ? { checks: "pending", mergeStateStatus: "BLOCKED" } : conflicting, others: [350] });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    expect(env.row(349)).toMatchObject({ phase: "waiting", body: { cause: "ci" } });
+    const board = await env.harness.callRpc("board_get", null) as Board;
+    expect(board.v2Managed).toEqual({ [url(349)]: { effortId: env.effort.id, effortName: "Shelving entry", n: 1, state: "waiting", owner: "ci", modifiers: [] } });
+    const cards = pipelineCards(board.prInventory.entries, [...inboxRows(board, Date.now()).values()].flat(), Date.now(), { holds: board.prHolds, dispatch: board.dispatch,
+      runs: board.runs, observations: board.prObservations, v2: board.v2Managed });
+    const card = (n: number) => cards.find((item) => item.pr?.number === n)!;
+    expect(card(349)).toMatchObject({ blocker: { label: "Managed by Shelving entry roster: Waiting on CI" }, action: null,
+      managed: { effortId: env.effort.id, effortName: "Shelving entry", n: 1, state: "waiting", label: "Waiting on CI" } });
+    // 350 conflicts and belongs to no effort: its card offers Advance, as it always has.
+    expect(card(350)).toMatchObject({ managed: null, blocker: { label: "Conflicts" }, action: { kind: "advance" } });
+  });
+
+  it("labels a member its instruction let go, and one whose row another effort holds, as not in the instruction, and no card once the effort leaves v2", async () => {
+    const env = await setup([353, 354], { live: () => ({ checks: "pending", mergeStateStatus: "BLOCKED" }), others: [356] });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    // Returns desk's instruction takes 356 from outside membership; then the PR's membership moves to Shelving entry.
+    const efforts = createEffortStore(env.db);
+    const desk = efforts.establish({ sourceKey: "returns-desk", name: "Returns desk", goal: "Clear the returns desk", projectId: PROJECT, coordinatorState: "none",
+      members: { tickets: [], prUrls: [] } });
+    env.work.setMode(desk.id, "v2", 0, () => []);
+    const roster = await env.harness.callRpc("effort_roster_get", { effortId: desk.id }) as EffortRoster;
+    expect(await env.harness.callRpc("effort_command", { effortId: desk.id, snapshotId: roster.snapshotId, text: `move ${url(356)} forward`, requestId: "req-desk",
+      source: "panel" })).toMatchObject({ kind: "admit" });
+    efforts.transfer(env.effort.key, { tickets: [], prUrls: [url(356)] });
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(await say(env, `drop ${env.row(354)!.body.n}`, "req-drop")).toMatchObject({ kind: "admit" });
+    expect([env.row(354)?.phase, env.row(356)?.effortId]).toEqual(["finished", desk.id]);
+    const managed = async () => (await env.harness.callRpc("board_get", null) as Board).v2Managed;
+    const shelving = { effortId: env.effort.id, effortName: "Shelving entry" };
+    // The roster reads each the same way: 354 keeps its number, and 356 has none in Shelving entry, which never numbered it.
+    expect(await managed()).toEqual({ [url(353)]: { ...shelving, n: 1, state: "waiting", owner: "ci", modifiers: [] },
+      [url(354)]: { ...shelving, n: 2, state: "not-in-instruction", owner: null, modifiers: [] },
+      [url(356)]: { ...shelving, n: null, state: "not-in-instruction", owner: null, modifiers: [] } });
+    const rows = (await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster).rows;
+    expect(rows.filter((row) => row.target !== url(353)).map((row) => [row.target, row.state])).toEqual([[url(354), "not-in-instruction"], [url(356), "not-in-instruction"]]);
+    // Leaving v2 lifts Shelving entry's fences, though 353's row holds its PR until it pauses: that card is a legacy card again. 356's row is
+    // Returns desk's, which fences it now.
+    env.work.setMode(env.effort.id, "legacy", 1, () => []);
+    expect(await managed()).toEqual({ [url(356)]: expect.objectContaining({ effortId: desk.id, effortName: "Returns desk" }) });
   });
 });
 
