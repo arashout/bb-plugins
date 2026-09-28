@@ -8,7 +8,10 @@
 import { formatTargets, type CommandTarget, type InstructionScope } from "./effort-command.js";
 import type { Next } from "./effort-phase.js";
 import type { GateId, Gates } from "./pr-gates.js";
+import { ROLLUP_LABELS } from "./roster-shared.js";
 import { prWorkItemKey } from "./work-item-index.js";
+
+const [OUTCOME, VALIDATED, STILL_NEEDED, NEEDS_A_DECISION] = ROLLUP_LABELS;
 
 export type CriterionStatus = "satisfied" | "missing" | "invalidated" | "blocked";
 /** An included PR as the contract reads it. */
@@ -192,11 +195,11 @@ export function evidenceContract(input: { scope: InstructionScope; goal: string;
   return {
     criteria,
     rollup: [
-      `Outcome: ${scope.outcome ?? (input.goal.trim() || "none set; add one with outcome: …")} · ${rows.length} PRs${rows.length ? `: ${formatTargets([...rows].sort(byNumber))}` : ""}`,
-      `Validated: ${validated.join("; ") || "nothing yet"}`,
-      `Still needed: ${[...[...short.values()].map((list) => `${names(list)}: ${list[0]!.next!.action} · ${list[0]!.next!.owner} · wake: ${list[0]!.next!.wake}`),
+      `${OUTCOME}: ${scope.outcome ?? (input.goal.trim() || "none set; add one with outcome: …")} · ${rows.length} PRs${rows.length ? `: ${formatTargets([...rows].sort(byNumber))}` : ""}`,
+      `${VALIDATED}: ${validated.join("; ") || "nothing yet"}`,
+      `${STILL_NEEDED}: ${[...[...short.values()].map((list) => `${names(list)}: ${list[0]!.next!.action} · ${list[0]!.next!.owner} · wake: ${list[0]!.next!.wake}`),
         ...shortTickets.length ? [`${names(shortTickets)}: their PRs (${formatTargets(ticketPrs)})`] : []].join("; ") || "nothing"}`,
-      `Needs a decision: ${[...decisions.values()].map((item) => `${item.question} (${formatTargets(item.rows)})`).join("; ") || "none"}`,
+      `${NEEDS_A_DECISION}: ${[...decisions.values()].map((item) => `${item.question} (${formatTargets(item.rows)})`).join("; ") || "none"}`,
     ],
     outcomeValidated: rows.length > 0 && rows.every((row) => row.step.phase === "prepared" || row.step.phase === "finished") && satisfied.length === criteria.length,
     completed: rows.length > 0 && rows.every((row) => row.step.phase === "finished") && users.every((item) => item.status === "satisfied"),

@@ -197,7 +197,7 @@ describe("outcome evidence contract", () => {
 
   it("evaluates from its inputs alone: no model, SDK, host, or store", () => {
     const imports = [...readFileSync(new URL("./outcome-evidence.ts", import.meta.url), "utf8").matchAll(/^import .* from "(.+)";$/gmu)].map((match) => match[1]);
-    expect(imports).toEqual(["./effort-command.js", "./effort-phase.js", "./pr-gates.js", "./work-item-index.js"]);
+    expect(imports).toEqual(["./effort-command.js", "./effort-phase.js", "./pr-gates.js", "./roster-shared.js", "./work-item-index.js"]);
     const result = contract([row(1)]);
     expect(result).not.toBeInstanceOf(Promise);
     expect(result.criteria.every((item) => item.status === "satisfied")).toBe(true);

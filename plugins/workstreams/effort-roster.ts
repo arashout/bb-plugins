@@ -23,6 +23,7 @@ import type { LegacyAttempt } from "./legacy-history.js";
 import { checkCounts, checksFailed, checksGreen } from "./pr-checks.js";
 import { GATE_IDS, mergeWait, prGates, type GateId, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor, prHoldSchema, type PrHolds } from "./pr-holds.js";
+import { STATE_LABEL } from "./roster-shared.js";
 import type { Run } from "./runs.js";
 import type { ThreadFacts } from "./threads.js";
 import { prWorkItemKey } from "./work-item-index.js";
@@ -467,8 +468,7 @@ export function effortRoster(input: {
 /** The numbered plain list the CLI prints: `n · repo #num · reviewer · summary · state · next`. */
 export function rosterText(roster: EffortRoster): string {
   const { effort } = roster;
-  const state = { doing: "Doing", waiting: "Waiting", decision: "Needs your decision", ready: "Ready", issue: "System issue", done: "Done",
-    "not-in-instruction": "Not in instruction" } satisfies Record<RosterState, string>;
+  const state = STATE_LABEL satisfies Record<RosterState, string>;
   const open = roster.rows.filter((row) => row.state !== "done").length;
   const lines = [
     `${effort.name} · ${effort.key}${roster.snapshotId ? ` · ${roster.snapshotId}` : ""}${effort.archivedAt ? " · archived" : ""}${effort.redirectedFrom ? ` · merged from effort:${effort.redirectedFrom}` : ""}`,

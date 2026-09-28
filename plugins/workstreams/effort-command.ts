@@ -9,6 +9,9 @@
 import { z } from "zod";
 import { prTarget } from "./ghactions.js";
 import { canonicalPrUrl, prHoldFor, type PrHolds } from "./pr-holds.js";
+import { formatTargets } from "./roster-shared.js";
+
+export { formatTargets };
 
 /** Everything an instruction can grant. Merge is not here: it has its own fresh preview and confirmation. */
 export const EFFECTS = ["code-fix", "test", "push", "pr-reply", "resolve-addressed-threads", "retarget-base", "rerun-checks", "request-rereview", "mark-ready", "request-review"] as const;
@@ -332,19 +335,6 @@ type Ref = CommandTarget & { named: boolean; owner: { effortId: string; name: st
 type Resolved = { clause: Clause; refs: Ref[]; excluded: (Ref & { marker: string })[] };
 
 const q = (text: string) => `"${text}"`;
-/** Numbers as `1, 2, 4-6`, then unnumbered PRs by repository. */
-export function formatTargets(targets: readonly CommandTarget[]): string {
-  const numbers = [...new Set(targets.flatMap((target) => target.n === null ? [] : [target.n]))].sort((a, b) => a - b);
-  const runs: string[] = [];
-  for (let i = 0; i < numbers.length; i++) {
-    let j = i;
-    while (numbers[j + 1] === numbers[j]! + 1) j++;
-    runs.push(j - i >= 2 ? `${numbers[i]}-${numbers[j]}` : numbers.slice(i, j + 1).join(", "));
-    i = j;
-  }
-  const urls = [...new Set(targets.filter((target) => target.n === null).map((target) => target.target))];
-  return [...runs, ...urls].join(", ");
-}
 const EFFECT_LABEL: Record<Effect, string> = { "code-fix": "fix", test: "test", push: "push", "pr-reply": "reply", "resolve-addressed-threads": "resolve threads",
   "retarget-base": "retarget", "rerun-checks": "rerun failed checks", "request-rereview": "re-request review", "mark-ready": "mark ready", "request-review": "request review" };
 const REPORT_LABEL: Record<ReportMode, string> = { changes: "changes", "decisions-only": "decisions only", quiet: "quiet" };
