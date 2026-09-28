@@ -150,7 +150,7 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
 
       <Section title="Keyboard shortcuts">
         <p className="text-foreground">Efforts</p>
-        <p className="text-muted-foreground">Search accepts ticket IDs, titles, repos, workstreams, and PR numbers such as 2846, #2846, or my-parsley #2846.</p>
+        <p className="text-muted-foreground">Search accepts ticket IDs, titles, repos, workstreams, and PR numbers such as 318, #318, or quill #318.</p>
         <Pairs rows={BOARD_KEYS} mono />
         <p className="pt-1 text-foreground">Map</p>
         <Pairs rows={MAP_KEYS} mono />

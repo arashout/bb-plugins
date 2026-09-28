@@ -354,14 +354,14 @@ describe("matchesInboxQuery", () => {
   });
 
   it("finds an exact PR number alone, with #, or prefixed by its repo", () => {
-    const pr = { ...row, repo: "my-parsley", prNumber: 2846 };
-    for (const query of ["2846", "#2846", "MY-PARSLEY #2846", "my-parsley#2846"]) {
+    const pr = { ...row, repo: "quill", prNumber: 318 };
+    for (const query of ["318", "#318", "QUILL #318", "quill#318"]) {
       expect(matchesInboxQuery(pr, query)).toBe(true);
     }
-    for (const query of ["#284", "12846", "another-repo #2846"]) {
+    for (const query of ["#31", "1318", "another-repo #318"]) {
       expect(matchesInboxQuery(pr, query)).toBe(false);
     }
-    expect(matchesInboxQuery({ ...pr, prNumber: null }, "#2846")).toBe(false);
+    expect(matchesInboxQuery({ ...pr, prNumber: null }, "#318")).toBe(false);
   });
 });
 
