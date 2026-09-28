@@ -280,10 +280,15 @@ describe("decide()", () => {
     expect(state(decide(row({ attempts: [deleted], retryEpoch: 1 }, FEEDBACK)))).toBe("queued:launching");
   });
 
-  it("retries a failed turn twice, then names the failure", () => {
+  it("retries a failed turn twice, then names the failure with an attempt that ended, so retry N can start a new one", () => {
     const failed = (turnRetries: number) => decide(row({ attempts: [attempt({ status: "running", result: null, endedAt: null, turnFailed: true, turnRetries })] }));
     expect(failed(1)).toMatchObject({ phase: "repair-needed", cause: "turn-retry", modifiers: ["recovering"], nextAction: "retry-turn" });
-    expect(state(failed(2))).toBe("repair-needed:turn-failed");
+    // Past the bound the runner still takes the step: it ends the attempt, which releases the claim.
+    expect(failed(2)).toMatchObject({ phase: "repair-needed", cause: "turn-retry", nextAction: "retry-turn", detail: "The worker's turn failed 3 times; ending the attempt" });
+    const ended = [attempt({ status: "failed", result: null, failure: "turn-failed" })];
+    const CONFLICT = { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" };
+    expect(decide(row({ attempts: ended }, CONFLICT))).toMatchObject({ phase: "repair-needed", cause: "turn-failed", recovery: ["retry N"], nextAction: null });
+    expect(decide(row({ attempts: ended, retryEpoch: 1 }, CONFLICT))).toMatchObject({ phase: "queued", cause: "launching", nextAction: ["integrate_base"] });
   });
 
   it("waits on branch protection and other merge requirements by name", () => {

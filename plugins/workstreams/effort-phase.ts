@@ -108,7 +108,8 @@ export type Next = {
 };
 
 const MINUTE = 60_000;
-const TURN_RETRIES = 2;
+/** Retries v2 asks for after a worker's turn fails, before the failure is a system issue. */
+export const TURN_RETRIES = 2;
 /** Minutes to wait after the Nth environment blocker, or checkout that couldn't be prepared, on a head before trying again. */
 const BACKOFF = [1, 2, 4, 8, 15];
 /** A checkout that can't be prepared this many times on one head is a repair. */
@@ -201,9 +202,9 @@ export function decide(input: DecideInput): Next {
         return waiting("source-unavailable", `BB couldn't be read back for attempt ${attempt.id}; its claim holds until a readback succeeds`, owner);
       return recovering("launch-uncertain", "Launch outcome uncertain; reading BB back by its launch key", "recover-launch", "readback finds or rules out its worker");
     }
-    if (attempt.turnFailed) return attempt.turnRetries < TURN_RETRIES
-      ? recovering("turn-retry", `The worker's turn failed; retry ${attempt.turnRetries + 1} of ${TURN_RETRIES}`, "retry-turn", "the retried turn starts")
-      : issue("turn-failed", `The worker's turn failed ${TURN_RETRIES + 1} times`);
+    // Past the bound, the runner ends the attempt, so `retry N` can start a new one.
+    if (attempt.turnFailed) return recovering("turn-retry", attempt.turnRetries < TURN_RETRIES ? `The worker's turn failed; retry ${attempt.turnRetries + 1} of ${TURN_RETRIES}`
+      : `The worker's turn failed ${TURN_RETRIES + 1} times; ending the attempt`, "retry-turn", "the retried turn starts");
     if (attempt.interactionPending)
       return ask("worker-interaction", `The worker in ${attempt.threadId} is waiting for your input`, [{ id: "open", label: "Open thread" }], `worker-interaction:${attempt.id}`, null, "open-thread");
     return next("executing", attempt.status === "launching" ? "launching" : "worker", attempt.status === "launching" ? "Launching the worker" : `Worker running in ${attempt.threadId}`,
@@ -272,7 +273,8 @@ export function decide(input: DecideInput): Next {
         if (now < due) return waiting("source-unavailable", "The checkout couldn't be prepared; trying again after a backoff", { kind: "v2-attempt", ref: latest.id },
           { wake: { event: WAKES["source-unavailable"]![0], ref: latest.id, dueAt: due } });
       }
-    } else if (latest.status === "failed") return issue(latest.failure ?? "turn-failed", `The launch failed: ${latest.failure ?? "unknown cause"}`);
+    } else if (latest.status === "failed") return issue(latest.failure ?? "turn-failed", latest.failure === "turn-failed"
+      ? `The worker's turn failed ${TURN_RETRIES + 1} times` : `The launch failed: ${latest.failure ?? "unknown cause"}`);
     if (latest.status === "completed" && latest.result === null)
       return next("verifying", "parse-report", "Reading the worker's report", { nextAction: "parse-report", owner: { kind: "v2-attempt", ref: latest.id } });
     if (latest.status === "completed" && latest.result !== null) {

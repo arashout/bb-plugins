@@ -35,7 +35,7 @@ const scope = (rows: readonly Row[], criteria: UserCriterion[] = [], outcome: st
   include: rows.map((item) => ({ target: item.target, n: item.n, outsideMembership: false, work: [...VERBS["move forward"].work], effects: [...DEFAULT_EFFECTS], reviewers: [], addedInRevision: 1 })),
 });
 const proof = (id: string, n: number, headOid = head(n), more: Partial<CriterionEvidence> = {}): CriterionEvidence =>
-  ({ criterion: id, target: TARGETS[n - 1]!, headOid, outcome: "passed", accepted: true, ...more });
+  ({ criterion: id, target: TARGETS[n - 1]!, headOid, outcome: "passed", accepted: true, revision: 1, ...more });
 const contract = (rows: Row[], criteria: UserCriterion[] = [], evidence: CriterionEvidence[] = [], outcome: string | null = null) =>
   evidenceContract({ scope: scope(rows, criteria, outcome), goal: "Readers keep their shelves in order", rows, evidence });
 const find = (result: ReturnType<typeof contract>, id: string) => result.criteria.find((item) => item.id === id)!;
@@ -97,6 +97,16 @@ describe("outcome evidence contract", () => {
       next: { action: "1 left the instruction: include it again, or drop c1", owner: "you" } });
     // A dropped criterion is gone from the contract.
     expect(contract([row(1)], [{ ...criteria[0]!, droppedInRevision: 2 }]).criteria.map((item) => item.id)).not.toContain("c1");
+  });
+
+  it("never takes a report on another instruction's criterion as proof: ids restart at c1 after a cancel, so only a work order that had it counts", () => {
+    // r2's c1 passed, then r2 was cancelled; r4 added its own c1 on the same PR and head.
+    const audit = { ...criterion("c1", "the audit log records every checkout", [1]), addedInRevision: 4 };
+    const earlier = [proof("c1", 1, head(1), { revision: 2 })];
+    expect(find(contract([row(1)], [audit], earlier), "c1").status).toBe("missing");
+    expect(pendingCriteria(scope([row(1)], [audit]), [row(1)], earlier)).toEqual(new Map([[TARGETS[0], ["c1"]]]));
+    // A report on r4's own work order, or a later revision's that still carries c1, proves it.
+    for (const revision of [4, 5]) expect(find(contract([row(1)], [audit], [proof("c1", 1, head(1), { revision })]), "c1").status).toBe("satisfied");
   });
 
   it("assigns an effort-wide criterion to the lowest-numbered open PR, preferring one with a checkout, unless a PR already proves it", () => {

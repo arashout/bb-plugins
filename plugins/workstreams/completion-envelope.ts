@@ -20,7 +20,8 @@ import { canonicalPrUrl } from "./pr-holds.js";
 const SHA = /^[0-9a-f]{40}$/u;
 const FINGERPRINT = /^[0-9a-f]{64}$/u;
 const LINE_LIMIT = 50_000;
-const RAW_LIMIT = 64 * 1024;
+/** How much of a turn's output a report keeps: its tail, where the result line is. */
+export const RAW_LIMIT = 64 * 1024;
 const sha = z.string().regex(SHA);
 const optionSchema = z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(500) }).strict();
 /** The documented fields and nothing else; the arrays a worker had nothing to put in may be left out. */
@@ -58,7 +59,8 @@ export type CompletionReport = {
   headOid: string | null;
   /** Feedback evidence from a report that succeeded, validated against fresh facts, ready to save with worker provenance. */
   feedback: FeedbackReport | null;
-  criteria: CriterionEvidence[];
+  /** The attempt's instruction revision binds them when they are read as evidence. */
+  criteria: Omit<CriterionEvidence, "revision">[];
   blocker: Attempt["blocker"];
   /** The base moved after the worker read it: verification reads again instead of rejecting the report. */
   baseMoved: boolean;

@@ -27,7 +27,7 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
-import { createEffortRunner, type V2Execution } from "./effort-runner.js";
+import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
 import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
   type V2Target } from "./effort-work-store.js";
@@ -2281,6 +2281,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   const onThreadError = (error: unknown) =>
     bb.log.warn(`thread event handling failed: ${String(error).slice(0, 300)}`);
+  /** A thread signal for the v2 attempt that holds the thread, if any; no other thread hears anything. */
+  const v2Signal = (threadId: string, signal: AttemptSignal) => { void runner.signal(threadId, signal).catch(onThreadError); };
   bb.events.on("thread.created", ({ thread }) => {
     onThreadChanged(thread, false).catch(onThreadError);
   });
@@ -2290,6 +2292,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
+    v2Signal(thread.id, { kind: "idle" });
     void advance.signal(thread.id, "idle", lastAssistantText).catch(onThreadError);
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
@@ -2307,6 +2310,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
+    v2Signal(thread.id, { kind: "gone" });
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2315,6 +2319,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.deleted", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
     void advance.signal(thread.id, "gone").catch(onThreadError);
+    v2Signal(thread.id, { kind: "gone" });
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2324,12 +2329,20 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("interaction.pending", ({ thread }) => {
     signalRuns(thread.id, { kind: "pending" });
     void advance.signal(thread.id, "pending").catch(onThreadError);
+    v2Signal(thread.id, { kind: "interaction" });
+  });
+  // A failed turn: v2 asks BB to retry its worker's turn, within a bound. Core's own retries are left to run.
+  bb.events.on("turn.failed", ({ threadId, requestId, rateLimits }) => { v2Signal(threadId, { kind: "turn-failed", requestId, rateLimits }); });
+  // You deleted a queued message: when it was a v2 work order, its attempt is released and its row pauses.
+  bb.events.on("message.cancelled", ({ entry }) => {
+    v2Signal(entry.threadId, { kind: "cancelled", text: entry.content.map((part) => part.type === "text" ? part.text : "").join("\n") });
   });
   // There is no "interaction answered" event, and the event DTO carries no
   // pending flag. The thread's event sequence does advance when the user
   // answers, so a waiting run re-reads that one thread's interactions then.
   // Core coalesces this to at most once a second per thread; no polling.
   bb.events.on("experimental_thread.events", ({ thread }) => {
+    v2Signal(thread.id, { kind: "events" });
     if (thread.status !== "active" || !runs.openIn(thread.id).some((run) => run.status === "needs-you")) return;
     bb.sdk.threads.interactions.list({ threadId: thread.id }).then(
       (pending) => {
@@ -4582,7 +4595,7 @@ export default async function plugin(bb: BbPluginApi) {
     observe: observePr,
     realtime: bb.realtime,
     launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
-      launching: (target) => runner.launching(target) },
+      launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh) },
     execution: {
       get: (effortId) => effortWork.execution(effortId),
       set: async (effortId, mode, expectedRevision) => {
@@ -4670,6 +4683,23 @@ export default async function plugin(bb: BbPluginApi) {
       if (requested.some((event) => JSON.stringify(event).includes(marker))) return true;
       return (await bb.sdk.threads.queuedMessages.list({ threadId })).some((queued) => JSON.stringify(queued).includes(marker));
     },
+    turn: async (threadId) => {
+      const thread = await bb.sdk.threads.get({ threadId });
+      const requested = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "50" });
+      const [last] = await bb.sdk.threads.events.list({ threadId, order: "desc", limit: "1" });
+      return { status: thread.status, requests: requested.map((event) => ({ seq: event.seq, id: event.type === "client/turn/requested" ? event.data.requestId : null,
+        text: JSON.stringify(event.data) })), lastSeq: last?.seq ?? null,
+        output: thread.status === "idle" ? (await bb.sdk.threads.output({ threadId })).output : null };
+    },
+    interactions: async (threadId) => (await bb.sdk.threads.interactions.list({ threadId })).length,
+    retrying: async (threadId, requestId) => {
+      if ((await bb.sdk.threads.queuedMessages.list({ threadId })).some((queued) => queued.payload.kind === "retry")) return true;
+      const [newest] = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "1" });
+      return requestId !== null && newest?.type === "client/turn/requested" && newest.data.requestId !== requestId;
+    },
+    retry: (args) => bb.sdk.threads.retry(args),
+    read: async (prUrl) => (await observePr(prUrl, [])).status === "checked" ? prFacts.get(prUrl)?.facts ?? null : null,
+    feedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
     publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
   });
 

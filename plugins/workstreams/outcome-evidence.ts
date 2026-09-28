@@ -27,7 +27,12 @@ export type RowStep = Pick<Next, "phase" | "cause" | "nextAction" | "owner" | "w
 /** One `criteria` entry of a worker report, bound to the head that report named. Newest first. */
 export type CriterionEvidence = { criterion: string; target: string; headOid: string; outcome: "passed" | "failed" | "not-run";
   /** False when its report was rejected: kept as history, never proof. */
-  accepted: boolean };
+  accepted: boolean;
+  /**
+   * The instruction revision whose work order the report answered. It proves only a criterion that revision already had: ids restart
+   * at c1 with each new instruction, so an earlier c1 is another criterion.
+   */
+  revision: number };
 export type Criterion = {
   id: string; source: "gate" | "ticket" | "user"; label: string; status: CriterionStatus;
   /** Included PRs still short of it. */
@@ -86,8 +91,9 @@ function nextFor(short: readonly (ContractRow & { step: RowStep })[]): Criterion
 
 type Proof = "passed" | "failed" | "stale" | "none";
 /** A criterion's newest accepted result on a head that still applies; earlier passing proof on an older head is stale. */
-function proof(id: string, row: ContractRow, evidence: readonly CriterionEvidence[]): Proof {
-  const mine = evidence.filter((item) => item.accepted && item.criterion === id && prWorkItemKey(item.target) === prWorkItemKey(row.target));
+function proof(criterion: UserCriterion, row: ContractRow, evidence: readonly CriterionEvidence[]): Proof {
+  const mine = evidence.filter((item) => item.accepted && item.criterion === criterion.id && item.revision >= criterion.addedInRevision
+    && prWorkItemKey(item.target) === prWorkItemKey(row.target));
   const current = mine.find((item) => row.heads.includes(item.headOid) && item.outcome !== "not-run");
   if (current) return current.outcome as "passed" | "failed";
   return mine.some((item) => item.outcome === "passed") ? "stale" : "none";
@@ -105,7 +111,7 @@ function assigned<T extends ContractRow>(criterion: UserCriterion, rows: readonl
     const found = criterion.binding.n.map((n) => rows.find((row) => row.n === n));
     return { rows: found.filter((row) => row !== undefined), left: criterion.binding.n.filter((_, index) => !found[index]) };
   }
-  const proving = rows.find((row) => proof(criterion.id, row, evidence) === "passed");
+  const proving = rows.find((row) => proof(criterion, row, evidence) === "passed");
   const open = rows.filter((row) => row.state !== "MERGED" && row.state !== "CLOSED").sort((a, b) => Number(b.checkout) - Number(a.checkout) || byNumber(a, b))[0];
   return { rows: proving ? [proving] : open ? [open] : [], left: [] };
 }
@@ -114,7 +120,7 @@ function assigned<T extends ContractRow>(criterion: UserCriterion, rows: readonl
 export function pendingCriteria(scope: InstructionScope, rows: readonly ContractRow[], evidence: readonly CriterionEvidence[]): Map<string, string[]> {
   const pending = new Map<string, string[]>();
   for (const criterion of scope.criteria.filter((item) => item.droppedInRevision === null))
-    for (const row of assigned(criterion, rows, evidence).rows) if (proof(criterion.id, row, evidence) !== "passed") {
+    for (const row of assigned(criterion, rows, evidence).rows) if (proof(criterion, row, evidence) !== "passed") {
       const key = prWorkItemKey(row.target);
       pending.set(key, [...pending.get(key) ?? [], criterion.id]);
     }
@@ -146,7 +152,7 @@ export function evidenceContract(input: { scope: InstructionScope; goal: string;
       next: { action: `${left.join(", ")} left the instruction: include ${left.length === 1 ? "it" : "them"} again, or drop ${criterion.id}`, owner: "you", wake: "a command" } };
     if (bound.length === 0) return { ...base, status: "missing", affected: [],
       next: { action: "no included PR is open to validate it in", owner: "you", wake: "a command that includes an open one" } };
-    const short = bound.map((row) => ({ row, proof: proof(criterion.id, row, evidence) })).filter((item) => item.proof !== "passed");
+    const short = bound.map((row) => ({ row, proof: proof(criterion, row, evidence) })).filter((item) => item.proof !== "passed");
     if (short.length === 0) return { ...base, status: "satisfied", affected: [], next: null };
     const failed = short.find((item) => item.proof === "failed" && !blocking(item.row.step));
     return { ...base, affected: short.map(({ row }) => ({ target: row.target, n: row.n })).sort(byNumber),

@@ -17,6 +17,7 @@
 // the instruction.
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import type { AdvanceFacts } from "./advance-contract.js";
 import type { AdvanceJob } from "./bulk-advance.js";
 import { capAcknowledgment, EFFECTS, formatTargets, interpretEffortCommand, WORK_RECIPES, type CommandResult, type CommandRow, type CommandTarget,
   type DecisionAnswer, type InstructionScope } from "./effort-command.js";
@@ -27,10 +28,10 @@ import type { createEffortRosterStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
 import type { Admission, V2Execution } from "./effort-runner.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
-import { decideAttempt, decisionId, holdsPr, sameBody, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
+import { attemptEvidence, decideAttempt, decisionId, holdsPr, sameBody, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
   type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
-import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow } from "./outcome-evidence.js";
+import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type CriterionEvidence } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor } from "./pr-holds.js";
 import { prWorkItemKey } from "./work-item-index.js";
@@ -135,8 +136,8 @@ export function rowBody(step: Next, row: Pick<WorkRowBody, "n" | "retryEpoch" | 
 
 /**
  * Plan each PR's step from stored facts and our attempts on it. This reads no checkout or thread, so a launch plans
- * its recipes and leaves the checkout and thread to the reconciler's reads. No worker has reported, so no criterion
- * has proof yet.
+ * its recipes and leaves the checkout and thread to the reconciler's reads. A criterion has proof only from a
+ * worker's accepted report on the PR's current head.
  */
 export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode; scope: InstructionScope | null; sources: RosterSources;
   models: Record<ModelRole, ModelChoice>; held(target: string): boolean; targets: readonly { target: string; n: number | null; retryEpoch: number }[];
@@ -144,6 +145,8 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
   open?(target: string): { decision: RowDecision; head: string | null } | null;
   /** Our attempts on a PR, newest first; none when absent. */
   attempts?(target: string): readonly Attempt[];
+  /** Criteria evidence from our attempts' reports; none when absent. */
+  evidence?: readonly CriterionEvidence[];
   /** Whether a new launch may start now; open when absent. */
   admission?: Admission;
   /** A writer found outside the board's facts, such as the holder of a claim that just failed. */
@@ -161,7 +164,7 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
     return { target, n, retryEpoch, observed, item, tickets, feedback, gates, contract };
   });
   const included = new Set(scope?.include.map((grant) => prWorkItemKey(grant.target)));
-  const pending = scope ? pendingCriteria(scope, read.filter((row) => included.has(row.target)).map((row) => row.contract), []) : new Map<string, string[]>();
+  const pending = scope ? pendingCriteria(scope, read.filter((row) => included.has(row.target)).map((row) => row.contract), input.evidence ?? []) : new Map<string, string[]>();
   return read.map((row) => {
     const decideInput: DecideInput = { now: sources.now, target: row.target, effort: { id: input.effort.id, mode: input.mode, archived: Boolean(input.effort.archivedAt) },
       ownerId: sources.work.ownerForPr(row.target)?.id ?? null, instruction: scope, held: input.held(row.target), full: row.observed.full, feedback: row.feedback,
@@ -186,9 +189,9 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
 
 /** The evidence contract over the instruction's rows as stored, so the rollup reads exactly what the roster shows, naming each open decision by number. */
 export function rowContract(effort: Pick<EstablishedEffort, "goal">, scope: InstructionScope, rows: readonly Pick<WorkRow, "target" | "phase" | "body">[], work: RosterSources["work"],
-  decisions: readonly Pick<Decision, "n" | "key">[] = []) {
+  decisions: readonly Pick<Decision, "n" | "key">[] = [], evidence: readonly CriterionEvidence[] = []) {
   const byTarget = new Map(rows.map((row) => [row.target, row]));
-  return evidenceContract({ scope, goal: effort.goal, evidence: [], ordinal: (key) => decisions.find((decision) => decision.key === key)?.n ?? null, rows: scope.include.flatMap((grant) => {
+  return evidenceContract({ scope, goal: effort.goal, evidence, ordinal: (key) => decisions.find((decision) => decision.key === key)?.n ?? null, rows: scope.include.flatMap((grant) => {
     const row = byTarget.get(prWorkItemKey(grant.target));
     if (!row) return [];
     const { body } = row;
@@ -299,7 +302,9 @@ export type EffortV2Deps = {
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
    */
-  launches: { execution(): Promise<V2Execution>; admission(): Promise<Admission>; recover(attemptId: string): Promise<void>; launching(target: string): boolean };
+  launches: { execution(): Promise<V2Execution>; admission(): Promise<Admission>; recover(attemptId: string): Promise<void>; launching(target: string): boolean;
+    /** Recheck: read the latest attempt's turn again, and its report against these fresh facts. */
+    recheck(target: string, fresh: AdvanceFacts): Promise<void> };
   /** Holds write through the existing store, inside the command's transaction; `changed` tells the board afterward. */
   holds: { set(prUrl: string, held: boolean, reason?: string): unknown; changed(): void };
   models(): Promise<Record<ModelRole, ModelChoice>>;
@@ -348,7 +353,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const decisions = deps.work.decisions(effort.id);
     return { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target))),
       active: active && { id: active.id, revision: active.revision, text: active.text, reportMode: active.scope.reportMode, outcome: active.scope.outcome },
-      rollup: active ? rowContract(effort, active.scope, rows, sources.work, decisions).rollup : null,
+      rollup: active ? rowContract(effort, active.scope, rows, sources.work, decisions, evidenceOf(rows.map((row) => row.target))).rollup : null,
       decisions: decisions.map(({ id, n, revision, body }) => ({ id, n, revision, kind: body.kind, subkind: body.subkind, question: body.question, options: body.options,
         targets: body.targets.map(({ target, n: number }) => ({ target, n: number })) })) };
   }
@@ -364,6 +369,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     queues.set(effortId, next.catch(() => undefined));
     return next;
   }
+  /** Criteria evidence from our attempts' reports on these PRs. */
+  const evidenceOf = (targets: Iterable<string>) => attemptEvidence([...targets].flatMap((target) => deps.work.attempts(target)));
   /** Our attempts on a PR as decide() reads them; a claim `reset N release` drops is read as released. */
   function attemptsOf(target: string, released?: ReadonlySet<string>): Attempt[] {
     return deps.work.attempts(target).map(decideAttempt).map((attempt) => released?.has(target) && (attempt.status === "launching" || attempt.status === "uncertain")
@@ -386,7 +393,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const { change } = options;
     const planned = planRows({ effort, mode: deps.execution.get(effort.id).mode, scope, sources, models: await deps.models(), held: options.held,
       admission: change?.admission ?? await deps.launches.admission(),
-      attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released),
+      attempts: (target) => change?.target === target ? change.attempts : attemptsOf(target, options.released), evidence: evidenceOf(targets),
       writer: (target) => change?.target === target ? change.writer ?? null : null,
       targets: targets.map((target) => {
         const row = stored.get(target);
@@ -564,11 +571,16 @@ export function createEffortV2(deps: EffortV2Deps) {
     }
     // The revision holds the command's changes and its answers together.
     const revised = result.instruction !== null || answered.length > 0 ? scope : null;
-    // Refresh and recheck read GitHub, the threads, and the checkouts first, and recheck launches reads BB back for each
-    // unfinished launch; every other step plans from stored facts.
+    // Refresh and recheck read GitHub, the threads, and the checkouts first. Recheck then reads the latest attempt's turn
+    // and its report again against that read, and recheck launches reads BB back for each unfinished launch; every other
+    // step plans from stored facts.
     const reads = new Map<string, Awaited<ReturnType<EffortV2Deps["observe"]>>>();
-    for (const item of result.interventions) if (item.action === "refresh" || item.action === "recheck")
-      reads.set(item.target, await observeOnce(item.target, sources.work.items.get(item.target)?.paths ?? []));
+    for (const item of result.interventions) if (item.action === "refresh" || item.action === "recheck") {
+      const read = await observeOnce(item.target, sources.work.items.get(item.target)?.paths ?? []);
+      reads.set(item.target, read);
+      const fresh = read.status === "checked" && item.action === "recheck" ? (await deps.sources()).full(item.target)?.facts : null;
+      if (fresh) await deps.launches.recheck(item.target, fresh);
+    }
     if (reads.size) sources = await deps.sources();
     const readback: string[] = [];
     if (result.recheckLaunches) for (const claim of deps.work.claims(effort.id).filter((attempt) => attempt.status !== "running")) {
@@ -598,7 +610,7 @@ export function createEffortV2(deps: EffortV2Deps) {
         ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
         ...result.recheckLaunches ? [`Readback: ${readback.join("; ") || "no launch is unfinished"}`] : [],
         ...next.length ? [`Next (planned; nothing runs until v2 execution is on): ${steps(next)}`] : []]),
-      rollup: scope ? rowContract(effort, scope, planned, sources.work, after).rollup : null,
+      rollup: scope ? rowContract(effort, scope, planned, sources.work, after, evidenceOf(planned.map((row) => row.target))).rollup : null,
     };
     deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source: "command", rows: writes,
       instruction: result.cancel ? "cancel" : revised && { scope: revised, text: input.text,
@@ -626,7 +638,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     return { effort: { id: effort.id, key: effort.key, name: effort.name, archived: Boolean(effort.archivedAt) }, snapshotId: deps.snapshots.latest(effort.id),
       revision: active?.revision ?? null, lastRevision: deps.work.lastRevision(effort.id), decisions: decisions.map(({ n, revision }) => ({ n, revision })),
       counts: Object.fromEntries(USER_STATES.map((state) => [state, rows.filter((row) => row.body.userState === state).length])) as Record<UserState, number>,
-      rollup: active ? rowContract(effort, active.scope, rows, (await deps.sources()).work, decisions).rollup : null };
+      rollup: active ? rowContract(effort, active.scope, rows, (await deps.sources()).work, decisions, evidenceOf(rows.map((row) => row.target))).rollup : null };
   }
   const observing = new Map<string, ReturnType<EffortV2Deps["observe"]>>();
   /** Concurrent reads of one PR share one read. */

@@ -80,6 +80,12 @@ async function setup() {
   const queued = new Map<string, unknown[]>();
   const hostCalls: { method: string; input: any }[] = [];
   let failWorkspace = false;
+  /** GitHub's live facts for a PR, over the default conflicting ones, and full reads that fail next. */
+  const live = new Map<number, Partial<AdvanceFacts>>();
+  let failedReads = 0;
+  /** Each thread's latest output. */
+  const outputs = new Map<string, string>();
+  const retry = vi.fn(async () => ({ ok: true, delivery: "queued", attempt: 2, queuedMessageId: "qm-retry", sendAt: null, turnRequestId: "req-retry" }) as never);
   const beforeWorkspace = vi.fn(async () => {});
   const beforeGet = vi.fn(async (_threadId: string) => {});
   let spawned = 0;
@@ -115,7 +121,7 @@ async function setup() {
       updatePluginMetadata: async ({ threadId, set }: { threadId: string; set?: Record<string, unknown> }) => {
         metadata.set(threadId, { ...metadata.get(threadId), ...set }); return metadata.get(threadId) as never;
       },
-      output: async () => ({ output: "" }), context: async () => ({ usage: null }) as never,
+      output: async ({ threadId }: { threadId: string }) => ({ output: outputs.get(threadId) ?? "" }), context: async () => ({ usage: null }) as never, retry,
       events: { list: async ({ threadId, types }: { threadId: string; types?: readonly string[] }) =>
         (types?.includes("client/turn/requested") ? turnRequests.get(threadId) ?? [] : []) as never },
       queuedMessages: { list: async ({ threadId }: { threadId: string }) => (queued.get(threadId) ?? []) as never },
@@ -131,7 +137,11 @@ async function setup() {
     if (method === "linkbacks") return { found: [], warnings: [] };
     if (method === "inspectPrs") return { entries: [], closed: [], failed: (input as { prUrls: string[] }).prUrls, warnings: [] };
     if (method === "contextWorkspace") return { path: "/synthetic/workstreams/context" };
-    if (method === "advanceInspect") return { ok: true, facts: facts(number((input as { prUrl: string }).prUrl)) };
+    if (method === "advanceInspect") {
+      if (failedReads > 0 && failedReads--) return { ok: false, error: "GitHub is unavailable" };
+      const n = number((input as { prUrl: string }).prUrl);
+      return { ok: true, facts: { ...facts(n), ...live.get(n) } };
+    }
     if (method === "advanceWorkspace") {
       await beforeWorkspace();
       if (failWorkspace) return { ok: false, error: "The fetched PR base changed. No checkout was created." };
@@ -166,7 +176,7 @@ async function setup() {
     ...spawn.mock.calls.filter(([args]) => args.pluginMetadata?.prUrl === prUrl || args.environment?.workspace?.path?.includes(`folio-${prUrl.split("/").at(-1)}`)),
     ...hostCalls.filter((call) => call.method === "advanceWorkspace" && call.input.prUrl === prUrl)];
   return { bb, harness, db, store, work, returns, used, rpc, optIn, preview, job, workedOn, spawn, send, threads, metadata, turnRequests, queued, hostCalls, beforeWorkspace, beforeGet,
-    runner, failWorkspace: (value: boolean) => { failWorkspace = value; } };
+    runner, live, outputs, retry, failWorkspace: (value: boolean) => { failWorkspace = value; }, failReads: (count: number) => { failedReads = count; } };
 }
 
 describe("v2 execution fence", () => {
@@ -901,5 +911,150 @@ describe("v2 claims", () => {
     expect((await command(env, "recheck launches", "returns-2")).acknowledgment).toContain(`Readback: ${name} attached to thr-author`);
     expect(env.work.attempt("A-12")).toMatchObject({ status: "running", threadId: "thr-author" });
     expect(env.send).not.toHaveBeenCalled();
+  });
+
+  describe("worker results and SDK signals", () => {
+    const NEXT = "c".repeat(40);
+    const result = (attemptId: string, patch: Record<string, unknown> = {}) =>
+      `Workstreams result v1: ${JSON.stringify({ attemptId, target: RETURNS, actions: ["integrate_base"], outcome: "changed", headOid: NEXT, baseOid: BASE, ...patch })}`;
+    /** GitHub once the worker's rebase landed: a clean, approved merge candidate. */
+    const ready: Partial<AdvanceFacts> = { headOid: NEXT, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", checks: "passed", readiness: "ready", detail: "" };
+    /** 12 opted in, instructed, and read; then its work order launched in a new thread with v2 execution on. */
+    async function running(env: Awaited<ReturnType<typeof setup>>) {
+      await env.optIn();
+      await command(env, `move ${RETURNS} forward`, "returns-1");
+      await command(env, `refresh ${RETURNS}`, "returns-2");
+      await env.harness.setSettings({ v2Execution: "on" });
+      expect(await launch(env)).toBe("launched");
+      return env.work.attempts(RETURNS)[0]!;
+    }
+    /** The worker's turn ends: its thread goes idle with this output, after the turn its work order started. */
+    async function idle(env: Awaited<ReturnType<typeof setup>>, attempt: StoredAttempt, output: string) {
+      const threadId = attempt.threadId!;
+      env.turnRequests.set(threadId, [{ type: "client/turn/requested", seq: 3, data: { input: [{ type: "text", text: attempt.body.marker }], senderThreadId: null } }]);
+      env.outputs.set(threadId, output);
+      env.threads.set(threadId, { ...env.threads.get(threadId)!, status: "idle" });
+      await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get(threadId)!, lastAssistantText: output });
+    }
+    const name = (env: Awaited<ReturnType<typeof setup>>) => formatTargets([{ target: RETURNS, n: env.work.row(RETURNS)?.body.n ?? null }]);
+
+    it("reads a worker's report when its thread goes idle, judges the PR on a fresh GitHub read, and never merges", async () => {
+      const env = await setup();
+      const attempt = await running(env);
+      env.live.set(12, { ...ready, checks: "pending", mergeStateStatus: "BLOCKED" });
+      const reads = env.hostCalls.filter((call) => call.method === "advanceInspect").length;
+      await idle(env, attempt, `Rebased onto main.\n${result(attempt.id)}`);
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "ci" } }));
+      expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { startSeq: 3, report: { key: "changed", rejection: null } } });
+      expect(env.hostCalls.filter((call) => call.method === "advanceInspect").length).toBe(reads + 1);
+      // Code declares readiness, and no path from a report reaches a merge or any other GitHub write.
+      expect(env.hostCalls.filter((call) => call.method === "prWrite")).toEqual([]);
+      expect([env.spawn.mock.calls.length, env.send.mock.calls.length]).toEqual([1, 0]);
+    });
+
+    it("asks BB to retry a worker's failed turn, and releases a work order you deleted from its thread's queue", async () => {
+      const env = await setup();
+      const attempt = await running(env);
+      await env.harness.emitThreadEvent("turn.failed", { threadId: attempt.threadId!, requestId: "req-1", turnId: null, errorInfo: null, inputAccepted: true,
+        rateLimits: null, attemptNumber: 1 });
+      await vi.waitFor(() => expect(env.retry).toHaveBeenCalledWith({ threadId: attempt.threadId, turnRequestId: "req-1", sendAt: expect.any(Number) }));
+      await vi.waitFor(() => expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: null }));
+      // The worker asks for input: you answer in its thread, and the row goes back to executing once nothing is pending.
+      const thread = env.threads.get(attempt.threadId!)!;
+      await env.harness.emitThreadEvent("interaction.pending", { thread, interaction: {} as never });
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "decision-needed", body: { cause: "worker-interaction" } }));
+      await env.harness.emitThreadEvent("experimental_thread.events", { thread, sequence: 9 });
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "executing", body: { cause: "worker" } }));
+      // A work order sent to a busy thread waits in its queue; you delete it there.
+      const body = seed(env, "A-16", WRAP, "running", { path: "/p/folio-16", threadId: "thr-author" });
+      env.work.recordAttempt("A-16", ["running"], { status: "running", body: { ...body, mode: "send", resource: { ...body.resource, kind: "reuse", threadId: "thr-author" } } });
+      await env.harness.emitThreadEvent("message.cancelled", { entry: { id: "qm-1", threadId: "thr-author",
+        content: [{ type: "text", text: `${body.marker}\nPrepare exactly one PR toward merge.`, mentions: [] }] } as never });
+      await vi.waitFor(() => expect(env.work.attempt("A-16")).toMatchObject({ status: "released", body: { releasedReason: "user-cancelled" } }));
+      expect(env.work.claimOn(WRAP, null)).toBeNull();
+    });
+
+    it("asks BB for no second retry when it took one whose answer was lost, and reads the turn that retry ran", async () => {
+      const env = await setup();
+      const attempt = await running(env);
+      const threadId = attempt.threadId!;
+      const requested = (seq: number, requestId: string, more: Record<string, unknown> = {}) =>
+        ({ type: "client/turn/requested", seq, data: { requestId, input: [{ type: "text", text: attempt.body.marker }], senderThreadId: null, ...more } });
+      env.turnRequests.set(threadId, [requested(3, "req-1")]);
+      env.retry.mockRejectedValueOnce(new Error("socket hang up"));
+      await env.harness.emitThreadEvent("turn.failed", { threadId, requestId: "req-1", turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 });
+      await vi.waitFor(() => expect(env.work.attempt(attempt.id)?.body).toMatchObject({ turnRetries: 1, turnFailure: { requestId: "req-1" }, error: "socket hang up" }));
+      // BB took the retry anyway: a turn was requested after the failed one, and it finished with the work order's report.
+      env.turnRequests.set(threadId, [requested(7, "req-7", { retryOfRequestId: "req-1" }), requested(3, "req-1")]);
+      env.live.set(12, ready);
+      env.outputs.set(threadId, result(attempt.id));
+      env.threads.set(threadId, { ...env.threads.get(threadId)!, status: "idle" });
+      await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get(threadId)!, lastAssistantText: result(attempt.id) });
+      await vi.waitFor(() => expect(env.work.attempt(attempt.id)).toMatchObject({ status: "completed", body: { turnFailure: null, report: { key: "changed" } } }));
+      expect(env.retry).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads the latest attempt's report again on recheck N, against a fresh read, and clears the row to Ready without a worker", async () => {
+      const env = await setup();
+      const attempt = await running(env);
+      env.live.set(12, ready);
+      // GitHub can't be read when the turn ends: the report waits unread rather than being judged on stale facts.
+      env.failReads(1);
+      await idle(env, attempt, result(attempt.id));
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "verifying", body: { cause: "parse-report" } }));
+      expect(env.work.attempt(attempt.id)?.body.report?.key).toBeNull();
+      const recheck = await command(env, `recheck ${RETURNS}`, "returns-3");
+      expect(recheck.acknowledgment).toContain(`Recheck ${name(env)}: Ready`);
+      expect(env.work.attempt(attempt.id)?.body.report).toMatchObject({ key: "changed", rejection: null });
+      expect(env.work.row(RETURNS)).toMatchObject({ phase: "prepared", body: { cause: "merge-candidate" } });
+      expect([env.spawn.mock.calls.length, env.send.mock.calls.length, env.retry.mock.calls.length]).toEqual([1, 0, 0]);
+    });
+
+    it("rebuilds a row from source facts on reset N after its attempt finished, keeping the attempt and every transition", async () => {
+      const env = await setup();
+      const attempt = await running(env);
+      await idle(env, attempt, result(attempt.id, { outcome: "blocked", blockers: [{ kind: "other", summary: "The shelf fixture is missing" }] }));
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "repair-needed", body: { cause: "worker-blocked", detail: "The shelf fixture is missing" } }));
+      const before = transitions(env);
+      expect(await command(env, `reset ${RETURNS}`, "returns-3")).toMatchObject({ kind: "admit" });
+      // The finished attempt's route belonged to the old epoch: the PR is still conflicting, so its work is planned again.
+      expect(env.work.row(RETURNS)).toMatchObject({ phase: "queued", body: { cause: "launching", nextAction: ["integrate_base"], retryEpoch: 1 } });
+      expect(env.work.attempts(RETURNS).map((item) => [item.id, item.status])).toEqual([[attempt.id, "completed"]]);
+      expect(transitions(env)).toBe(before + 1);
+    });
+
+    it("counts a criterion an accepted report proved on the PR's current head, so the row can be Ready", async () => {
+      const env = await setup();
+      await env.optIn();
+      const roster = await env.rpc("effort_roster_get", { effortId: env.returns.id });
+      const n = roster.rows.find((row: { target: string }) => row.target === RETURNS).n;
+      for (const [text, requestId] of [[`move ${n} forward`, "returns-1"], [`done when ${n}: returned books keep their shelf order`, "returns-2"], [`refresh ${n}`, "returns-3"]])
+        expect(await env.rpc("effort_command", { effortId: env.returns.id, snapshotId: roster.snapshotId, text, requestId, source: "panel" })).toMatchObject({ kind: "admit" });
+      await env.harness.setSettings({ v2Execution: "on" });
+      expect(await launch(env)).toBe("launched");
+      const attempt = env.work.attempts(RETURNS)[0]!;
+      env.live.set(12, ready);
+      await idle(env, attempt, result(attempt.id, { criteria: [{ id: "c1", outcome: "passed", evidence: "npm test -- shelf passed" }] }));
+      await vi.waitFor(() => expect(env.work.row(RETURNS)).toMatchObject({ phase: "prepared" }));
+      expect((await env.rpc("effort_roster_get", { effortId: env.returns.id })).rollup[1]).toContain("returned books keep their shelf order (c1)");
+    });
+
+    it("in a dry run hears no thread signal and writes nothing to BB", async () => {
+      const env = await setup();
+      await env.optIn();
+      await command(env, `move ${RETURNS} forward`, "returns-1");
+      await command(env, `refresh ${RETURNS}`, "returns-2");
+      expect(await launch(env)).toBe("planned");
+      const row = env.work.row(RETURNS)!;
+      const thread = makeThreadResponse({ id: "thr-author", projectId: PROJECT, status: "idle", providerId: "codex" });
+      await env.harness.emitThreadEvent("thread.idle", { thread, lastAssistantText: "Done. Ready to merge." });
+      await env.harness.emitThreadEvent("interaction.pending", { thread, interaction: {} as never });
+      await env.harness.emitThreadEvent("turn.failed", { threadId: "thr-author", requestId: "req-1", turnId: null, errorInfo: null, inputAccepted: true, rateLimits: null, attemptNumber: 1 });
+      await env.harness.emitThreadEvent("message.cancelled", { entry: { id: "qm-1", threadId: "thr-author", content: [{ type: "text", text: "anything", mentions: [] }] } as never });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(env.work.row(RETURNS)).toEqual(row);
+      expect([env.work.attempts(RETURNS), env.spawn.mock.calls, env.send.mock.calls, env.retry.mock.calls,
+        env.hostCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))]).toEqual([[], [], [], [], []]);
+    });
   });
 });

@@ -114,7 +114,8 @@ describe("completion envelope v1", () => {
       criteria: [{ id: "c1", text: "The waitlist shows for ineligible readers", binding: { kind: "targets" as const, n: [4] }, addedInRevision: 1, droppedInRevision: null }] };
     const step = { phase: "waiting" as const, cause: "ci", modifiers: [], nextAction: null, owner: { kind: "ci" as const, ref: null }, wake: null, decision: null };
     const row = (heads: string[]) => ({ target: PR_URL, n: 4, state: "OPEN" as const, heads, checkout: true, tickets: [{ id: "ABC-340", title: "Keep shelf order" }], gates: null, step });
-    const status = (heads: string[]) => Object.fromEntries(evidenceContract({ scope, goal: "", rows: [row(heads)], evidence: report.criteria }).criteria
+    const evidence = report.criteria.map((item) => ({ ...item, revision: 1 }));
+    const status = (heads: string[]) => Object.fromEntries(evidenceContract({ scope, goal: "", rows: [row(heads)], evidence }).criteria
       .filter((item) => item.source !== "gate").map((item) => [item.id, item.status]));
     expect(status([HEAD])).toEqual({ c1: "satisfied", "ticket:ABC-340": "missing" });
     // On a later head the proof is stale, and a passing ticket entry never proves the ticket.

@@ -17,9 +17,11 @@
 // entries on all three, so a second claim fails inside its transaction however
 // the two launches interleave. A claim ends only by a status change here.
 import { z } from "zod";
+import { envelopeSchema } from "./completion-envelope.js";
 import { EFFECTS, instructionScopeSchema, WORK_RECIPES, type InstructionScope } from "./effort-command.js";
 import type { Attempt, Phase } from "./effort-phase.js";
-import { RECIPE_IDS, WORKER_RECIPE_IDS } from "./effort-recipes.js";
+import { RECIPE_IDS, WORKER_RECIPE_IDS, WORKER_RESULTS } from "./effort-recipes.js";
+import type { CriterionEvidence } from "./outcome-evidence.js";
 import { GATE_IDS } from "./pr-gates.js";
 import type { RunDb } from "./runstore.js";
 import { prWorkItemKey } from "./work-item-index.js";
@@ -101,6 +103,16 @@ export type RowWrite = { target: string; expectedRevision: number; phase: Phase;
 /** Launching, running, and uncertain attempts hold their claims; the rest are history. */
 export type AttemptStatus = "launching" | "running" | "uncertain" | "completed" | "failed" | "released";
 const workspaceSchema = z.object({ batchId: z.string(), jobId: z.string(), sourcePath: z.string(), moveCleanToHead: z.boolean() }).strict();
+/**
+ * A finished turn's report as completion-envelope read it, less the feedback evidence it saved. Its `key` is null
+ * until the output is read against fresh facts; the raw output is kept whatever the result.
+ */
+const reportSchema = z.object({
+  raw: z.string(), source: z.enum(["v1", "legacy"]).nullable(), envelope: envelopeSchema.nullable(), compat: z.array(z.string()), rejection: z.string().nullable(),
+  key: z.enum(WORKER_RESULTS).nullable(), headOid: z.string().nullable(), baseMoved: z.boolean(),
+  criteria: z.array(z.object({ criterion: z.string(), target: z.string(), headOid: z.string(), outcome: z.enum(["passed", "failed", "not-run"]), accepted: z.boolean() }).strict()),
+  blocker: z.object({ summary: z.string(), question: z.string().nullable(), options: z.array(optionSchema), prUrl: z.string().nullable() }).strict().nullable(),
+}).strict();
 /** One launch: the work order it bound, where it runs, and what reading BB back found. */
 const attemptBodySchema = z.object({
   instructionRevision: z.number().int().positive(),
@@ -116,22 +128,47 @@ const attemptBodySchema = z.object({
   settledAt: z.number().nullable(),
   /** When the launch went uncertain, which the breaker's run of uncertain launches reads. */
   uncertainAt: z.number().nullable(),
-  /** The first complete readback after settling that found no worker; a second one at least a minute later releases the claim. */
+  /**
+   * The first complete readback after settling that found no worker; a second one at least a minute later releases the claim. For a work
+   * order sent to a thread, the first read of the idle thread that found it neither in a turn request nor queued.
+   */
   emptyReadbackAt: z.number().nullable(),
   /** Why the launch failed for good (project-source, workspace, unpushed-worktree), or what keeps an uncertain one (duplicate-writer, source-unavailable). */
   failure: z.string().nullable(),
   error: z.string().max(800).nullable(),
   releasedReason: z.enum(["no-worker", "user-cancelled", "stopped"]).nullable(),
+  // What the worker's turn did, filled in as BB reports it; absent until then.
+  /** The seq of the turn request that carries the marker, and of the thread's last event when the turn was read complete. */
+  startSeq: z.number().int().nullable().optional(),
+  endSeq: z.number().int().nullable().optional(),
+  /** When the turn was read complete. */
+  endedAt: z.number().nullable().optional(),
+  report: reportSchema.nullable().optional(),
+  /** The worker is waiting on your input in its thread. */
+  interactionPending: z.boolean().optional(),
+  /** A failed turn waiting for its retry: the turn request to retry, and when. */
+  turnFailure: z.object({ requestId: z.string().nullable(), sendAt: z.number() }).strict().nullable().optional(),
+  /** Retries v2 asked BB for; a retry core queued itself isn't one. */
+  turnRetries: z.number().int().nonnegative().optional(),
 }).strict();
 export type AttemptBody = z.infer<typeof attemptBodySchema>;
+export type AttemptReport = z.infer<typeof reportSchema>;
 export type StoredAttempt = { id: string; target: string; effortId: string; instructionId: string; launchKey: string; status: AttemptStatus;
   threadId: string | null; hostId: string | null; path: string | null; body: AttemptBody; createdAt: number };
 /** An attempt as decide() reads it. */
 export function decideAttempt({ id, status, threadId, path, body }: StoredAttempt): Attempt {
   return { id, status, threadId, path, workspace: body.resource.workspace && { batchId: body.resource.workspace.batchId, jobId: body.resource.workspace.jobId },
-    recipes: body.recipes, retryEpoch: body.retryEpoch, headOid: body.start.headOid, fingerprint: body.start.fingerprint, endedAt: status === "failed" ? body.settledAt : null,
-    result: null, blocker: null, failure: body.failure, releasedReason: body.releasedReason, interactionPending: false, turnFailed: false, turnRetries: 0 };
+    recipes: body.recipes, retryEpoch: body.retryEpoch, headOid: body.start.headOid, fingerprint: body.start.fingerprint,
+    endedAt: status === "failed" || status === "completed" ? body.endedAt ?? body.settledAt : null,
+    result: status === "completed" ? body.report?.key ?? null : null, blocker: body.report?.blocker ?? null, failure: body.failure, releasedReason: body.releasedReason,
+    interactionPending: body.interactionPending ?? false, turnFailed: Boolean(body.turnFailure), turnRetries: body.turnRetries ?? 0 };
 }
+/**
+ * Criteria evidence from our attempts' reports, newest first. Only an accepted report carries any, each entry bound to the head it named and to
+ * the instruction revision its work order carried, since criterion ids restart with each new instruction.
+ */
+export const attemptEvidence = (attempts: readonly StoredAttempt[]): CriterionEvidence[] =>
+  attempts.flatMap((attempt) => (attempt.body.report?.criteria ?? []).map((item) => ({ ...item, revision: attempt.body.instructionRevision })));
 /** A write lost its compare-and-swap: the row, instruction, decision, or attempt changed after its writer read it. */
 export class StaleWriteError extends Error {}
 /** Another attempt holds the PR, the checkout, or the thread this claim needs, or already made this exact launch. */
@@ -301,16 +338,18 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       }
     },
     /**
-     * Move an attempt on, but only from a status its writer read; null when it moved on first. Naming a thread
-     * claims it, so a thread another attempt holds is a conflict, never a second writer.
+     * Move an attempt on, but only from a status its writer read; null when it moved on first. `body` patches the attempt as it is now,
+     * so a fact another writer recorded while this one awaited BB or GitHub is kept. Naming a thread claims it, so a thread another
+     * attempt holds is a conflict, never a second writer.
      */
-    recordAttempt(id: string, from: readonly AttemptStatus[], next: { status: AttemptStatus; threadId?: string | null; path?: string | null; body: AttemptBody }): StoredAttempt | null {
+    recordAttempt(id: string, from: readonly AttemptStatus[], next: { status: AttemptStatus; threadId?: string | null; path?: string | null; body: Partial<AttemptBody> }):
+      StoredAttempt | null {
       const current = attempt(id);
       if (!current || !from.includes(current.status)) return null;
       try {
         db.prepare(`UPDATE effort_attempts SET status = ?, thread_id = ?, checkout_path = ?, body = ?, updated_at = ? WHERE id = ? AND status = ?`)
           .run(next.status, next.threadId === undefined ? current.threadId : next.threadId, next.path === undefined ? current.path : next.path,
-            JSON.stringify(attemptBodySchema.parse(next.body)), now(), id, current.status);
+            JSON.stringify(attemptBodySchema.parse({ ...current.body, ...next.body })), now(), id, current.status);
       } catch (error) {
         if (!isUnique(error)) throw error;
         const holder = db.prepare(`SELECT ${ATTEMPT} FROM effort_attempts WHERE ${CLAIMED} AND id <> ? AND (thread_id = ? OR (host_id = ? AND checkout_path = ?)) LIMIT 1`)

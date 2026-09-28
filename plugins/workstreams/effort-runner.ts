@@ -6,9 +6,18 @@
 // back by the launch key attaches it, or, after two empty readbacks a minute
 // apart, releases it to be launched once more. In a dry run a launch records
 // its plan and holds, starts, and sends nothing.
+//
+// BB's signals about a worker's thread are facts on the attempt that holds it:
+// a pending interaction, a failed turn, a work order you deleted from the
+// queue. A turn is complete when its thread is idle, a turn request carries the
+// attempt's marker, and its output reads; its report is then read against a
+// fresh full read of the PR. The worker never declares readiness: its report
+// only routes the next step, and decide() judges the PR on fresh facts.
 import { createHash } from "node:crypto";
-import type { AdvanceWorkspace, AdvanceWorkspaceInput } from "./advance-contract.js";
-import type { Attempt, Next, Phase } from "./effort-phase.js";
+import type { AdvanceFacts, AdvanceWorkspace, AdvanceWorkspaceInput } from "./advance-contract.js";
+import type { FeedbackReport } from "./approval-feedback.js";
+import { parseCompletion, RAW_LIMIT } from "./completion-envelope.js";
+import { TURN_RETRIES, type Attempt, type Next, type Phase } from "./effort-phase.js";
 import { buildWorkOrder, recipe, type WorkerRecipe, type WorkerRecipeId, type WorkOrderInput } from "./effort-recipes.js";
 import type { ResourceWriter } from "./effort-resources.js";
 import { ClaimConflictError, decideAttempt, instructionId, sameBody, StaleWriteError, type AttemptBody, type AttemptStatus, type createEffortWorkStore,
@@ -74,8 +83,35 @@ export type EffortRunnerDeps = {
   spawned(projectId: string, attemptId: string): Promise<string[]>;
   /** Readback: whether the thread's turn requests or queued messages carry this marker. */
   marked(threadId: string, marker: string): Promise<boolean>;
+  /**
+   * A worker thread now: its status, its newest turn requests (newest first) with their request ids, the seq of its last event, and
+   * its output once idle.
+   */
+  turn(threadId: string): Promise<{ status: string; requests: readonly { seq: number; id: string | null; text: string }[]; lastSeq: number | null; output: string | null }>;
+  /** How many interactions in the thread wait on you. */
+  interactions(threadId: string): Promise<number>;
+  /**
+   * Whether the thread has moved past this failed turn request: core queued a retry, or a turn was requested after it (a retry, ours or
+   * core's, or your next prompt).
+   */
+  retrying(threadId: string, requestId: string | null): Promise<boolean>;
+  retry(args: { threadId: string; turnRequestId?: string; sendAt: number }): Promise<unknown>;
+  /** A fresh full read of the PR, kept where the roster reads it; null when GitHub couldn't be read. */
+  read(prUrl: string): Promise<AdvanceFacts | null>;
+  /** Save feedback evidence a report proved on fresh facts, with worker provenance. */
+  feedback(prUrl: string, threadId: string, report: FeedbackReport): void;
   publish(effortId: string): void;
 };
+
+type RateLimits = { status: string; windows: readonly { status: string; resetsAtMs: number | null }[] };
+/** What BB said about a thread. Only the attempt of ours that holds the thread hears it. */
+export type AttemptSignal = { kind: "idle" | "gone" | "interaction" | "events" } | { kind: "turn-failed"; requestId: string; rateLimits: RateLimits | null }
+  | { kind: "cancelled"; text: string };
+/** When to retry a failed turn: once the provider's blocked rate-limit windows reset, else in a minute. */
+export function retryAt(rateLimits: RateLimits | null, now: number): number {
+  const resets = (rateLimits?.windows ?? []).flatMap((window) => window.status === "blocked" && window.resetsAtMs !== null ? [window.resetsAtMs] : []);
+  return resets.length ? Math.max(now, ...resets) : now + MINUTE;
+}
 
 /** A queued step to launch, as the reconciler planned it from live checkout and thread reads. */
 export type Launch = {
@@ -154,15 +190,18 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
       throw error;
     }
   }
-  function record(attempt: StoredAttempt, from: readonly AttemptStatus[], next: { status: AttemptStatus; threadId?: string; path?: string; body: AttemptBody }): StoredAttempt | null {
+  /** Move an attempt on from a status it was read in. `body` patches it as it is now, so a signal recorded meanwhile is kept. */
+  function record(attempt: StoredAttempt, from: readonly AttemptStatus[], next: { status: AttemptStatus; threadId?: string; path?: string; body: Partial<AttemptBody> }):
+    StoredAttempt | null {
     try { return deps.work.recordAttempt(attempt.id, from, next); }
     catch (error) {
       if (!(error instanceof ClaimConflictError)) throw error;
       // A thread or checkout another attempt holds: our launch's outcome is uncertain, and never a second writer. A released
       // claim that a later launch has taken since stays released, and keeps what BB answered rather than dropping it.
-      const released = deps.work.attempt(attempt.id)?.status === "released";
+      const current = deps.work.attempt(attempt.id);
+      const released = current?.status === "released";
       return deps.work.recordAttempt(attempt.id, from, { status: released ? "released" : "uncertain", ...released ? { threadId: next.threadId } : {},
-        body: { ...next.body, failure: "duplicate-writer", uncertainAt: next.body.uncertainAt ?? deps.now(), error: released
+        body: { ...next.body, failure: "duplicate-writer", uncertainAt: next.body.uncertainAt ?? current?.body.uncertainAt ?? deps.now(), error: released
           ? "BB answered after this launch was released, and a later launch holds its PR, checkout, or thread now." : `${error.message} It answers to this launch too.` } });
     }
   }
@@ -324,7 +363,7 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
         // Our own launch is still waiting on BB here; only a launch no process is finishing is uncertain.
         if (flights.has(`launch:${attempt.target}`)) return;
         const at = deps.now();
-        attempt = record(attempt, ["launching"], { status: "uncertain", body: { ...attempt.body, settledAt: at, uncertainAt: at } });
+        attempt = record(attempt, ["launching"], { status: "uncertain", body: { settledAt: at, uncertainAt: at } });
         if (!attempt || attempt.status !== "uncertain") return;
       }
       const { body } = attempt;
@@ -333,13 +372,13 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
         matches = body.mode === "spawn" ? await deps.spawned(body.resource.projectId ?? "", attempt.id)
           : await deps.marked(body.resource.threadId ?? "", body.marker) ? [body.resource.threadId!] : [];
       } catch (error) {
-        record(attempt, ["uncertain"], { status: "uncertain", body: { ...body, failure: "source-unavailable", error: message(error) } });
+        record(attempt, ["uncertain"], { status: "uncertain", body: { failure: "source-unavailable", error: message(error) } });
         return;
       }
       const at = deps.now();
-      const clear = { ...body, failure: null, error: null };
+      const clear = { failure: null, error: null };
       if (matches.length === 1) record(attempt, ["uncertain"], { status: "running", threadId: matches[0]!, body: { ...clear, emptyReadbackAt: null } });
-      else if (matches.length > 1) record(attempt, ["uncertain"], { status: "uncertain", body: { ...body, failure: "duplicate-writer", error: `Threads ${matches.join(", ")} answer to ${attempt.id}.` } });
+      else if (matches.length > 1) record(attempt, ["uncertain"], { status: "uncertain", body: { failure: "duplicate-writer", error: `Threads ${matches.join(", ")} answer to ${attempt.id}.` } });
       else if (body.emptyReadbackAt === null || body.settledAt === null || body.emptyReadbackAt < body.settledAt)
         record(attempt, ["uncertain"], { status: "uncertain", body: { ...clear, emptyReadbackAt: at } });
       else if (at - body.emptyReadbackAt >= READBACK_GAP) record(attempt, ["uncertain"], { status: "released", body: { ...clear, releasedReason: "no-worker" } });
@@ -347,8 +386,144 @@ export function createEffortRunner(deps: EffortRunnerDeps) {
     });
   }
 
+  /**
+   * The completion rule: the thread is idle, one of its turn requests carries the attempt's marker, and its output
+   * reads. When you prompted the thread after the work order, the latest output is read anyway. An idle turn whose
+   * output holds no report is complete too: its report is repaired, never left uncertain. What no event told us is
+   * read here as well: a thread in error with no retry queued failed its turn, and a work order sent to an idle thread
+   * that is in no turn request and no longer queued, on two reads a minute apart, was deleted from the queue.
+   */
+  async function complete(attempt: StoredAttempt, gone: boolean): Promise<void> {
+    const threadId = attempt.threadId!;
+    const { marker } = attempt.body;
+    let turn: Awaited<ReturnType<EffortRunnerDeps["turn"]>> | null = null;
+    try { turn = await deps.turn(threadId); } catch { /* An unread thread is read again at its next signal or poll; a gone one fails below. */ }
+    const mine = turn?.requests.find((request) => request.text.includes(marker));
+    if (turn?.status === "idle" && mine) {
+      const output = turn.output ?? "";
+      record(attempt, ["running"], { status: "completed", body: { startSeq: mine.seq, endSeq: turn.lastSeq, endedAt: deps.now(), interactionPending: false,
+        report: { raw: output.slice(-RAW_LIMIT), source: null, envelope: null, compat: [], rejection: null, key: null, headOid: null, baseMoved: false, criteria: [], blocker: null } } });
+    } else if (gone) record(attempt, ["running"], { status: "failed", body: { failure: "thread-gone", endedAt: deps.now(),
+      error: "The worker's thread was archived or deleted before its turn finished." } });
+    else if (turn?.status === "error") {
+      // Its turn.failed never reached us, as across a reload: the newest turn failed, and is retried as that event would have it.
+      const failed = turn.requests[0]?.id ?? null;
+      if (!await deps.retrying(threadId, failed).catch(() => true))
+        record(attempt, ["running"], { status: "running", body: { turnFailure: { requestId: failed, sendAt: retryAt(null, deps.now()) } } });
+    } else if (turn?.status === "idle" && attempt.body.mode === "send") {
+      // Its message.cancelled never reached us. One read can fall between the queue and the turn request, so it takes two a minute apart.
+      const queued = await deps.marked(threadId, marker).catch(() => true);
+      const at = deps.now();
+      const first = attempt.body.emptyReadbackAt;
+      if (queued) { if (first !== null) record(attempt, ["running"], { status: "running", body: { emptyReadbackAt: null } }); }
+      else if (first === null) record(attempt, ["running"], { status: "running", body: { emptyReadbackAt: at } });
+      else if (at - first >= READBACK_GAP) record(attempt, ["running"], { status: "released", body: { releasedReason: "user-cancelled" } });
+    }
+  }
+
+  /** Read a finished turn's report against fresh facts, and save the feedback evidence it proves. Without a fresh read nothing is judged. */
+  async function parse(attempt: StoredAttempt, fresh?: AdvanceFacts): Promise<void> {
+    const facts = fresh ?? await deps.read(attempt.target);
+    if (!facts) return;
+    const { feedback, ...report } = parseCompletion(attempt.body.report?.raw ?? "", { attemptId: attempt.id, target: attempt.target, fresh: facts });
+    if (feedback && attempt.threadId) deps.feedback(attempt.target, attempt.threadId, feedback);
+    record(attempt, ["completed"], { status: "completed", body: { report } });
+  }
+
+  /**
+   * Ask BB to retry a failed turn at the time its rate limits reset, at most TURN_RETRIES times per attempt; a failure after
+   * that ends the attempt as turn-failed, and its claims go. Nothing is asked when the thread already moved past the failure,
+   * or in a dry run, which asks BB for nothing even on a claim made while execution was on. True when it asked.
+   */
+  async function retryTurn(attempt: StoredAttempt): Promise<boolean> {
+    const { turnFailure: failure, turnRetries = 0 } = attempt.body;
+    if (!failure) return false;
+    let moved: boolean;
+    try { moved = await deps.retrying(attempt.threadId!, failure.requestId); } catch { return false; }
+    // Core's own retry, or one of ours BB took though its answer was lost, runs this turn again; another would run the work order twice.
+    if (moved) return (record(attempt, ["running"], { status: "running", body: { turnFailure: null } }), false);
+    if (turnRetries >= TURN_RETRIES) return (record(attempt, ["running"], { status: "failed",
+      body: { turnFailure: null, failure: "turn-failed", endedAt: deps.now(), error: `The worker's turn failed ${TURN_RETRIES + 1} times.` } }), false);
+    if ((await deps.settings()).execution !== "on") return false;
+    // Counted before the call, so a retry whose answer is lost still counts toward the bound.
+    const counted = record(attempt, ["running"], { status: "running", body: { turnRetries: turnRetries + 1 } });
+    if (!counted) return false;
+    try {
+      await deps.retry({ threadId: attempt.threadId!, ...failure.requestId ? { turnRequestId: failure.requestId } : {}, sendAt: failure.sendAt });
+      record(counted, ["running"], { status: "running", body: { turnFailure: null, error: null } });
+    } catch (error) {
+      record(counted, ["running"], { status: "running", body: { error: message(error) } });
+    }
+    return true;
+  }
+
+  /**
+   * One attempt's next step, then its row re-planned: read back an unfinished launch, retry a failed turn, read a
+   * finished turn, or read its report against fresh facts. `gone` fails a turn whose thread was archived or deleted.
+   */
+  function advance(attemptId: string, gone = false): Promise<void> {
+    return once(`advance:${attemptId}`, async () => {
+      let attempt = deps.work.attempt(attemptId);
+      if (!attempt) return;
+      const { effortId, target } = attempt;
+      if (attempt.status === "launching" || attempt.status === "uncertain") {
+        await recover(attemptId);
+        attempt = deps.work.attempt(attemptId)!;
+      }
+      let asked = false;
+      if (attempt.status === "running" && attempt.body.turnFailure) {
+        asked = await retryTurn(attempt);
+        attempt = deps.work.attempt(attemptId)!;
+      }
+      // A failure the thread already moved past no longer keeps its turn from being read. A retry just asked for is read once it
+      // has run: until then the thread may still show the error, beside the retry's own turn request.
+      if (attempt.status === "running" && !attempt.body.turnFailure && !asked) {
+        await complete(attempt, gone);
+        attempt = deps.work.attempt(attemptId)!;
+      }
+      if (attempt.status === "completed" && attempt.body.report?.key == null) await parse(attempt);
+      await deps.settle(effortId, target);
+    });
+  }
+
+  /**
+   * BB said something about a thread. Only a claim of ours on that thread hears it, so a dry run, which claims
+   * nothing, hears nothing. The signal is recorded on the attempt; an idle, gone, or failed turn is then acted on.
+   */
+  async function signal(threadId: string, event: AttemptSignal): Promise<void> {
+    const attempt = deps.work.claims().find((claim) => claim.threadId === threadId);
+    // A launch still in flight settles when BB answers it.
+    if (!attempt || attempt.status === "launching") return;
+    const note = (patch: Partial<AttemptBody>, status: AttemptStatus = attempt.status) => record(attempt, [attempt.status], { status, body: patch });
+    if (event.kind === "idle" || event.kind === "gone") return advance(attempt.id, event.kind === "gone");
+    if (event.kind === "turn-failed") {
+      if (attempt.status !== "running") return;
+      note({ turnFailure: { requestId: event.requestId, sendAt: retryAt(event.rateLimits, deps.now()) } });
+      return advance(attempt.id);
+    }
+    if (event.kind === "interaction") note({ interactionPending: true });
+    else if (event.kind === "events") {
+      // BB has no "interaction answered" event; the thread's events move when you answer, so its interactions are read again then.
+      if (!attempt.body.interactionPending || await deps.interactions(threadId) > 0) return;
+      note({ interactionPending: false });
+    } else if (event.kind === "cancelled") {
+      // You deleted our queued work order before it ran: nothing started, and no later turn in that thread is this attempt's.
+      if (attempt.body.mode !== "send" || !event.text.includes(attempt.body.marker)) return;
+      note({ releasedReason: "user-cancelled" }, "released");
+    }
+    await deps.settle(attempt.effortId, attempt.target);
+  }
+
+  /** Recheck: read the latest attempt's turn again, and its report against these fresh facts, even a report already read. The caller re-plans. */
+  async function recheck(target: string, fresh: AdvanceFacts): Promise<void> {
+    const [latest] = deps.work.attempts(target);
+    if (latest?.status === "running" && !latest.body.turnFailure) await complete(latest, false);
+    const current = latest && deps.work.attempt(latest.id);
+    if (current?.status === "completed") await parse(current, fresh);
+  }
+
   /** Whether this process is making a launch on the PR now, which settles its claim when BB answers. */
   const launching = (target: string) => flights.has(`launch:${prWorkItemKey(target)}`);
 
-  return { launch, recover, admission: open, launching };
+  return { launch, recover, admission: open, launching, signal, advance, recheck };
 }
