@@ -4,8 +4,8 @@ import { effortTitle } from "./effort-title.js";
 describe("effort thread titles", () => {
   it.each([
     ["Speed up CI across projects", "🚦 Speed up CI across projects"],
-    ["Bridge eligibility improvements", "🛡️ Bridge eligibility improvements"],
-    ["Improve insurance eligibility checks", "🛡️ Improve insurance eligibility checks"],
+    ["Folio damage claims improvements", "🛡️ Folio damage claims improvements"],
+    ["Improve shipment coverage checks", "🛡️ Improve shipment coverage checks"],
     ["Roll out OTA releases", "🚀 Roll out OTA releases"],
     ["Improve manuscript review", "🔍 Improve manuscript review"],
     ["Reduce cache latency", "⚡ Reduce cache latency"],

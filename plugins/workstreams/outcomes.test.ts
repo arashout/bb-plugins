@@ -3,12 +3,12 @@ import { latestEffortOutcome } from "./outcomes.js";
 import type { Row } from "./inbox.js";
 import type { Board, WireRun } from "./server.js";
 
-const row = (path: string, effortKey = "care") => ({
+const row = (path: string, effortKey = "reader") => ({
   key: path,
   effortKey,
-  effort: "Care support",
+  effort: "Reader support",
   repo: "catalog",
-  title: "Fail closed for clinician matching",
+  title: "Fail closed for author matching",
   section: "respond",
   verb: "Changes requested",
   unit: { pr: { number: 57, url: "https://github.com/inkwell/catalog/pull/57" } },
@@ -31,8 +31,8 @@ const attempt = (path: string, status: Attempt["status"], startedAt: number): At
 describe("effort outcome", () => {
   it("keeps an agent's recorded result distinct from a newer PR scan and unrelated efforts", () => {
     const outcome = latestEffortOutcome(
-      [row("care-path")],
-      [run("other-path", 400, "Unrelated"), run("care-path", 300, "Ten threads resolved; decision remains open")],
+      [row("reader-path")],
+      [run("other-path", 400, "Unrelated"), run("reader-path", 300, "Ten threads resolved; decision remains open")],
       [],
     );
     expect(outcome).toMatchObject({
@@ -42,33 +42,33 @@ describe("effort outcome", () => {
   });
 
   it("uses explicit dispatch verification instead of calling the linked agent run verified", () => {
-    expect(latestEffortOutcome([row("care-path")], [run("care-path", 300, "Fixed")], [attempt("care-path", "verified", 150)]))
+    expect(latestEffortOutcome([row("reader-path")], [run("reader-path", 300, "Fixed")], [attempt("reader-path", "verified", 150)]))
       .toMatchObject({ source: "Scan verified", outcome: "Review gate cleared on fresh scan" });
   });
 
   it("does not invent a result when an agent finishes without one", () => {
-    expect(latestEffortOutcome([row("care-path")], [run("care-path", 300, null)], []))
+    expect(latestEffortOutcome([row("reader-path")], [run("reader-path", 300, null)], []))
       .toMatchObject({ source: "Agent finished without a result", outcome: "Finished; see thread" });
   });
 
   it("keeps the latest manual action when two actions reuse one thread", () => {
-    const first = run("care-path", 300, "Addressed review threads");
-    const latest = { ...run("care-path", 500, "Posted PTAL"), action: "address-comments" };
-    expect(latestEffortOutcome([row("care-path")], [first, latest], []))
+    const first = run("reader-path", 300, "Addressed review threads");
+    const latest = { ...run("reader-path", 500, "Posted PTAL"), action: "address-comments" };
+    expect(latestEffortOutcome([row("reader-path")], [first, latest], []))
       .toMatchObject({ action: "Address comments", outcome: "Posted PTAL", source: "Agent reported at action finish", at: 500 });
   });
 
   it("keeps a later manual action after a dispatched action in the same thread", () => {
-    const dispatched = run("care-path", 300, "Fixed review feedback");
-    const manual = { ...run("care-path", 500, "Asked reviewer to take another look"), action: "address-comments" };
-    expect(latestEffortOutcome([row("care-path")], [dispatched, manual], [attempt("care-path", "verified", 150)]))
+    const dispatched = run("reader-path", 300, "Fixed review feedback");
+    const manual = { ...run("reader-path", 500, "Asked reviewer to take another look"), action: "address-comments" };
+    expect(latestEffortOutcome([row("reader-path")], [dispatched, manual], [attempt("reader-path", "verified", 150)]))
       .toMatchObject({ action: "Address comments", outcome: "Asked reviewer to take another look", source: "Agent reported at action finish", at: 500 });
   });
 
   it("dates a dispatch outcome from its matching run, not an earlier run in the same thread", () => {
-    const earlier = { ...run("care-path", 300, "Investigated CI"), action: "investigate-ci" };
-    const dispatched = { ...run("care-path", 500, "Addressed review"), startedAt: 410 };
-    expect(latestEffortOutcome([row("care-path")], [earlier, dispatched], [attempt("care-path", "verified", 400)]))
+    const earlier = { ...run("reader-path", 300, "Investigated CI"), action: "investigate-ci" };
+    const dispatched = { ...run("reader-path", 500, "Addressed review"), startedAt: 410 };
+    expect(latestEffortOutcome([row("reader-path")], [earlier, dispatched], [attempt("reader-path", "verified", 400)]))
       .toMatchObject({ action: "Address review", outcome: "Review gate cleared on fresh scan", source: "Scan verified", at: 500 });
   });
 });

@@ -24,7 +24,7 @@ function unit(ticket: string, title: string, number: number): RawUnit {
 }
 
 async function setup(response: "valid" | "incomplete" | "invalid" = "valid") {
-  let units = [unit("ABC-1", "Correct clinician matching in enrollment", 1), unit("ABC-2", "Capture international phone numbers", 2)];
+  let units = [unit("ABC-1", "Correct author matching in catalog import", 1), unit("ABC-2", "Capture international phone numbers", 2)];
   model.mockImplementation(async ({ questions }: { questions: Record<string, unknown> }) => ({
     answers: response === "incomplete" ? {} : Object.fromEntries(Object.keys(questions).map((key) => [key, { type: "score", score: response === "invalid" ? 5 : 0.17, confidence: 0.96 }])),
     usage: { input_tokens: 100, output_tokens: 10 },
@@ -43,7 +43,7 @@ async function setup(response: "valid" | "incomplete" | "invalid" = "valid") {
   const clusters = buildBoard(units, { pattern: /([A-Z]+)-(\d+)/giu, overrides: {}, linearProjects: {} }).flatMap((group) => group.clusters);
   const legacy = candidatesFrom(clusters)[0]!.legacyLabel!;
   for (const cluster of clusters) db.prepare(`INSERT INTO cluster_decisions (hash, summary, label, fit, updated_at) VALUES (?, ?, ?, ?, ?)`).run(clusterInputHash(cluster), cluster.units[0]!.pr!.title, legacy, 1, 0);
-  db.prepare(`INSERT INTO effort_names (member_hash, name, updated_at, level, cohesion, cohesion_reason) VALUES (?, ?, ?, ?, ?, ?)`).run(effortMemberHash(clusters), "Enrollment improvements", 0, "effort", "mixed", "Phone capture and clinician matching deliver separate outcomes.");
+  db.prepare(`INSERT INTO effort_names (member_hash, name, updated_at, level, cohesion, cohesion_reason) VALUES (?, ?, ?, ?, ?, ?)`).run(effortMemberHash(clusters), "Catalog import improvements", 0, "effort", "mixed", "Phone capture and author matching deliver separate outcomes.");
   const refresh = async () => {
     const result = await harness.runCli(["refresh"]);
     expect(result, result.stderr).toMatchObject({ exitCode: 0 });

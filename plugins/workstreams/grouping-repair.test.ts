@@ -27,14 +27,14 @@ function client(scores: Record<string, number>, fallback = 0): JevClient {
     })), usage: { input_tokens: 100, output_tokens: 20 } };
   } };
 }
-const clinician = cluster("ABC-1", "Correct clinician matching in enrollment");
+const author = cluster("ABC-1", "Correct author matching in catalog import");
 const phone = cluster("ABC-2", "Capture international phone numbers");
-const eligibility = cluster("ABC-3", "Enforce eligibility coverage limits");
+const renewal = cluster("ABC-3", "Enforce loan renewal limits");
 const schema = cluster("ABC-4", "Repair analytics schema migration");
 
 describe("bounded outcome membership review", () => {
   it("accepts Jev's fractional expected score with its probability distribution, without rounding a weak fit up", async () => {
-    const jobs = planGroupingRepair({ groups: [group("mixed", [clinician, phone], true)] }).jobs;
+    const jobs = planGroupingRepair({ groups: [group("mixed", [author, phone], true)] }).jobs;
     const response = {
       type: "score", score: 3.72, confidence: 0.93,
       legend: { 0: "Unrelated", 1: "Shared area", 2: "Possible", 3: "Good", 4: "Certain" },
@@ -49,8 +49,8 @@ describe("bounded outcome membership review", () => {
     expect(uncertain.partitions[0]?.members).toEqual([["ABC-1"], ["ABC-2"]]);
   });
 
-  it("splits unrelated clinician/phone and eligibility/schema work instead of giving broad groups better names", async () => {
-    const plan = planGroupingRepair({ groups: [group("enrollment", [clinician, phone], true), group("backend", [eligibility, schema], true)] });
+  it("splits unrelated author/phone and renewal/schema work instead of giving broad groups better names", async () => {
+    const plan = planGroupingRepair({ groups: [group("catalog-import", [author, phone], true), group("backend", [renewal, schema], true)] });
     const result = await reviewGroupingRepair({ jobs: plan.jobs, jev: client({}) });
     expect(result.partitions.flatMap((part) => part.members).sort((a, b) => a[0]!.localeCompare(b[0]!))).toEqual([["ABC-1"], ["ABC-2"], ["ABC-3"], ["ABC-4"]]);
   });
@@ -85,7 +85,7 @@ describe("bounded outcome membership review", () => {
       cluster("CI-3", "chore(ci): warm dependency downloads without serial PR setup", "member"),
       cluster("CI-4", "fix(ci): restore test caching and cancel superseded checks", "api"),
     ];
-    const others = [clinician, phone].map((one) => ({ ...one, units: one.units.map((unit) => ({ ...unit, branch: "developer/common-prefix-ci-cache-work" })) }));
+    const others = [author, phone].map((one) => ({ ...one, units: one.units.map((unit) => ({ ...unit, branch: "developer/common-prefix-ci-cache-work" })) }));
     const groups = [...cache, ...others].map((one) => group(one.ticket, [one]));
     const plan = planGroupingRepair({ groups, pathThreads: [{ id: "thread-cache", title: "Speed up CI across projects", clusters: cache.map((one) => one.ticket) }] });
     expect(plan.jobs.map((job) => job.items.map((item) => item.id))).toEqual([["CI-1", "CI-2", "CI-3", "CI-4"]]);
@@ -99,7 +99,7 @@ describe("bounded outcome membership review", () => {
   });
 
   it("cannot chain unrelated outcomes through a bridge member", async () => {
-    const plan = planGroupingRepair({ groups: [group("mixed", [clinician, phone, eligibility], true)] });
+    const plan = planGroupingRepair({ groups: [group("mixed", [author, phone, renewal], true)] });
     const result = await reviewGroupingRepair({ jobs: plan.jobs, jev: client({ "ABC-1,ABC-2": 4, "ABC-2,ABC-3": 4 }) });
     expect(result.partitions[0]?.members).toEqual([["ABC-1", "ABC-2"], ["ABC-3"]]);
     expect(result.partitions[0]?.members.flat().sort()).toEqual(["ABC-1", "ABC-2", "ABC-3"]);
@@ -116,23 +116,23 @@ describe("bounded outcome membership review", () => {
   });
 
   it("makes status-only rescans and the accepted split zero-call, while changed evidence is reviewed", async () => {
-    const groups = [group("mixed", [clinician, phone], true)];
+    const groups = [group("mixed", [author, phone], true)];
     const plan = planGroupingRepair({ groups });
     const repaired = await reviewGroupingRepair({ jobs: plan.jobs, jev: client({}) });
     const reviewed = new Map(Object.entries(repaired.partitions[0]!.evidence));
-    const status = { ...clinician, lifecycle: "merged" as const, units: clinician.units.map((unit) => ({ ...unit, dirty: true, ahead: 2, pr: { ...unit.pr!, state: "MERGED" as const } })) };
+    const status = { ...author, lifecycle: "merged" as const, units: author.units.map((unit) => ({ ...unit, dirty: true, ahead: 2, pr: { ...unit.pr!, state: "MERGED" as const } })) };
     expect(planGroupingRepair({ groups: [group("renamed", [status, phone], true)], reviewed }).jobs).toEqual([]);
-    expect(planGroupingRepair({ groups: [group("one", [clinician]), group("two", [phone])], reviewed }).jobs).toEqual([]);
-    const changed = { ...clinician, units: clinician.units.map((unit) => ({ ...unit, changedPaths: ["src/matching/provider.ts"] })) };
+    expect(planGroupingRepair({ groups: [group("one", [author]), group("two", [phone])], reviewed }).jobs).toEqual([]);
+    const changed = { ...author, units: author.units.map((unit) => ({ ...unit, changedPaths: ["src/matching/author.ts"] })) };
     expect(planGroupingRepair({ groups: [group("mixed", [changed, phone], true)], reviewed }).jobs).toHaveLength(1);
   });
 
   it("does not review established or manual effort members", () => {
-    expect(planGroupingRepair({ groups: [group("user-selected", [clinician, phone], true, true)] }).jobs).toEqual([]);
+    expect(planGroupingRepair({ groups: [group("user-selected", [author, phone], true, true)] }).jobs).toEqual([]);
   });
 
   it("retains exact prior membership on missing, invalid or failed judgments", async () => {
-    const jobs = planGroupingRepair({ groups: [group("mixed", [clinician, phone], true)] }).jobs;
+    const jobs = planGroupingRepair({ groups: [group("mixed", [author, phone], true)] }).jobs;
     const invalid: JevClient[] = [client({}, 5), client({}, NaN), { async ask() { return { answers: {}, usage: { input_tokens: 0, output_tokens: 0 } }; } }, { async ask() { throw new Error("offline"); } }];
     for (const jev of invalid) {
       const result = await reviewGroupingRepair({ jobs, jev });
@@ -162,7 +162,7 @@ describe("bounded outcome membership review", () => {
 
   it("schedules open work before completed history without changing evidence identity", () => {
     const historical = Array.from({ length: 4 }, (_, index) => group(`a${index}`, [cluster(`A-${index}`, `Historical alpha ${index}`), cluster(`B-${index}`, `Historical beta ${index}`)].map((one) => ({ ...one, units: one.units.map((unit) => ({ ...unit, pr: { ...unit.pr!, state: "MERGED" as const } })) })), true));
-    const current = group("z-current", [clinician, phone], true);
+    const current = group("z-current", [author, phone], true);
     const plan = planGroupingRepair({ groups: [...historical, current] });
     expect(plan.jobs[0]?.items.map((item) => item.id)).toEqual(["ABC-1", "ABC-2"]);
   });

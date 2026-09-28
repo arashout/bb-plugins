@@ -165,7 +165,7 @@ describe("parsePrList", () => {
   });
 
   it("records a written approval separately from inline review threads", () => {
-    const written = row({ latestReviews: [{ author: { login: "reviewer" }, state: "APPROVED", body: "Please fix the dependent DOB path." }] });
+    const written = row({ latestReviews: [{ author: { login: "reviewer" }, state: "APPROVED", body: "Please fix the dependent ISBN path." }] });
     expect(parsePrList(written)?.pr.approvalHasBody).toBe(true);
     expect(parsePrList(row({ latestReviews: [{ state: "APPROVED", body: "  " }] }))?.pr.approvalHasBody).toBe(false);
   });
