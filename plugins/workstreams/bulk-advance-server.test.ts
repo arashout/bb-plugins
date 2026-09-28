@@ -32,7 +32,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     state: options.terminal ?? "OPEN", isDraft: false, isCrossRepository: options.fork ?? false, reviewDecision: "APPROVED", mergeStateStatus: options.ready ? "CLEAN" : "DIRTY",
     mergeable: options.ready ? "MERGEABLE" : "CONFLICTING", needsPreparation: !options.ready, readiness: options.terminal === "MERGED" ? "merged" : options.terminal === "CLOSED" ? "closed" : options.ready && !options.feedback ? "ready" : "needs-attention",
     detail: options.feedback ? "Review feedback needs attention" : options.ready ? "Approved and ready to merge" : "Resolve branch conflicts",
-    unresolvedThreads: options.feedback === "threads" ? 1 : 0, checks: "passed", basePrNumber: null,
+    unresolvedThreads: options.feedback === "threads" ? 1 : 0, threadsComplete: true, checks: "passed", basePrNumber: null,
     approvalFeedback: options.feedback === "approval-note"
       ? { status: "present", fingerprint: "f".repeat(64), sourceIds: ["approval-42"] }
       : { status: "none", fingerprint: null, sourceIds: [] } };

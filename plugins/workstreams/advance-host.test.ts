@@ -162,6 +162,17 @@ describe("bulk advance verification", () => {
     expect(await readAdvancePr(fixture({ review: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [] } } }).run, url)).toMatchObject({ ok: false });
   });
 
+  it("marks review threads complete only when every page was read", async () => {
+    expect(await readAdvancePr(fixture().run, url)).toMatchObject({ ok: true, facts: { threadsComplete: true } });
+    expect(await readAdvancePr(fixture({ review: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [{ isResolved: false }] } } }).run, url))
+      .toMatchObject({ ok: true, facts: { unresolvedThreads: 1, threadsComplete: false } });
+    expect(await readAdvancePr(fixture({ view: { state: "MERGED" } }).run, url)).toMatchObject({ ok: true, facts: { threadsComplete: false } });
+    const result = await readAdvancePr(fixture().run, url);
+    if (!result.ok) throw new Error(result.error);
+    const { threadsComplete: _complete, ...older } = result.facts;
+    expect(advanceInspectionSchema.parse({ ok: true, facts: older })).toMatchObject({ facts: { threadsComplete: false } });
+  });
+
   it("reports a live open base PR as a dependency even when all checks pass", async () => {
     expect(await readAdvancePr(fixture({ bases: [{ number: 41, headRefName: "main" }] }).run, url))
       .toMatchObject({ ok: true, facts: { basePrNumber: 41, readiness: "needs-attention" } });

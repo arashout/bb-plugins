@@ -29,7 +29,7 @@ function terminalFacts(value: unknown, prUrl: string, repo: string, number: numb
     state: view.state, isDraft: false, isCrossRepository: raw.isCrossRepository === true,
     reviewDecision: null, mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN", needsPreparation: false,
     readiness: view.state === "MERGED" ? "merged" : "closed", detail: view.state === "MERGED" ? "PR merged." : "PR closed without merging.",
-    unresolvedThreads: 0, checks: "unknown", basePrNumber: null,
+    unresolvedThreads: 0, threadsComplete: false, checks: "unknown", basePrNumber: null,
     approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
   } };
 }
@@ -165,7 +165,7 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
       headRefName: view.headRefName, baseRefName: view.baseRefName, headOid: view.headRefOid, baseOid: refs.baseRef.target.oid,
       state: view.state, isDraft: view.isDraft, isCrossRepository: view.isCrossRepository,
       reviewDecision: view.reviewDecision || null, mergeStateStatus, mergeable: view.mergeable,
-      needsPreparation, readiness, detail, unresolvedThreads: threads.count, checks, basePrNumber,
+      needsPreparation, readiness, detail, unresolvedThreads: threads.count, threadsComplete: !threads.hasNextPage, checks, basePrNumber,
       approvalFeedback: threads.approvalFeedback,
       ...(threads.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: threads.reviewFollowupPosted }),
     } };

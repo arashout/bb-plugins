@@ -48,7 +48,7 @@ async function setup(saved?: SavedRows) {
     headRefName: `abc-${number}-lookup`, baseRefName: "main", headOid: `${number === 42 ? "a" : "c"}`.repeat(40),
     baseOid: "b".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED",
     mergeStateStatus: "DIRTY", mergeable: "CONFLICTING", needsPreparation: true, readiness: "needs-attention",
-    detail: "Resolve branch conflicts", unresolvedThreads: 0, checks: "passed", basePrNumber: null,
+    detail: "Resolve branch conflicts", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
     approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: HOST }) as never },
