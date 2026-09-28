@@ -132,11 +132,13 @@ export function createPrFactsStore(db: RunDb) {
     },
     /**
      * A cheap read on its own. It keeps its signature only for a PR with no full read, such as a parent the roster
-     * watches; otherwise the signature stays the full read's, so a change waits for the next full read.
+     * watches; otherwise the signature stays the full read's, so a change waits for the next full read. Its time is kept
+     * only when it shows what the full read showed, so `cheapAt` never makes facts a newer read contradicts look fresh.
      */
     cheap(prUrl: string, signature: string, at: number): void {
       db.prepare(`INSERT INTO pr_facts (pr_url, signature, cheap_at) VALUES (?, ?, ?)
-        ON CONFLICT(pr_url) DO UPDATE SET cheap_at = excluded.cheap_at, signature = CASE WHEN body IS NULL THEN excluded.signature ELSE signature END`)
+        ON CONFLICT(pr_url) DO UPDATE SET cheap_at = CASE WHEN body IS NULL OR signature = excluded.signature THEN excluded.cheap_at ELSE cheap_at END,
+        signature = CASE WHEN body IS NULL THEN excluded.signature ELSE signature END`)
         .run(key(prUrl), signature, at);
     },
     /** A failed read keeps the last success beside the failure. */

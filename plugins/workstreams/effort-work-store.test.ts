@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { InstructionScope } from "./effort-command.js";
-import { ClaimConflictError, createEffortWorkStore, decisionId, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS,
+import { ClaimConflictError, createEffortWorkStore, decisionId, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS,
   EFFORT_INSTRUCTION_MIGRATIONS, StaleWriteError, type AttemptBody, type DecisionBody, type DecisionWrite, type RowWrite, type StoredAttempt, type V2Target,
   type WorkRowBody } from "./effort-work-store.js";
 
@@ -13,7 +13,7 @@ const [folio, quill, atlas] = [pr("folio", 12), pr("quill", 14), pr("atlas", 16)
 function open() {
   const db = new Database(":memory:");
   databases.push(db);
-  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS, ...EFFORT_ATTEMPT_MIGRATIONS].forEach((sql) => db.exec(sql));
+  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS, ...EFFORT_ATTEMPT_MIGRATIONS, ...EFFORT_JOURNAL_MIGRATIONS].forEach((sql) => db.exec(sql));
   let clock = 1_000;
   return { db, work: createEffortWorkStore(db, () => ++clock) };
 }

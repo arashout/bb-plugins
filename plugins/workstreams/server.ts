@@ -29,7 +29,7 @@ import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establ
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
-import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
+import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS,
   type V2Target } from "./effort-work-store.js";
 import type { ResourceThread } from "./effort-resources.js";
 import type { CheckoutInspection } from "./advance-contract.js";
@@ -757,6 +757,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_INSTRUCTION_MIGRATIONS,
     ...EFFORT_DECISION_MIGRATIONS,
     ...EFFORT_ATTEMPT_MIGRATIONS,
+    ...EFFORT_JOURNAL_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -4752,7 +4753,8 @@ export default async function plugin(bb: BbPluginApi) {
     autoDispatches: (effortId) => dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effortId,
     async sources() {
       const current = await board();
-      const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+      const { ticketPattern, refreshMinutes } = await settings.get();
+      const work = readWorkContext(current, compilePattern(ticketPattern), false, prFacts.reads());
       const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
       return {
         now: Date.now(), work,
@@ -4767,6 +4769,7 @@ export default async function plugin(bb: BbPluginApi) {
         threads: [...threadFacts.values()],
         tickets: (ids) => new Map([...linear.read(ids)].map(([id, detail]) => [id, { title: detail.title, url: detail.url }])),
         groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !effortStore.get(group.key)),
+        refreshMs: refreshMinutes * 60_000,
       };
     },
   });

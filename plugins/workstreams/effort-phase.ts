@@ -161,6 +161,14 @@ const PHASE_WAKES: Record<Exclude<Phase, "waiting" | "paused" | "finished">, [ev
   "repair-needed": ["retry N, or the PR merging", 15 * MINUTE],
   prepared: ["the PR changes or merges", 5 * MINUTE],
 };
+/** A step planned but not performed (a dry run's launch, a code action) is looked at again after this, unless an event wakes it first. */
+export const PLANNED_POLL = 5 * MINUTE;
+/** How often the reconciler looks at a row in this step whatever events arrive; null once finished. */
+export function wakePoll(phase: Phase, cause: string): number | null {
+  return phase === "finished" ? null : phase === "waiting" || phase === "paused" ? WAKES[cause]?.[1] ?? null : PHASE_WAKES[phase][1];
+}
+/** Causes of a repair-needed step that recovers on its own: our claim's launch is read back, or its failed turn retried. Every other one is a system issue. */
+export const RECOVERING_CAUSES = ["launch-uncertain", "turn-retry"] as const;
 const PAUSED = { hold: "On hold", archived: "The effort is archived", "v2-off": "The effort runs on legacy Advance",
   "membership-moved": "Another effort owns this PR now", "user-cancelled": "You deleted its queued work order", stopped: "Stopped" };
 const CODE_LABEL: Record<CodeRecipeId, string> = { request_rereview: "Re-request review from reviewers who asked for changes",
@@ -224,7 +232,7 @@ export function decide(input: DecideInput): Next {
   // Our claim: attach to it, answer for it, or recover it. Never a second launch.
   const claimed = (attempt: Attempt): Next => {
     const owner = { kind: "v2-attempt" as const, ref: attempt.id };
-    const recovering = (cause: string, detail: string, nextAction: Next["nextAction"], event: string) =>
+    const recovering = (cause: (typeof RECOVERING_CAUSES)[number], detail: string, nextAction: Next["nextAction"], event: string) =>
       next("repair-needed", cause, detail, { modifiers: ["recovering"], nextAction, owner, wake: { event, ref: attempt.id, dueAt: now + 2 * MINUTE } });
     if (attempt.status === "uncertain") {
       // More than one worker answers to the launch key: the claim stays until you stop the extras and release it.

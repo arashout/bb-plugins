@@ -331,6 +331,30 @@ function render({ clause, refs, excluded }: Resolved, replace: boolean): string 
   }
 }
 
+/**
+ * Why `action N` is refused on this row, or null when the grammar admits it. The parser and the roster's row menu both read
+ * it, so the menu never offers what a typed command would clarify.
+ */
+export function interventionRefusal(action: Intervention["action"], item: CommandTarget, state: Pick<CommandRow, "issue" | "stopped" | "claim">,
+  included: boolean, release: boolean): string | null {
+  const name = formatTargets([item]);
+  if (action === "stop" && state.claim?.status !== "running") return `stop ${name} interrupts a running turn, and none of ours is running on ${name}. To keep it from starting, hold ${name}.`;
+  if (action === "retry" && !(included && (state.issue || state.stopped))) return `retry ${name} restarts a system issue or a stopped row, and ${name} is neither.`;
+  if ((action === "refresh" || action === "recheck") && item.n === null && !included) return `${name} isn't on this roster.`;
+  if (action === "reset") {
+    const uncertain = state.claim?.status === "launching" || state.claim?.status === "uncertain";
+    if (!included) return `reset ${name} rebuilds a row's work in the instruction, and ${name} isn't in it. refresh ${name} re-reads it.`;
+    if (uncertain && !release) return `${name}'s launch is ${state.claim!.status === "launching" ? "still launching" : "uncertain"}${state.claim!.threadId
+      ? `; its likely worker is ${state.claim!.threadId}` : ""}. Reset drops that claim only if you confirm no worker is writing: reset ${name} release`;
+    if (!uncertain && release) return `${name} has no uncertain launch to release. Send: reset ${name}`;
+  }
+  return null;
+}
+/** Every command to an effort on legacy launchers is refused with this. */
+export const legacyRefusal = (effortName: string) => `${effortName} runs on legacy launchers. Move it to its roster before instructing it there.`;
+/** `stop N` in a dry run, which writes nothing to BB: the worker's thread to stop yourself. */
+export const dryRunStopRefusal = (targets: string, threads: string) => `v2 execution is a dry run, so v2 stops no worker. Stop ${targets} in ${threads} yourself.`;
+
 const ACK_LINES = 12;
 const HELD = ["Held, skipped until released", "Now held:"];
 /** At most 12 lines, folding the rest into a pointer to the roster; lines naming held PRs are kept before any other. */
@@ -599,22 +623,11 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
       case "stop": case "retry": case "refresh": case "recheck": case "reset": {
         if (head.op === "stop" && clause.include.length === 0) break;
         for (const item of plain) {
-          const state = row(item.target);
-          const name = formatTargets([item]);
-          const included = inScope(item) ?? prev?.include.find((grant) => grant.target === item.target);
-          if (head.op === "stop" && state.claim?.status !== "running") { issue(`stop ${name} interrupts a running turn, and none of ours is running on ${name}. To keep it from starting, hold ${name}.`); continue; }
-          if (head.op === "retry" && !(included && (state.issue || state.stopped))) { issue(`retry ${name} restarts a system issue or a stopped row, and ${name} is neither.`); continue; }
-          if ((head.op === "refresh" || head.op === "recheck") && item.n === null && !included) { issue(`${formatTargets([item])} isn't on this roster.`); continue; }
-          if (head.op === "reset") {
-            const uncertain = state.claim?.status === "launching" || state.claim?.status === "uncertain";
-            if (!included) { issue(`reset ${name} rebuilds a row's work in the instruction, and ${name} isn't in it. refresh ${name} re-reads it.`); continue; }
-            if (uncertain && !clause.flags.has("release")) {
-              issue(`${name}'s launch is ${state.claim!.status === "launching" ? "still launching" : "uncertain"}${state.claim!.threadId ? `; its likely worker is ${state.claim!.threadId}` : ""}. Reset drops that claim only if you confirm no worker is writing: reset ${name} release`);
-              continue;
-            }
-            if (!uncertain && clause.flags.has("release")) { issue(`${name} has no uncertain launch to release. Send: reset ${name}`); continue; }
-          }
-          interventions.push({ ...item, action: head.op, release: head.op === "reset" && clause.flags.has("release") });
+          const included = Boolean(inScope(item) ?? prev?.include.find((grant) => grant.target === item.target));
+          const release = head.op === "reset" && clause.flags.has("release");
+          const refusal = interventionRefusal(head.op, item, row(item.target), included, release);
+          if (refusal) { issue(refusal); continue; }
+          interventions.push({ ...item, action: head.op, release });
         }
         break;
       }

@@ -3,7 +3,7 @@ import type { Pr } from "./contract.js";
 import { effortRoster, type RosterSources } from "./effort-roster.js";
 import { cheapSignature } from "./effort-roster-store.js";
 import type { EstablishedEffort } from "./effort-store.js";
-import type { WorkRow } from "./effort-work-store.js";
+import type { StoredAttempt, WorkRow, WorkRowBody } from "./effort-work-store.js";
 import { INKWELL_ADVANCE_BATCHES, INKWELL_ADVANCE_EFFORTS, INKWELL_ROSTER } from "./inkwell-fixtures.js";
 import type { PrObservation } from "./inventory-store.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
@@ -84,7 +84,7 @@ describe("effort roster rows", () => {
     const targets = [first!, second!, third!, fourth!];
     const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
-      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), active: null, rollup: null, decisions: [] } });
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), scope: null, claims: new Map(), active: null, rollup: null, decisions: [] } });
     // Details that differ only in each PR's own facts label the issue by its cause; a detail every PR shares labels it.
     expect(result.issues).toEqual([{ cause: "ci-infrastructure", label: "ci-infrastructure", numbers: [1, 3] },
       { cause: "report-unrepairable", label: unrepairable, numbers: [2, 4] }]);
@@ -159,5 +159,131 @@ describe("effort roster rows", () => {
     expect(result.ticketsWithoutPrs).toEqual([{ id: "ABC-299", title: null, url: null }]);
     // Six job rows across two batches describe three current PRs.
     expect(result.history).toEqual({ legacyJobs: 6, legacyPrs: 3 });
+  });
+});
+
+describe("roster presentation facts", () => {
+  const NOW = Date.UTC(2026, 8, 28, 11, 30);
+  const MINUTE = 60_000;
+  const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
+  const body = (n: number, patch: Partial<WorkRowBody> = {}): WorkRowBody => ({ n, cause: "ci", detail: "Checks running", userState: "waiting", modifiers: [],
+    nextAction: null, owner: { kind: "ci", ref: null }, wake: { event: "check results change", ref: null, dueAt: NOW + 2 * MINUTE }, decision: null, recovery: [], offers: [],
+    retryEpoch: 0, observedHead: null, observedAt: null, gates: null, tickets: [], ...patch });
+  const workRow = (target: string, phase: WorkRow["phase"], rowBody: WorkRowBody): WorkRow =>
+    ({ target, effortId: "reader", instructionId: "I-reader-r1", phase, revision: 1, dueAt: null, body: rowBody });
+  const attempt = (target: string, status: StoredAttempt["status"], resource: Pick<StoredAttempt["body"]["resource"], "kind" | "threadId" | "reason">): StoredAttempt =>
+    ({ id: `A-${target.split("/").at(-1)}`, target, effortId: "reader", instructionId: "I-reader-r1", launchKey: "key", status, threadId: resource.threadId, hostId: "host-inkwell",
+      path: null, createdAt: NOW - 3 * MINUTE, body: { instructionRevision: 1, recipes: ["address_review_feedback"], role: "code", retryEpoch: 0, retryIndex: 0,
+        start: { headOid: "a".repeat(40), baseOid: "b".repeat(40), fingerprint: null, sourceIds: [] },
+        resource: { ...resource, path: null, hostId: "host-inkwell", projectId: "project", workspace: null }, mode: resource.threadId ? "send" : "spawn", marker: "[attempt]",
+        settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null } });
+  /** An effort on its roster whose instruction includes every target, with these v2 rows and claims. */
+  function instructed(targets: string[], rows: WorkRow[], options: { claims?: StoredAttempt[]; sources?: Partial<RosterSources>; facts?: Record<string, Pr | null> } = {}) {
+    const sources: RosterSources = { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
+      work: { items: new Map(targets.map((target) => [target, { paths: [], tickets: [] }])), ownerForPr: () => null },
+      facts: (target) => target in (options.facts ?? {}) ? options.facts![target]! : pr(target), observation: () => ({ checkedAt: new Date(NOW - MINUTE).toISOString(), failedAt: null }),
+      feedback: () => null, tickets: () => new Map(), ...options.sources };
+    return effortRoster({ effort: effort(targets), redirectedFrom: null, sources, execution: { mode: "v2", revision: 1 }, v2Execution: "dry-run",
+      number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: targets.indexOf(target) + 1, target, provisional: false })) }),
+      v2: { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(targets), claims: new Map((options.claims ?? []).map((item) => [item.target, item])), active: null,
+        rollup: null, decisions: [], scope: { revision: 1, include: targets.map((target, index) => ({ target, n: index + 1, outsideMembership: false, work: [], effects: [], reviewers: [],
+          addedInRevision: 1 })), exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] } } });
+  }
+
+  it("carries each v2 row's wake and next step, and none once the row is done, so the pane never guesses when a row looks again", () => {
+    const [waiting, merged] = [url("spine", 214), url("catalog", 899)];
+    const result = instructed([waiting, merged], [workRow(waiting, "waiting", body(1)),
+      workRow(merged, "finished", body(2, { cause: "merged", detail: "Merged", userState: "done", owner: null, wake: null }))],
+    { facts: { [merged]: pr(merged, { state: "MERGED" }) } });
+    expect(result.rows.map((row) => [row.n, row.state, row.wake, row.nextAction])).toEqual([
+      [1, "waiting", { event: "check results change", dueAt: NOW + 2 * MINUTE }, null], [2, "done", null, null]]);
+  });
+
+  it("says who performs each step and where: the dry run's planned launch with its reason, the running claim's reused thread, a code action, or a code procedure", () => {
+    const [entryForm, checksum, verify, rereview] = [url("folio", 412), url("quill", 188), url("catalog", 903), url("atlas", 85)];
+    const reason = "the only quill thread is busy on #185";
+    const running = attempt(entryForm, "running", { kind: "reuse", threadId: "thr_folio_entry", reason: null });
+    const result = instructed([entryForm, checksum, verify, rereview], [
+      workRow(entryForm, "executing", body(1, { cause: "worker", userState: "doing", nextAction: "attach", owner: { kind: "v2-attempt", ref: running.id } })),
+      workRow(checksum, "queued", body(2, { cause: "launching", userState: "waiting", modifiers: ["plan only"], nextAction: ["fix_failing_checks"], owner: null,
+        plan: { recipes: ["fix_failing_checks"], role: "code", launchKey: "key", resource: { kind: "spawn", threadId: null, path: "/Users/reader/src/quill-188", hostId: "host-inkwell", reason } } })),
+      workRow(verify, "verifying", body(3, { cause: "observe", userState: "doing", nextAction: "observe", owner: null })),
+      workRow(rereview, "queued", body(4, { cause: "code-action", userState: "waiting", modifiers: ["plan only"], nextAction: ["request_rereview"], owner: null })),
+    ], { claims: [running] });
+    expect(result.rows.map((row) => row.work)).toEqual([
+      { executor: "worker", recipes: ["address_review_feedback"], resource: { kind: "reuse", threadId: "thr_folio_entry", reason: null }, planned: false },
+      { executor: "worker", recipes: ["fix_failing_checks"], resource: { kind: "spawn", threadId: null, reason }, planned: true },
+      { executor: "procedure", recipes: [], resource: null, planned: false },
+      { executor: "code", recipes: ["request_rereview"], resource: null, planned: true },
+    ]);
+    expect(result.rows[0]!.claim).toEqual({ attemptId: running.id, status: "running", threadId: "thr_folio_entry", since: NOW - 3 * MINUTE });
+    expect(result.rows.slice(1).map((row) => row.claim)).toEqual([null, null, null]);
+    // A row outside the instruction has no v2 step at all.
+    expect(roster([entryForm]).rows[0]).toMatchObject({ work: null, wake: null, nextAction: null, claim: null });
+  });
+
+  it("nests a PR under the roster PR it is stacked on, from a full read's parent or a cheap read's base branch, and names a parent off the roster without a number", () => {
+    const [parent, fullChild, cheapChild, orphan] = [url("spine", 212), url("spine", 215), url("spine", 217), url("spine", 219)];
+    const facts = (target: string, basePrNumber: number | null) => ({ facts: { prUrl: target, number: Number(target.split("/").at(-1)), title: "Shelf location", repo: "inkwell/spine",
+      headRefName: "abc-215", baseRefName: "abc-212", headOid: "d".repeat(40), baseOid: "b".repeat(40), state: "OPEN" as const, isDraft: false, isCrossRepository: false,
+      reviewDecision: null, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready" as const, detail: "", unresolvedThreads: 0,
+      threadsComplete: true, checks: "passed" as const, basePrNumber, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } },
+      fullAt: NOW - MINUTE, failedAt: null, error: null, signature: null });
+    const result = roster([parent, fullChild, cheapChild, orphan], {
+      full: (target) => target === fullChild ? facts(fullChild, 212) : target === orphan ? facts(orphan, 190) : null,
+      observation: () => ({ checkedAt: new Date(Date.UTC(2026, 8, 28) - 2 * MINUTE).toISOString(), failedAt: null }),
+    }, { [parent]: pr(parent, { headRefName: "abc-212" }), [cheapChild]: pr(cheapChild, { headRefName: "abc-217", baseRefName: "abc-212" }) });
+    expect(result.rows.map((row) => [row.n, row.stack])).toEqual([
+      [1, null],
+      [2, { parentTarget: parent, parentN: 1 }],
+      [3, { parentTarget: parent, parentN: 1 }],
+      [4, { parentTarget: url("spine", 190), parentN: null }],
+    ]);
+  });
+
+  it("counts CI for the chip from the board's read: a check still running isn't done, and a failure is counted", () => {
+    const [target] = urls;
+    expect(roster([target!], {}, { [target!]: pr(target!, { checkConclusions: ["SUCCESS", "FAILURE", "PENDING"] }) }).rows[0]!.checkCounts).toEqual({ done: 2, total: 3, failed: 1 });
+    expect(roster([target!], {}, { [target!]: null }).rows[0]!.checkCounts).toBeNull();
+  });
+
+  it("dates a PR the board doesn't track from the reconciler's cheap read that confirmed its full read, never from one that saw a change", () => {
+    const teammate = url("catalog", 362);
+    const facts = { prUrl: teammate, number: 362, title: "Shelf labels", repo: "inkwell/catalog", headRefName: "abc-362", baseRefName: "main", headOid: "d".repeat(40),
+      baseOid: "b".repeat(40), state: "OPEN" as const, isDraft: false, isCrossRepository: false, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED",
+      mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention" as const, detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed" as const,
+      basePrNumber: null, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } };
+    const reviewWait = body(1, { cause: "review", owner: { kind: "reviewer", ref: "ines-v" }, wake: { event: "the review decision changes", ref: null, dueAt: NOW } });
+    // No checkout and not yours: the board never reads it, and the reconciler reads it cheaply at its review poll.
+    const read = (cheapAt: number) => instructed([teammate], [workRow(teammate, "waiting", reviewWait)], { facts: { [teammate]: null }, sources: { observation: () => null,
+      full: () => ({ facts, fullAt: NOW - 40 * MINUTE, failedAt: null, error: null, signature: "unchanged", cheapAt }) } }).rows[0]!;
+    expect(read(NOW - MINUTE)).toMatchObject({ observedAt: NOW - MINUTE, stale: false, staleAt: NOW + 29 * MINUTE });
+    // The pr_facts store keeps no time for a cheap read that saw a change, so the 40-minute-old full read shows its age until it is read again.
+    expect(read(NOW - 41 * MINUTE)).toMatchObject({ observedAt: NOW - 40 * MINUTE, stale: true });
+  });
+
+  it("marks a row stale once its observation is older than twice its poll, or a failed read is newer than the last success, and never a done row", () => {
+    const [review, ci, board, failed, merged] = [url("catalog", 907), url("spine", 214), url("quill", 93), url("folio", 418), url("catalog", 899)];
+    const seen: Record<string, { checkedAt: string; failedAt: string | null }> = {
+      // A review wait polls every 15 minutes: 29 minutes is fresh, 31 stale.
+      [review]: { checkedAt: new Date(NOW - 31 * MINUTE).toISOString(), failedAt: null },
+      // A CI wait polls every 2 minutes, but no v2 step looks more often than every 5, so 9 minutes is fresh.
+      [ci]: { checkedAt: new Date(NOW - 9 * MINUTE).toISOString(), failedAt: null },
+      // A PR with no v2 step yet is read by the board's 10-minute refresh.
+      [board]: { checkedAt: new Date(NOW - 21 * MINUTE).toISOString(), failedAt: null },
+      [failed]: { checkedAt: new Date(NOW - MINUTE).toISOString(), failedAt: new Date(NOW - 30_000).toISOString() },
+      [merged]: { checkedAt: new Date(NOW - 600 * MINUTE).toISOString(), failedAt: null },
+    };
+    const reviewWait = body(1, { cause: "review", owner: { kind: "reviewer", ref: "ines-v" }, wake: { event: "the review decision changes", ref: null, dueAt: NOW } });
+    const rows = [workRow(review, "waiting", reviewWait), workRow(ci, "waiting", body(2)), workRow(failed, "waiting", body(4)),
+      workRow(merged, "finished", body(5, { cause: "merged", userState: "done", wake: null }))];
+    const read = (observation: (target: string) => { checkedAt: string; failedAt: string | null }) => instructed([review, ci, board, failed, merged], rows,
+      { sources: { observation }, facts: { [merged]: pr(merged, { state: "MERGED" }) } });
+    const result = read((target) => seen[target]!);
+    // Each row goes stale at twice its poll past its last read, a failed read's row at once, and a done row never.
+    expect(result.rows.map((row) => [row.n, row.stale, row.staleAt])).toEqual([[1, true, NOW - MINUTE], [2, false, NOW + MINUTE], [3, true, NOW - MINUTE],
+      [4, true, NOW - 30_000], [5, false, null]]);
+    // Two minutes earlier the review wait was 29 minutes old: fresh.
+    expect(read((target) => target === review ? { ...seen[review]!, checkedAt: new Date(NOW - 29 * MINUTE).toISOString() } : seen[target]!).rows[0]!.stale).toBe(false);
   });
 });

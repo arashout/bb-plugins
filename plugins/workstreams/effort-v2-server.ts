@@ -24,9 +24,9 @@ import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { AdvanceJob } from "./bulk-advance.js";
-import { capAcknowledgment, EFFECTS, formatTargets, interpretEffortCommand, WORK_RECIPES, type CommandResult, type CommandRow, type CommandTarget,
-  type DecisionAnswer, type InstructionScope } from "./effort-command.js";
-import { decide, PREPARED, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
+import { capAcknowledgment, dryRunStopRefusal, EFFECTS, formatTargets, interpretEffortCommand, legacyRefusal, WORK_RECIPES, type CommandResult, type CommandRow,
+  type CommandTarget, type DecisionAnswer, type InstructionScope } from "./effort-command.js";
+import { decide, PLANNED_POLL, PREPARED, RECOVERING_CAUSES, type Attempt, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
 import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
 import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
@@ -47,6 +47,8 @@ import { prWorkItemKey } from "./work-item-index.js";
 export const EFFORT_ROSTER_CHANGED = "effort-roster-changed";
 
 const MINUTE = 60_000;
+/** Journal sources a person started: their steps aren't ones v2 took on its own. */
+const USER_SOURCES = new Set(["command", "refresh", "hold", "archive", "restore", "mode"]);
 /** The reconciler's budgets (plan §2.6 and §7 item 14). */
 const RECONCILE = {
   tick: 15_000,
@@ -56,8 +58,7 @@ const RECONCILE = {
   /** A launch, a code action, or Ready needs a full read this fresh. */
   fullFresh: 2 * MINUTE,
   fullPerMinute: 4,
-  /** A step planned but not performed (a dry run's launch, a code action) looks again after this, unless an event wakes it first. */
-  plannedPoll: 5 * MINUTE,
+  plannedPoll: PLANNED_POLL,
   legacyRecheckEvery: 10 * MINUTE,
   /** Minutes a secondary rate limit, which names no reset, or a PR GitHub couldn't read, backs off. */
   backoff: [1, 2, 4, 8, 15],
@@ -114,7 +115,8 @@ const parentContextSchema = z.object({
 });
 
 export const effortV2Contract = {
-  effort_roster_get: { input: z.object({ effortId: z.string().min(1).max(500) }).strict(), output: effortRosterSchema },
+  /** `since` is a `through` an earlier read returned: the roster then says what changed after it. */
+  effort_roster_get: { input: z.object({ effortId: z.string().min(1).max(500), since: z.number().int().nonnegative().optional() }).strict(), output: effortRosterSchema },
   effort_reconcile: { input: z.object({ effortId: z.string().min(1).max(500), prUrl: z.string().max(500) }).strict(),
     output: z.object({ status: z.enum(["checked", "failed"]), error: z.string().optional(), row: rosterRowSchema }) },
   effort_v2_preview: { input: z.object({ effortId: z.string().min(1).max(500) }).strict(), output: effortV2PreviewSchema },
@@ -355,7 +357,7 @@ export type EffortV2Deps = {
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
-    | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction">;
+    | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction" | "journal" | "asked">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
@@ -437,15 +439,47 @@ export function createEffortV2(deps: EffortV2Deps) {
     if (!active && rows.length === 0) return undefined;
     const decisions = deps.work.decisions(effort.id);
     return { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target))),
+      scope: active?.scope ?? null, claims: new Map(deps.work.claims(effort.id).map((attempt) => [attempt.target, attempt])),
       active: active && { id: active.id, revision: active.revision, text: active.text, reportMode: active.scope.reportMode, outcome: active.scope.outcome },
       rollup: active ? rowContract(effort, active.scope, rows, sources.work, decisions, evidenceOf(rows.map((row) => row.target))).rollup : null,
       decisions: decisions.map(({ id, n, revision, body }) => ({ id, n, revision, kind: body.kind, subkind: body.subkind, question: body.question, options: body.options,
         targets: body.targets.map(({ target, n: number }) => ({ target, n: number })) })) };
   }
-  async function roster(effortId: string): Promise<EffortRoster> {
+  async function roster(effortId: string, since?: number): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);
     const sources = await deps.sources();
-    return effortRoster({ effort, redirectedFrom, sources, number: (targets) => deps.numbers(effort.id, targets, { assign: true }), v2: instructionView(effort, sources) });
+    const read = effortRoster({ effort, redirectedFrom, sources, number: (targets) => deps.numbers(effort.id, targets, { assign: true }),
+      execution: deps.execution.get(effort.id), v2Execution: await deps.launches.execution(), v2: instructionView(effort, sources) });
+    return { ...read, ...changesSince(effort.id, read.rows, since) };
+  }
+  /**
+   * The journal after `since`: each roster row's first and last phase since then, the decisions asked since that are still open,
+   * rows observed on a new head, and how many steps v2 took on its own. Only a move to a new phase or cause is a change: a rewrite
+   * that keeps a row's step (a new observation, a dry run's plan) isn't. A launch or code action only queued hasn't been taken yet,
+   * and a step ending in a decision or a system issue waits on you, so neither is a step v2 took.
+   */
+  function changesSince(effortId: string, rows: readonly Pick<EffortRoster["rows"][number], "n" | "target">[], since: number | undefined): Pick<EffortRoster, "through" | "since"> {
+    const { through, transitions, headBefore } = deps.work.journal(effortId, since ?? Number.MAX_SAFE_INTEGER);
+    if (since === undefined) return { through, since: null };
+    const numberOf = new Map(rows.map((row) => [row.target, row.n]));
+    const byTarget = new Map<string, typeof transitions>();
+    for (const item of transitions) if (numberOf.has(item.target)) byTarget.set(item.target, [...byTarget.get(item.target) ?? [], item]);
+    const moved = (item: (typeof transitions)[number]) => item.fromPhase !== item.toPhase || item.fromCause !== item.cause;
+    const byNumber = (a: number, b: number) => a - b;
+    const first = transitions[0]?.at ?? Infinity;
+    const opened = deps.work.asked(effortId);
+    return { through, since: {
+      rows: [...byTarget].filter(([, list]) => list.some(moved))
+        .map(([target, list]) => ({ n: numberOf.get(target)!, from: list[0]!.fromPhase, to: list.at(-1)!.toPhase, cause: list.at(-1)!.cause, at: list.at(-1)!.at }))
+        .sort((a, b) => a.n - b.n),
+      decisionsOpened: deps.work.decisions(effortId).filter((decision) => (opened.get(decision.id) ?? -Infinity) >= first).map((decision) => decision.n).sort(byNumber),
+      newHeads: [...byTarget].filter(([target, list]) => {
+        const head = list.map((item) => item.head).filter((value) => value !== null).at(-1) ?? null;
+        return head !== null && headBefore.has(target) && headBefore.get(target) !== head;
+      }).map(([target]) => numberOf.get(target)!).sort(byNumber),
+      handled: transitions.filter((item) => moved(item) && !USER_SOURCES.has(item.source) && item.toPhase !== "queued" && item.toPhase !== "decision-needed"
+        && !(item.toPhase === "repair-needed" && !(RECOVERING_CAUSES as readonly string[]).includes(item.cause))).length,
+    } };
   }
   const queues = new Map<string, Promise<unknown>>();
   /** One command or event at a time per effort, so each plans from the rows the last one wrote. */
@@ -581,7 +615,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     return serial(effort.id, async () => {
       const replay = deps.work.command(effort.id, requestId);
       if (replay !== null) return commandResultSchema.parse(replay);
-      if (deps.execution.get(effort.id).mode !== "v2") return refuse(`${effort.name} runs on legacy launchers. Move it to its roster before instructing it there.`);
+      if (deps.execution.get(effort.id).mode !== "v2") return refuse(legacyRefusal(effort.name));
       return run();
     });
   }
@@ -642,8 +676,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     if (result.postRoster) return refuse("post roster arrives with parent-thread reports; open the roster instead. Nothing was admitted.");
     // `stop N` interrupts our running worker through BB, which a dry run never writes to.
     const stops = result.interventions.filter((item) => item.action === "stop");
-    if (stops.length && await deps.launches.execution() !== "on") return refuse(`v2 execution is a dry run, so v2 stops no worker. Stop ${formatTargets(stops)} in `
-      + `${stops.map((item) => deps.work.attempts(item.target).find((attempt) => attempt.status === "running")?.threadId ?? "its worker's thread").join(", ")} yourself. Nothing was admitted.`);
+    if (stops.length && await deps.launches.execution() !== "on") return refuse(`${dryRunStopRefusal(formatTargets(stops),
+      stops.map((item) => deps.work.attempts(item.target).find((attempt) => attempt.status === "running")?.threadId ?? "its worker's thread").join(", "))} Nothing was admitted.`);
     if (effort.archivedAt && (result.instruction || result.answers.length)) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
     // A launch this process is still making settles its own claim when BB answers; releasing it first would let its worker start unrecorded.
     const making = result.interventions.filter((item) => item.release && deps.launches.launching(item.target));
@@ -1103,7 +1137,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     } finally { changing.delete(effortId); }
   }
   const handlers = {
-    effort_roster_get: ({ effortId }: { effortId: string }) => roster(effortId),
+    effort_roster_get: ({ effortId, since }: { effortId: string; since?: number }) => roster(effortId, since),
     effort_reconcile: ({ effortId, prUrl }: { effortId: string; prUrl: string }) => reconcile(effortId, prUrl),
     effort_v2_preview: ({ effortId }: { effortId: string }) => preview(effortId),
     effort_v2_set: setMode,

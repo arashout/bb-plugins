@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
 import { syncDecisions, type EffortCommandResult } from "./effort-v2-server.js";
-import { createEffortWorkStore, type WorkRowBody } from "./effort-work-store.js";
+import { createEffortWorkStore, type AttemptBody, type WorkRowBody } from "./effort-work-store.js";
 import { cheapSignature, createPrFactsStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
 import { createEffortStore } from "./effort-store.js";
@@ -827,6 +827,122 @@ describe("effort instructions", () => {
       expect((await env.command(text)).kind, text).toBe("admit");
     for (const path of ["threads.spawn", "threads.send", "threads.update"]) expect(env.harness.inspection.sdk.callsTo(path)).toEqual([]);
     expect(env.harness.inspection.experimental_hostRpcCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))).toEqual([]);
+  });
+
+  describe("roster presentation facts", () => {
+    const attemptBody = (threadId: string | null): AttemptBody => ({ instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
+      start: { headOid: "a".repeat(40), baseOid: "b".repeat(40), fingerprint: null, sourceIds: [] },
+      resource: { kind: "spawn", threadId, path: null, hostId: "host-inkwell", projectId: "project", reason: "no idle thread in the checkout", workspace: null },
+      mode: "spawn", marker: "[Workstreams attempt]", settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null });
+
+    it("names how the active instruction treats each row: included, left alone this instruction only, removed in its revision, or never named", async () => {
+      const env = await instructed();
+      expect((await env.roster(env.effort.id)).rows[0]).toMatchObject({ membership: null, membershipReason: null });
+      await env.admit("move 1-6 forward, leave 3 alone");
+      await env.admit("drop 4");
+      const roster = await env.roster(env.effort.id);
+      expect(roster).toMatchObject({ execution: { mode: "v2", revision: 1 }, v2Execution: "dry-run",
+        instruction: { revision: 2, included: [1, 2, 5, 6], excluded: [{ target: roster.rows[2]!.target, n: 3, reason: "leave alone" }] } });
+      expect(roster.rows.slice(0, 7).map((row) => [row.n, row.membership, row.membershipReason])).toEqual([[1, "included", null], [2, "included", null],
+        [3, "excluded", "this instruction only"], [4, "removed", "dropped in r2"], [5, "included", null], [6, "included", null], [7, "outside", null]]);
+    });
+
+    it("offers a row command only when the grammar would admit it, giving the reason the typed command would get", async () => {
+      const env = await instructed();
+      expect((await env.roster(env.efforts["Vault audits"]!.id)).rows[0]!.actions.recheck)
+        .toEqual({ ok: false, why: "Vault audits runs on legacy launchers. Move it to its roster before instructing it there." });
+      await env.admit("move 1-3 forward");
+      const [first, running, , outside] = (await env.roster(env.effort.id)).rows;
+      expect(first!.actions).toMatchObject({ recheck: { ok: true, why: null }, reset: { ok: true, why: null, release: false } });
+      for (const action of ["retry", "stop"] as const) {
+        expect(first!.actions[action].ok).toBe(false);
+        expect(await env.command(`${action} 1`)).toMatchObject({ kind: "clarify", message: first!.actions[action].why });
+      }
+      expect(outside!.actions.reset.ok).toBe(false);
+      expect(await env.command("reset 4")).toMatchObject({ kind: "clarify", message: outside!.actions.reset.why });
+      expect(await env.command("reset 1")).toMatchObject({ kind: "admit" });
+      // Our worker runs on 2: the grammar stops it, but a dry run writes nothing to BB, so the menu gives the refusal a stop would.
+      env.work.claim({ id: "A-two", target: running!.target, effortId: env.effort.id, instructionId: "I-x-r1", launchKey: "key-two", threadId: "thr_worker_two",
+        hostId: "host-inkwell", path: null, body: attemptBody("thr_worker_two") });
+      env.work.recordAttempt("A-two", ["launching"], { status: "running", body: {} });
+      const second = (await env.roster(env.effort.id)).rows[1]!;
+      expect(second.actions.stop).toEqual({ ok: false, why: "v2 execution is a dry run, so v2 stops no worker. Stop 2 in thr_worker_two yourself." });
+      expect(await env.command("stop 2")).toMatchObject({ kind: "clarify", message: `${second.actions.stop.why} Nothing was admitted.` });
+    });
+
+    it("shows our claim while it is launching, running, or uncertain, and none once it is released", async () => {
+      const env = await instructed();
+      await env.admit("move 1 forward");
+      const target = env.first.rows[0]!.target;
+      const claimOf = async () => (await env.roster(env.effort.id)).rows[0]!.claim;
+      env.work.claim({ id: "A-one", target, effortId: env.effort.id, instructionId: "I-x-r1", launchKey: "key-one", threadId: null, hostId: "host-inkwell", path: null,
+        body: attemptBody(null) });
+      expect(await claimOf()).toEqual({ attemptId: "A-one", status: "launching", threadId: null, since: expect.any(Number) });
+      env.work.recordAttempt("A-one", ["launching"], { status: "uncertain", threadId: "thr_likely", body: {} });
+      expect(await claimOf()).toMatchObject({ status: "uncertain", threadId: "thr_likely" });
+      expect((await env.roster(env.effort.id)).rows[0]!.actions.reset).toEqual({ ok: true, why: null, release: true });
+      env.work.recordAttempt("A-one", ["uncertain"], { status: "running", body: {} });
+      expect(await claimOf()).toMatchObject({ status: "running" });
+      env.work.recordAttempt("A-one", ["running"], { status: "released", body: { releasedReason: "stopped" } });
+      expect(await claimOf()).toBeNull();
+    });
+
+    it("says what changed since a read: each row's move, decisions asked, new heads, and the steps v2 took on its own, never counting yours", async () => {
+      const env = await instructed();
+      await env.admit("move 1-4 forward");
+      const unasked = await env.roster(env.effort.id);
+      expect(unasked.since).toBeNull();
+      const seen = unasked.through;
+      expect(seen).toBe((env.db.prepare(`SELECT MAX(seq) AS seq FROM effort_transitions`).get() as { seq: number }).seq);
+      // Yours: a hold on 1. Then v2's own steps on 2 and 3, and two that wait on you: an exhausted repair on 3 and a question on 4.
+      await env.admit("hold 1");
+      const [, two, three, four] = env.first.rows.map((row) => row.target);
+      const step = (target: string, source: string, phase: "waiting" | "prepared" | "repair-needed" | "decision-needed", patch: Partial<WorkRowBody>, decide = false) => {
+        const row = env.work.row(target)!;
+        const write = { target, expectedRevision: row.revision, phase, body: { ...row.body, ...patch }, dueAt: null };
+        env.work.commit({ effortId: env.effort.id, baseRevision: env.work.lastRevision(env.effort.id), source, instruction: null, journal: null, rows: [write],
+          ...decide ? { decisions: syncDecisions(env.effort.id, [], env.work.nextDecision(env.effort.id), [write]) } : {} });
+      };
+      step(two!, "reconciler", "waiting", { cause: "ci", userState: "waiting" });
+      step(two!, "reconciler", "prepared", { cause: "merge-candidate", userState: "ready", observedHead: "e".repeat(40) });
+      step(three!, "launch", "repair-needed", { cause: "launch-uncertain", userState: "doing", modifiers: ["recovering"] });
+      step(three!, "launch", "repair-needed", { cause: "retry-exhausted", userState: "issue", modifiers: [] });
+      step(four!, "launch", "decision-needed", { cause: "product", userState: "decision", decision: { key: "product:out of print?", kind: "product", subkind: null,
+        question: "Out-of-print ISBNs at entry: allow or block?", options: [{ id: "A", label: "Allow" }, { id: "B", label: "Block" }], grants: null, answer: "command" } }, true);
+      const later = await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id, since: seen }) as EffortRoster;
+      expect(later.since).toEqual({
+        rows: [{ n: 1, from: "verifying", to: "paused", cause: "hold", at: expect.any(Number) }, { n: 2, from: "verifying", to: "prepared", cause: "merge-candidate", at: expect.any(Number) },
+          { n: 3, from: "verifying", to: "repair-needed", cause: "retry-exhausted", at: expect.any(Number) }, { n: 4, from: "verifying", to: "decision-needed", cause: "product", at: expect.any(Number) }],
+        decisionsOpened: [1], newHeads: [2],
+        // 2's two steps and 3's launch readback; not your hold, not the exhausted repair, not the question.
+        handled: 3 });
+      expect(later.through).toBeGreaterThan(seen);
+      expect((await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id, since: later.through }) as EffortRoster).since)
+        .toEqual({ rows: [], decisionsOpened: [], newHeads: [], handled: 0 });
+    });
+
+    it("counts only moves: a read that keeps a row's step changes nothing, and a launch a dry run only planned is no step taken", async () => {
+      const env = await instructed();
+      await env.admit("move 1-2 forward");
+      const [one, two] = env.first.rows.map((row) => row.target);
+      const step = (target: string, source: string, phase: "waiting" | "queued", patch: Partial<WorkRowBody>) => {
+        const row = env.work.row(target)!;
+        env.work.commit({ effortId: env.effort.id, baseRevision: env.work.lastRevision(env.effort.id), source, instruction: null, journal: null,
+          rows: [{ target, expectedRevision: row.revision, phase, body: { ...row.body, ...patch }, dueAt: null }] });
+      };
+      const since = async (through: number) => (await env.harness.callRpc("effort_roster_get", { effortId: env.effort.id, since: through }) as EffortRoster);
+      const start = (await env.roster(env.effort.id)).through;
+      step(one!, "reconciler", "waiting", { cause: "ci", userState: "waiting" });
+      const waiting = await since(start);
+      expect(waiting.since).toMatchObject({ rows: [{ n: 1, from: "verifying", to: "waiting", cause: "ci" }], handled: 1 });
+      // Three reads find 1's checks still running: its row is rewritten each time, but its step never moved.
+      for (const minute of [1, 2, 3]) step(one!, "reconciler", "waiting", { observedAt: Date.now() + minute * 60_000 });
+      expect((await since(waiting.through)).since).toMatchObject({ rows: [], handled: 0 });
+      // In a dry run the reconciler plans 2's launch and the launch pass records where it would run; nothing starts.
+      step(two!, "reconciler", "queued", { cause: "launching", userState: "waiting", modifiers: ["plan only"] });
+      step(two!, "launch", "queued", { detail: "integrate base in a new thread: no idle thread" });
+      expect((await since(waiting.through)).since).toMatchObject({ rows: [{ n: 2, from: "verifying", to: "queued", cause: "launching" }], handled: 0 });
+    });
   });
 
   describe("decisions", () => {

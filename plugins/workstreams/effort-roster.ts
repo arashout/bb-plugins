@@ -10,21 +10,26 @@ import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
 import type { DispatchAttempt } from "./dispatch.js";
+import { dryRunStopRefusal, formatTargets, interventionRefusal, legacyRefusal, type CommandRow, type InstructionScope } from "./effort-command.js";
+import { PLANNED_POLL, wakePoll } from "./effort-phase.js";
+import { recipe } from "./effort-recipes.js";
 import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
+import type { V2Execution } from "./effort-runner.js";
 import type { EstablishedEffort } from "./effort-store.js";
-import { USER_STATES, type WorkRow } from "./effort-work-store.js";
+import { USER_STATES, workRowBodySchema, type Execution, type StoredAttempt, type WorkRow } from "./effort-work-store.js";
 import { prTarget } from "./ghactions.js";
 import type { PrObservation } from "./inventory-store.js";
 import type { LegacyAttempt } from "./legacy-history.js";
-import { checksFailed, checksGreen } from "./pr-checks.js";
+import { checkCounts, checksFailed, checksGreen } from "./pr-checks.js";
 import { GATE_IDS, mergeWait, prGates, type GateId, type Gates } from "./pr-gates.js";
-import { prHoldFor, prHoldSchema, type PrHolds } from "./pr-holds.js";
+import { canonicalPrUrl, prHoldFor, prHoldSchema, type PrHolds } from "./pr-holds.js";
 import type { Run } from "./runs.js";
 import type { ThreadFacts } from "./threads.js";
 import { prWorkItemKey } from "./work-item-index.js";
 import { displayTitle } from "./workstreams.js";
 
 const ticketSchema = z.object({ id: z.string(), title: z.string().nullable(), url: z.string().nullable() });
+const actionSchema = z.object({ ok: z.boolean(), why: z.string().nullable() });
 export const rosterRowSchema = z.object({
   n: z.number(), provisional: z.boolean(), target: z.string(), repo: z.string(), number: z.number(), title: z.string(),
   state: z.enum([...USER_STATES, "not-in-instruction"]), cause: z.string(), label: z.string(),
@@ -38,12 +43,42 @@ export const rosterRowSchema = z.object({
   observedAt: z.number().nullable(), failedAt: z.number().nullable(),
   tickets: z.array(ticketSchema), checkouts: z.array(z.string()),
   legacy: z.object({ batchId: z.string(), jobId: z.string(), cause: z.string(), label: z.string(), jobs: z.number() }).nullable(),
+  /** What wakes the row's v2 step, and when the reconciler looks again regardless; null outside the instruction and once finished. */
+  wake: z.object({ event: z.string(), dueAt: z.number() }).nullable(),
+  nextAction: workRowBodySchema.shape.nextAction,
+  /**
+   * Who performs the v2 step: a worker, a code action, or a code procedure (a GitHub read, a report read, a launch readback), where it
+   * runs and why there, and whether it is only planned (a dry run). Null outside the instruction.
+   */
+  work: z.object({ executor: z.enum(["worker", "code", "procedure"]).nullable(), recipes: z.array(z.string()),
+    resource: z.object({ kind: z.string(), threadId: z.string().nullable(), reason: z.string().nullable() }).nullable(), planned: z.boolean() }).nullable(),
+  /** Our attempt's writer claim on the PR. */
+  claim: z.object({ attemptId: z.string(), status: z.enum(["launching", "running", "uncertain"]), threadId: z.string().nullable(), since: z.number() }).nullable(),
+  /** The PR this one is stacked on, and its number when it is on this roster. */
+  stack: z.object({ parentTarget: z.string(), parentN: z.number().nullable() }).nullable(),
+  checkCounts: z.object({ done: z.number(), total: z.number(), failed: z.number() }).nullable(),
+  /** The last observation is at least twice the row's poll old, or a failed read is newer than it. */
+  stale: z.boolean(),
+  /**
+   * When the row goes stale unless a newer read lands first; null when it never does (a done row, or one never read). A read that finds
+   * nothing new signals no one, so a pane refetches once when a row's staleAt passes rather than trusting its copy's age.
+   */
+  staleAt: z.number().nullable(),
+  /** How the active instruction names the PR; null with no active instruction. */
+  membership: z.enum(["included", "excluded", "removed", "outside"]).nullable(), membershipReason: z.string().nullable(),
+  /** Whether `recheck N`, `reset N` (with `release` for an unfinished launch), `retry N`, and `stop N` would be admitted now, and why not. */
+  actions: z.object({ recheck: actionSchema, reset: actionSchema.extend({ release: z.boolean() }), retry: actionSchema, stop: actionSchema }),
 });
 export const effortRosterSchema = z.object({
   effort: z.object({ id: z.string(), key: z.string(), name: z.string(), goal: z.string(), archivedAt: z.number().nullable(),
     redirectedFrom: z.string().nullable(), coordinatorThreadId: z.string().nullable() }),
   snapshotId: z.string().nullable(),
-  instruction: z.object({ id: z.string(), revision: z.number(), text: z.string(), reportMode: z.string(), outcome: z.string().nullable() }).nullable(),
+  execution: z.object({ mode: z.enum(["legacy", "v2"]), revision: z.number() }),
+  /** The v2Execution setting: a dry run plans every step and claims, starts, sends, and writes nothing. */
+  v2Execution: z.enum(["dry-run", "on"]),
+  instruction: z.object({ id: z.string(), revision: z.number(), text: z.string(), reportMode: z.string(), outcome: z.string().nullable(),
+    /** Row numbers the instruction includes, and the rows it leaves alone for this instruction only. */
+    included: z.array(z.number()), excluded: z.array(z.object({ target: z.string(), n: z.number().nullable(), reason: z.string() })) }).nullable(),
   /** Outcome, Validated, Still needed, and Needs a decision; null without an active instruction. */
   rollup: z.array(z.string()).nullable(),
   observedAt: z.number(),
@@ -57,6 +92,14 @@ export const effortRosterSchema = z.object({
   /** Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. */
   decisions: z.array(z.object({ id: z.string(), n: z.number(), revision: z.number(), kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(),
     question: z.string(), options: z.array(z.object({ id: z.string(), label: z.string() })), targets: z.array(z.object({ target: z.string(), n: z.number().nullable() })) })),
+  /** The effort's newest journal sequence: pass it back as `since` to read what changed after this roster. */
+  through: z.number(),
+  /**
+   * What changed after the `since` the read named, or null without one: each row's first and last phase since then, decisions
+   * asked since and still open, rows on a new head, and the steps v2 took without a command.
+   */
+  since: z.object({ rows: z.array(z.object({ n: z.number(), from: z.string().nullable(), to: z.string(), cause: z.string(), at: z.number() })),
+    decisionsOpened: z.array(z.number()), newHeads: z.array(z.number()), handled: z.number() }).nullable(),
 });
 export type EffortRoster = z.infer<typeof effortRosterSchema>;
 export type RosterRow = z.infer<typeof rosterRowSchema>;
@@ -84,6 +127,8 @@ export type RosterSources = {
   tickets(ids: readonly string[]): ReadonlyMap<string, { title: string | null; url: string | null }>;
   /** Derived effort-level board groups; null when the board cannot be derived. */
   groups: readonly SuggestionGroup[] | null;
+  /** How often the board reads PRs outside an instruction: the refresh interval setting, 10 minutes when absent. */
+  refreshMs?: number;
 };
 
 const byRepoAndNumber = (a: string, b: string) => {
@@ -196,10 +241,38 @@ export function observedFacts(target: string, sources: Pick<RosterSources, "fact
 
 const WORK_OWNER: Record<NonNullable<WorkRow["body"]["owner"]>["kind"], RosterRow["owner"]> = { user: "you", ci: "ci", reviewer: "reviewer", pr: "parent",
   github: "github", "legacy-job": "legacy-job", thread: "thread", "v2-attempt": "v2" };
-/** The effort's v2 rows, by PR, and the PRs its active instruction includes. */
-export type RosterInstruction = { rows: ReadonlyMap<string, WorkRow>; included: ReadonlySet<string> };
+/**
+ * The effort's v2 rows, by PR, the PRs its active instruction includes, the instruction's scope (null with none active), and our
+ * writer claims, by PR.
+ */
+export type RosterInstruction = { rows: ReadonlyMap<string, WorkRow>; included: ReadonlySet<string>; scope: InstructionScope | null;
+  claims: ReadonlyMap<string, StoredAttempt> };
+/** How the effort runs, which decides whether a command item can be admitted at all. */
+type RosterMode = { name: string; execution: Execution; v2Execution: V2Execution };
+const DEFAULT_REFRESH = 10 * 60_000;
 
-function rosterRow(target: string, number: { n: number; provisional: boolean }, sources: RosterSources, instruction: RosterInstruction | null, outside: ReadonlySet<string>): RosterRow {
+/** Who performs a v2 step, where, and why there: the running claim's place, else the dry run's planned launch. */
+function workOf(body: WorkRow["body"], claim: StoredAttempt | null): NonNullable<RosterRow["work"]> {
+  const next = body.nextAction;
+  const executor = Array.isArray(next) ? next.every((id) => recipe(id).executor === "worker") ? "worker" : "code"
+    : next === "attach" || next === "retry-turn" ? "worker" : next === null ? null : "procedure";
+  const resource = claim?.body.resource ?? body.plan?.resource ?? null;
+  return { executor, recipes: Array.isArray(next) ? [...next] : claim ? [...claim.body.recipes] : [],
+    resource: resource && { kind: resource.kind, threadId: resource.threadId, reason: resource.reason }, planned: body.modifiers.includes("plan only") };
+}
+
+/** How the active instruction names a PR, and why when that isn't plain inclusion. */
+function membershipOf(target: string, scope: InstructionScope | null, outside: boolean): Pick<RosterRow, "membership" | "membershipReason"> {
+  if (!scope) return { membership: null, membershipReason: null };
+  const named = (item: { target: string }) => prWorkItemKey(item.target) === target;
+  if (scope.include.some(named)) return { membership: "included", membershipReason: outside ? "included from outside membership" : null };
+  if (scope.exclude.some(named)) return { membership: "excluded", membershipReason: "this instruction only" };
+  const removed = scope.removed.find(named);
+  return removed ? { membership: "removed", membershipReason: `${removed.reason} in r${removed.revision}` } : { membership: "outside", membershipReason: null };
+}
+
+function rosterRow(target: string, number: { n: number; provisional: boolean }, sources: RosterSources, instruction: RosterInstruction | null, outside: ReadonlySet<string>,
+  context: { mode: RosterMode; numberOf: ReadonlyMap<string, number>; heads: ReadonlyMap<string, string> }): RosterRow {
   const item = sources.work.items.get(target);
   const checkouts = [...item?.paths ?? []];
   const hold = prHoldFor(target, sources.holds);
@@ -230,14 +303,43 @@ function rosterRow(target: string, number: { n: number; provisional: boolean }, 
   const tickets = sources.tickets(item?.tickets ?? []);
   const parsed = prTarget(target);
   const { modifiers = [], ...shown } = need;
+  // The reconciler's own cheap read of a PR the board doesn't track counts once it confirmed the full read shown.
+  const observedAt = latest(cheapAt, full?.at, full && stored?.cheapAt);
+  const failedAt = latest(observation?.failedAt ? Date.parse(observation.failedAt) : null, stored?.failedAt);
+  // A v2 step is read at its wake's poll, counted as no shorter than a planned step's; any other row at the board's refresh interval.
+  const poll = shown.state === "done" ? null : current ? Math.max(wakePoll(current.phase, current.body.cause) ?? 0, PLANNED_POLL) : sources.refreshMs ?? DEFAULT_REFRESH;
+  const staleAt = poll === null ? null : failedAt !== null && (observedAt === null || failedAt > observedAt) ? failedAt : observedAt !== null ? observedAt + 2 * poll : null;
+  const stale = staleAt !== null && sources.now >= staleAt;
+  // A full read names the stack parent; a cheap read only its base branch, which another roster PR's head may be.
+  const base = full?.facts.basePrNumber ?? null;
+  const parentTarget = base !== null && parsed ? canonicalPrUrl(`https://github.com/${parsed.slug}/pull/${base}`)
+    : !full && pr?.baseRefName && parsed ? context.heads.get(`${parsed.slug}:${pr.baseRefName}`) ?? null : null;
+  const claim = instruction?.claims.get(target) ?? null;
+  const membership = membershipOf(target, instruction?.scope ?? null, outside.has(target));
+  // The same rules a typed command meets, so the row menu never offers what the grammar would clarify.
+  const own = instruction?.rows.get(target) ?? null;
+  const state: Pick<CommandRow, "issue" | "stopped" | "claim"> = { issue: own?.body.userState === "issue",
+    stopped: own?.phase === "paused" && ["stopped", "user-cancelled"].includes(own.body.cause), claim: claim && { status: claim.status as "launching" | "running" | "uncertain", threadId: claim.threadId } };
+  const { mode } = context;
+  const check = (action: "recheck" | "reset" | "retry" | "stop", release = false) => {
+    const why = mode.execution.mode !== "v2" ? legacyRefusal(mode.name) : interventionRefusal(action, { target, n: number.n }, state, membership.membership === "included", release)
+      ?? (action === "stop" && mode.v2Execution !== "on" ? dryRunStopRefusal(formatTargets([{ target, n: number.n }]), claim?.threadId ?? "its worker's thread") : null);
+    return { ok: why === null, why };
+  };
+  const unfinished = claim?.status === "launching" || claim?.status === "uncertain";
   return {
     ...shown, modifiers, outsideMembership: outside.has(target),
     n: number.n, provisional: number.provisional, target, repo: parsed?.slug ?? "", number: parsed?.number ?? 0,
     title: facts ? displayTitle(facts.title) : "", hold, reviewers: pr?.latestReviews ?? [], requested: pr?.reviewRequests ?? [],
-    head: facts?.headOid || null, checks: facts?.checks ?? null, reviewDecision: facts?.reviewDecision ?? null, gates,
-    observedAt: latest(cheapAt, full?.at), failedAt: latest(observation?.failedAt ? Date.parse(observation.failedAt) : null, stored?.failedAt),
+    head: facts?.headOid || null, checks: facts?.checks ?? null, reviewDecision: facts?.reviewDecision ?? null, gates, observedAt, failedAt,
     tickets: (item?.tickets ?? []).map((id) => ({ id, title: tickets.get(id)?.title ?? null, url: tickets.get(id)?.url ?? null })),
     checkouts, legacy: legacy && { batchId: legacy.batchId, jobId: legacy.job.id, cause: legacy.cause, label: legacy.label, jobs: legacy.jobs },
+    wake: current?.body.wake ? { event: current.body.wake.event, dueAt: current.body.wake.dueAt } : null, nextAction: current?.body.nextAction ?? null,
+    work: current ? workOf(current.body, claim) : null,
+    claim: claim && { attemptId: claim.id, status: claim.status as "launching" | "running" | "uncertain", threadId: claim.threadId, since: claim.createdAt },
+    stack: parentTarget && parentTarget !== target ? { parentTarget, parentN: context.numberOf.get(parentTarget) ?? null } : null,
+    checkCounts: pr ? checkCounts(pr.checkConclusions) : null, stale, staleAt, ...membership,
+    actions: { recheck: check("recheck"), reset: { ...check("reset", unfinished), release: unfinished }, retry: check("retry"), stop: check("stop") },
   };
 }
 
@@ -245,15 +347,28 @@ export function effortRoster(input: {
   effort: EstablishedEffort; redirectedFrom: string | null; sources: RosterSources;
   /** Numbers the targets in display order; see the roster store. */
   number(targets: string[]): { rows: { n: number; target: string; provisional: boolean }[]; snapshotId: string | null };
+  /** The effort's execution mode and the v2Execution setting; legacy and a dry run when absent, as for a copy without them. */
+  execution?: Execution; v2Execution?: V2Execution;
   /** The active instruction, its rows, its rollup, and its open decisions; absent for a legacy effort or a copy without them. */
-  v2?: RosterInstruction & { active: EffortRoster["instruction"]; rollup: string[] | null; decisions: EffortRoster["decisions"] };
+  v2?: RosterInstruction & { active: Omit<NonNullable<EffortRoster["instruction"]>, "included" | "excluded"> | null; rollup: string[] | null;
+    decisions: EffortRoster["decisions"] };
 }): EffortRoster {
   const { effort, sources, v2 = null } = input;
+  const execution = input.execution ?? { mode: "legacy", revision: 0 };
+  const v2Execution = input.v2Execution ?? "dry-run";
   const owned = new Set(rosterTargets(effort, sources.work));
   // Ownership is read now: a PR included from outside that later joins the effort is simply a member.
   const outside = new Set([...v2?.included ?? []].filter((target) => !owned.has(target)));
   const numbered = input.number(rosterTargets(effort, sources.work, [...outside]));
-  const rows = numbered.rows.map((row) => rosterRow(row.target, row, sources, v2, outside)).sort((a, b) => a.n - b.n);
+  const numberOf = new Map(numbered.rows.map((row) => [row.target, row.n]));
+  // Each roster PR's head branch, so a cheap read's base branch can name the PR it is stacked on.
+  const heads = new Map(numbered.rows.flatMap((row) => {
+    const branch = sources.facts(row.target)?.headRefName ?? sources.full(row.target)?.facts?.headRefName;
+    const slug = prTarget(row.target)?.slug;
+    return branch && slug ? [[`${slug}:${branch}`, row.target] as const] : [];
+  }));
+  const context = { mode: { name: effort.name, execution, v2Execution }, numberOf, heads };
+  const rows = numbered.rows.map((row) => rosterRow(row.target, row, sources, v2, outside, context)).sort((a, b) => a.n - b.n);
   // A failure several PRs share is one issue naming each of them. Each row's detail names its own PR's facts (its head, its tries, its run),
   // so issues group by cause, labeled with the detail only when every PR in the issue shares it.
   const issues = new Map<string, EffortRoster["issues"][number]>();
@@ -276,9 +391,13 @@ export function effortRoster(input: {
   return {
     effort: { id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, archivedAt: effort.archivedAt ?? null,
       redirectedFrom: input.redirectedFrom, coordinatorThreadId: effort.coordinatorThreadId },
-    snapshotId: numbered.snapshotId, instruction: v2?.active ?? null, rollup: v2?.rollup ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
+    snapshotId: numbered.snapshotId, execution, v2Execution,
+    instruction: v2?.active ? { ...v2.active, included: rows.filter((row) => row.membership === "included").map((row) => row.n),
+      excluded: (v2.scope?.exclude ?? []).map(({ target, reason }) => ({ target: prWorkItemKey(target), n: numberOf.get(prWorkItemKey(target)) ?? null, reason })) } : null,
+    rollup: v2?.rollup ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
     suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
+    through: 0, since: null,
   };
 }
 

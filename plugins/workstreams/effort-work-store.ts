@@ -57,6 +57,9 @@ export const EFFORT_ATTEMPT_MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS effort_attempts_target ON effort_attempts (target, created_at)`,
 ];
 
+/** Append-only: server.ts adds this after the attempt migrations (id 54). Each row transition keeps the head its row was observed on. */
+export const EFFORT_JOURNAL_MIGRATIONS = [`ALTER TABLE effort_transitions ADD COLUMN head TEXT`];
+
 const sourceSchema = z.object({ kind: z.enum(["panel", "banner", "thread", "cli"]), threadId: z.string().nullable(), eventId: z.string().nullable() }).strict();
 export type CommandSource = z.infer<typeof sourceSchema>;
 /** One revision of the standing instruction: its scope, and the command and surface that produced it. */
@@ -189,6 +192,12 @@ export function decideAttempt({ id, status, threadId, path, body }: StoredAttemp
  */
 export const attemptEvidence = (attempts: readonly StoredAttempt[]): CriterionEvidence[] =>
   attempts.flatMap((attempt) => (attempt.body.report?.criteria ?? []).map((item) => ({ ...item, revision: attempt.body.instructionRevision })));
+/**
+ * One row transition as the journal keeps it, with the cause of the step it left. `source` names who wrote it: a command, a refresh, the
+ * reconciler, a launch, and so on.
+ */
+export type JournalEntry = { seq: number; target: string; at: number; fromPhase: Phase | null; fromCause: string | null; toPhase: Phase; cause: string; source: string;
+  head: string | null };
 /** A write lost its compare-and-swap: the row, instruction, decision, or attempt changed after its writer read it. */
 export class StaleWriteError extends Error {}
 /** Another attempt holds the PR, the checkout, or the thread this claim needs, or already made this exact launch. */
@@ -339,6 +348,29 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
       return (db.prepare(`SELECT detail FROM effort_transitions WHERE effort_id = ? AND target IS NULL AND cause = ? ORDER BY seq DESC LIMIT ?`).all(effortId, cause, limit) as
         { detail: string }[]).map((row) => JSON.parse(row.detail) as unknown);
     },
+    /**
+     * The effort's journal after sequence `after`: its newest sequence, and each row transition since, oldest first, with the
+     * head each of those rows was last observed on at or before `after` (null when unknown).
+     */
+    journal(effortId: string, after: number): { through: number; transitions: JournalEntry[]; headBefore: ReadonlyMap<string, string> } {
+      const through = (db.prepare(`SELECT MAX(seq) AS seq FROM effort_transitions WHERE effort_id = ?`).get(effortId) as { seq: number | null }).seq ?? 0;
+      // A row's revisions are consecutive, so its previous transition holds the cause it left.
+      const transitions = db.prepare(`SELECT t.seq, t.target, t.at, t.from_phase AS fromPhase, p.cause AS fromCause, t.to_phase AS toPhase, t.cause, t.source, t.head
+        FROM effort_transitions t LEFT JOIN effort_transitions p ON p.target = t.target AND p.row_revision = t.row_revision - 1
+        WHERE t.effort_id = ? AND t.seq > ? AND t.target IS NOT NULL ORDER BY t.seq`).all(effortId, after) as JournalEntry[];
+      const before = db.prepare(`SELECT head FROM effort_transitions WHERE target = ? AND seq <= ? AND head IS NOT NULL ORDER BY seq DESC LIMIT 1`);
+      const headBefore = new Map<string, string>();
+      for (const target of new Set(transitions.map((item) => item.target))) {
+        const head = (before.get(target, after) as { head: string } | undefined)?.head;
+        if (head) headBefore.set(target, head);
+      }
+      return { through, transitions, headBefore };
+    },
+    /** When each of the effort's open decisions was first asked, by id. */
+    asked(effortId: string): Map<string, number> {
+      return new Map((db.prepare(`SELECT id, created_at AS createdAt FROM effort_decisions WHERE effort_id = ? AND status = 'open'`).all(effortId) as
+        { id: string; createdAt: number }[]).map((row) => [row.id, row.createdAt]));
+    },
     /** Every included PR finished with its criteria held on its final head: the instruction is complete, and stays so. */
     completeInstruction(id: string): void {
       db.prepare(`UPDATE effort_instructions SET status = 'completed', updated_at = ? WHERE id = ? AND status = 'active'`).run(now(), id);
@@ -471,9 +503,9 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
             ON CONFLICT(target) DO UPDATE SET effort_id = excluded.effort_id, instruction_id = excluded.instruction_id, phase = excluded.phase,
             revision = excluded.revision, due_at = excluded.due_at, body = excluded.body, updated_at = excluded.updated_at`)
             .run(target, input.effortId, instructionId(input.effortId, newest), write.phase, revision, write.dueAt, JSON.stringify(body), at);
-          db.prepare(`INSERT INTO effort_transitions (effort_id, target, row_revision, at, from_phase, to_phase, cause, detail, attempt_id, source, observed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.effortId, target, revision, at, stored?.phase ?? null, write.phase, body.cause, body.detail,
-            write.attemptId ?? null, input.source, body.observedAt);
+          db.prepare(`INSERT INTO effort_transitions (effort_id, target, row_revision, at, from_phase, to_phase, cause, detail, attempt_id, source, observed_at, head)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.effortId, target, revision, at, stored?.phase ?? null, write.phase, body.cause, body.detail,
+            write.attemptId ?? null, input.source, body.observedAt, body.observedHead);
         }
         for (const write of input.decisions ?? []) {
           const body = JSON.stringify(decisionBodySchema.parse(write.body));

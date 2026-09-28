@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createEffortRosterStore, EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
+import { createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 
 const databases: Database.Database[] = [];
@@ -152,5 +152,26 @@ describe("effort roster numbers", () => {
     const effort = establish(createEffortStore(deployed), "Reader accounts");
     expect(open(path, { readonly: true }).roster.numbers(effort, [b, a], { assign: false })).toEqual({ effortId: effort, snapshotId: null,
       rows: [{ n: 1, target: b, provisional: true }, { n: 2, target: a, provisional: true }] });
+  });
+});
+
+describe("pr facts", () => {
+  it("keeps a cheap read's time only when it shows what the full read showed, so a change it saw never makes the older full read look fresh", () => {
+    const db = new Database(":memory:");
+    databases.push(db);
+    db.exec(PR_FACTS_MIGRATION);
+    const store = createPrFactsStore(db);
+    store.full(a, { fullAt: 1_000, signature: "as-read", cheapAt: 900, facts: { prUrl: a, number: 1, title: "Entry form", repo: "inkwell/folio", headRefName: "abc-1",
+      baseRefName: "main", headOid: "d".repeat(40), baseOid: "b".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: null,
+      mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed",
+      basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } });
+    store.cheap(a, "as-read", 2_000);
+    expect(store.get(a)).toMatchObject({ fullAt: 1_000, cheapAt: 2_000, signature: "as-read" });
+    store.cheap(a, "pushed", 3_000);
+    expect(store.get(a)).toMatchObject({ fullAt: 1_000, cheapAt: 2_000, signature: "as-read" });
+    // A PR with no full read, such as a parent the roster watches, is known only by its cheap reads.
+    store.cheap(b, "open", 4_000);
+    store.cheap(b, "merged", 5_000);
+    expect(store.get(b)).toMatchObject({ fullAt: null, cheapAt: 5_000, signature: "merged" });
   });
 });

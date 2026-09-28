@@ -11,7 +11,7 @@ import { decide, type DecideInput, type Next } from "./effort-phase.js";
 import type { ResourceInput, ResourceWriter } from "./effort-resources.js";
 import { createEffortRunner, type Admission, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { rowBody } from "./effort-v2-server.js";
-import { createEffortWorkStore, decideAttempt, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
+import { createEffortWorkStore, decideAttempt, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS,
   sameBody, type AttemptBody, type ExecutionMode, type StoredAttempt } from "./effort-work-store.js";
 import type { ModelChoice } from "./execution.js";
 
@@ -57,7 +57,7 @@ type Options = { execution?: V2Execution; concurrency?: number; resources?: Deci
 function setup(options: Options = {}) {
   const db = new Database(":memory:");
   databases.push(db);
-  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS, ...EFFORT_ATTEMPT_MIGRATIONS].forEach((sql) => db.exec(sql));
+  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS, ...EFFORT_ATTEMPT_MIGRATIONS, ...EFFORT_JOURNAL_MIGRATIONS].forEach((sql) => db.exec(sql));
   const clock = { now: START };
   const work = createEffortWorkStore(db, () => clock.now);
   work.commit({ effortId: EFFORT, baseRevision: 0, source: "command", instruction: { scope, text: "move 4 forward", source: { kind: "panel", threadId: null, eventId: null },
