@@ -1,10 +1,13 @@
 import {
   BRIEF_STAGES,
+  MAX_REFRESHER_LENGTH,
   MAX_TITLE_LENGTH,
   nextStepActorSchema,
   summaryResultSchema,
   type BriefStage,
   type NextStepActor,
+  type RefresherProse,
+  type StoredBriefStatus,
   type SummaryResult,
 } from "./contract.js";
 
@@ -20,9 +23,16 @@ Return ONLY a JSON object with exactly these keys:
   "blockedOn"     The party or artifact the thread is waiting on, when someone could go chase it. Empty string otherwise.
   "constraints"   Facts learned during the thread that would break a naive re-plan: API limits, rejected approaches, assumptions proven wrong. Empty string if none.
   "stage"         One of: "discovery", "planning", "implementation", "review".
+  "refresherShort" One or two sentences of plain prose, addressed to the user as "you", for someone reopening this thread after a few hours: what they were doing, how far it got, what to do next.
+  "refresherFull"  The same thing for someone who has been away for days: two or three sentences, with enough named detail to stand on its own.
 
 Rules:
 - Every field is a string except "nextStepActor", which is one of the three words above. Keep each to one or two lines.
+- The two "refresher" fields are prose, not labelled fields: flowing sentences, no "Goal:" / "Next:" prefixes, no bullet points, no headings. Write them as you would say them to the person over their shoulder as they sit back down.
+- Write them in that order — what you were doing, how far it got, what to do next — and name things concretely: the file, the branch, the PR, the command. "You were partway through the sidebar sections" is useless; "the section sync lands but the order is not pinned yet" is the point.
+- Mention what is blocking, or a constraint learned in the thread, ONLY when it changes what to do next. A blocker that has already been routed around is history, not orientation.
+- When "nextStep" is empty, the refreshers say so plainly — what the thread landed, and that nothing is owed. Never manufacture a next action for them that "nextStep" itself would not carry.
+- "refresherFull" is not "refresherShort" with adjectives. It is allowed the detail the short one had to drop: the second half of the state, the constraint that will bite, the name of the thing that is blocked.
 - "title" describes what the thread turned out to be about, not what its opening message asked for. A thread that set out to fix a test and ended up rewriting the scheduler is named for the scheduler.
 - Omit "nextStepActor" entirely when "nextStep" is the empty string — there is no actor for a step that does not exist.
 - When "blockedOn" is non-empty, "nextStepActor" is "other".
@@ -34,9 +44,30 @@ Rules:
 - Write plainly and specifically. No preamble, no hedging, no restating these instructions.
 - Base every claim on the transcript. Do not speculate about what the code or the user probably wants.`;
 
+/**
+ * What to tell the model about a status the user has pinned by hand.
+ *
+ * Addressed to the two refresher fields and nothing else. The pin deliberately
+ * sits *in front of* the derivation rather than editing the fields it reads
+ * (see `effectiveStatus`): a `nextStep` blanked to satisfy a pin would be fed
+ * back as the previous brief and written into storage, where a pin is a
+ * separate fact the summarizer never sees and cannot undo. So the five fields
+ * keep describing the work, and only the prose — the part that speaks to the
+ * user about what to do — is told to agree with the pin.
+ */
+const PINNED_STATUS_GUIDANCE: Record<StoredBriefStatus, string> = {
+  "waiting-on-me":
+    "the user has marked this thread as waiting on them. The refreshers should read as a thread parked for them to pick up, whatever the transcript's own sign-off suggested.",
+  "waiting-on-other":
+    "the user has marked this thread as blocked. The refreshers must not tell them to carry on with the work; say what it is waiting on and leave it there.",
+  done: "the user has marked this thread as finished — the outstanding step was carried out somewhere the transcript cannot see. The refreshers must not hand out a next action; say what it landed and stop.",
+};
+
 export function buildUserPrompt(args: {
   transcript: string;
   fixedStage: BriefStage | null;
+  /** A status the user pinned by hand, or null for the ordinary derivation. */
+  pinnedStatus?: StoredBriefStatus | null;
 }): string {
   const stageLine =
     args.fixedStage === null
@@ -45,7 +76,13 @@ export function buildUserPrompt(args: {
           args.fixedStage,
         )} by the user — return exactly that value regardless of what the transcript suggests.`;
 
-  return `${stageLine}
+  const pinned = args.pinnedStatus ?? null;
+  const statusLine =
+    pinned === null
+      ? ""
+      : `\n\nFor "refresherShort" and "refresherFull" only: ${PINNED_STATUS_GUIDANCE[pinned]} The other fields still describe the work as the transcript leaves it.`;
+
+  return `${stageLine}${statusLine}
 
 Thread transcript follows.
 
@@ -163,6 +200,62 @@ export function normalizeTitle(value: unknown): string | undefined {
   return clamped === "" ? undefined : clamped;
 }
 
+/**
+ * Prose cut to a length, on a sentence boundary where there is one.
+ *
+ * Over-length is clamped rather than rejected because the failure it guards is
+ * a model that answered the brief well and the word count badly — throwing that
+ * away would cost the whole refresher over a matter of style. The cut prefers
+ * the last sentence end inside the cap, so what survives is whole sentences
+ * rather than a clause ending in an ellipsis; a single unbroken sentence longer
+ * than the cap falls back to a word boundary and takes the ellipsis, which at
+ * least reads as truncation rather than as a thought the model abandoned.
+ */
+export function clampProse(text: string, limit: number): string {
+  const collapsed = text.replace(/\s+/gu, " ").trim();
+  if (collapsed.length <= limit) return collapsed;
+
+  const cut = collapsed.slice(0, limit);
+  const sentenceEnd = Math.max(
+    cut.lastIndexOf(". "),
+    cut.lastIndexOf("! "),
+    cut.lastIndexOf("? "),
+  );
+  // A sentence boundary in the first fifth of the budget is not a clamp, it is
+  // a one-line answer to a three-line question; keep cutting instead.
+  if (sentenceEnd > limit / 5) return cut.slice(0, sentenceEnd + 1);
+
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+/**
+ * The two reorientation variants, or null when neither survived.
+ *
+ * Null is an ordinary answer, not a failure: a model that ignored the two new
+ * keys still wrote a perfectly good brief, and the only consequence is that
+ * this thread never shows a refresher. Failing the parse instead would cost the
+ * five fields, the ring and the sidebar section over a paragraph.
+ *
+ * One empty variant is kept rather than dropped — {@link chooseRefresher} falls
+ * back to whichever one exists, so a model that answered only the short form
+ * still reorients someone returning after a week.
+ */
+export function normalizeRefresher(record: {
+  short: unknown;
+  full: unknown;
+}): RefresherProse | null {
+  const short = clampProse(
+    normalizeField(record.short),
+    MAX_REFRESHER_LENGTH.short,
+  );
+  const full = clampProse(
+    normalizeField(record.full),
+    MAX_REFRESHER_LENGTH.full,
+  );
+  return short === "" && full === "" ? null : { short, full };
+}
+
 export function parseSummary(
   reply: string,
   fixedStage: BriefStage | null,
@@ -193,6 +286,10 @@ export function parseSummary(
     blockedOn: normalizeField(record.blockedOn),
     constraints: normalizeField(record.constraints),
     stage,
+    refresher: normalizeRefresher({
+      short: record.refresherShort,
+      full: record.refresherFull,
+    }),
   });
 }
 

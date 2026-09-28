@@ -1332,3 +1332,295 @@ describe("renaming threads", () => {
     await current.harness.lifecycle.dispose();
   });
 });
+
+describe("re-entry refresher", () => {
+  const HOUR = 3_600_000;
+  const PROSE = {
+    refresherShort: "You were wiring the sidebar sections. Run the reconcile.",
+    refresherFull:
+      "You were wiring the sidebar sections to brief status, and the sync lands. The order is still unpinned. Run the reconcile and check manualSectionOrder.",
+  };
+
+  /** A thread whose last activity, and the refresher setting, a test controls. */
+  function refresherHost(options: {
+    idleMs?: number;
+    refresherIdleHours?: number;
+    summary?: Record<string, unknown>;
+  }) {
+    const live = makeThreadResponse({
+      id: "thr_1",
+      title: "Sidebar grouping",
+      visibility: "visible",
+      status: "idle",
+      latestAttentionAt: Date.now() - (options.idleMs ?? 48 * HOUR),
+    });
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    ...SUMMARY,
+                    ...PROSE,
+                    ...options.summary,
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const created = createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings: {
+        apiKey: "test-key",
+        baseUrl: "https://api.test/v1",
+        model: "test-model",
+        jsonMode: true,
+        quietSeconds: 120,
+        refresherIdleHours: options.refresherIdleHours ?? 8,
+      },
+      sdk: {
+        threads: {
+          get: async () => ({ ...live }),
+          list: async () => [live],
+          update: async () => live,
+          output: async () => ({ output: "All set." }),
+          conversationOutline: async () => ({
+            items: [
+              { id: "1", role: "user", preview: "Build it", attachmentSummary: null },
+            ],
+            maxSeq: 12,
+          }),
+          interactions: { list: async () => [] },
+        },
+      },
+    });
+    return { ...created, live, fetchMock };
+  }
+
+  async function summarized(current: ReturnType<typeof refresherHost>) {
+    await current.harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    return waitFor(async () =>
+      current.bb.storage.kv.get<StoredBrief>("brief:thr_1"),
+    );
+  }
+
+  const ask = async (current: ReturnType<typeof refresherHost>) =>
+    (await current.harness.behavior.callRpc("getRefresher", {
+      threadId: "thr_1",
+    })) as { refresher: { text: string; variant: string; attentionAt: number } | null };
+
+  let current: ReturnType<typeof refresherHost> | null = null;
+  afterEach(async () => {
+    await current?.harness.lifecycle.dispose();
+    current = null;
+  });
+
+  it("stores both variants and the status reading they were written for", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+    const stored = await summarized(current);
+
+    expect(stored.refresher).toEqual({
+      short: PROSE.refresherShort,
+      full: PROSE.refresherFull,
+      // Stamped from the fields this same summary produced, so a status pinned
+      // afterwards makes the two disagree — which is what suppresses the card.
+      writtenForStatus: "waiting-on-me",
+    });
+  });
+
+  it("reorients you on a thread you left two days ago", async () => {
+    current = refresherHost({ idleMs: 48 * HOUR });
+    await plugin(current.bb);
+    await summarized(current);
+
+    const { refresher } = await ask(current);
+    expect(refresher?.variant).toBe("full");
+    expect(refresher?.text).toBe(PROSE.refresherFull);
+    expect(refresher?.attentionAt).toBe(current.live.latestAttentionAt);
+  });
+
+  it("keeps it to a line on a thread you left this morning", async () => {
+    current = refresherHost({ idleMs: 10 * HOUR });
+    await plugin(current.bb);
+    await summarized(current);
+
+    const { refresher } = await ask(current);
+    expect(refresher?.variant).toBe("short");
+    expect(refresher?.text).toBe(PROSE.refresherShort);
+  });
+
+  it("says nothing on a thread you were in an hour ago", async () => {
+    current = refresherHost({ idleMs: 1 * HOUR });
+    await plugin(current.bb);
+    await summarized(current);
+
+    expect((await ask(current)).refresher).toBeNull();
+  });
+
+  it("says nothing on a thread with no brief, without touching the thread", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+
+    expect((await ask(current)).refresher).toBeNull();
+    // The cheap checks come first: a thread the refresher can never fire on
+    // must not cost a lookup on every open.
+    expect(current.harness.sdk.callsTo("threads.get")).toHaveLength(0);
+  });
+
+  it("is off at a threshold of zero, and costs nothing when it is", async () => {
+    current = refresherHost({ refresherIdleHours: 0 });
+    await plugin(current.bb);
+    await summarized(current);
+    const before = current.harness.sdk.callsTo("threads.get").length;
+
+    expect((await ask(current)).refresher).toBeNull();
+    expect(current.harness.sdk.callsTo("threads.get")).toHaveLength(before);
+  });
+
+  it("stays dismissed for the activity it was shown for", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+    await summarized(current);
+
+    const shown = (await ask(current)).refresher!;
+    await current.harness.behavior.callRpc("dismissRefresher", {
+      threadId: "thr_1",
+      attentionAt: shown.attentionAt,
+    });
+
+    expect((await ask(current)).refresher).toBeNull();
+  });
+
+  it("comes back when the thread does something you have not seen", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+    await summarized(current);
+
+    const shown = (await ask(current)).refresher!;
+    await current.harness.behavior.callRpc("dismissRefresher", {
+      threadId: "thr_1",
+      attentionAt: shown.attentionAt,
+    });
+
+    // A turn lands after the dismissal.
+    current.live.latestAttentionAt = shown.attentionAt + 1_000;
+    expect((await ask(current)).refresher).not.toBeNull();
+  });
+
+  it("never moves the dismissal backwards", async () => {
+    // Two windows can hold the same thread. A stale dismiss from the one you
+    // did not type in must not reopen a question the other one closed.
+    current = refresherHost({});
+    await plugin(current.bb);
+    const stored = await summarized(current);
+    const at = current.live.latestAttentionAt;
+
+    await current.harness.behavior.callRpc("dismissRefresher", {
+      threadId: "thr_1",
+      attentionAt: at,
+    });
+    await current.harness.behavior.callRpc("dismissRefresher", {
+      threadId: "thr_1",
+      attentionAt: at - 10_000,
+    });
+
+    expect(stored.refresher).not.toBeNull();
+    expect((await ask(current)).refresher).toBeNull();
+  });
+
+  it("drops the dismissal along with the brief it silenced", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+    await summarized(current);
+    await current.harness.behavior.callRpc("dismissRefresher", {
+      threadId: "thr_1",
+      attentionAt: current.live.latestAttentionAt,
+    });
+
+    await current.harness.behavior.emitThreadEvent("thread.deleted", {
+      thread: current.live,
+    });
+    await waitFor(async () =>
+      (await current!.bb.storage.kv.get("brief:thr_1")) === undefined ? true : null,
+    );
+
+    expect(
+      await current.bb.storage.kv.get("refresher-seen:thr_1"),
+    ).toBeUndefined();
+  });
+
+  it("says nothing while the agent is running", async () => {
+    current = refresherHost({});
+    await plugin(current.bb);
+    await summarized(current);
+
+    current.live.status = "active";
+    expect((await ask(current)).refresher).toBeNull();
+  });
+
+  describe("a status pinned by hand", () => {
+    it("re-summarizes, telling the model what the user pinned", async () => {
+      current = refresherHost({});
+      await plugin(current.bb);
+      await summarized(current);
+      expect(current.fetchMock).toHaveBeenCalledTimes(1);
+
+      await current.harness.behavior.callRpc("setStatusOverride", {
+        threadId: "thr_1",
+        status: "waiting-on-other",
+      });
+      await waitFor(async () =>
+        current!.fetchMock.mock.calls.length > 1 ? true : null,
+      );
+
+      const body = JSON.parse(String(current.fetchMock.mock.calls[1]![1].body));
+      expect(body.messages[1].content).toContain(
+        'For "refresherShort" and "refresherFull" only',
+      );
+      expect(body.messages[1].content).toContain("marked this thread as blocked");
+    });
+
+    it("shows nothing until the prose written for the pin lands", async () => {
+      current = refresherHost({});
+      await plugin(current.bb);
+      await summarized(current);
+
+      // Pin the status without letting the re-summary land, by seeding the row
+      // directly: the stored prose still says "carry on".
+      const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      await current.bb.storage.kv.set("brief:thr_1", {
+        ...stored,
+        statusOverride: "waiting-on-other",
+        statusOverrideSeq: stored!.lastActivitySeen,
+      });
+
+      expect((await ask(current)).refresher).toBeNull();
+    });
+
+    it("shows prose written for the pin once the re-summary has landed", async () => {
+      current = refresherHost({});
+      await plugin(current.bb);
+      await summarized(current);
+
+      await current.harness.behavior.callRpc("setStatusOverride", {
+        threadId: "thr_1",
+        status: "waiting-on-other",
+      });
+      const rewritten = await waitFor(async () => {
+        const row = await current!.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+        return row?.refresher?.writtenForStatus === "waiting-on-other" ? row : null;
+      });
+
+      expect(rewritten.statusOverride).toBe("waiting-on-other");
+      expect((await ask(current)).refresher?.text).toBe(PROSE.refresherFull);
+    });
+  });
+});

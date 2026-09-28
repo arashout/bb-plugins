@@ -1,6 +1,6 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the manual stage and status overrides, and renaming threads to the brief's title.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the re-entry refresher above the composer, the manual stage and status overrides, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
@@ -29,6 +29,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `model` | `gpt-4o-mini` | Model used for summarizing. Any small instruction-following model works. |
 | `jsonMode` | `true` | Send `response_format: {type: "json_object"}`. Turn **off** for endpoints that reject it (many local servers do). |
 | `quietSeconds` | `120` | How long a thread must be quiet before it is **re**-summarized. A thread's first brief does not wait for it — see [When a brief is regenerated](#when-a-brief-is-regenerated). |
+| `refresherIdleHours` | `8` | Idle hours before opening a thread shows the re-entry refresher above the composer. `0` turns it off. See [The re-entry refresher](#the-re-entry-refresher). |
 | `renameThreads` | `false` | `true` renames each thread to the short name its brief chose. See [Thread titles](#thread-titles). |
 | `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
 
@@ -230,6 +231,108 @@ bar changed: **Re-summarize** from the Brief panel. That re-reads the
 transcript under the current prompt, but note it also feeds the old brief back
 as a starting point, so a wrong `blockedOn` can survive if the transcript still
 reads as though it were true.
+
+## The re-entry refresher
+
+Opening a thread you have been away from shows one to three sentences of prose
+in a card directly above the composer — what you were doing, how far it got,
+what to do next. It is not the five fields restated: it is the thing you read
+without meaning to, in the register someone would use leaning over your shoulder
+as you sit back down.
+
+```sh
+bb plugin config thread-briefs set refresherIdleHours 8   # default
+bb plugin config thread-briefs set refresherIdleHours 0   # off
+```
+
+### Both conditions have to hold
+
+1. The thread has been idle for at least `refresherIdleHours`, measured from
+   bb's `latestAttentionAt` — the last thing the thread did that wanted your
+   attention. Not `updatedAt`, because this plugin writes thread titles and
+   section assignments and both move that, and a rename by the plugin is not
+   activity you were away from.
+2. You have not already dismissed the refresher for *that* activity.
+
+And three hard nevers: never on a running thread (`active`, `starting`,
+`pending`), never on a thread with no brief, never when the brief has no stored
+prose.
+
+### It goes away when you engage
+
+Sending a message retires it, through the composer's own submission signal — so
+does the **×**. Either way the thread's attention cursor at the moment it was
+shown is recorded, and it does not come back until the thread does something new
+you have not seen. Two windows on the same thread cannot undo each other: the
+record only ever moves forwards.
+
+It is asked for once, when the banner mounts, and deliberately does **not**
+subscribe to brief updates. A refresher that faded in while you were already
+reading the transcript would be an interruption rather than an orientation.
+
+### Short and full
+
+Two variants are written by every summary and one is picked when the thread is
+opened:
+
+| Idle for | Variant | Roughly |
+| --- | --- | --- |
+| ≥ `refresherIdleHours` | short | one or two sentences |
+| ≥ 3 × `refresherIdleHours` | full | two or three, with the detail the short one dropped |
+
+The multiple is derived from the setting rather than configured beside it, so
+tuning one number moves both boundaries and they cannot be set into a
+contradiction. At the default that puts "cold" at a day, which is the span the
+summarizer's own prompt is written around. If the model wrote only one of the
+two, that one is used whichever was asked for — a sentence in the wrong register
+beats no reorientation at all.
+
+**No model call happens when a thread is opened.** Both variants are generated
+by the ordinary summary, stored on the brief, and chosen from at open time. A
+thread whose stored prose does not fit the moment shows nothing rather than
+generating something.
+
+### Overrides, and the one that is awkward
+
+A pinned **stage** reaches the summarizer as fixed, exactly as it already does
+for the five fields, so prose written under a stage pin respects it.
+
+A pinned **status** is harder, because you can pin it long after the prose was
+written — and prose that says "carry on" on a thread you have just called
+blocked is the one failure this feature must not have. So:
+
+- every brief records the status reading its prose was written for
+  (`refresher.writtenForStatus`)
+- opening a thread whose effective status no longer matches that shows
+  **nothing**
+- pinning or clearing a status queues a forced re-summary, told about the pin,
+  which rewrites the prose under it
+
+So a pin costs one summarizer call, and the refresher is blank for the few
+seconds between the pin and the rewrite. If that rewrite fails, the refresher
+stays blank on that thread until the next real turn — nothing wrong is ever
+shown.
+
+The pin is scoped to the two prose fields in the prompt, and the prompt says so:
+the five fields still describe the work as the transcript leaves it, for the
+same reason the pin sits in front of the derivation rather than editing what it
+reads.
+
+### Where it renders
+
+`app.composer.customize({ banners })`, scoped to `thread` — bb's own prompt
+stack, the strip that holds its Goal, Todo and context cards. The host owns the
+position, so the card cannot cover the composer, cannot take a keystroke meant
+for it, and works on a phone for free. It is not injected into the transcript
+and is not a modal.
+
+The banner is registered `chrome: "bare"` and draws its own card, deliberately.
+The host's `chrome: "card"` relies on `empty:hidden` to disappear when a banner
+renders nothing, and that cannot work for a plugin: bb wraps every plugin
+surface in a `data-bb-plugin-root` element, so the card is never `:empty`.
+Taking the host chrome would leave an empty bordered box above the composer of
+every thread in bb — which, for a banner that renders nothing on nearly all of
+them, is the whole feature backwards.
 
 ## Thread titles
 
@@ -448,6 +551,19 @@ no preference writes.
 - A thread that will not stay in the section you drag it to: sections are keyed
   on status and nothing feeds an assignment back into a brief, so the next
   reconcile undoes the move. Pin the status instead.
+- No re-entry refresher on a thread you have not touched in days: check
+  `refresherIdleHours` is not `0`, that the thread has a brief at all, and that
+  you have not already dismissed it for that activity — it shows once per new
+  activity, not once per open. A thread whose brief predates this feature has no
+  stored prose; **Re-summarize** writes some.
+- The refresher stopped appearing right after you pinned a status: expected for
+  a few seconds. The prose is being rewritten for the pin, and nothing is shown
+  in the meantime. If it never comes back, the re-summary failed —
+  `bb plugin logs thread-briefs` will have the HTTP error, and the next real
+  turn will try again.
+- The refresher shows prose that reads stale: it is written by the summary, so
+  it is exactly as fresh as the **Summarized …** line in the Brief panel.
+  **Re-summarize** rewrites both.
 - The header **Brief** button does nothing: it opens a tab in the thread's side
   panel, which only the main thread view has. A `ThreadChat` embedded elsewhere
   has no panel to open, and the host logs the declined open.

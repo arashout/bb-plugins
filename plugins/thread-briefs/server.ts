@@ -6,18 +6,22 @@ import {
   storedBriefSchema,
   type BriefStage,
   type BriefState,
+  type RefresherState,
   type RowSignal,
   type StoredBrief,
+  type StoredRefresher,
 } from "./contract.js";
 import {
   briefKey,
   deriveStatus,
+  effectiveStatus,
   overrideHolds,
   planRename,
   resolveBrief,
   rowSignalFor,
   threadIdFromKey,
 } from "./brief.js";
+import { chooseRefresher, refresherSeenKey } from "./refresher.js";
 import {
   buildUserPrompt,
   parseSummary,
@@ -113,6 +117,18 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Quiet period before summarizing (seconds)",
       default: 120,
     },
+    refresherIdleHours: {
+      type: "number",
+      label: "Show the re-entry refresher after this many idle hours",
+      description:
+        "Opening a thread that has sat idle this long, and whose last activity you have not already dismissed, shows a two-line reorientation above the composer. Threads idle for three times this long get the fuller version. Set to 0 to turn the refresher off.",
+      // Long enough to have lost the thread — a night, or a day spent on
+      // something else — and short enough to catch the morning you come back to
+      // it. Anything much shorter fires on the coffee break, where the banner
+      // is something to close rather than something to read, and a banner you
+      // learn to close is one you stop reading on the day it matters.
+      default: 8,
+    },
     renameThreads: {
       type: "boolean",
       label: "Rename threads to the brief's title",
@@ -162,6 +178,36 @@ export default async function plugin(bb: BbPluginApi) {
 
   const deleteBrief = async (threadId: string) => {
     await bb.storage.kv.delete(briefKey(threadId));
+    // The dismissal is meaningless without the brief it silenced, and leaving
+    // it would silence the *next* brief this thread earns if its attention
+    // cursor had not moved on in the meantime.
+    await bb.storage.kv.delete(refresherSeenKey(threadId));
+  };
+
+  /**
+   * The thread's attention cursor when its refresher was last dismissed.
+   *
+   * A plain number rather than a parsed row: the only thing stored is the
+   * cursor, and a value that will not read as one is treated as no dismissal
+   * at all — showing a refresher one extra time is the harmless failure.
+   */
+  const readDismissal = async (threadId: string): Promise<number | null> => {
+    const raw = await bb.storage.kv.get<unknown>(refresherSeenKey(threadId));
+    const at = (raw as { attentionAt?: unknown } | undefined)?.attentionAt;
+    return typeof at === "number" && Number.isFinite(at) ? at : null;
+  };
+
+  /**
+   * Record a dismissal, never moving the cursor backwards.
+   *
+   * Monotonic because two windows can have the same thread open: the one you
+   * typed in dismisses at the cursor it was shown for, and a stale dismiss from
+   * the other window must not reopen the question.
+   */
+  const writeDismissal = async (threadId: string, attentionAt: number) => {
+    const existing = (await readDismissal(threadId)) ?? Number.NEGATIVE_INFINITY;
+    if (attentionAt <= existing) return;
+    await bb.storage.kv.set(refresherSeenKey(threadId), { attentionAt });
   };
 
   const announce = () => {
@@ -437,7 +483,14 @@ export default async function plugin(bb: BbPluginApi) {
     const signal = AbortSignal.any([timeout, lifetime.signal]);
     const reply = await requestSummary(
       config,
-      buildUserPrompt({ transcript, fixedStage: stagePin.value }),
+      buildUserPrompt({
+        transcript,
+        fixedStage: stagePin.value,
+        // The pin reaches the prompt for the refresher prose alone: the five
+        // fields keep describing the work, and only the paragraph that tells
+        // the user what to do is asked to agree with what they pinned.
+        pinnedStatus: statusPin.value,
+      }),
       signal,
     );
     const summary = parseSummary(reply, stagePin.value);
@@ -451,18 +504,32 @@ export default async function plugin(bb: BbPluginApi) {
           staleCurrent: thread.title,
         });
 
+    const fields = {
+      title: summary.title,
+      goal: summary.goal,
+      currentState: summary.currentState,
+      nextStep: summary.nextStep,
+      nextStepActor: summary.nextStepActor,
+      blockedOn: summary.blockedOn,
+      constraints: summary.constraints,
+    };
+    // The reading the prose was written against, stamped from the same pin and
+    // the same fields the summary just produced rather than re-derived later.
+    // A status pinned *after* this write makes the two disagree, and that
+    // disagreement is exactly what stops the refresher showing: see
+    // {@link chooseRefresher}.
+    const refresher: StoredRefresher | null =
+      summary.refresher === null
+        ? null
+        : {
+            ...summary.refresher,
+            writtenForStatus: statusPin.value ?? deriveStatus(fields),
+          };
+
     await writeBrief({
       version: 1,
       threadId,
-      fields: {
-        title: summary.title,
-        goal: summary.goal,
-        currentState: summary.currentState,
-        nextStep: summary.nextStep,
-        nextStepActor: summary.nextStepActor,
-        blockedOn: summary.blockedOn,
-        constraints: summary.constraints,
-      },
+      fields,
       modelStage: summary.stage,
       stageOverride: stagePin.value,
       stageOverrideSeq: stagePin.seq,
@@ -470,6 +537,7 @@ export default async function plugin(bb: BbPluginApi) {
       statusOverrideSeq: statusPin.seq,
       endedWithQuestion: endsWithQuestion(output),
       appliedTitle,
+      refresher,
       lastSummarizedAt: Date.now(),
       lastActivitySeen: outline.maxSeq,
     });
@@ -494,6 +562,50 @@ export default async function plugin(bb: BbPluginApi) {
       return isPending(threadId) ? { state: "summarizing" } : { state: "absent" };
     }
     return { state: "ready", brief: resolveBrief(stored) };
+  };
+
+  /** The configured idle threshold in ms; 0 when the refresher is off. */
+  const refresherThresholdMs = async (): Promise<number> => {
+    const hours = Number((await settings.get()).refresherIdleHours);
+    if (!Number.isFinite(hours) || hours <= 0) return 0;
+    return hours * 3_600_000;
+  };
+
+  /**
+   * The reorientation for one thread, decided in a single pass.
+   *
+   * Three reads at most, and the first two short-circuit the rest: the
+   * threshold comes from settings already in memory, and a thread with no brief
+   * never costs a `threads.get`. This runs once per thread open, so it is on
+   * the path of every navigation in the app — it has to stay cheap enough that
+   * a thread the refresher will never fire on pays almost nothing.
+   */
+  const refresherState = async (
+    threadId: string,
+  ): Promise<RefresherState | null> => {
+    const thresholdMs = await refresherThresholdMs();
+    if (thresholdMs === 0) return null;
+
+    const stored = await readBrief(threadId);
+    if (stored === null || (stored.refresher ?? null) === null) return null;
+
+    // `latestAttentionAt` rather than `updatedAt`: this plugin writes a thread's
+    // title and its section, and both move `updatedAt`. A rename is not
+    // activity you were away from, and counting it as such would reset the
+    // idle clock on exactly the threads this is for.
+    const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    if (thread === null) return null;
+
+    const choice = chooseRefresher({
+      prose: stored.refresher,
+      status: effectiveStatus(stored),
+      threadStatus: thread.status,
+      latestAttentionAt: thread.latestAttentionAt,
+      dismissedAt: await readDismissal(threadId),
+      now: Date.now(),
+      thresholdMs,
+    });
+    return choice === null ? null : { threadId, ...choice };
   };
 
   // ------------------------------------------------------------------- rpc
@@ -525,6 +637,7 @@ export default async function plugin(bb: BbPluginApi) {
         stageOverrideSeq: stage === null ? null : stored.lastActivitySeen,
       });
       announce();
+      rewriteRefresher(threadId);
       return briefState(threadId);
     },
 
@@ -543,6 +656,7 @@ export default async function plugin(bb: BbPluginApi) {
       // move the thread as well as its glyph. Debounced, so clicking through a
       // few threads is still one pass.
       scheduleReconcile();
+      rewriteRefresher(threadId);
       return briefState(threadId);
     },
 
@@ -555,7 +669,45 @@ export default async function plugin(bb: BbPluginApi) {
       enqueue(threadId);
       return { queued: true };
     },
+
+    getRefresher: async ({ threadId }) => ({
+      refresher: await refresherState(threadId),
+    }),
+
+    dismissRefresher: async ({ threadId, attentionAt }) => {
+      await writeDismissal(threadId, attentionAt);
+      // No announce: nothing else on screen reads the dismissal, and the banner
+      // that sent this has already hidden itself. Poking the realtime channel
+      // would repaint every sidebar row in every window to record a click.
+      return { dismissed: true };
+    },
   });
+
+  /**
+   * Re-summarize because a manual override changed what the refresher should
+   * say.
+   *
+   * The five fields are not what moved — a pin does not touch the transcript —
+   * but the refresher prose is written *to* the user about what to do next, and
+   * a pin is a statement that the derivation was wrong about that. The prose
+   * cannot be patched: it is sentences, not fields, and regenerating it is a
+   * model call, which this design refuses to make when a thread is opened. So
+   * it is made here instead, when the pin is set, where a second's latency
+   * costs nothing and the user is not waiting on it.
+   *
+   * Until it lands the refresher simply does not show — `writtenForStatus` no
+   * longer matches the effective status, so {@link chooseRefresher} declines.
+   * That is also the whole recovery path if this call fails: nothing is shown
+   * rather than something wrong, and the next real turn re-summarizes anyway.
+   *
+   * Forced, because the thread's activity cursor has not moved and
+   * `summarizeThread` would otherwise decide there is nothing new to say.
+   */
+  const rewriteRefresher = (threadId: string) => {
+    cancelSummary(threadId);
+    forced.add(threadId);
+    enqueue(threadId);
+  };
 
   // -------------------------------------------------------- sidebar sections
 

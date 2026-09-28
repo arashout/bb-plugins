@@ -7,7 +7,8 @@ import {
   renderSlot,
   type CapturedPluginApp,
 } from "@get-bb/plugin-sdk/testing/app";
-import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
+import { useComposer, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
+import type { ComponentType } from "react";
 import type { BriefState, RowSignal } from "./contract.js";
 import {
   BRIEF_STAGES,
@@ -618,5 +619,176 @@ describe("sidebar row glyphs", () => {
 
     slot.lifecycle.unmount();
     await scripts.lifecycle.dispose();
+  });
+});
+
+describe("the re-entry refresher", () => {
+  const STATE = {
+    threadId: "thr_1",
+    text: "You were wiring the sidebar sections. Run the reconcile.",
+    variant: "full" as const,
+    attentionAt: 1_700_000_000_000,
+  };
+
+  const banner = async () => {
+    const captured = await loadApp();
+    const customization = captured.composerCustomizations.find(
+      (entry) => entry.id === "refresher",
+    );
+    return customization!.banners![0]!;
+  };
+
+  /** The banner alone, in a thread composer. */
+  const mount = async (
+    options: {
+      refresher?: typeof STATE | null;
+      isRunning?: boolean;
+      probe?: boolean;
+    } = {},
+  ) => {
+    const registration = await banner();
+    const Banner = registration.component;
+    const component = options.probe === true ? withProbe(Banner) : Banner;
+    return renderSlot(
+      { component },
+      {},
+      {
+        rpc: {
+          getRefresher: () => ({
+            refresher:
+              options.refresher === undefined ? STATE : options.refresher,
+          }),
+          dismissRefresher: () => ({ dismissed: true }),
+        },
+        composer: {
+          text: "a draft",
+          scope: { kind: "thread", threadId: "thr_1" },
+        },
+      },
+    );
+  };
+
+  /**
+   * The banner beside a button that submits through the same composer.
+   *
+   * The harness has no "press Enter" driver, so a send is staged the only way
+   * a plugin can stage one: through `experimental_submit`, which fires the same
+   * submission listeners bb's own send does.
+   */
+  const withProbe = (Banner: ComponentType) =>
+    function BannerWithProbe() {
+      const composer = useComposer();
+      return (
+        <>
+          <Banner />
+          <button
+            type="button"
+            onClick={() => void composer.experimental_submit({ experimental_data: null })}
+          >
+            send
+          </button>
+        </>
+      );
+    };
+
+  it("registers one thread-scoped banner, and no other composer surface", async () => {
+    const captured = await loadApp();
+    const customization = captured.composerCustomizations.find(
+      (entry) => entry.id === "refresher",
+    )!;
+    expect(customization.scopes).toEqual(["thread"]);
+    expect(customization.banners!.map((entry) => entry.id)).toEqual(["re-entry"]);
+    // Bare, never "card". bb wraps every plugin surface in a
+    // `data-bb-plugin-root` element, so the host card is never `:empty` and its
+    // `empty:hidden` cannot fire — taking it would put an empty bordered box
+    // above the composer of every thread in bb, since this banner renders
+    // nothing on nearly all of them.
+    expect(customization.banners![0]!.chrome).toBe("bare");
+    // Nothing else: the refresher must not touch the draft, the + menu or the
+    // composer's rich text.
+    expect(customization.plusMenu).toBeUndefined();
+    expect(customization.richText).toBeUndefined();
+    expect(customization.actions).toBeUndefined();
+  });
+
+  it("shows the sentence the server chose", async () => {
+    const slot = await mount();
+    expect(await slot.findByText(STATE.text)).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it("renders nothing at all when there is nothing to say", async () => {
+    // The overwhelmingly common case, and the reason the banner is `bare`: an
+    // empty render has to leave no element at all above the composer.
+    const slot = await mount({ refresher: null });
+    await waitFor(() =>
+      expect(
+        slot.inspection.rpcCalls.some((call) => call.method === "getRefresher"),
+      ).toBe(true),
+    );
+    expect(slot.container.textContent).toBe("");
+    slot.lifecycle.unmount();
+  });
+
+  it("asks once and does not keep asking", async () => {
+    const slot = await mount();
+    await slot.findByText(STATE.text);
+    // Deliberately not subscribed to `briefs-changed`: a refresher that faded
+    // in while you were already reading would be an interruption.
+    await slot.behavior.emitRealtime(BRIEFS_CHANGED_CHANNEL, { at: 1 });
+    expect(
+      slot.inspection.rpcCalls.filter((call) => call.method === "getRefresher"),
+    ).toHaveLength(1);
+    slot.lifecycle.unmount();
+  });
+
+  it("goes away when dismissed, and records the cursor it was shown for", async () => {
+    const slot = await mount();
+    await slot.findByText(STATE.text);
+
+    fireEvent.click(slot.getByLabelText("Dismiss the thread refresher"));
+
+    await waitFor(() => expect(slot.queryByText(STATE.text)).toBeNull());
+    expect(
+      slot.inspection.rpcCalls.find(
+        (call) => call.method === "dismissRefresher",
+      )?.input,
+      // The cursor the card was shown for, not whatever the thread reads by
+      // now: a turn that landed while it was up is activity still unseen.
+    ).toEqual({ threadId: "thr_1", attentionAt: STATE.attentionAt });
+    slot.lifecycle.unmount();
+  });
+
+  it("goes away the moment you send a message", async () => {
+    const slot = await mount({ probe: true });
+    await slot.findByText(STATE.text);
+
+    fireEvent.click(slot.getByText("send"));
+
+    await waitFor(() => expect(slot.queryByText(STATE.text)).toBeNull());
+    expect(
+      slot.inspection.rpcCalls.some(
+        (call) => call.method === "dismissRefresher",
+      ),
+    ).toBe(true);
+    slot.lifecycle.unmount();
+  });
+
+  it("says nothing outside a thread composer", async () => {
+    const registration = await banner();
+    const slot = renderSlot(
+      registration,
+      {},
+      {
+        rpc: {
+          getRefresher: () => ({ refresher: STATE }),
+          dismissRefresher: () => ({ dismissed: true }),
+        },
+        composer: { scope: { kind: "new-thread", projectId: "proj_alpha" } },
+      },
+    );
+    await waitFor(() => expect(slot.container.textContent).toBe(""));
+    expect(slot.inspection.rpcCalls).toEqual([]);
+    slot.lifecycle.unmount();
   });
 });

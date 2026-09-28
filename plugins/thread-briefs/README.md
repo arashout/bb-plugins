@@ -133,6 +133,46 @@ Brief tab open on one thread is not open on the next — so without a fixed
 control in the header, seeing a brief would mean walking the new-tab launcher on
 every thread, which is friction landing on exactly the moment this is for.
 
+**Above the composer** — a **re-entry refresher**: one to three sentences of
+prose, in a card in the prompt stack, on a thread you have been away from.
+
+```sh
+bb plugin config thread-briefs set refresherIdleHours 8   # 0 turns it off
+```
+
+The five fields are a reference, and a reference is something you consult. This
+is the thing you read without meaning to: what you were doing, how far it got,
+what to do next, in the register someone would use leaning over your shoulder as
+you sit back down. The two variants — a line for a thread you left this morning,
+a paragraph for one you left last week — are both written at summarize time and
+chosen when the thread is opened, because how much you have forgotten is a fact
+about the gap, not about the thread. **No model call happens when a thread is
+opened.** If the stored prose does not fit the moment, nothing is shown.
+
+It appears only when reorienting is actually likely: the thread has been idle
+past the threshold **and** you have not already dismissed that particular
+activity. It never appears on a running thread, never on a thread with no brief,
+and never twice for the same activity — sending a message or dismissing it
+records the thread's attention cursor, and only new activity you have not seen
+brings it back.
+
+A composer banner rather than a floating overlay, because bb owns the position:
+the card sits in the same prompt stack as bb's own Goal and Todo cards, which
+means it structurally cannot cover the composer, cannot take a keystroke meant
+for it, and follows the composer to the bottom of a phone screen for nothing.
+Positioning a fixed card ourselves would put it over the transcript as asked, at
+the cost of measuring a private DOM attribute and a list of viewports where it
+lands on something. A surface that cannot get in the way beats one that has to
+keep checking whether it has.
+
+The prose respects both manual overrides. A pinned stage reaches the summarizer
+as fixed, the same way it already does for the fields. A pinned **status** is
+harder, because it can be set long after the prose was written — so each brief
+records the status reading its prose was written for, pinning a status queues
+the re-summary that rewrites it under the pin, and until that lands the
+refresher shows nothing rather than telling you to carry on with something you
+have just called blocked.
+
 Briefs are **never backfilled** — activity earns a brief. A thread that has been
 dormant since before the plugin started stays briefless, and the panel says so
 with **Summarize now** rather than showing a spinner that would never resolve.
@@ -156,8 +196,27 @@ ring and no section, for as long as its first turn takes.
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
 | Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, since a row status takes an icon *name* and not a component |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
+| Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `experimental_onSubmitted` for the send that retires it |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |
+
+### Why the refresher is decided on the server, in one call
+
+Everything the decision reads is server-side: the stored prose, the effective
+status with its overrides, the thread's `latestAttentionAt`, and the dismissal
+record. Splitting it would mean shipping all four to the client to recombine
+them there. So the client asks once when the banner mounts and renders the
+sentence it is handed — which also means the *whole* rule lives in one pure
+function, `chooseRefresher`, rather than spread across a component's effects.
+
+`latestAttentionAt` rather than `updatedAt` is load-bearing. This plugin writes
+thread titles and section assignments, and both move `updatedAt` — counting our
+own rename as activity would reset the idle clock on exactly the threads the
+refresher exists for.
+
+The one thing the client decides is when to stop showing it, because that is the
+one input the server cannot see: a send, through
+`useComposer().experimental_onSubmitted`.
 
 ### Why a content script rather than a list fork
 

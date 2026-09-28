@@ -90,9 +90,62 @@ export const briefFieldsSchema = z
   .strict();
 export type BriefFields = z.infer<typeof briefFieldsSchema>;
 
-/** What the summarizer returns: the five fields plus its stage judgement. */
+/**
+ * How long each reorientation variant may run before it is clamped.
+ *
+ * The refresher is read standing at the composer, before typing — a paragraph
+ * there is a thing to skip rather than a thing to read, and skipping it is the
+ * one failure this feature cannot survive. The caps are therefore the sentence
+ * budget expressed in characters: roughly two sentences for `short`, roughly
+ * four for `full`. The prompt asks for the same lengths; these are what happens
+ * when it is ignored.
+ */
+export const MAX_REFRESHER_LENGTH = { short: 280, full: 640 } as const;
+
+/**
+ * The two reorientation variants, as the summarizer returns them.
+ *
+ * Two rather than one because how much you have forgotten is not a property of
+ * the thread — it is how long you have been away from it, which is only known
+ * when the thread is opened. Generating both at summarize time and picking one
+ * at open time is what keeps the choice late and the model call early.
+ */
+export const refresherProseSchema = z
+  .object({
+    /** One or two sentences, for a thread only just past the idle threshold. */
+    short: z.string(),
+    /** Two or three, for a thread that has gone cold. */
+    full: z.string(),
+  })
+  .strict();
+export type RefresherProse = z.infer<typeof refresherProseSchema>;
+
+/**
+ * The stored prose plus the status reading it was written against.
+ *
+ * `writtenForStatus` is the guard that makes "respect the status override"
+ * cheap. A status pinned by hand *after* this brief was written would leave
+ * prose that says "carry on" on a thread the user has just called blocked, and
+ * the refresher refuses to make a fresh sentence at open time. Recording the
+ * reading it was written for lets the open-time check notice the disagreement
+ * and show nothing; setting a pin also queues the re-summary that resolves it.
+ */
+export const storedRefresherSchema = refresherProseSchema
+  .extend({ writtenForStatus: storedBriefStatusSchema })
+  .strict();
+export type StoredRefresher = z.infer<typeof storedRefresherSchema>;
+
+/** What the summarizer returns: the five fields, the stage, the refresher. */
 export const summaryResultSchema = briefFieldsSchema
-  .extend({ stage: briefStageSchema })
+  .extend({
+    stage: briefStageSchema,
+    /**
+     * Null when the model returned nothing usable for either variant. A brief
+     * with no refresher is a brief that simply never shows one — the same
+     * outcome as every brief written before this field existed.
+     */
+    refresher: refresherProseSchema.nullable(),
+  })
   .strict();
 export type SummaryResult = z.infer<typeof summaryResultSchema>;
 
@@ -169,6 +222,21 @@ export const storedBriefSchema = z
      * mismatch persists and every later summary skips the rename too.
      */
     appliedTitle: z.string().nullable().optional(),
+    /**
+     * The re-entry reorientation, written by the same summarizer call that
+     * wrote the fields above.
+     *
+     * Top-level rather than inside `fields` for two reasons. `fields` is fed
+     * back into the next summary as the previous brief, and handing the model
+     * its own last paragraph back invites it to keep the paragraph rather than
+     * rewrite it from the thread. And `fields` is what the Brief panel renders,
+     * where a second prose block restating the five fields would be noise.
+     *
+     * Optional and nullable, like every field added after version 1: a brief
+     * written before this existed, or one whose model returned nothing usable,
+     * is a brief that shows no refresher.
+     */
+    refresher: storedRefresherSchema.nullable().optional(),
     lastSummarizedAt: z.number(),
     /** The thread's `conversationOutline().maxSeq` at summarize time. */
     lastActivitySeen: z.number(),
@@ -207,6 +275,39 @@ export const briefStateSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("error"), message: z.string() }).strict(),
 ]);
 export type BriefState = z.infer<typeof briefStateSchema>;
+
+/** Which of the two variants a given staleness asks for. */
+export const refresherVariantSchema = z.enum(["short", "full"]);
+export type RefresherVariant = z.infer<typeof refresherVariantSchema>;
+
+/**
+ * What the composer banner draws, or null for the overwhelming majority of
+ * opens where reorienting is not needed.
+ *
+ * The whole decision is made on the server, in one call, because every input to
+ * it is server-side: the stored prose, the effective status, the thread's
+ * attention cursor and the dismissal record. The client renders the sentence it
+ * is handed and decides nothing.
+ */
+export const refresherStateSchema = z
+  .object({
+    threadId: z.string(),
+    /** The sentence or three to show. Never empty. */
+    text: z.string().min(1),
+    /** Which variant this is, so the client can label nothing and the tests can. */
+    variant: refresherVariantSchema,
+    /**
+     * The thread's attention cursor this refresher is about.
+     *
+     * Handed to the client so that dismissing sends back the exact cursor it
+     * was looking at rather than whatever the thread reads by then — a turn
+     * that lands between the open and the dismiss must not be dismissed along
+     * with it.
+     */
+    attentionAt: z.number(),
+  })
+  .strict();
+export type RefresherState = z.infer<typeof refresherStateSchema>;
 
 /** The per-row signal the sidebar draws: one glyph, no prose. */
 export const rowSignalSchema = z
@@ -268,5 +369,31 @@ export const rpcContract = defineRpcContract({
   refresh: {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.object({ queued: z.boolean() }).strict(),
+  },
+  /**
+   * The reorientation to show on opening this thread, or null.
+   *
+   * Asked once when the composer banner mounts, and never re-asked while the
+   * thread stays open: a refresher is for the moment you arrive, and one that
+   * appeared while you were already reading would be an interruption rather
+   * than an orientation.
+   */
+  getRefresher: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: z.object({ refresher: refresherStateSchema.nullable() }).strict(),
+  },
+  /**
+   * Record that the refresher for this attention cursor has served its purpose
+   * — the user sent a message or dismissed it by hand.
+   *
+   * Keyed on the cursor rather than the thread, so the dismissal covers exactly
+   * the activity it was shown for: new activity the user has not seen brings
+   * the refresher back, and nothing else does.
+   */
+  dismissRefresher: {
+    input: z
+      .object({ threadId: z.string().min(1), attentionAt: z.number() })
+      .strict(),
+    output: z.object({ dismissed: z.boolean() }).strict(),
   },
 });

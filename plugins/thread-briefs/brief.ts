@@ -5,6 +5,7 @@ import type {
   ResolvedBrief,
   RowSignal,
   StoredBrief,
+  StoredBriefStatus,
 } from "./contract.js";
 import { projectColorIndex } from "./shared.js";
 
@@ -69,7 +70,7 @@ export function isStatusOverrideStale(stored: StoredBrief): boolean {
  * can retire it and re-summarizing reads the same unresolved instruction back.
  * That thread is `waiting-on-me` forever unless you can say otherwise.
  */
-export function effectiveStatus(stored: StoredBrief): BriefStatus {
+export function effectiveStatus(stored: StoredBrief): StoredBriefStatus {
   const override = stored.statusOverride ?? null;
   if (override !== null && !isStatusOverrideStale(stored)) return override;
   return deriveStatus({
@@ -103,13 +104,15 @@ export function effectiveStatus(stored: StoredBrief): BriefStatus {
  * to end in a question, and whether or not we know the actor.
  *
  * `working` is deliberately absent: it is live thread state, not a property of
- * a brief, so it is applied per row by {@link rowDecoration}.
+ * a brief, so it is applied per row by {@link rowDecoration}. The return type
+ * says so — narrowing to the stored statuses is what lets a caller that needs
+ * one, like the refresher's `writtenForStatus`, take this value without a cast.
  */
 export function deriveStatus(args: {
   nextStep: string;
   blockedOn: string;
   nextStepActor?: NextStepActor | undefined;
-}): BriefStatus {
+}): StoredBriefStatus {
   const nextStep = args.nextStep.trim();
   const blockedOn = args.blockedOn.trim();
   if (nextStep === "" && blockedOn === "") return "done";

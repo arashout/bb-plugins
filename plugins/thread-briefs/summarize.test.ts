@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildUserPrompt,
   chatCompletionsUrl,
+  clampProse,
   extractJson,
+  normalizeRefresher,
   normalizeTitle,
   parseSummary,
 } from "./summarize.js";
-import { MAX_TITLE_LENGTH } from "./contract.js";
+import { MAX_REFRESHER_LENGTH, MAX_TITLE_LENGTH } from "./contract.js";
 import {
   endsWithQuestion,
   renderTranscript,
@@ -45,7 +47,10 @@ describe("extractJson", () => {
 
 describe("parseSummary", () => {
   it("returns the five fields and the stage", () => {
-    expect(parseSummary(reply(full), null)).toEqual(full);
+    // `refresher` comes back null rather than absent: a model that ignored the
+    // two prose keys still wrote a usable brief, and the only consequence is a
+    // thread that never shows a re-entry card.
+    expect(parseSummary(reply(full), null)).toEqual({ ...full, refresher: null });
   });
 
   it("treats 'none' and friends as empty, so status derivation stays right", () => {
@@ -159,6 +164,121 @@ describe("buildUserPrompt", () => {
   it("pins the stage when the user set one", () => {
     const prompt = buildUserPrompt({ transcript: "t", fixedStage: "review" });
     expect(prompt).toContain('"stage" is fixed to "review"');
+  });
+
+  it("says nothing about a status when none is pinned", () => {
+    const prompt = buildUserPrompt({ transcript: "t", fixedStage: null });
+    expect(prompt).not.toContain("refresherShort");
+  });
+
+  it("tells the refreshers about a pinned status, and only them", () => {
+    // The pin sits in front of the derivation rather than editing the fields it
+    // reads: a `nextStep` blanked to satisfy a pin would be fed back as the
+    // previous brief and written into storage. So the prompt scopes the pin to
+    // the two prose fields and says the rest still describes the work.
+    const prompt = buildUserPrompt({
+      transcript: "t",
+      fixedStage: null,
+      pinnedStatus: "waiting-on-other",
+    });
+    expect(prompt).toContain('For "refresherShort" and "refresherFull" only');
+    expect(prompt).toContain("must not tell them to carry on");
+    expect(prompt).toContain("The other fields still describe the work");
+  });
+
+  it("tells them not to hand out a next step on a thread pinned done", () => {
+    const prompt = buildUserPrompt({
+      transcript: "t",
+      fixedStage: null,
+      pinnedStatus: "done",
+    });
+    expect(prompt).toContain("must not hand out a next action");
+  });
+});
+
+describe("clampProse", () => {
+  it("leaves prose inside the budget alone, whitespace collapsed", () => {
+    expect(clampProse("You were\n  mid-reconcile.", 100)).toBe(
+      "You were mid-reconcile.",
+    );
+  });
+
+  it("cuts back to the last whole sentence", () => {
+    // What survives has to read as sentences. A clause ending in an ellipsis is
+    // the thing people skip.
+    const text = "You wired the sections. The order is not pinned. Run the reconcile and check it lands where you expect.";
+    expect(clampProse(text, 60)).toBe(
+      "You wired the sections. The order is not pinned.",
+    );
+  });
+
+  it("falls back to a word boundary for one very long sentence", () => {
+    const text = `${"word ".repeat(40)}end.`;
+    const clamped = clampProse(text, 50);
+    expect(clamped.endsWith("…")).toBe(true);
+    expect(clamped.length).toBeLessThanOrEqual(50);
+  });
+
+  it("keeps cutting when the only sentence end is right at the start", () => {
+    // A boundary in the first fifth of the budget is a one-line answer to a
+    // three-line question, not a clamp; taking it would throw the rest away.
+    const text = `Yes. ${"word ".repeat(40)}end.`;
+    expect(clampProse(text, 60).endsWith("…")).toBe(true);
+  });
+});
+
+describe("normalizeRefresher", () => {
+  it("keeps both variants", () => {
+    expect(
+      normalizeRefresher({ short: " One line. ", full: "Two lines, really." }),
+    ).toEqual({ short: "One line.", full: "Two lines, really." });
+  });
+
+  it("keeps a lone variant rather than dropping the pair", () => {
+    // `chooseRefresher` falls back to whichever one exists, so a model that
+    // answered only the short form still reorients someone back after a week.
+    expect(normalizeRefresher({ short: "One line.", full: "" })).toEqual({
+      short: "One line.",
+      full: "",
+    });
+  });
+
+  it("returns null when the model ignored both keys", () => {
+    expect(normalizeRefresher({ short: undefined, full: undefined })).toBeNull();
+    expect(normalizeRefresher({ short: "none", full: "N/A" })).toBeNull();
+  });
+
+  it("clamps each variant to its own budget", () => {
+    const long = `${"Sentence here. ".repeat(80)}`;
+    const prose = normalizeRefresher({ short: long, full: long });
+    expect(prose!.short.length).toBeLessThanOrEqual(MAX_REFRESHER_LENGTH.short);
+    expect(prose!.full.length).toBeLessThanOrEqual(MAX_REFRESHER_LENGTH.full);
+    expect(prose!.full.length).toBeGreaterThan(prose!.short.length);
+  });
+});
+
+describe("parseSummary refreshers", () => {
+  it("reads the two prose keys off the reply", () => {
+    const parsed = parseSummary(
+      reply({
+        ...full,
+        refresherShort: "You were mid-reconcile. Run the tests.",
+        refresherFull: "You were mid-reconcile on the section sync. It lands, but the order is unpinned. Run the tests.",
+      }),
+      null,
+    );
+    expect(parsed.refresher).toEqual({
+      short: "You were mid-reconcile. Run the tests.",
+      full: "You were mid-reconcile on the section sync. It lands, but the order is unpinned. Run the tests.",
+    });
+  });
+
+  it("does not fail the brief over a model that skipped them", () => {
+    // Losing the five fields, the ring and the sidebar section over a missing
+    // paragraph would be a bad trade in every direction.
+    const parsed = parseSummary(reply(full), null);
+    expect(parsed.refresher).toBeNull();
+    expect(parsed.goal).toBe(full.goal);
   });
 });
 

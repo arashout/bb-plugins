@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
   experimental_useSidebarThreads,
   useBbNavigate,
+  useComposer,
+  useComposerView,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -11,6 +13,7 @@ import {
 // resolve, so this import must erase. Runtime values come from `shared.ts`.
 import type {
   BriefState,
+  RefresherState,
   ResolvedBrief,
   RowSignal,
   rpcContract,
@@ -643,6 +646,135 @@ function BriefHeaderAction({
   );
 }
 
+// -------------------------------------------------------- the re-entry card
+
+/** The composer customization the banner is registered under. */
+const COMPOSER_CUSTOMIZATION_ID = "refresher";
+const REFRESHER_BANNER_ID = "re-entry";
+
+/**
+ * Two sentences above the composer, on a thread you have been away from.
+ *
+ * **Why a composer banner.** bb renders this in the prompt stack, beside its
+ * own Goal, Todo and context cards — the strip directly above the input, which
+ * is where your eyes already are when you sit down to type. The host owns the
+ * position, so the card structurally cannot cover the composer, cannot take a
+ * keystroke meant for it, and follows the composer to the bottom of a phone
+ * screen for free. A card we positioned ourselves — fixed, measured off bb's
+ * composer element — would float over the transcript as literally asked, at the
+ * price of a private DOM attribute to measure and a list of viewports where it
+ * covers something. The requirement that settles it is "if it can't render
+ * without getting in the way, better to not render": a surface that cannot get
+ * in the way beats one that has to keep checking whether it has.
+ *
+ * **Why it asks once.** The state is fetched when this mounts — bb keys the
+ * banner on the composer scope, so opening a thread mounts a fresh one — and
+ * never re-fetched. It deliberately does not subscribe to `briefs-changed`: a
+ * refresher is for the moment you arrive, and one that faded in while you were
+ * already reading the transcript would be an interruption. The decision is
+ * made on arrival or not at all.
+ */
+function ReentryRefresher() {
+  const rpc = useRpc<typeof rpcContract>();
+  const view = useComposerView();
+  const composer = useComposer();
+  const threadId = view.scope.kind === "thread" ? view.scope.threadId : null;
+
+  const [state, setState] = useState<RefresherState | null>(null);
+  const [isDismissed, setIsDismissed] = useState(false);
+
+  useEffect(() => {
+    if (threadId === null) return;
+    let live = true;
+    void rpc
+      .call("getRefresher", { threadId })
+      .then((result) => {
+        // A late reply for a thread we have navigated away from would paint a
+        // sentence about the wrong thread; bb remounts per scope, so the guard
+        // only has to cover this component's own lifetime.
+        if (live) setState(result.refresher);
+      })
+      .catch(() => {
+        // Nothing to show and nothing to say. The refresher is an extra, and a
+        // server hiccup should cost the composer nothing at all.
+      });
+    return () => {
+      live = false;
+    };
+  }, [rpc, threadId]);
+
+  const dismiss = useCallback(() => {
+    if (state === null) return;
+    setIsDismissed(true);
+    void rpc
+      .call("dismissRefresher", {
+        threadId: state.threadId,
+        // The cursor this card was shown for, not whatever the thread reads by
+        // now: a turn that landed while the card was on screen is new activity
+        // the user has not seen, and must not be dismissed along with it.
+        attentionAt: state.attentionAt,
+      })
+      .catch(() => {
+        // The card is gone either way. A failed write means it may reappear on
+        // the next open, which is a far better failure than a card that will
+        // not go away.
+      });
+  }, [rpc, state]);
+
+  // Sending is the strongest possible signal that you are reoriented, so the
+  // card goes before the message does. Subscribed through a ref because the
+  // composer handle is rebuilt as the draft changes, and re-subscribing on
+  // every keystroke would be the one thing this card must never cost.
+  const dismissRef = useRef(dismiss);
+  useEffect(() => {
+    dismissRef.current = dismiss;
+  }, [dismiss]);
+  useEffect(
+    () => composer.experimental_onSubmitted(() => dismissRef.current()),
+    [composer],
+  );
+
+  if (state === null || isDismissed) return null;
+  // A turn that starts while the card is up — a queued message, a background
+  // agent — makes the sentence describe a position that is already moving.
+  // Hidden rather than dismissed: nothing was read, so nothing is recorded, and
+  // the card is still owed when the thread goes quiet again.
+  if (view.run.isRunning) return null;
+
+  return (
+    // The card chrome is drawn here rather than taken from the host's
+    // `chrome: "card"`, which cannot work for a banner that usually renders
+    // nothing: bb wraps every plugin surface in a `data-bb-plugin-root`
+    // element, so the host card is never `:empty`, its `empty:hidden` never
+    // fires, and every thread in bb would carry an empty bordered box above its
+    // composer. `chrome: "bare"` puts this component straight into the prompt
+    // stack's grid through a `display: contents` wrapper, so rendering null
+    // really does render nothing — no box, and no gap between the rows either
+    // side of it. What is below is bb's own prompt-stack card, matched.
+    <section
+      aria-label="Where you left off"
+      className="flex items-start gap-2 rounded-lg border border-border bg-card px-3 py-2"
+    >
+      <Icon
+        name="ListTodo"
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+        aria-hidden
+      />
+      <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+        {state.text}
+      </p>
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Dismiss the thread refresher"
+        className="-mr-1 -mt-0.5 shrink-0 rounded p-1 text-muted-foreground hover:bg-card hover:text-foreground"
+      >
+        <Icon name="X" className="h-3.5 w-3.5" aria-hidden />
+      </button>
+    </section>
+  );
+}
+
 // ------------------------------------------------------------- registration
 
 export default definePluginApp((app) => {
@@ -668,6 +800,27 @@ export default definePluginApp((app) => {
     id: "brief",
     title: "Thread brief",
     component: BriefHeaderAction,
+  });
+
+  app.composer.customize({
+    id: COMPOSER_CUSTOMIZATION_ID,
+    // Threads only. There is nothing to be reoriented about in a new-thread
+    // composer, and a queued-message editor or a side chat is a place you are
+    // already typing rather than a place you have just arrived at.
+    scopes: ["thread"],
+    banners: [
+      {
+        id: REFRESHER_BANNER_ID,
+        // Bare, not the host card. The host card's `empty:hidden` cannot fire
+        // for a plugin banner — bb wraps every surface in a
+        // `data-bb-plugin-root` element, so the card is never `:empty` — and
+        // this banner renders nothing on the overwhelming majority of threads.
+        // Taking the host chrome would put an empty bordered box above every
+        // composer in bb. See {@link ReentryRefresher}.
+        chrome: "bare",
+        component: ReentryRefresher,
+      },
+    ],
   });
 
   app.contentScripts.register({
