@@ -28,7 +28,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `apiKey` | _(unset, secret)_ | Bearer token for that endpoint. The plugin reports `needs-configuration` until it is set. |
 | `model` | `gpt-4o-mini` | Model used for summarizing. Any small instruction-following model works. |
 | `jsonMode` | `true` | Send `response_format: {type: "json_object"}`. Turn **off** for endpoints that reject it (many local servers do). |
-| `quietSeconds` | `120` | How long a thread must be quiet before it is summarized. |
+| `quietSeconds` | `120` | How long a thread must be quiet before it is **re**-summarized. A thread's first brief does not wait for it — see [When a brief is regenerated](#when-a-brief-is-regenerated). |
 | `renameThreads` | `false` | `true` renames each thread to the short name its brief chose. See [Thread titles](#thread-titles). |
 | `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
 
@@ -61,10 +61,42 @@ are accepted now.
 
 Re-summarize is available in the Brief panel; it bypasses the debounce.
 
+### The first brief does not wait
+
+A thread with **no brief yet** is on a 5-second delay instead of `quietSeconds`,
+and is summarized from `thread.active` — while its first turn is still
+running — rather than waiting for that turn to end:
+
+- The quiet period exists to stop a thread in active back-and-forth being
+  re-summarized every turn. On the first brief there is nothing to protect, and
+  it is the cheapest summary that thread will ever cost, because the transcript
+  is at its shortest.
+- It is also where the absence shows: until the first brief lands there is no row
+  glyph, no sidebar section, an empty Brief panel, and bb's opening-prompt title
+  still on the thread. An agentic first turn can run for ten minutes, and waiting
+  for it means the thread spends all ten looking like one the plugin has never
+  heard of.
+- The opening prompt alone is enough for a goal, a `discovery` ring and a
+  sidebar section. Every field is corrected by the summary that follows the turn.
+
+The delay is capped at `quietSeconds`, so setting that below five seconds makes
+first briefs faster rather than slower.
+
+A pre-turn brief **never renames the thread**, even with `renameThreads` on: a
+title chosen from the opening prompt is only as good as the one bb already
+guessed from that same prompt, the post-turn summary will choose better, and
+applying both would rename the thread twice in a minute — each rename also
+dispatching a command into the thread's environment. So a new thread keeps bb's
+title until its first turn ends.
+
+None of this backfills anything: a briefless thread still needs activity, and
+`thread.active` *is* activity. See below.
+
 Hidden threads (plugin workers) and deleted threads never get briefs.
 
 **Briefs are never backfilled — activity earns a brief.** A thread gets its
-first brief from a turn happening while the plugin is running. The sweep will
+first brief from a turn happening while the plugin is running — or from starting
+one, since `thread.active` counts. The sweep will
 only give a *briefless* thread a first brief if its last activity postdates the
 current plugin load, which is activity whose `thread.idle` should have arrived
 and may have been missed. A thread that has been dormant since before the plugin
@@ -403,7 +435,12 @@ no preference writes.
 - A brief that describes work already finished: read the **Summarized …** line
   under the status. Briefs are only rewritten after `quietSeconds` of quiet, so
   one that predates the last few turns is expected rather than broken;
-  **Re-summarize** forces it.
+  **Re-summarize** forces it. Note this does not apply to a *first* brief, which
+  does not wait.
+- A brand-new thread whose brief reads as though the work has not started, and
+  whose title is still bb's: also expected. That is the pre-turn brief, written
+  from the opening prompt while the first turn runs, and the summary after that
+  turn replaces it and names the thread.
 - A thread stuck on **Waiting on you** whose next step you have already carried
   out: expected if the step happened outside the thread, because nothing in the
   transcript can record that. Pin the status to **Done** in the Brief panel —

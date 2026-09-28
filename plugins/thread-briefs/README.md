@@ -132,11 +132,17 @@ Work on it again and it gets a brief like any other thread. The alternative —
 summarizing every existing thread — is an unbounded burst the first time a key is
 configured.
 
+What *does* count as activity is deliberately early: a thread that starts
+running has earned a brief, before the turn it is running has finished. The
+quiet period is there to stop a busy thread being re-summarized every turn, and
+a thread with no brief has nothing to protect — only an empty panel, a missing
+ring and no section, for as long as its first turn takes.
+
 ## How it is built
 
 | Concern | Mechanism |
 | --- | --- |
-| Trigger | `bb.events.on("thread.idle")` + a per-thread quiet-period debounce, with a `*/10 * * * *` sweep as the backstop |
+| Trigger | `bb.events.on("thread.idle")` + a per-thread quiet-period debounce, with a `*/10 * * * *` sweep as the backstop. A thread with no brief yet skips the quiet period, and is summarized from `thread.active` as well — mid-turn, so a long first turn is not spent briefless |
 | Summarizer input | `threads.conversationOutline()` head + tail with the middle elided, `threads.output()` for the last message in full, and the previous brief |
 | Storage | `bb.storage.kv`, one row per thread at `brief:<threadId>` |
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |

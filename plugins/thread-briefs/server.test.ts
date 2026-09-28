@@ -174,10 +174,15 @@ describe("summarizing", () => {
     expect(JSON.parse(String(init.body)).model).toBe("test-model");
   });
 
-  it("does not summarize a thread the moment it goes idle", async () => {
+  it("does not summarize a thread with a brief the moment it goes idle", async () => {
     const fetchMock = fakeCompletion(SUMMARY);
     current = host({ fetch: fetchMock });
     await plugin(current.bb);
+    // Behind the thread's cursor, so only the quiet period is holding it back.
+    await current.bb.storage.kv.set("brief:thr_1", {
+      ...storedBrief("thr_1", {}),
+      lastActivitySeen: 5,
+    });
 
     await current.harness.behavior.emitThreadEvent("thread.idle", {
       thread,
@@ -186,6 +191,94 @@ describe("summarizing", () => {
     // The quiet period has to elapse first.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The first brief skips the quiet period, and arrives before the first turn
+   * has even finished. Timers are faked because the delays involved are seconds,
+   * and asserted on `fetch` rather than by polling: under fake timers the poll
+   * in {@link waitFor} would never tick.
+   */
+  describe("the first brief", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Let the debounce fire and the queue drain. */
+    const settle = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(ms);
+      await vi.advanceTimersByTimeAsync(0);
+    };
+
+    it("skips the quiet period when the thread has no brief", async () => {
+      const fetchMock = fakeCompletion(SUMMARY);
+      current = host({ fetch: fetchMock });
+      await plugin(current.bb);
+      vi.useFakeTimers();
+
+      await current.harness.behavior.emitThreadEvent("thread.idle", {
+        thread,
+        lastAssistantText: "done",
+      });
+      // Well inside the 120s quiet period this host is configured with.
+      await settle(6_000);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      expect(stored?.fields.goal).toBe(SUMMARY.goal);
+    });
+
+    it("summarizes a briefless thread as soon as it starts running", async () => {
+      const fetchMock = fakeCompletion(SUMMARY);
+      current = host({ fetch: fetchMock });
+      await plugin(current.bb);
+      vi.useFakeTimers();
+
+      await current.harness.behavior.emitThreadEvent("thread.active", { thread });
+      await settle(6_000);
+
+      // A brief describing a turn still in flight, so the row has a ring and a
+      // sidebar section the moment that turn ends.
+      const stored = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      expect(stored?.fields.goal).toBe(SUMMARY.goal);
+    });
+
+    it("leaves a thread that already has a brief alone while it runs", async () => {
+      const fetchMock = fakeCompletion(SUMMARY);
+      current = host({ fetch: fetchMock });
+      await plugin(current.bb);
+      await current.bb.storage.kv.set("brief:thr_1", {
+        ...storedBrief("thr_1", {}),
+        lastActivitySeen: 5,
+      });
+      vi.useFakeTimers();
+
+      await current.harness.behavior.emitThreadEvent("thread.active", { thread });
+      await settle(10_000);
+
+      // Mid-burst is exactly when a brief is not rewritten.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("cancels a pending first brief when the thread starts running again", async () => {
+      const fetchMock = fakeCompletion(SUMMARY);
+      current = host({ fetch: fetchMock });
+      await plugin(current.bb);
+      vi.useFakeTimers();
+
+      await current.harness.behavior.emitThreadEvent("thread.idle", {
+        thread,
+        lastAssistantText: "done",
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await current.harness.behavior.emitThreadEvent("thread.active", { thread });
+      // The timer restarts from the new event rather than firing at 5s.
+      await settle(3_500);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await settle(2_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("skips a second request when the thread has not moved", async () => {
@@ -1031,6 +1124,42 @@ describe("renaming threads", () => {
 
     expect(current.live.title).toBe("Sidebar grouping by status");
     await current.harness.lifecycle.dispose();
+  });
+
+  it("does not name a thread from a brief written before its first turn ended", async () => {
+    const current = renameHost({});
+    await plugin(current.bb);
+    vi.useFakeTimers();
+    try {
+      // A brief from the opening prompt alone: written, but it renames nothing,
+      // because bb's own title was guessed from that same prompt and the
+      // post-turn summary will choose better.
+      await current.harness.behavior.emitThreadEvent("thread.active", {
+        thread: current.live,
+      });
+      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const preTurn = await current.bb.storage.kv.get<StoredBrief>("brief:thr_1");
+      expect(preTurn?.fields.goal).toBe(SUMMARY.goal);
+      expect(preTurn?.appliedTitle).toBeNull();
+      expect(current.live.title).toBe("Build me a thing that does...");
+      expect(current.harness.sdk.callsTo("threads.update")).toHaveLength(0);
+
+      // The turn ends, and that summary does name it.
+      current.nextSeq();
+      await current.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: current.live,
+        lastAssistantText: "All set.",
+      });
+      await vi.advanceTimersByTimeAsync(130_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(current.live.title).toBe("Sidebar grouping by status");
+    } finally {
+      vi.useRealTimers();
+      await current.harness.lifecycle.dispose();
+    }
   });
 
   it("records the title it wrote, so it can tell its own name from yours", async () => {
