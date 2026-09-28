@@ -115,13 +115,45 @@ their next natural summary. To see how far that has spread, compare the rows
 that have one against the total.
 
 Beyond that guard, **done** is only as good as the summarizer's bar for
-"finished", and the
-prompt sets that bar past the end of the chat: work handed off and still pending
-— a PR open for review or merge, a patch carried on a fork until it lands
-upstream, a temporary workaround still in place, a rollout not yet done — earns
-a `nextStep` and a `blockedOn`, so the thread reads **waiting-on-other** rather
-than done. A thread that still reads done despite an open handoff is usually a
-brief written before this bar existed: **Re-summarize** from the header popover.
+"finished", and the prompt sets that bar at **whether anybody owes the thread an
+action** — something a person or team must do, that will not happen on its own,
+and that would be dropped if the brief did not record it.
+
+That test cuts both ways, and the prompt names both halves because each has its
+own failure:
+
+- An obligation **outside the chat** still counts, and is the one that gets
+  silently dropped: a PR open for review or merge, a patch carried on a fork
+  until it lands upstream, a temporary workaround to undo, a rollout to finish
+  and confirm. These earn a `nextStep` and a `blockedOn`, so the thread reads
+  **waiting-on-other** rather than done.
+- **Nothing is owed to the passage of time.** Open-ended watching — "check back
+  in a few days", "keep an eye on it", "confirm it behaves in real use" — has no
+  owner and no definite outcome, so it does not keep a thread open. Neither does
+  work the transcript puts out of scope, nor an idea nobody adopted.
+
+The second half exists because the first, on its own, made `done` a function of
+the agent's closing rhetoric rather than of the work. Agents habitually hedge
+when they sign off — "worth a glance", "I'd flag this as open" — and a bar of
+"nothing outstanding anywhere" is unfalsifiable, so any such sentence kept a
+finished thread out of Done. Two threads that had both shipped and rolled out
+landed in different sections purely because one agent volunteered a caveat. The
+prompt now says to judge the state of the work, not the tone of the sign-off.
+
+`blockedOn` carries a **higher** bar than `nextStep`, because it is the field
+that jams the door: any non-empty value forces **waiting-on-other**, and
+`renderTranscript` feeds the previous brief back into the next summary, so a
+stray value is sticky. It must name a party or artifact someone could go
+chase — a specific review, a person, an upstream fix, a running build, an access
+grant — never a duration, "real usage", or "more data". The Blocked section is
+meant to be a list of things you could go poke; if you cannot say who would be
+chased, it is not blocked.
+
+A thread whose brief disagrees with this bar is usually one written before the
+bar changed: **Re-summarize** from the header popover. That re-reads the
+transcript under the current prompt, but note it also feeds the old brief back
+as a starting point, so a wrong `blockedOn` can survive if the transcript still
+reads as though it were true.
 
 ## Thread titles
 

@@ -15,9 +15,9 @@ Return ONLY a JSON object with exactly these keys:
   "title"         A name for this thread, 4-6 words, that someone scanning a sidebar would recognise a day later. Name the work, not the conversation: the subsystem, file, or feature plus what is being done to it. No trailing punctuation, no quotes, no "thread"/"discussion"/"chat", no leading verb like "Add" unless adding is genuinely the whole job.
   "goal"          One line: what this thread is actually trying to achieve. Not the opening prompt restated — the underlying objective, as it stands now.
   "currentState"  What exists now, including half-finished work. Name the concrete artifacts (files, branches, PRs) where the transcript names them.
-  "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan.
+  "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan. Empty string if nobody owes this thread an action.
   "nextStepActor" Who has to take that next step. One of: "me" if only the user can (try it and report back, decide between options, reply to someone, merge, grant access), "agent" if the agent could carry on unprompted, "other" if it depends on someone or something outside this thread (a review, a colleague, an upstream fix, a rollout).
-  "blockedOn"     Who or what the thread is waiting on. Empty string if nothing is blocking it.
+  "blockedOn"     The party or artifact the thread is waiting on, when someone could go chase it. Empty string otherwise.
   "constraints"   Facts learned during the thread that would break a naive re-plan: API limits, rejected approaches, assumptions proven wrong. Empty string if none.
   "stage"         One of: "discovery", "planning", "implementation", "review".
 
@@ -26,8 +26,10 @@ Rules:
 - "title" describes what the thread turned out to be about, not what its opening message asked for. A thread that set out to fix a test and ended up rewriting the scheduler is named for the scheduler.
 - Omit "nextStepActor" entirely when "nextStep" is the empty string — there is no actor for a step that does not exist.
 - When "blockedOn" is non-empty, "nextStepActor" is "other".
-- NEVER invent a next step. If the work described is finished, "nextStep" MUST be the empty string. A brief that invents work is worse than one that says the thread is done.
-- Finished means nothing is left outstanding anywhere, not just in the chat. Work the transcript hands off and leaves pending is NOT finished: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround still in place, a build or rollout not yet done, a question put to someone outside the thread. In those cases "nextStep" is the follow-up that actually closes it out and "blockedOn" names who or what it is waiting on. This is not inventing work — the transcript already named it.
+- A thread is finished when nobody owes it an action. For any candidate next step, ask: must a person or team actually do this, will it not happen on its own, and would it be dropped if this brief did not record it? Yes to all three — that is "nextStep", and the thread is not done. Otherwise "nextStep" is the empty string. Never invent one; a brief that manufactures work devalues every real item next to it.
+- An action can be owed outside the chat, and those are the ones that get silently dropped: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround to undo, a build or rollout to finish and confirm, a question put to someone who has not answered. Recording these is not inventing work — the transcript already named them.
+- Nothing is owed to the passage of time. Open-ended watching has no owner and no definite outcome — "check back in a few days", "keep an eye on it", "confirm it behaves in real use" — and does NOT keep a thread open. Nor does work the transcript puts out of scope, nor an idea raised and not adopted. Judge the state of the work, not the tone of the sign-off: agents habitually hedge when they finish ("worth a glance", "I'd flag this as open"), and an item nobody must act on does not block done however the transcript labels it. Keep anything worth remembering in "currentState" or "constraints".
+- "blockedOn" is held to a higher bar than "nextStep": name a party or artifact someone could go chase — a specific review, a person, an upstream fix, a running build, an access grant. Never a duration, never "real usage" or "more data". If you cannot say who would be chased, leave it empty.
 - Use empty strings, not "none" / "N/A" / "nothing".
 - Write plainly and specifically. No preamble, no hedging, no restating these instructions.
 - Base every claim on the transcript. Do not speculate about what the code or the user probably wants.`;

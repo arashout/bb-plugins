@@ -6,13 +6,14 @@ every thread a short, durable **brief**, generated outside the working chat:
 
 - **goal** — what the thread is actually trying to achieve
 - **currentState** — what exists now, including half-done work
-- **nextStep** — the single most concrete next action, or empty only when
-  nothing is outstanding anywhere: an open PR, a patch carried on a fork, or a
-  workaround still in place all count as outstanding
+- **nextStep** — the single most concrete next action, or empty when nobody owes
+  the thread one. An open PR, a patch carried on a fork, or a workaround still in
+  place is owed; open-ended watching is not
 - **nextStepActor** — who has to take it: `me`, `agent`, or `other`. The one
   judgement the status needs that the prose cannot supply, since "test it and
   tell me" and "keep going" read alike
-- **blockedOn** — who or what it is waiting on
+- **blockedOn** — the party or artifact it is waiting on, when someone could go
+  chase it
 - **constraints** — facts learned in the thread that would break a naive re-plan
 - **title** — a 4–6 word name for the work, which can optionally replace bb's
   own thread title
