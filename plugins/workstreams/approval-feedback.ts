@@ -16,7 +16,7 @@ export type ApprovalFeedbackSnapshot = z.infer<typeof approvalFeedbackSchema>;
 const sha = z.string().regex(/^[0-9a-f]{40}$/u);
 const fingerprint = z.string().regex(/^[0-9a-f]{64}$/u);
 const sourceId = z.string().min(1).max(300);
-const findingSchema = z.object({
+export const feedbackFindingSchema = z.object({
   sourceId,
   resolution: z.enum(["fixed", "already-satisfied", "no-change-needed"]),
   evidence: z.string().trim().min(10).max(1_500),
@@ -25,20 +25,21 @@ const findingSchema = z.object({
     detail: z.string().trim().min(3).max(800),
   }).strict(),
 }).strict();
-const reportSchema = z.object({
+export const feedbackReportSchema = z.object({
   attemptId: z.string().min(1).max(100),
   headOid: sha,
   fingerprint,
-  findings: z.array(findingSchema).min(1).max(300),
+  findings: z.array(feedbackFindingSchema).min(1).max(300),
   blockers: z.array(z.string().max(500)).max(20),
 }).strict();
+export type FeedbackReport = z.infer<typeof feedbackReportSchema>;
 export const approvalFeedbackProvenanceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("worker") }).strict(),
   z.object({ kind: z.literal("legacy-reconciliation"), auditThreadId: z.string().trim().min(1).max(200),
     evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100) }).strict(),
 ]);
 export type ApprovalFeedbackProvenance = z.infer<typeof approvalFeedbackProvenanceSchema>;
-const recordSchema = reportSchema.extend({
+const recordSchema = feedbackReportSchema.extend({
   prUrl: z.string().max(500),
   threadId: z.string().min(1).max(200),
   verifiedAt: z.number().int().nonnegative(),
@@ -55,15 +56,19 @@ export const APPROVAL_FEEDBACK_MIGRATION =
 export const FEEDBACK_REPORT_PREFIX = "Workstreams approval feedback evidence: ";
 
 /** A worker's final report is evidence to check, never a clearance by itself. */
-export function parseFeedbackReport(output: string, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): z.infer<typeof reportSchema> | null {
+export function parseFeedbackReport(output: string, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): z.infer<typeof feedbackReportSchema> | null {
   if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) return null;
   const lines = output.split(/\r?\n/u).filter((line) => line.startsWith(FEEDBACK_REPORT_PREFIX));
   if (lines.length !== 1 || lines[0]!.length > 50_000) return null;
   let raw: unknown;
   try { raw = JSON.parse(lines[0]!.slice(FEEDBACK_REPORT_PREFIX.length)); } catch { return null; }
-  const parsed = reportSchema.safeParse(raw);
-  if (!parsed.success) return null;
-  const report = parsed.data;
+  const parsed = feedbackReportSchema.safeParse(raw);
+  return parsed.success ? validateFeedbackReport(parsed.data, attemptId, snapshot, headOid) : null;
+}
+
+/** Evidence for exactly the feedback on this head: this attempt, head, and fingerprint, one passing finding per source, and no blocker. */
+export function validateFeedbackReport(report: FeedbackReport, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): FeedbackReport | null {
+  if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) return null;
   if (report.attemptId !== attemptId || report.headOid !== headOid || report.fingerprint !== snapshot.fingerprint || report.blockers.length > 0 ||
       report.findings.some((finding) => finding.validation.outcome === "failed" || finding.validation.outcome === "blocked")) return null;
   const expected = [...new Set(snapshot.sourceIds)].sort();
@@ -99,7 +104,7 @@ export function createApprovalFeedbackStore(db: RunDb) {
       if (!row) return null;
       try { return recordSchema.safeParse(JSON.parse(row.body)).data ?? null; } catch { return null; }
     },
-    save(prUrl: string, threadId: string, report: z.infer<typeof reportSchema>, verifiedAt: number,
+    save(prUrl: string, threadId: string, report: z.infer<typeof feedbackReportSchema>, verifiedAt: number,
       provenance: ApprovalFeedbackProvenance = { kind: "worker" }): ApprovalFeedbackRecord {
       const key = canonicalPrUrl(prUrl);
       if (key === null) throw new Error("Invalid PR URL for feedback verification");
