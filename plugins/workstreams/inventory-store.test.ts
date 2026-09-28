@@ -1,16 +1,18 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePrList } from "./gh.js";
-import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
+import type { Pr } from "./contract.js";
+import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { INVENTORY_LIMIT, type InventoryEntry, type InventoryResult } from "./inventory.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
-function setup() {
+function setup(datesStates = false) {
   const db = new Database(":memory:");
   databases.push(db);
   for (const migration of INVENTORY_MIGRATIONS) db.exec(migration);
   db.exec(PR_OBSERVATIONS_MIGRATION);
+  if (datesStates) db.exec(PR_STATE_SINCE_MIGRATION);
   let clock = 1_000;
   return { db, store: createInventoryStore(db, () => clock), tick: () => { clock += 1_000; } };
 }
@@ -108,5 +110,77 @@ describe("authored PR cache coverage", () => {
     store.observe([{ ...first.pr, state: "CLOSED" }, entry(2).pr]);
     expect(store.read().entries).toEqual([]);
     expect(store.observation(entry(2).pr.url)?.checkedAt).toBe(new Date(1_000).toISOString());
+  });
+});
+
+describe("undated PR states", () => {
+  const url = entry(1).pr.url.toLowerCase();
+  const red = (patch: Partial<Pr> = {}): InventoryEntry => ({ ...entry(1), pr: { ...entry(1).pr, checkConclusions: ["FAILURE"], mergeable: "CONFLICTING", ...patch } });
+
+  it("dates red checks and a conflict from the first read that sees them, through full refreshes, until a read sees them end", () => {
+    const { store, tick } = setup(true);
+    store.apply(result([red()]));
+    tick();
+    // A full refresh rewrites every row of the repository; the dates stay with the PR.
+    store.apply(result([red()]));
+    expect(store.statesSince().get(url)).toEqual({ "ci-red": 1_000, conflicting: 1_000 });
+    tick();
+    // Green again ends the red state; GitHub still computing mergeability neither ends nor restarts the conflict.
+    store.inspect({ entries: [red({ checkConclusions: ["SUCCESS"], mergeable: "UNKNOWN" })], closed: [], failed: [], warnings: [] });
+    expect(store.statesSince().get(url)).toEqual({ conflicting: 1_000 });
+    tick();
+    store.observe([red({ checkConclusions: ["FAILURE"], mergeable: "MERGEABLE" }).pr]);
+    expect(store.statesSince().get(url)).toEqual({ "ci-red": 4_000 });
+  });
+
+  it("keeps dates through a failed read, and forgets them when the PR closes or leaves the inventory", () => {
+    const { store } = setup(true);
+    store.apply(result([red(), { ...red(), pr: { ...red().pr, number: 2, url: entry(2).pr.url } }]));
+    store.inspect({ entries: [], closed: [], failed: [entry(1).pr.url], warnings: ["GitHub unavailable"] });
+    expect([...store.statesSince().keys()]).toEqual([url, entry(2).pr.url.toLowerCase()]);
+    store.inspect({ entries: [], closed: [entry(1).pr.url], failed: [], warnings: [] });
+    expect([...store.statesSince().keys()]).toEqual([entry(2).pr.url.toLowerCase()]);
+    store.apply(result([]));
+    expect(store.statesSince()).toEqual(new Map());
+    // A PR the inventory doesn't hold is never dated.
+    store.inspect({ entries: [red()], closed: [], failed: [], warnings: [] });
+    store.observe([red().pr]);
+    expect(store.statesSince()).toEqual(new Map());
+  });
+
+  it("reads no dates, and writes none, in a database copied before the table existed", () => {
+    const { store } = setup();
+    store.apply(result([red()]));
+    expect(store.statesSince()).toEqual(new Map());
+  });
+});
+
+describe("PR ages through reads that date nothing", () => {
+  const iso = (at: number) => new Date(at).toISOString();
+  const head = "a".repeat(40);
+  const aged: InventoryEntry = { ...entry(1), pr: { ...entry(1).pr, headRefOid: head, reviewRequests: ["mira", "otto"],
+    headCommittedAt: iso(1), reviewRequestedAt: [{ reviewer: "mira", at: iso(2) }, { reviewer: "otto", at: iso(3) }] } };
+  const { headCommittedAt: _pushed, reviewRequestedAt: _asked, ...undated } = aged.pr;
+
+  it("keeps the inventory's ages while the head and requests stand, since a checkout scan reads none", () => {
+    const { store } = setup();
+    store.apply(result([aged]));
+    store.observe([{ ...undated, reviewRequests: ["mira"] }]);
+    expect(store.get(aged.pr.url)?.pr).toMatchObject({ headCommittedAt: iso(1), reviewRequestedAt: [{ reviewer: "mira", at: iso(2) }] });
+    store.observe([{ ...undated, headRefOid: "b".repeat(40), reviewRequests: ["mira"] }]);
+    expect(store.get(aged.pr.url)?.pr.headCommittedAt).toBeUndefined();
+    expect(store.get(aged.pr.url)?.pr.reviewRequestedAt).toEqual([{ reviewer: "mira", at: iso(2) }]);
+  });
+
+  it("keeps them through a refresh whose ages read GitHub refused, so a rate limit never erases a nudge", () => {
+    const { store } = setup();
+    store.apply(result([aged]));
+    store.apply(result([{ ...aged, pr: undated }], { complete: false, warnings: ["inkwell/folio: PR ages could not be read: API rate limit exceeded"] }));
+    expect(store.get(aged.pr.url)?.pr).toMatchObject({ headCommittedAt: iso(1), reviewRequestedAt: aged.pr.reviewRequestedAt });
+    store.inspect({ entries: [{ ...aged, pr: { ...undated, reviewRequests: ["otto"] } }], closed: [], failed: [], warnings: ["rate limited"] });
+    expect(store.get(aged.pr.url)?.pr).toMatchObject({ headCommittedAt: iso(1), reviewRequestedAt: [{ reviewer: "otto", at: iso(3) }] });
+    // A read that dates the PR replaces what the store kept.
+    store.inspect({ entries: [{ ...aged, pr: { ...aged.pr, headCommittedAt: iso(9), reviewRequestedAt: [] } }], closed: [], failed: [], warnings: [] });
+    expect(store.get(aged.pr.url)?.pr).toMatchObject({ headCommittedAt: iso(9), reviewRequestedAt: [] });
   });
 });

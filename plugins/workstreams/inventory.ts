@@ -21,6 +21,19 @@ export type InventoryInspection = { entries: InventoryEntry[]; closed: string[];
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u;
 export const INVENTORY_LIMIT = 1_000;
 const CONCURRENCY = 4;
+const AGES_BATCH = 25;
+// The query text varies only with how many PRs one read names; every value is a typed -f/-F field.
+const AGES_FRAGMENT = "fragment ages on PullRequest{commits(last:1){nodes{commit{oid committedDate}}} " +
+  "timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:100){nodes{...on ReviewRequestedEvent{createdAt requestedReviewer{...on User{login}...on Bot{login}...on Team{combinedSlug}}}}}}";
+
+/** One GraphQL read of a repository's PRs, for the dates GitHub keeps but `gh pr list` doesn't return. */
+export function agesArgv(repo: string, numbers: readonly number[]): string[] {
+  const [owner, name] = repo.split("/") as [string, string];
+  const query = `query($owner:String!,$name:String!,${numbers.map((_, index) => `$n${index}:Int!`).join(",")}){repository(owner:$owner,name:$name){` +
+    `${numbers.map((_, index) => `p${index}:pullRequest(number:$n${index}){...ages}`).join(" ")}}}${AGES_FRAGMENT}`;
+  return ["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`,
+    ...numbers.flatMap((number, index) => ["-F", `n${index}=${number}`])];
+}
 
 function jsonArray(raw: string): unknown[] | null {
   try {
@@ -53,6 +66,51 @@ async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message:
   if (threads.hasNextPage) warn(`${repo} #${pr.number}: more review threads remain unread.`);
 }
 
+const date = (value: unknown): string | null => typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value.slice(0, 40) : null;
+type AgesNode = { commits?: { nodes?: { commit?: { oid?: unknown; committedDate?: unknown } }[] };
+  timelineItems?: { nodes?: ({ createdAt?: unknown; requestedReviewer?: { login?: unknown; combinedSlug?: unknown } | null } | null)[] } };
+
+/**
+ * The head commit's date, only when it is the head `gh pr list` returned, and when each reviewer still requested
+ * was last asked. Anything unread stays absent, and an absent date never ages a reason.
+ */
+function agesOf(node: unknown, pr: Pr): Pick<Pr, "headCommittedAt" | "reviewRequestedAt"> {
+  const view = (node !== null && typeof node === "object" ? node : {}) as AgesNode;
+  const head = Array.isArray(view.commits?.nodes) ? view.commits.nodes[0]?.commit : undefined;
+  const committed = pr.headRefOid !== undefined && head?.oid === pr.headRefOid ? date(head.committedDate) : null;
+  if (!Array.isArray(view.timelineItems?.nodes)) return committed === null ? {} : { headCommittedAt: committed };
+  const asked = new Map<string, string>();
+  for (const event of view.timelineItems.nodes) {
+    const who = event?.requestedReviewer?.login ?? event?.requestedReviewer?.combinedSlug;
+    const at = date(event?.createdAt);
+    if (typeof who !== "string" || at === null) continue;
+    const previous = asked.get(who.toLowerCase());
+    if (previous === undefined || Date.parse(at) > Date.parse(previous)) asked.set(who.toLowerCase(), at);
+  }
+  return { ...(committed === null ? {} : { headCommittedAt: committed }),
+    reviewRequestedAt: pr.reviewRequests.flatMap((reviewer) => { const at = asked.get(reviewer.toLowerCase()); return at ? [{ reviewer, at }] : []; }) };
+}
+
+/** Date what PR attention ages, one read per repository and batch. A failed read leaves its PRs undated, which nudges no one. */
+async function readAges(run: GhRunner, entries: readonly InventoryEntry[], warn: (message: string) => void): Promise<void> {
+  const byRepo = new Map<string, InventoryEntry[]>();
+  for (const entry of entries) byRepo.set(entry.repo, [...(byRepo.get(entry.repo) ?? []), entry]);
+  const batches = [...byRepo.values()].flatMap((list) =>
+    Array.from({ length: Math.ceil(list.length / AGES_BATCH) }, (_, index) => list.slice(index * AGES_BATCH, (index + 1) * AGES_BATCH)));
+  await bounded(batches, async (batch) => {
+    const repo = batch[0]!.repo;
+    const read = await run(agesArgv(repo, batch.map((entry) => entry.pr.number)));
+    let body: { errors?: unknown; data?: { repository?: Record<string, unknown> | null } } | undefined;
+    if (read.ok) try { body = JSON.parse(read.stdout); } catch { /* Reported below. */ }
+    const repository = body?.errors === undefined ? body?.data?.repository : undefined;
+    if (repository === null || repository === undefined || typeof repository !== "object") {
+      warn(`${repo}: PR ages could not be read${read.ok ? "" : `: ${read.error}`}; their waits stay undated.`);
+      return;
+    }
+    batch.forEach((entry, index) => Object.assign(entry.pr, agesOf(repository[`p${index}`], entry.pr)));
+  });
+}
+
 /** Re-read known PRs after an action or native BB invalidation, without rediscovery. */
 export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[]): Promise<InventoryInspection> {
   const result: InventoryInspection = { entries: [], closed: [], failed: [], warnings: [] };
@@ -83,6 +141,7 @@ export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[])
     await reviewFacts(run, entry, warn);
     result.entries.push(entry);
   });
+  await readAges(run, result.entries, warn);
   result.entries.sort((a, b) => a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
   result.closed.sort();
   result.failed.sort();
@@ -169,5 +228,6 @@ export async function readAuthoredPrs(run: GhRunner, scopeOwners: readonly strin
     result.entries.push(...entries.slice(0, capacity).sort((a, b) => a.pr.number - b.pr.number));
   }
   await bounded(result.entries, (entry) => reviewFacts(run, entry, warn));
+  await readAges(run, result.entries, warn);
   return result;
 }

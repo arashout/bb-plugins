@@ -87,7 +87,7 @@ export function latestReviewStates(reviews: unknown): string[] {
 }
 
 /**
- * Who left each latest review, and its state, from the same `latestReviews`
+ * Who left each latest review, its state, and when, from the same `latestReviews`
  * payload. Bots are kept: they review like people. A login is bounded here, and
  * validated as a reviewer only where a re-request passes it to gh.
  */
@@ -102,7 +102,8 @@ export function latestReviewers(reviews: unknown): { login: string; state: strin
         author !== null && typeof author === "object" ? (author as Record<string, unknown>).login : undefined;
       const state = record.state;
       if (typeof login !== "string" || login === "" || typeof state !== "string" || state === "") return [];
-      return [{ login: login.slice(0, 140), state: state.toUpperCase().slice(0, 40) }];
+      const submittedAt = typeof record.submittedAt === "string" && !Number.isNaN(Date.parse(record.submittedAt)) ? record.submittedAt.slice(0, 40) : null;
+      return [{ login: login.slice(0, 140), state: state.toUpperCase().slice(0, 40), ...(submittedAt === null ? {} : { submittedAt }) }];
     })
     .slice(0, 50);
 }

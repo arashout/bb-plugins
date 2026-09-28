@@ -77,9 +77,15 @@ export const prSchema = z
      * existed still parses.
      */
     latestReviews: z
-      .array(z.object({ login: z.string().max(140), state: z.string().max(40) }).strict())
+      .array(z.object({ login: z.string().max(140), state: z.string().max(40),
+        /** When the review was submitted; absent on older scans. PR attention ages approvals and answered requests by it. */
+        submittedAt: z.string().max(40).optional() }).strict())
       .max(50)
       .default([]),
+    /** The head commit's date, the last push as near as GitHub dates it; absent until an inventory read dates it. */
+    headCommittedAt: z.string().max(40).optional(),
+    /** When each currently requested reviewer was last asked, from the PR timeline; absent until an inventory read dates it. */
+    reviewRequestedAt: z.array(z.object({ reviewer: z.string().max(140), at: z.string().max(40) }).strict()).max(20).optional(),
     /** The latest approving review has body text; absent on older scans. */
     approvalHasBody: z.boolean().optional(),
     /** Retained only so older cached PR rows load; readiness ignores this former reply heuristic. */

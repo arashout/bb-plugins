@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INVENTORY_LIMIT, readAuthoredPrs, readInventoryPrs } from "./inventory.js";
+import { agesArgv, INVENTORY_LIMIT, readAuthoredPrs, readInventoryPrs } from "./inventory.js";
 import { githubRepoFromRemote, PR_FIELDS } from "./gh.js";
 import type { GhRunner, Run } from "./ghactions.js";
 
@@ -13,6 +13,8 @@ const ok = (value: unknown): Run => ({ ok: true, stdout: JSON.stringify(value) }
 const threads = (nodes: { isResolved: boolean }[] = [], hasNextPage = false) => ok({
   data: { repository: { pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage } } } } },
 });
+/** Review-thread reads, apart from the one ages read per repository. */
+const threadReads = (calls: string[][]) => calls.filter((args) => args[0] === "api" && args.some((arg) => arg.includes("reviewThreads")));
 function fake(answers: (args: readonly string[]) => Run) {
   const calls: string[][] = [];
   const run: GhRunner = async (args) => {
@@ -33,7 +35,7 @@ describe("authored PR inventory", () => {
     expect(result.entries[1]?.pr.unresolvedReviewThreads).toBeNull();
     expect(gh.calls[0]).toEqual(["search", "prs", "--author", "@me", "--state", "open", "--owner", "inkwell", "--limit", "1000", "--json", "url"]);
     expect(gh.calls[1]).toContain(PR_FIELDS);
-    expect(gh.calls.filter((args) => args[0] === "api")).toHaveLength(1);
+    expect(threadReads(gh.calls)).toHaveLength(1);
   });
 
   it("never expands empty or malformed organization scope to all GitHub", async () => {
@@ -66,7 +68,7 @@ describe("authored PR inventory", () => {
     const result = await readAuthoredPrs(gh.run, ["inkwell"]);
     expect(result.entries.map((entry) => entry.pr.number)).toEqual([1]);
     expect(result.complete).toBe(true);
-    expect(gh.calls.filter((args) => args[0] === "api")).toHaveLength(1);
+    expect(threadReads(gh.calls)).toHaveLength(1);
   });
 
   it("keeps approval unverified on a failed review read without losing complete membership", async () => {
@@ -91,7 +93,7 @@ describe("authored PR inventory", () => {
       pr(2, { reviewDecision: "CHANGES_REQUESTED" }), pr(3, { isDraft: true }),
     ]) : threads());
     await readAuthoredPrs(gh.run, ["inkwell"]);
-    const reads = gh.calls.filter((args) => args[0] === "api");
+    const reads = threadReads(gh.calls);
     expect(reads).toHaveLength(2);
     expect(reads.every((args) => args.includes("includeFollowup=true"))).toBe(true);
   });
@@ -135,6 +137,68 @@ describe("inventory invalidation reads", () => {
   it("refuses mismatched PR identities and malformed data rather than overwriting the requested row", async () => {
     const gh = fake((args) => args[2] === "1" ? ok(pr(2)) : { ok: true, stdout: "bad json" });
     expect(await readInventoryPrs(gh.run, [url(1), url(2)])).toMatchObject({ entries: [], closed: [], failed: [url(1), url(2)] });
+  });
+});
+
+describe("PR ages", () => {
+  const head = "a".repeat(40);
+  const isAges = (args: readonly string[]) => args.some((arg) => arg.includes("fragment ages"));
+  const numbersOf = (args: readonly string[]) => args.flatMap((arg) => /^n\d+=(\d+)$/u.exec(arg)?.[1] ?? []).map(Number);
+  const asked = (login: string, createdAt: string) => ({ createdAt, requestedReviewer: login.includes("/") ? { combinedSlug: login } : { login } });
+  const node = (oid: string, events: unknown[]) => ({ commits: { nodes: [{ commit: { oid, committedDate: "2026-09-25T10:00:00Z" } }] }, timelineItems: { nodes: events } });
+  const requested = pr(1, { headRefOid: head, reviewDecision: "REVIEW_REQUIRED",
+    reviewRequests: [{ login: "mira" }, { __typename: "Team", slug: "editors", organization: { login: "inkwell" } }] });
+
+  it("dates the last push and each reviewer still requested from one read per repository, keeping each reviewer's latest request", async () => {
+    const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }, { url: url(2, "spine") }]) :
+      args.includes("inkwell/spine") ? ok([pr(2, { url: url(2, "spine"), headRefOid: head, reviewDecision: null })]) : args[0] === "pr" ? ok([requested]) :
+      isAges(args) ? ok({ data: { repository: { p0: node(head, [asked("mira", "2026-09-22T09:00:00Z"), asked("inkwell/editors", "2026-09-23T09:00:00Z"),
+        asked("Mira", "2026-09-24T09:00:00Z"), asked("otto", "2026-09-21T09:00:00Z"), { createdAt: "2026-09-21T09:00:00Z", requestedReviewer: null }]) } } }) : threads());
+    const result = await readAuthoredPrs(gh.run, ["inkwell"]);
+    expect(result.complete).toBe(true);
+    expect(result.entries.find((entry) => entry.repo === "inkwell/folio")?.pr).toMatchObject({ headCommittedAt: "2026-09-25T10:00:00Z",
+      // otto was asked once but is no longer requested, so his request dates nothing.
+      reviewRequestedAt: [{ reviewer: "mira", at: "2026-09-24T09:00:00Z" }, { reviewer: "inkwell/editors", at: "2026-09-23T09:00:00Z" }] });
+    const reads = gh.calls.filter(isAges);
+    expect(reads.map((args) => args[args.indexOf("-f", 4) + 1])).toEqual(["owner=inkwell", "owner=inkwell"]);
+    expect(reads.map(numbersOf)).toEqual([[1], [2]]);
+    // Every value is a typed field; the query text never carries one.
+    expect(reads.every((args) => !args[3]!.includes("inkwell") && !args[3]!.includes("folio"))).toBe(true);
+  });
+
+  it("leaves the push undated when the head moved between reads, and keeps request times", async () => {
+    const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }]) : args[0] === "pr" ? ok([requested]) :
+      isAges(args) ? ok({ data: { repository: { p0: node("b".repeat(40), [asked("mira", "2026-09-22T09:00:00Z")]) } } }) : threads());
+    const [entry] = (await readAuthoredPrs(gh.run, ["inkwell"])).entries;
+    expect(entry?.pr.headCommittedAt).toBeUndefined();
+    expect(entry?.pr.reviewRequestedAt).toEqual([{ reviewer: "mira", at: "2026-09-22T09:00:00Z" }]);
+  });
+
+  it("reports a failed ages read and leaves those PRs undated, so none of them is nudged on a guess", async () => {
+    for (const answer of [{ ok: false, error: "rate limit" } as Run, ok({ errors: [{ message: "Field 'combinedSlug' doesn't exist" }] }), { ok: true, stdout: "{" } as Run]) {
+      const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }]) : args[0] === "pr" ? ok([requested]) : isAges(args) ? answer : threads());
+      const result = await readAuthoredPrs(gh.run, ["inkwell"]);
+      expect(result.complete).toBe(false);
+      expect(result.warnings).toEqual([expect.stringContaining("inkwell/folio: PR ages could not be read")]);
+      expect(result.entries[0]?.pr).not.toHaveProperty("headCommittedAt");
+      expect(result.entries[0]?.pr).not.toHaveProperty("reviewRequestedAt");
+    }
+  });
+
+  it("reads a repository's PRs 25 at a time", async () => {
+    const rows = Array.from({ length: 30 }, (_, index) => pr(index + 1, { reviewDecision: null }));
+    const gh = fake((args) => args[0] === "search" ? ok(rows.map((row) => ({ url: row.url }))) : args[0] === "pr" ? ok(rows) : ok({ data: { repository: {} } }));
+    await readAuthoredPrs(gh.run, ["inkwell"]);
+    expect(gh.calls.filter(isAges).map((args) => numbersOf(args).length).sort((a, b) => a - b)).toEqual([5, 25]);
+    expect(agesArgv("inkwell/folio", [7, 9])).toEqual(expect.arrayContaining(["owner=inkwell", "name=folio", "n0=7", "n1=9"]));
+  });
+
+  it("dates a single PR refresh too, so a nudge from the refreshed row reads fresh request times", async () => {
+    const gh = fake((args) => args[0] === "pr" ? ok(requested) :
+      isAges(args) ? ok({ data: { repository: { p0: node(head, [asked("mira", "2026-09-22T09:00:00Z")]) } } }) : threads());
+    const result = await readInventoryPrs(gh.run, [url(1)]);
+    expect(result.entries[0]?.pr).toMatchObject({ headCommittedAt: "2026-09-25T10:00:00Z", reviewRequestedAt: [{ reviewer: "mira", at: "2026-09-22T09:00:00Z" }] });
+    expect(gh.calls.filter(isAges)).toHaveLength(1);
   });
 });
 

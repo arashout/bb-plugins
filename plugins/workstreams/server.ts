@@ -57,7 +57,7 @@ import { canonicalConversationScope, conversationExclusionSchema, conversationSc
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
-import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import type { InventoryInspection, InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
@@ -784,6 +784,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_DECISION_MIGRATIONS,
     ...EFFORT_ATTEMPT_MIGRATIONS,
     ...EFFORT_JOURNAL_MIGRATIONS,
+    PR_STATE_SINCE_MIGRATION,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -1928,6 +1929,7 @@ export default async function plugin(bb: BbPluginApi) {
     const attentionClock = { now: attentionAt, thresholds: { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays },
       utcOffsetMinutes: -new Date(attentionAt).getTimezoneOffset() };
     const holds = prHolds.list();
+    const statesSince = inventory.statesSince();
     const prThreadLinks: Board["prThreadLinks"] = {};
     for (const url of context.items.keys()) {
       const ids = context.directThreadIds(url).filter((id) => threadFacts.has(id) || newContextThreads.has(id))
@@ -1957,7 +1959,7 @@ export default async function plugin(bb: BbPluginApi) {
       prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
         ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
         attention: prAttention({ ...entry.pr, stackedOn: stackParent(entry, storedInventory.entries)?.pr.number ?? null },
-          { holds, effort: context.ownerForPr(entry.pr.url), since: {} }, attentionClock),
+          { holds, effort: context.ownerForPr(entry.pr.url), since: statesSince.get(entry.pr.url.toLowerCase()) ?? {} }, attentionClock),
       })), refreshing: inventoryRefreshing || inventoryTargeting },
       warnings: [
         ...((await bb.storage.kv.get<string[]>("warnings")) ?? []),

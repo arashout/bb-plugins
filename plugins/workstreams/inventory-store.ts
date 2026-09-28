@@ -2,6 +2,7 @@ import { inventoryEntrySchema, type Pr } from "./contract.js";
 import type { InventoryEntry, InventoryInspection, InventoryResult } from "./inventory.js";
 import type { RunDb } from "./runstore.js";
 import { INVENTORY_LIMIT } from "./inventory.js";
+import { UNDATED_STATES, undatedStates, type StateSince, type UndatedState } from "./pr-attention.js";
 import { z } from "zod";
 
 export const INVENTORY_MIGRATIONS = [
@@ -9,6 +10,8 @@ export const INVENTORY_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS authored_pr_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)`,
 ];
 export const PR_OBSERVATIONS_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_observations (url TEXT PRIMARY KEY, checked_at TEXT, failed_at TEXT)`;
+/** When a read first saw a PR in a state GitHub doesn't date (red checks, a conflict); the row goes when a read sees the state end. */
+export const PR_STATE_SINCE_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_state_since (url TEXT NOT NULL, state TEXT NOT NULL, since TEXT NOT NULL, PRIMARY KEY (url, state))`;
 export type PrObservation = { checkedAt: string | null; failedAt: string | null };
 export type InventoryMeta = { owners: string[]; complete: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; warnings: string[] };
 export const EMPTY_INVENTORY = { owners: [], entries: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, refreshing: false, warnings: [] };
@@ -16,9 +19,34 @@ type InventoryDb = RunDb & { transaction(fn: () => void): () => void };
 const metaSchema = z.object({ owners: z.array(z.string()).max(50), complete: z.boolean(), lastSuccessAt: z.string().nullable(),
   lastAttemptAt: z.string().nullable(), warnings: z.array(z.string()).max(50) });
 
+/**
+ * A read that dates nothing, a checkout scan or an ages read GitHub refused, keeps the stored ages while they still describe this
+ * head and these requests, so a rate limit never erases a nudge.
+ */
+function carryAges(previous: Pr | undefined, next: Pr): Pr {
+  if (previous === undefined) return next;
+  const sameHead = next.headRefOid !== undefined && next.headRefOid === previous.headRefOid;
+  return { ...next,
+    ...(next.headCommittedAt === undefined && sameHead && previous.headCommittedAt !== undefined ? { headCommittedAt: previous.headCommittedAt } : {}),
+    ...(next.reviewRequestedAt === undefined && previous.reviewRequestedAt !== undefined
+      ? { reviewRequestedAt: previous.reviewRequestedAt.filter((asked) => next.reviewRequests.includes(asked.reviewer)) } : {}) };
+}
+
 export function createInventoryStore(db: InventoryDb, now: () => number = Date.now) {
   const put = db.prepare(`INSERT OR REPLACE INTO authored_prs (url, repo, entry, stale) VALUES (?, ?, ?, ?)`);
   const remove = db.prepare(`DELETE FROM authored_prs WHERE url = ?`);
+  // A read-only copy of a database from before pr_state_since dates no undated state.
+  const datesStates = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pr_state_since'`).get() !== undefined;
+  /** A state starts at the first read that sees it and ends at the first that sees it gone; GitHub's indecision changes neither. */
+  const recordStates = (pr: Pr, at: string) => {
+    if (!datesStates) return;
+    for (const [state, holds] of Object.entries(undatedStates(pr))) {
+      if (holds === true) db.prepare(`INSERT OR IGNORE INTO pr_state_since (url, state, since) VALUES (?, ?, ?)`).run(pr.url.toLowerCase(), state, at);
+      else if (holds === false) db.prepare(`DELETE FROM pr_state_since WHERE url = ? AND state = ?`).run(pr.url.toLowerCase(), state);
+    }
+  };
+  /** After each write, so a refresh that rewrites a PR keeps its dates and a PR that leaves the inventory takes its dates along. */
+  const pruneStates = () => { if (datesStates) db.prepare(`DELETE FROM pr_state_since WHERE url NOT IN (SELECT url FROM authored_prs)`).run(); };
   const writeMeta = (meta: InventoryMeta) => db.prepare(`INSERT OR REPLACE INTO authored_pr_metadata (id, value) VALUES (1, ?)`).run(JSON.stringify(meta));
   const success = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)
     ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL`);
@@ -43,7 +71,8 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       } catch { return []; }
     });
   }
-  const insert = (entry: InventoryEntry) => put.run(entry.pr.url.toLowerCase(), entry.repo, JSON.stringify(entry), 0);
+  const insert = (entry: InventoryEntry, previous: Pr | undefined) =>
+    put.run(entry.pr.url.toLowerCase(), entry.repo, JSON.stringify({ ...entry, pr: carryAges(previous, entry.pr) }), 0);
   return {
     read: () => ({ ...metadata(), entries: entries(), refreshing: false }),
     observation(url: string): PrObservation | null {
@@ -54,6 +83,16 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
     lastCheckedAt(): string | null {
       const row = db.prepare(`SELECT MAX(checked_at) AS checked_at FROM pr_observations`).get() as { checked_at: string | null };
       return row.checked_at;
+    },
+    /** When a read first saw each undated state of each open PR, in epoch ms, by lowercased URL. */
+    statesSince(): Map<string, StateSince> {
+      const since = new Map<string, StateSince>();
+      if (!datesStates) return since;
+      for (const row of db.prepare(`SELECT url, state, since FROM pr_state_since`).all() as { url: string; state: UndatedState; since: string }[]) {
+        const at = Date.parse(row.since);
+        if (UNDATED_STATES.includes(row.state) && !Number.isNaN(at)) since.set(row.url, { ...since.get(row.url), [row.state]: at });
+      }
+      return since;
     },
     get(url: string): (InventoryEntry & { stale: boolean }) | undefined {
       const row = db.prepare(`SELECT entry, stale FROM authored_prs WHERE url = ?`).get(url.toLowerCase()) as { entry: string; stale: number } | undefined;
@@ -68,6 +107,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       const previous = metadata();
       const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
       db.transaction(() => {
+        const stored = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         db.prepare(`UPDATE authored_prs SET stale = 1`).run();
         for (const entry of entries()) {
           const repo = entry.repo.toLowerCase();
@@ -75,13 +115,15 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
               (result.discoveryComplete && !coverage.has(repo))) remove.run(entry.pr.url.toLowerCase());
         }
         for (const entry of result.entries) if (entry.pr.state === "OPEN") {
-          insert(entry);
+          insert(entry, stored.get(entry.pr.url.toLowerCase()));
           recordSuccess(entry.pr.url, at);
+          recordStates(entry.pr, at);
         }
         const retained = entries().sort((a, b) => Number(a.stale) - Number(b.stale) || a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
         for (const entry of retained) if (entry.stale) recordFailure(entry.pr.url, at);
         const capped = retained.length > INVENTORY_LIMIT;
         for (const entry of retained.slice(INVENTORY_LIMIT)) remove.run(entry.pr.url.toLowerCase());
+        pruneStates();
         writeMeta({ owners: result.owners, complete: result.complete && !capped, lastAttemptAt: at,
           lastSuccessAt: result.complete && !capped ? at : previous.lastSuccessAt,
           warnings: capped ? [`Authored PR cache reached its ${INVENTORY_LIMIT} PR limit; older stale entries were omitted.`, ...result.warnings].slice(0, 50) : result.warnings });
@@ -90,7 +132,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
     inspect(result: InventoryInspection): void {
       const at = new Date(now()).toISOString();
       db.transaction(() => {
-        const known = new Set(entries().map((entry) => entry.pr.url.toLowerCase()));
+        const known = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         for (const url of result.closed) { remove.run(url.toLowerCase()); recordSuccess(url, at); }
         for (const url of result.failed) {
           db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
@@ -98,8 +140,12 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
         }
         for (const entry of result.entries) {
           recordSuccess(entry.pr.url, at);
-          if (known.has(entry.pr.url.toLowerCase())) insert(entry);
+          const previous = known.get(entry.pr.url.toLowerCase());
+          if (previous === undefined) continue;
+          insert(entry, previous);
+          recordStates(entry.pr, at);
         }
+        pruneStates();
         if (result.warnings.length > 0) writeMeta({ ...metadata(), complete: false, warnings: result.warnings });
       })();
     },
@@ -113,8 +159,12 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
           const entry = known.get(pr.url.toLowerCase());
           if (entry === undefined) continue;
           if (pr.state !== "OPEN") remove.run(pr.url.toLowerCase());
-          else insert({ repo: entry.repo, pr });
+          else {
+            insert({ repo: entry.repo, pr }, entry.pr);
+            recordStates(pr, at);
+          }
         }
+        pruneStates();
       })();
     },
   };

@@ -92,6 +92,16 @@ describe("latestReviewers", () => {
     ]);
   });
 
+  it("keeps when each review was submitted, because attention dates approvals and answered requests by it, and drops an unreadable time", () => {
+    expect(latestReviewers([
+      { author: { login: "reader-ada" }, state: "APPROVED", submittedAt: "2026-09-24T09:00:00Z" },
+      { author: { login: "reader-lin" }, state: "COMMENTED", submittedAt: "yesterday" },
+    ])).toEqual([
+      { login: "reader-ada", state: "APPROVED", submittedAt: "2026-09-24T09:00:00Z" },
+      { login: "reader-lin", state: "COMMENTED" },
+    ]);
+  });
+
   it("drops an entry with no author or state rather than inventing a reviewer", () => {
     expect(latestReviewers(undefined)).toEqual([]);
     expect(latestReviewers([null, { state: "APPROVED" }, { author: { login: "reader-lin" } }, { author: null, state: "APPROVED" }])).toEqual([]);
