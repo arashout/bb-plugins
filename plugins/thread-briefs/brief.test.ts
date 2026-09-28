@@ -11,7 +11,13 @@ import {
   rowSignalFor,
   summarizedAgo,
 } from "./brief.js";
-import { BRIEF_STAGES, isLiveWorking } from "./shared.js";
+import {
+  BRIEF_STAGES,
+  PROJECT_RING_HUES,
+  isLiveWorking,
+  projectColorIndex,
+  projectRingColor,
+} from "./shared.js";
 import type { StoredBrief } from "./contract.js";
 
 const stored = (overrides: Partial<StoredBrief> = {}): StoredBrief => ({
@@ -367,6 +373,98 @@ describe("rowDecoration", () => {
   it("restores the stored glyph once the thread goes idle again", () => {
     expect(rowDecoration(signalFor(blocked), false)?.icon).toBe(
       "thread-briefs/stage-implementation",
+    );
+  });
+
+  describe("with a project", () => {
+    const alpha = { id: "proj_alpha", name: "Alpha" };
+
+    it("keeps the stage on the ring and puts the project in its colour", () => {
+      // The suffix is the only difference: same stage, same artwork, repainted.
+      const plain = rowDecoration(signalFor(stored()), false);
+      const colored = rowDecoration(signalFor(stored()), false, alpha);
+      expect(colored?.icon).toBe(
+        `${plain?.icon}-c${projectColorIndex(alpha.id)}`,
+      );
+    });
+
+    it("colours the closed ring too, and gives up the done green for it", () => {
+      // Nothing is lost: `done` still has its own artwork and its own section
+      // heading, where the project has neither.
+      const decoration = rowDecoration(signalFor(done), false, alpha);
+      expect(decoration?.icon).toBe(
+        `thread-briefs/done-c${projectColorIndex(alpha.id)}`,
+      );
+    });
+
+    it("names the project in the label, since a hue cannot name itself", () => {
+      expect(rowDecoration(signalFor(stored()), false, alpha)?.label).toBe(
+        "Implementation — Waiting on you (Alpha)",
+      );
+    });
+
+    it("still colours by id when the project's name has not loaded", () => {
+      // The sidebar can hold a thread whose project is not in the list yet. The
+      // colour comes from the id, so only the label's suffix waits.
+      const decoration = rowDecoration(signalFor(stored()), false, {
+        id: alpha.id,
+        name: "",
+      });
+      expect(decoration?.icon).toBe(
+        `thread-briefs/stage-implementation-c${projectColorIndex(alpha.id)}`,
+      );
+      expect(decoration?.label).toBe("Implementation — Waiting on you");
+    });
+
+    it("gives two projects different rings for the same stage", () => {
+      const beta = { id: "proj_beta", name: "Beta" };
+      expect(rowDecoration(signalFor(stored()), false, alpha)?.icon).not.toBe(
+        rowDecoration(signalFor(stored()), false, beta)?.icon,
+      );
+    });
+
+    it("draws nothing while the agent is running, project or not", () => {
+      expect(rowDecoration(signalFor(stored()), true, alpha)).toBeNull();
+    });
+  });
+});
+
+describe("projectColorIndex", () => {
+  it("is stable, so a project keeps its colour with nothing stored", () => {
+    expect(projectColorIndex("proj_mdanshc55w")).toBe(
+      projectColorIndex("proj_mdanshc55w"),
+    );
+  });
+
+  it("always lands in the palette", () => {
+    for (const id of ["", "a", "proj_vqkcc8yinn", "x".repeat(200)]) {
+      const index = projectColorIndex(id);
+      expect(Number.isInteger(index)).toBe(true);
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(index).toBeLessThan(PROJECT_RING_HUES.length);
+    }
+  });
+
+  it("spreads a handful of real project ids over the palette", () => {
+    // Not a guarantee — a hash may collide — but a palette that sent every id
+    // to one slot would pass every other test here while being useless.
+    const ids = Array.from({ length: 8 }, (_, i) => `proj_${i}abcdefghij`);
+    expect(new Set(ids.map(projectColorIndex)).size).toBeGreaterThan(1);
+  });
+});
+
+describe("projectRingColor", () => {
+  it("gives each hue a light and a dark lightness", () => {
+    // One lightness cannot serve both sidebars, and bb sets `color-scheme` on
+    // both its themes, so `light-dark()` resolves without a re-render.
+    const color = projectRingColor(0);
+    expect(color).toMatch(/^light-dark\(oklch\(.+\), oklch\(.+\)\)$/);
+    expect(color).toContain(`${PROJECT_RING_HUES[0]}`);
+  });
+
+  it("wraps, so an out-of-range slot cannot draw a colourless ring", () => {
+    expect(projectRingColor(PROJECT_RING_HUES.length)).toBe(
+      projectRingColor(0),
     );
   });
 });

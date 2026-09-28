@@ -9,7 +9,13 @@ import {
 } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { BriefState, RowSignal } from "./contract.js";
-import { BRIEFS_CHANGED_CHANNEL } from "./shared.js";
+import {
+  BRIEF_STAGES,
+  BRIEFS_CHANGED_CHANNEL,
+  PROJECT_RING_HUES,
+  projectColorIndex,
+} from "./shared.js";
+import { doneRingIcon, stageRingIcon } from "./brief.js";
 
 const READY: BriefState = {
   state: "ready",
@@ -64,13 +70,30 @@ describe("registrations", () => {
     // A stage with no artwork would draw bb's Zap fallback on the row, which is
     // why the names are mapped off BRIEF_STAGES rather than listed.
     const captured = await loadApp();
-    expect(captured.icons.map((entry) => entry.name)).toEqual([
+    expect(captured.icons.slice(0, 5).map((entry) => entry.name)).toEqual([
       "thread-briefs/stage-discovery",
       "thread-briefs/stage-planning",
       "thread-briefs/stage-implementation",
       "thread-briefs/stage-review",
       "thread-briefs/done",
     ]);
+  });
+
+  it("registers every ring again in each palette colour", async () => {
+    // The registry is filled at init, before any project is known, so a colour
+    // a project hashes to later has to already be there. Asserted against the
+    // same name builders the decoration calls, so the two cannot drift.
+    const captured = await loadApp();
+    const names = new Set(captured.icons.map((entry) => entry.name));
+    for (let colorIndex = 0; colorIndex < PROJECT_RING_HUES.length; colorIndex += 1) {
+      for (const stage of BRIEF_STAGES) {
+        expect(names).toContain(stageRingIcon(stage, colorIndex));
+      }
+      expect(names).toContain(doneRingIcon(colorIndex));
+    }
+    expect(captured.icons).toHaveLength(
+      (BRIEF_STAGES.length + 1) * (PROJECT_RING_HUES.length + 1),
+    );
   });
 
   /** The artwork one registered icon draws, rendered on its own. */
@@ -387,6 +410,7 @@ describe("sidebar row glyphs", () => {
   const mountBoth = async (options: {
     signals: RowSignal[];
     threads?: PluginSidebarThread[];
+    projects?: { id: string; name: string }[];
     omitSetter?: boolean;
   }) => {
     const captured = await loadApp();
@@ -403,6 +427,9 @@ describe("sidebar row glyphs", () => {
         rpc: { listRowSignals: () => ({ signals: options.signals }) },
         sidebarThreads: {
           threads: options.threads ?? [sidebarThread({ id: "thr_1" })],
+          ...(options.projects === undefined
+            ? {}
+            : { projects: options.projects as never }),
         },
       },
     );
@@ -491,6 +518,63 @@ describe("sidebar row glyphs", () => {
     // No glyph may survive the generation, whether the host cleared it or the
     // script's own disposer did.
     expect(scripts.inspection.getThreadRowStatus("thr_1")).toBeNull();
+  });
+
+  it("colours each row by project once the sidebar holds more than one", async () => {
+    // The whole point of the setting that brings us here: status grouping
+    // takes the sidebar's project grouping away, so the ring gives it back.
+    const { scripts, slot } = await mountBoth({
+      signals: [
+        signal({ threadId: "thr_1", status: "waiting-on-me", stage: "review" }),
+        signal({ threadId: "thr_2", status: "waiting-on-me", stage: "review" }),
+      ],
+      threads: [
+        sidebarThread({ id: "thr_1", projectId: "proj_alpha" } as never),
+        sidebarThread({ id: "thr_2", projectId: "proj_beta" } as never),
+      ],
+      projects: [
+        { id: "proj_alpha", name: "Alpha" },
+        { id: "proj_beta", name: "Beta" },
+      ],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: stageRingIcon("review", projectColorIndex("proj_alpha")),
+        label: "Review — Waiting on you (Alpha)",
+        tone: "default",
+      }),
+    );
+    // Same stage, same status, same artwork — told apart by hue alone.
+    expect(scripts.inspection.getThreadRowStatus("thr_2")).toEqual({
+      icon: stageRingIcon("review", projectColorIndex("proj_beta")),
+      label: "Review — Waiting on you (Beta)",
+      tone: "default",
+    });
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("stays neutral while every thread is in one project", async () => {
+    // A colour is a comparison, and there is nothing here to compare: colouring
+    // would be decoration, and would cost `done` its green for nothing.
+    const { scripts, slot } = await mountBoth({
+      signals: [signal({ threadId: "thr_1" })],
+      threads: [sidebarThread({ id: "thr_1", projectId: "proj_alpha" } as never)],
+      projects: [{ id: "proj_alpha", name: "Alpha" }],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: "thread-briefs/done",
+        label: "Review — Done",
+        tone: "success",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
   });
 
   it("does not throw on a host without the row-status setter", async () => {

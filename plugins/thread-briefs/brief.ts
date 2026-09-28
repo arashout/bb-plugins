@@ -6,6 +6,7 @@ import type {
   RowSignal,
   StoredBrief,
 } from "./contract.js";
+import { projectColorIndex } from "./shared.js";
 
 export const briefKey = (threadId: string) => `brief:${threadId}`;
 export const threadIdFromKey = (key: string) => key.slice("brief:".length);
@@ -259,8 +260,25 @@ const ICON_PREFIX = "thread-briefs/";
  * `BRIEF_STAGES` cannot get a name without also getting artwork: `app.tsx`
  * registers its icons by mapping this same function over the same list.
  */
-export function stageRingIcon(stage: BriefStage): string {
-  return `${ICON_PREFIX}stage-${stage}`;
+export function stageRingIcon(stage: BriefStage, colorIndex?: number): string {
+  return `${ICON_PREFIX}stage-${stage}${ringColorSuffix(colorIndex)}`;
+}
+
+/**
+ * The palette suffix on a ring's registry name, or "" for the neutral ring.
+ *
+ * Every ring exists twice over: once in `currentColor`, which is what the panel
+ * and the stage picker want — they sit inside one thread, where naming its
+ * project back to it says nothing — and once per palette slot for the sidebar
+ * row, where the project is the fact the colour is there to carry.
+ */
+function ringColorSuffix(colorIndex: number | undefined): string {
+  return colorIndex === undefined ? "" : `-c${colorIndex}`;
+}
+
+/** {@link DONE_RING_ICON} in a project's colour, or neutral without one. */
+export function doneRingIcon(colorIndex?: number): string {
+  return `${DONE_RING_ICON}${ringColorSuffix(colorIndex)}`;
 }
 
 /**
@@ -291,6 +309,13 @@ export const DONE_RING_ICON = `${ICON_PREFIX}done`;
  * `waiting-on-other` therefore draw the same muted ring and are told apart by
  * the section header, or by the label on hover when grouping is off.
  *
+ * Passing a `project` takes that channel back and spends it on the project
+ * instead: the ring paints itself from the project's hue, which outranks the
+ * tone class, and `done` gives up its green. It loses nothing, because `done`
+ * already has its own artwork — the closed ring with the filled centre — and
+ * its own section heading, where the project has neither. Leave `project` null
+ * and the ring is exactly as it was.
+ *
  * Precedence is live first, stored second: a thread whose agent is running or
  * queued is `working` no matter what its brief says, and `working` still draws
  * nothing. Three reasons, in order of how much they cost:
@@ -311,12 +336,20 @@ export const DONE_RING_ICON = `${ICON_PREFIX}done`;
 export function rowDecoration(
   signal: RowSignal,
   liveWorking: boolean,
+  project: { id: string; name: string } | null = null,
 ): { icon: string; label: string; tone: "default" | "error" | "running" | "success" } | null {
   if (liveWorking) return null;
   const isDone = signal.status === "done";
+  const colorIndex =
+    project === null ? undefined : projectColorIndex(project.id);
+  const label = rowLabelFor(signal.stage, signal.status);
   return {
-    icon: isDone ? DONE_RING_ICON : stageRingIcon(signal.stage),
+    icon: isDone ? doneRingIcon(colorIndex) : stageRingIcon(signal.stage, colorIndex),
+    // Inert once a project colours the ring — the artwork paints itself and
+    // ignores the tone class — but still the tone the neutral ring wants, so
+    // the `done` green survives wherever no project is passed.
     tone: isDone ? "success" : "default",
-    label: rowLabelFor(signal.stage, signal.status),
+    label:
+      project === null || project.name === "" ? label : `${label} (${project.name})`,
   };
 }

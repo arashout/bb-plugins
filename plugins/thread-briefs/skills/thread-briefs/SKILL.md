@@ -258,12 +258,41 @@ stage the thread has reached:
 | half (ends at 6) | planning |
 | three quarters (ends at 9) | implementation |
 | closed ring, hollow | review |
-| closed ring, centre filled, success tone | status `done`, any stage |
+| closed ring, centre filled | status `done`, any stage |
+| the ring's **colour** | which project the thread is in |
 
 Names are registered by the app through `app.experimental_icons.register` as
-`thread-briefs/stage-<stage>` and `thread-briefs/done`; a row status takes an
-icon *name*, not a component, so the artwork has to go in the registry first.
-They are mapped off `BRIEF_STAGES`, so adding a stage adds its ring.
+`thread-briefs/stage-<stage>` and `thread-briefs/done`, each also in a `-c<n>`
+variant per palette slot; a row status takes an icon *name*, not a component, so
+the artwork has to go in the registry first. They are mapped off `BRIEF_STAGES`
+and `PROJECT_RING_HUES`, so adding a stage or a hue adds its rings.
+
+### The project colour
+
+`sidebarGrouping status` replaces the sidebar's project grouping, so nothing on
+a row says which project a thread is in. The ring's colour says it: a hue from
+`PROJECT_RING_HUES`, picked by `projectColorIndex` — an FNV-1a hash of the
+project id, so the colour is stable across windows, machines and reloads with
+nothing stored, and adding or removing a project never reshuffles the others.
+
+The colour is only drawn when the sidebar holds **more than one project**. Below
+that there is nothing to compare, so the rings stay neutral and `done` keeps its
+green — which is what the colour costs when it is on. That trade is cheap
+because `done` already has its own artwork (the filled centre) and its own
+section heading, where the project has neither.
+
+Each hue renders through `light-dark()` at two lightnesses: no single lightness
+clears 3:1 on the light sidebar and still reads on the dark one. bb sets
+`color-scheme` on both themes, so the browser picks and a theme switch needs no
+re-render.
+
+A hue cannot name itself, so the hover label carries the project name:
+`Implementation — Waiting on you (bb-dylan)`. A thread whose project has not
+loaded into the sidebar yet still gets its colour — that comes from the id — and
+picks up the name suffix when the project arrives.
+
+Threads with **no brief** get no row status at all, so they get no colour
+either. They sit in bb's unassigned Threads group.
 
 **Why stage and not status.** With `sidebarGrouping status` on, the section
 header already says the status, so a status glyph spends the row's one slot

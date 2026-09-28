@@ -18,12 +18,15 @@ import type {
 import {
   BRIEFS_CHANGED_CHANNEL,
   BRIEF_STAGES,
+  PROJECT_RING_HUES,
   STORED_BRIEF_STATUSES,
   isLiveWorking,
+  projectRingColor,
   type BriefStage,
   type StoredBriefStatus,
 } from "./shared.js";
 import {
+  doneRingIcon,
   DONE_RING_ICON,
   rowDecoration,
   STAGE_LABELS,
@@ -82,7 +85,7 @@ function sameDecoration(a: Decoration | undefined, b: Decoration | undefined) {
  */
 function BriefSync() {
   const rpc = useRpc<typeof rpcContract>();
-  const { threads } = experimental_useSidebarThreads();
+  const { threads, projects } = experimental_useSidebarThreads();
   const [signals, setSignals] = useState<readonly RowSignal[]>([]);
 
   const load = useCallback(() => {
@@ -108,14 +111,45 @@ function BriefSync() {
     return ids;
   }, [threads]);
 
+  /**
+   * The project each row belongs to — but only while more than one is on
+   * screen.
+   *
+   * A colour is a comparison, and there is nothing to compare in a sidebar
+   * holding one project: every ring would take the same arbitrary hue, which
+   * reads as decoration and costs `done` its green for nothing. Below two
+   * projects the rings stay neutral and the plugin behaves exactly as it did.
+   */
+  const projectByThreadId = useMemo(() => {
+    const byThread = new Map<string, { id: string; name: string }>();
+    const projectIds = new Set(threads.map((thread) => thread.projectId));
+    if (projectIds.size < 2) return byThread;
+    const names = new Map(
+      projects.map((project) => [project.id, project.name] as const),
+    );
+    for (const thread of threads) {
+      byThread.set(thread.id, {
+        id: thread.projectId,
+        // The row still gets its colour from the id when the project is not in
+        // the list yet; only the label's suffix waits for the name.
+        name: names.get(thread.projectId) ?? "",
+      });
+    }
+    return byThread;
+  }, [projects, threads]);
+
   useEffect(() => {
     const next = new Map<string, Decoration>();
     for (const signal of signals) {
-      const decoration = rowDecoration(signal, workingIds.has(signal.threadId));
+      const decoration = rowDecoration(
+        signal,
+        workingIds.has(signal.threadId),
+        projectByThreadId.get(signal.threadId) ?? null,
+      );
       if (decoration !== null) next.set(signal.threadId, decoration);
     }
     publishDecorations(next);
-  }, [signals, workingIds]);
+  }, [projectByThreadId, signals, workingIds]);
 
   return null;
 }
@@ -146,11 +180,18 @@ const RING_QUARTERS = [
  *
  * The track is what makes the glyph a ratio rather than a count: three quarters
  * against a visible whole reads instantly at 16px, where three marks against
- * nothing has to be counted. Everything is `currentColor`, so the host's tone
- * class colours it — the ring carries the stage and the colour carries the
- * status, and neither has to encode the other.
+ * nothing has to be counted.
+ *
+ * Without a `colorIndex` everything is `currentColor` and the host's tone class
+ * colours it. With one the ring paints itself from the project's hue, which is
+ * what lets one glyph carry three facts at 16px: how far round it goes is the
+ * stage, whether the centre is filled is `done`, and the hue is the project.
+ * Painting explicitly is also what overrides the tone class, so the two modes
+ * cannot both colour the same ring.
  */
-function ring(filled: number, complete = false) {
+function ring(filled: number, complete = false, colorIndex?: number) {
+  const color =
+    colorIndex === undefined ? "currentColor" : projectRingColor(colorIndex);
   return function StageRing({ className }: { className?: string }) {
     return (
       <svg
@@ -163,14 +204,12 @@ function ring(filled: number, complete = false) {
           <path
             key={d}
             d={d}
-            stroke="currentColor"
+            stroke={color}
             strokeWidth={2}
             opacity={index < filled ? 1 : 0.25}
           />
         ))}
-        {complete ? (
-          <circle cx={8} cy={8} r={2.75} fill="currentColor" />
-        ) : null}
+        {complete ? <circle cx={8} cy={8} r={2.75} fill={color} /> : null}
       </svg>
     );
   };
@@ -183,12 +222,32 @@ function ring(filled: number, complete = false) {
  * drift: `stageRingIcon` is the same function the row decoration calls, and a
  * stage added to the list gets its ring here without a second edit.
  */
+function ringSet(colorIndex?: number) {
+  return [
+    ...BRIEF_STAGES.map((stage, index) => ({
+      name: stageRingIcon(stage, colorIndex),
+      component: ring(index + 1, false, colorIndex),
+    })),
+    {
+      name: doneRingIcon(colorIndex),
+      component: ring(RING_QUARTERS.length, true, colorIndex),
+    },
+  ];
+}
+
+/**
+ * The neutral set, plus one set per palette slot.
+ *
+ * Every combination is registered up front because the registry is keyed by
+ * name and filled once, at plugin init, where no project list exists yet —
+ * projects arrive later, per window, through `experimental_useSidebarThreads`.
+ * Hashing a project into a fixed palette instead of registering an icon per
+ * project is what makes that work: the set of names is knowable without knowing
+ * the projects, and a project added later already has its artwork waiting.
+ */
 const RING_ICONS = [
-  ...BRIEF_STAGES.map((stage, index) => ({
-    name: stageRingIcon(stage),
-    component: ring(index + 1),
-  })),
-  { name: DONE_RING_ICON, component: ring(RING_QUARTERS.length, true) },
+  ...ringSet(),
+  ...PROJECT_RING_HUES.flatMap((_hue, colorIndex) => ringSet(colorIndex)),
 ];
 
 // ------------------------------------------------------------------ the panel
