@@ -65,7 +65,9 @@ const BORDER = { issue: "border-rose-500/30", decision: "border-amber-500/30" } 
 /** The card frame: amber for decisions, rose for system issues, and neutral for merges; focused, it gets a ring. */
 function Card({ ask, focused, children, onFocusAsk }: { ask: Ask; focused: boolean; children: ReactNode; onFocusAsk(id: string): void }) {
   const tone = toneOf(ask);
-  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} onClick={() => onFocusAsk(ask.id)} data-tone={tone ?? undefined}
+  // A click on the card focuses it for its keys; one in a field, box, or link stays there.
+  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} data-tone={tone ?? undefined}
+    onClick={(event) => { if (!(event.target as Element).closest("input, button, a, label")) onFocusAsk(ask.id); }}
     className={cn("min-w-0 rounded-md border bg-foreground/[0.03] px-3 py-2 text-[12px] outline-none", tone ? BORDER[tone] : "border-border", focused && "ring-2 ring-ring")}>
     {children}
   </article>;

@@ -575,7 +575,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
       rootRef={rootRef} onKeyDown={onKeyDown} onOrder={toggleOrder} onMarkSeen={markSeen} onFocus={focusRow} onMenu={setMenuN} onAction={act}
       onCompose={(n, shift) => { setCommandText((text) => composeNumber(text, n, shift)); inputRef.current?.focus(); }}
       asks={{ asks, receipts, state: pane, wide, now,
-        onFocusAsk: (id) => setPane((current) => ({ ...current, focus: { ask: id }, open: id, hint: null })), onFocus: focusRow,
+        onFocusAsk: (id) => { setPane((current) => ({ ...current, focus: { ask: id }, open: id, hint: null })); domFocus({ ask: id }); }, onFocus: focusRow,
         onAnswer: (ask, reply) => { answered(ask); void answer(ask, reply); }, onField: (ask, field) => { answered(ask); void answer(ask, { field }); },
         onSubset: (ask, numbers) => setPane((current) => ({ ...current, subsets: new Map([...current.subsets, [answerKey(ask), numbers]]) })),
         onCompose: (text) => { setCommandText(text); inputRef.current?.focus(); }, onUndo: (receipt) => void undo(receipt),
