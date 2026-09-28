@@ -4491,9 +4491,11 @@ export default async function plugin(bb: BbPluginApi) {
     return result;
   }
 
+  /** The checkout a direct action names, or the one checked out on the PR it names. */
+  const directUnit = (input: DirectTarget) => "path" in input ? readUnits().find((entry) => entry.path === input.path) :
+    readUnits().find((entry) => entry.pr?.url.toLowerCase() === input.prUrl.toLowerCase());
   async function directActionRun(input: DirectTarget, action: DirectAction, act: () => Promise<WriteResult>): Promise<WriteResult> {
-    const unit = "path" in input ? readUnits().find((entry) => entry.path === input.path) :
-      readUnits().find((entry) => entry.pr?.url.toLowerCase() === input.prUrl.toLowerCase());
+    const unit = directUnit(input);
     const prUrl = "prUrl" in input ? input.prUrl : unit?.pr?.url;
     const held = action === "merge" && prUrl ? holdMessage(prUrl) : null;
     if (held) return { ok: false, error: held };
@@ -5498,6 +5500,9 @@ export default async function plugin(bb: BbPluginApi) {
       const verdict = mergeVerdict(read.live, approvalFeedback.get(target.prUrl));
       const held = holdMessage(target.prUrl);
       if (held) verdict.refusals.unshift(held);
+      // The merge refuses while a v2 worker claims the PR or its checkout, so the preview never offers it.
+      const claimed = v2Claimed(target.prUrl, directUnit(input)?.path);
+      if (claimed) verdict.refusals.unshift(claimed);
       return {
         ok: true as const,
         live: read.live,
