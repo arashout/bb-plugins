@@ -22,14 +22,13 @@ import { Icon } from "./components/ui/icon";
 import { EASE_CSS } from "./layout";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
+import { CommandBox, type CommandBoxProps, type RosterNote } from "./roster-command";
 import type { RosterListEntry } from "./roster-parents";
 import { HATCH, RosterList, RosterTable, TONE_CLASS, type RowActions } from "./roster-rows";
 import { ROSTER_CHANGED } from "./roster-shared";
-import { holdCommand, liveGroup, ROSTER_KEYS, rosterKey, rosterView, rowCommandInput, rowIntent, settle, type GroupKey, type MenuItem, type RosterLine,
-  type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
+import { ackRows, ackView, commandInput, composeNumber, holdCommand, liveGroup, ROSTER_KEYS, rosterKey, rosterView, rowCommandInput, rowIntent, settle, type CommandRecord,
+  type GroupKey, type MenuItem, type RosterLine, type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
 
-/** What the last row command from this pane said back. */
-export type RosterNote = { command: string; lines: string[]; tone: "info" | "error" };
 export type RosterPaneProps = RowActions & {
   view: View;
   wide: boolean;
@@ -40,7 +39,8 @@ export type RosterPaneProps = RowActions & {
   focusN: number | null;
   menuN: number | null;
   liveThreads: ReadonlySet<string>;
-  note: RosterNote | null;
+  /** The command box, pinned to the bottom, with the last command and any note. */
+  command: CommandBoxProps;
   history: EffortRoster["history"];
   hasParent: boolean;
   onOrder(order: RosterOrder): void;
@@ -174,25 +174,11 @@ function EmptyAsks({ text }: { text: string }) {
   </p>;
 }
 
-function CommandNote({ note }: { note: RosterNote }) {
-  const [open, setOpen] = useState(false);
-  const [first, ...rest] = note.lines;
-  return <div role="status" className="shrink-0 border-t border-border/70 px-3 py-1.5 text-[12px]">
-    <p className="flex min-w-0 items-baseline gap-2">
-      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">› {note.command}</span>
-      <span className={cn("min-w-0 flex-1", open ? "whitespace-pre-wrap" : "truncate", note.tone === "error" && "text-destructive")} title={note.lines.join("\n")}>{first}</span>
-      {rest.length ? <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}
-        className="shrink-0 text-[11px] text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{open ? "Less" : "Details"}</button> : null}
-    </p>
-    {open ? <ul className="mt-1 space-y-0.5 text-muted-foreground">{rest.map((line, index) => <li key={index}>{line}</li>)}</ul> : null}
-  </div>;
-}
-
 /** The whole pane for one roster read. */
 export function RosterPane(props: RosterPaneProps) {
   const { view, wide } = props;
-  const rows = { groups: view.groups, focusN: props.focusN, menuN: props.menuN, liveThreads: props.liveThreads, onFocus: props.onFocus, onMenu: props.onMenu,
-    onAction: props.onAction, onToggleGroup: props.onToggleGroup, onOpenUrl: props.onOpenUrl };
+  const rows = { groups: view.groups, focusN: props.focusN, menuN: props.menuN, liveThreads: props.liveThreads, onFocus: props.onFocus, onCompose: props.onCompose,
+    onMenu: props.onMenu, onAction: props.onAction, onToggleGroup: props.onToggleGroup, onOpenUrl: props.onOpenUrl };
   return <div ref={props.rootRef} role="region" aria-label={`${view.header.name} roster`} tabIndex={-1} onKeyDown={props.onKeyDown}
     className={cn("flex h-full min-h-0 flex-col bg-background text-foreground outline-none", POINTER_CURSORS)}>
     <RosterHeader {...props} />
@@ -203,7 +189,7 @@ export function RosterPane(props: RosterPaneProps) {
       {view.empty ? <EmptyAsks text={view.empty} /> : null}
       <div data-roster-rows className="mt-2">{wide ? <RosterTable {...rows} /> : <RosterList {...rows} />}</div>
     </div>
-    {props.note ? <CommandNote note={props.note} /> : null}
+    <CommandBox {...props.command} />
   </div>;
 }
 
@@ -360,6 +346,12 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const [focusN, setFocusN] = useState<number | null>(focus);
   const [menuN, setMenuN] = useState<number | null>(null);
   const [note, setNote] = useState<RosterNote | null>(null);
+  const [commandText, setCommandText] = useState("");
+  /** This visit's latest command and its result; the roster's own last command shows until there is one. */
+  const [record, setRecord] = useState<CommandRecord | null>(null);
+  /** Whether the acknowledgment's details show; null follows the default, open for this visit's own command in a wide pane. */
+  const [ackOpen, setAckOpen] = useState<boolean | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const [holding, setHolding] = useState<RosterLine | null>(null);
   const [resetting, setResetting] = useState<RosterLine | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
@@ -428,24 +420,40 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     return order;
   }), []);
 
-  const send = useCallback(async (line: RosterLine, text: string) => {
-    if (!roster) return;
+  /** A send that failed before any answer: sending the same text again reuses its request id, so a lost reply can't run it twice. */
+  const unanswered = useRef<{ text: string; requestId: string } | null>(null);
+  /** Send one command. A row command shows no decisions, so no `Dn` in it can answer one; the command box shows them all. */
+  const send = useCallback(async (text: string, from: "row" | "box", rows: readonly number[] = []): Promise<CommandRecord["result"] | null> => {
+    if (!roster) return null;
+    const requestId = unanswered.current?.text === text ? unanswered.current.requestId : crypto.randomUUID();
+    unanswered.current = { text, requestId };
     setNote({ command: text, lines: ["Sending…"], tone: "info" });
+    let result: CommandRecord["result"];
     try {
-      const result = await rpc.call("effort_command", rowCommandInput(roster, text, crypto.randomUUID()));
-      if (result.kind === "admit") {
-        ownChanges.current.add(line.n);
-        setNote({ command: text, lines: result.acknowledgment.length ? result.acknowledgment : ["Done."], tone: "info" });
-      } else if (result.kind === "clarify") {
-        setNote({ command: text, lines: [result.message, ...result.normalized ? [`Reads as: ${result.normalized}`] : []], tone: "error" });
-      } else {
-        setNote({ command: text, lines: [`Held until ${new Date(result.until).toLocaleTimeString()}`], tone: "info" });
-      }
+      result = await rpc.call("effort_command", from === "row" ? rowCommandInput(roster, text, requestId) : commandInput(roster, text, requestId));
+      unanswered.current = null;
     } catch (cause) {
-      setNote({ command: text, lines: [message(cause)], tone: "error" });
+      result = { kind: "error", message: message(cause) };
     }
+    if (result.kind === "admit") for (const n of [...rows, ...result.parts ? ackRows(result.parts) : []]) ownChanges.current.add(n);
+    setNote(null);
+    setRecord({ requestId, text, origin: "panel", at: Date.now(), revision: result.kind === "admit" ? result.revision : roster.instruction?.revision ?? null,
+      snapshotId: roster.snapshotId, result, fresh: true });
+    setAckOpen(null);
     load();
+    return result;
   }, [roster, rpc, load]);
+  const submit = useCallback(async () => {
+    const text = commandText.trim();
+    const result = await send(text, "box");
+    // A clarified or refused command stays in the box to fix; one the server took leaves it.
+    if (result?.kind === "admit" || result?.kind === "pending") setCommandText((current) => current.trim() === text ? "" : current);
+  }, [commandText, send]);
+  const ack = useMemo(() => {
+    const journaled = roster?.lastCommand ? { ...roster.lastCommand, fresh: false } : null;
+    const latest = record && (!journaled || record.requestId === journaled.requestId || record.at >= journaled.at) ? record : journaled;
+    return latest && ackView(latest, now);
+  }, [roster, record, now]);
 
   const act = useCallback((line: RosterLine, id: MenuItem["id"]) => {
     const intent = rowIntent(line, id);
@@ -455,7 +463,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     else if (intent.kind === "open-thread") navigate.toThread(intent.threadId);
     else if (intent.kind === "hold") setHolding(line);
     else if (intent.kind === "confirm-reset") setResetting(line);
-    else if (intent.kind === "send") void send(line, intent.command);
+    else if (intent.kind === "send") void send(intent.command, "row", [line.n]);
     else if (intent.kind === "refresh") {
       const { command } = intent;
       setNote({ command, lines: ["Reading GitHub…"], tone: "info" });
@@ -483,6 +491,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     } else if (action.kind === "order") toggleOrder();
     else if (action.kind === "seen") markSeen();
     else if (action.kind === "keys") setKeysOpen(true);
+    else if (action.kind === "command") inputRef.current?.focus();
     else if (line && action.kind === "menu") setMenuN(line.n);
     else if (line && action.kind === "row") act(line, action.id);
   }, [view, focusN, lineOf, focusRow, toggleOrder, markSeen, act]);
@@ -493,8 +502,12 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const parent = roster.effort.coordinatorThreadId;
   return <>
     <RosterPane view={view} wide={wide} mount={mount} live={connection === "connected"} order={order} focusN={focusN} menuN={menuN} liveThreads={liveThreads}
-      note={error ? { command: "read", lines: [`The roster may be behind: ${error}`], tone: "error" } : note} history={roster.history} hasParent={parent !== null}
+      command={{ value: commandText, onValue: setCommandText, onSubmit: () => void submit(), inputRef, ack, open: ackOpen ?? Boolean(ack?.fresh && wide),
+        onToggle: () => setAckOpen((current) => !(current ?? Boolean(ack?.fresh && wide))), onLeave: () => rootRef.current?.focus(),
+        note: error ? { command: "read", lines: [`The roster may be behind: ${error}`], tone: "error" } : note }}
+      history={roster.history} hasParent={parent !== null}
       rootRef={rootRef} onKeyDown={onKeyDown} onOrder={toggleOrder} onMarkSeen={markSeen} onFocus={focusRow} onMenu={setMenuN} onAction={act}
+      onCompose={(n, shift) => { setCommandText((text) => composeNumber(text, n, shift)); inputRef.current?.focus(); }}
       onOpenUrl={(url) => navigate.openUrl(url)}
       onToggleGroup={(key) => setExpanded((current) => { const next = new Set(current); if (!next.delete(key)) next.add(key); return next; })}
       onHeader={(action) => {
@@ -503,9 +516,9 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
         else if (action === "full") navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(roster.effort.id)}` });
         else if (action === "all") navigate.toPluginPanel("board", { subPath: "roster" });
       }} />
-    <HoldDialog line={holding} onClose={() => setHolding(null)} onHold={(line, command) => { setHolding(null); void send(line, command); }} />
+    <HoldDialog line={holding} onClose={() => setHolding(null)} onHold={(line, command) => { setHolding(null); void send(command, "row", [line.n]); }} />
     <ResetDialog line={resetting} thread={resetting?.threadId ? titles.get(resetting.threadId) ?? null : null} onClose={() => setResetting(null)}
-      onOpenThread={(id) => navigate.toThread(id)} onReset={(line) => { setResetting(null); void send(line, `reset ${line.n} release`); }} />
+      onOpenThread={(id) => navigate.toThread(id)} onReset={(line) => { setResetting(null); void send(`reset ${line.n} release`, "row", [line.n]); }} />
     <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
       <DialogContent className={cn("max-w-sm", POINTER_CURSORS)}>
         <DialogHeader><DialogTitle>Roster keys</DialogTitle><DialogDescription>They work while the roster has focus, never while you type.</DialogDescription></DialogHeader>

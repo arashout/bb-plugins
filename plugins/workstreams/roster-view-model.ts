@@ -4,7 +4,7 @@
 // disagree. It imports types and roster-shared.ts only, which keeps server
 // modules out of the browser bundle (plan amendment A12.1).
 import type { EffortRoster, RosterRow } from "./effort-roster";
-import { formatTargets, ROLLUP_LABELS, STATE_LABEL } from "./roster-shared";
+import { EFFECT_LABEL, formatTargets, ROLLUP_LABELS, STATE_LABEL } from "./roster-shared";
 
 export type RosterOrder = "number" | "state";
 /** Where a row sits by state. A row an open system issue names sits under System issues whatever its own state. */
@@ -207,6 +207,122 @@ export function rowCommandInput(roster: Pick<EffortRoster, "effort" | "snapshotI
     ...roster.instruction ? { expectedRevision: roster.instruction.revision } : {} };
 }
 
+/**
+ * The command box's effort_command input: the snapshot the pane rendered, the instruction revision it showed, and each decision it shows
+ * at the revision it shows, so a `Dn` answer applies only to the question you read.
+ */
+export function commandInput(roster: Pick<EffortRoster, "effort" | "snapshotId" | "instruction" | "decisions">, text: string, requestId: string) {
+  return { ...rowCommandInput(roster, text, requestId), decisions: roster.decisions.map(({ n, revision }) => ({ n, revision })) };
+}
+
+type ServerResult = NonNullable<EffortRoster["lastCommand"]>["result"];
+export type AckParts = NonNullable<Extract<ServerResult, { kind: "admit" }>["parts"]>;
+/** A command and what came back: the server's result, or the error that refused it before any result. `fresh` means this visit sent it. */
+export type CommandRecord = Omit<NonNullable<EffortRoster["lastCommand"]>, "result"> & {
+  result: ServerResult | { kind: "error"; message: string }; fresh: boolean };
+export type AckChip = { label: string; kind: "added" | "kept" | "alone" | "held" | "change" | "no" };
+export type AckDetail = { label: string; numbers: string | null; text: string };
+export type AckView = { command: string; meta: string; kind: CommandRecord["result"]["kind"]; chips: AckChip[]; details: AckDetail[];
+  /** A clarification's, refusal's, or held answer's message; `normalized` is the reading a clarification offers to use. */
+  message: string | null; normalized: string | null; fresh: boolean };
+
+const ORIGIN_LABEL: Record<NonNullable<CommandRecord["origin"]>, string> = { panel: "roster", banner: "banner", thread: "thread", cli: "CLI" };
+/** A moment today to the second, else its date: "11:26:02", "Sep 26". */
+function stamp(at: number, now: number): string {
+  const when = new Date(at);
+  return when.toDateString() === new Date(now).toDateString() ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+    : clock(at, now);
+}
+
+/** The acknowledgment's chip row: what changed, what stays out, and every held target, always ending with `no merge` (A2, A8). */
+export function ackChips(parts: AckParts, mergePreviews: readonly { target: string; n: number | null }[] = []): AckChip[] {
+  const named = new Set(parts.holds.flatMap((hold) => hold.targets.map((item) => item.target)));
+  const held = parts.held.filter((item) => !named.has(item.target));
+  const chip = (kind: AckChip["kind"], label: string): AckChip => ({ kind, label });
+  const some = <T,>(list: readonly T[], make: () => AckChip) => list.length ? [make()] : [];
+  return [
+    ...parts.answers.map((answer) => chip("change", `D${answer.n} answered`)),
+    ...parts.added.map((added) => chip("added", `+${formatTargets(added.targets)} added`)),
+    ...some(parts.kept, () => chip("kept", `${formatTargets(parts.kept)} kept`)),
+    ...some(parts.leftAlone, () => chip("alone", `${formatTargets(parts.leftAlone)} left alone, not a hold`)),
+    ...parts.holds.map((hold) => chip("held", `${formatTargets(hold.targets)} now held`)),
+    ...some(held, () => chip("held", `${formatTargets(held)} held, hold wins`)),
+    ...some(parts.released, () => chip("change", `${formatTargets(parts.released)} released`)),
+    ...some(parts.superseded, () => chip("change", `${formatTargets(parts.superseded)} superseded`)),
+    ...some(parts.dropped, () => chip("change", `${formatTargets(parts.dropped)} dropped`)),
+    ...parts.interventions.map((item) => chip("change", `${item.action} ${formatTargets(item.targets)}${item.release ? " release" : ""}`)),
+    ...some(mergePreviews, () => chip("change", `${formatTargets(mergePreviews)} to the merge preview`)),
+    chip("no", "no merge"),
+  ];
+}
+
+/** Text lines the parts already say; any other line (a recheck's finding, a readback, an outcome) still shows under Also. */
+const SAID_BY_PARTS = /^(?:Added: |Still included: |Already included, |Still left alone |Superseded: |Dropped: |Left alone this instruction|Held, skipped |Effects: |Now held: |Released: |(?:Refresh|Recheck|Reset|Stop|Retry): |Reset, releasing |Merge .*: open the fresh merge preview|Next(?: \(planned[^)]*\))?: |D\d+: )/u;
+const placeOf = (resource: AckParts["starting"][number]["resource"]) => !resource ? null
+  : `${resource.kind === "spawn" || resource.kind === "worktree" ? "new worker" : "reused thread"}${resource.reason ? `: ${resource.reason}` : ""}`;
+
+/**
+ * The details block: Added, Kept, Excluded (this instruction only), Still held (outlasts every instruction), Effects, Not granted, and
+ * Starting, each only when it has something, then any acknowledgment line the parts don't say.
+ */
+export function ackDetails(parts: AckParts, revision: number | null, lines: readonly string[] = []): AckDetail[] {
+  const t = formatTargets;
+  const named = new Set(parts.holds.flatMap((hold) => hold.targets.map((item) => item.target)));
+  const held = parts.held.filter((item) => !named.has(item.target));
+  const detail = (label: string, numbers: string | null, text: string): AckDetail => ({ label, numbers, text });
+  const some = <T,>(list: readonly T[], make: () => AckDetail) => list.length ? [make()] : [];
+  const also = lines.filter((line) => !SAID_BY_PARTS.test(line));
+  // Releasing a held row includes it only where the instruction does; one this command leaves alone stays out (A2).
+  const within = (list: readonly { target: string }[]) => held.filter((item) => list.some((other) => other.target === item.target));
+  const rejoin = within([...parts.added.flatMap((added) => added.targets), ...parts.kept, ...parts.stillIncluded]);
+  const alone = within(parts.leftAlone);
+  return [
+    ...parts.answers.map((answer) => detail(`D${answer.n}`, null, answer.answer)),
+    ...parts.added.map((added) => detail("Added", t(added.targets), `${added.verb}${revision === null ? "" : ` · rev ${revision}`}`)),
+    ...some(parts.kept, () => detail("Kept", t(parts.kept), "already included; effects unchanged")),
+    ...some(parts.stillIncluded, () => detail("Still included", t(parts.stillIncluded), "not named here; unchanged")),
+    ...some(parts.leftAlone, () => detail("Excluded", t(parts.leftAlone), "this instruction only, not a hold")),
+    ...parts.holds.map((hold) => detail("Now held", t(hold.targets), `${hold.reason ? `because ${hold.reason} · ` : ""}outlasts every instruction`)),
+    ...some(held, () => detail("Still held", t(held), ["outlasts every instruction", rejoin.length ? `release ${t(rejoin)} to include` : null,
+      alone.length ? `${t(alone)} also left alone this instruction` : null].filter(Boolean).join(" · "))),
+    ...some(parts.released, () => detail("Released", t(parts.released), "rejoins the instruction wherever it includes them")),
+    ...some(parts.superseded, () => detail("Superseded", t(parts.superseded), "left the instruction; a running turn finishes first")),
+    ...some(parts.dropped, () => detail("Dropped", t(parts.dropped), "removed from the instruction")),
+    ...some(parts.effects, () => detail("Effects", null, parts.effects.map((group) => `${t(group.targets)} ${group.effects.map((effect) => EFFECT_LABEL[effect]).join(", ")}`).join("; "))),
+    ...parts.added.length || parts.notGranted.length ? [detail("Not granted", null, [...parts.notGranted.map((effect) => EFFECT_LABEL[effect]), "merge"].join(", "))] : [],
+    ...some(parts.starting, () => detail("Starting", null, parts.starting.map((item) =>
+      [`${t(item.targets)} ${item.step.replaceAll("_", " ")}`, placeOf(item.resource)].filter(Boolean).join(" · ")).join(" · "))),
+    ...some(also, () => detail("Also", null, also.join(" · "))),
+  ];
+}
+
+/** What the pane shows for a command: the text you sent, where and when, the chip row, and the details block. */
+export function ackView(record: CommandRecord, now: number): AckView {
+  const { result } = record;
+  const meta = [record.origin ? ORIGIN_LABEL[record.origin] : null, stamp(record.at, now), record.revision === null ? null : `rev ${record.revision}`, record.snapshotId,
+    record.origin === "thread" ? null : "0 model turns"].filter(Boolean).join(" · ");
+  const base = { command: record.text, meta, kind: result.kind, chips: [], details: [], message: null, normalized: null, fresh: record.fresh };
+  if (result.kind === "error") return { ...base, message: result.message };
+  if (result.kind === "clarify") return { ...base, message: result.message, normalized: result.normalized };
+  if (result.kind === "pending") return { ...base, message: `Waits for Undo until ${stamp(result.until, now)}; nothing changes before then` };
+  if (!result.parts) return { ...base, chips: [{ kind: "no", label: "no merge" }], details: result.acknowledgment.map((line) => ({ label: "Said", numbers: null, text: line })) };
+  return { ...base, chips: ackChips(result.parts, result.mergePreviews), details: ackDetails(result.parts, result.revision, result.acknowledgment) };
+}
+
+/** The rows an admitted command named, which settle into their new groups at once: you caused the move, so it isn't news. */
+export function ackRows(parts: AckParts): number[] {
+  const lists = [...parts.added.map((added) => added.targets), parts.kept, parts.leftAlone, ...parts.holds.map((hold) => hold.targets), parts.released, parts.superseded,
+    parts.dropped, ...parts.interventions.map((item) => item.targets), ...parts.starting.map((item) => item.targets)];
+  return [...new Set(lists.flat().flatMap((item) => item.n === null ? [] : [item.n]))];
+}
+
+/** A number cell's click composes into the command box: it appends the number, and with Shift turns the last number or range into a range to it. */
+export function composeNumber(text: string, n: number, shift: boolean): string {
+  const last = shift ? /(\d+)(?:-\d+)?\s*$/u.exec(text) : null;
+  if (last && Number(last[1]) !== n) return `${text.slice(0, last.index)}${Math.min(Number(last[1]), n)}-${Math.max(Number(last[1]), n)}`;
+  return text && !/\s$/u.test(text) ? `${text} ${n}` : `${text}${n}`;
+}
+
 /** What the next-owner cell leads with: who acts and what wakes the row, then the server's detail. */
 function nextOf(row: RosterRow, roster: EffortRoster, now: number, titles: ReadonlyMap<string, string>): RosterLine["next"] {
   const detail = row.label || null;
@@ -393,8 +509,8 @@ export function rosterView(roster: EffortRoster, options: { order: RosterOrder; 
   };
 }
 
-/** A roster key: move, toggle the order, Mark seen, list the keys, open the row's menu, or run one of its items. */
-export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" } | { kind: "row"; id: MenuItem["id"] };
+/** A roster key: move, toggle the order, Mark seen, list the keys, type a command, open the row's menu, or run one of its items. */
+export type KeyAction = { kind: "move"; step: 1 | -1 } | { kind: "order" | "seen" | "keys" | "menu" | "command" } | { kind: "row"; id: MenuItem["id"] };
 /**
  * What a key does on the roster, or null for a key it leaves alone. Shift, never a letter's case, picks ⇧R and ⇧S, so Caps Lock can't
  * turn Refresh into Reset or the order toggle into Stop. Space and Enter on a button or link stay that control's own.
@@ -409,6 +525,7 @@ export function rosterKey(event: { key: string; shiftKey: boolean; metaKey: bool
     case "s": return { kind: "order" };
     case " ": return on.control ? null : { kind: "seen" };
     case "?": return { kind: "keys" };
+    case "/": return { kind: "command" };
     case ".": return { kind: "menu" };
     case "Enter": return on.control ? null : { kind: "row", id: "thread" };
     case "o": return { kind: "row", id: "pr" };
@@ -436,5 +553,6 @@ export const ROSTER_KEYS: [string, string][] = [
   ["o", "Open the PR"],
   ["s", "By number or by state"],
   ["Space", "Mark seen"],
+  ["/", "Type a command; Esc leaves the box"],
   ["?", "These keys"],
 ];

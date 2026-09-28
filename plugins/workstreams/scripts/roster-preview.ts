@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "../inkwell-fixtures.js";
-import { rosterView, settle, type RosterOrder } from "../roster-view-model.js";
+import { ackView, rosterView, settle, type RosterOrder } from "../roster-view-model.js";
 import { RosterPane } from "../roster-view.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -18,8 +18,10 @@ const noop = () => {};
 const pane = (wide: boolean, order: RosterOrder) => renderToStaticMarkup(createElement(RosterPane, {
   view: rosterView(ROSTER, { order, now: NOW, settled: settle(ROSTER), seen: { seq: 400, at: NOW - (2 * 60 + 16) * 60_000 } }),
   wide, mount: wide ? "nav" : "tab", live: true, order, focusN: 5, menuN: null, liveThreads: new Set(["thr_folio_entry"]),
-  note: { command: "hold 8 because waiting on catalog team copy", lines: ["Now held: 8 (waiting on catalog team copy)"], tone: "info" },
-  history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onMenu: noop, onAction: noop, onToggleGroup: noop, onOpenUrl: noop,
+  command: { value: wide ? "" : "hold 8 because ", onValue: noop, onSubmit: noop, ack: ackView({ ...ROSTER.lastCommand!, fresh: wide }, NOW), open: wide, onToggle: noop,
+    onLeave: noop, note: null },
+  history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop,
+  onToggleGroup: noop, onOpenUrl: noop,
 }));
 const frame = (width: number, wide: boolean, order: RosterOrder) =>
   `<section style="width:${width}px;height:900px;border:1px solid #2a2a2a;flex:none" data-bb-plugin="workstreams">${pane(wide, order)}</section>`;

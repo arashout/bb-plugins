@@ -19,6 +19,8 @@ export const TONE_CLASS: Record<NonNullable<Tone>, string> = {
 
 export type RowActions = {
   onFocus(n: number): void;
+  /** A number cell writes its number into the command box, or with Shift a range to it, without running anything. */
+  onCompose(n: number, shift: boolean): void;
   onMenu(n: number | null): void;
   onAction(line: RosterLine, id: MenuItem["id"]): void;
   onToggleGroup(key: RosterGroup["key"]): void;
@@ -89,12 +91,14 @@ function RowMenu({ line, open, onMenu, onAction }: { line: RosterLine; open: boo
   </DropdownMenu.Root>;
 }
 
-/** The row number: dashed when left alone, hatched when held, with a dot while it changed since you looked. */
-function RowNumber({ line }: { line: RosterLine }) {
+/** The row number: dashed when left alone, hatched when held, with a dot while it changed since you looked. A click composes it into the command box. */
+function RowNumber({ line, onCompose }: { line: RosterLine } & Pick<RowActions, "onCompose">) {
   return <span className="relative inline-flex items-center">
     {line.changed ? <span aria-label="Changed since you looked" className="absolute -left-2 size-1 rounded-full bg-foreground/70" /> : null}
-    <span className={cn("inline-flex h-5 min-w-5 items-center justify-center rounded-[3px] px-0.5 tabular-nums", line.leftAlone && "border border-dashed border-muted-foreground/60")}
-      style={line.held ? HATCH : undefined}>{line.n}</span>
+    <button type="button" data-compose={line.n} onClick={(event) => { event.stopPropagation(); onCompose(line.n, event.shiftKey); }}
+      title={`Add ${line.n} to the command; Shift-click for a range`}
+      className={cn("inline-flex h-5 min-w-5 items-center justify-center rounded-[3px] px-0.5 tabular-nums outline-none hover:bg-foreground/[0.08] focus-visible:ring-2 focus-visible:ring-ring",
+        line.leftAlone && "border border-dashed border-muted-foreground/60")} style={line.held ? HATCH : undefined}>{line.n}</button>
   </span>;
 }
 
@@ -183,7 +187,7 @@ export function RosterTable(props: RowsProps) {
         : group.lines.map((line) => <tr key={line.n} {...rowProps(line, props)}
           className={cn("border-b border-border/50 align-middle outline-none hover:bg-foreground/[0.03] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
             focusN === line.n && "bg-foreground/[0.05]")}>
-          <td className="px-2 py-1.5"><RowNumber line={line} /></td>
+          <td className="px-2 py-1.5"><RowNumber line={line} onCompose={props.onCompose} /></td>
           <td className="px-2 py-1.5"><Pr line={line} onAction={props.onAction} /></td>
           <td className="truncate px-2 py-1.5"><Reviewer line={line} /></td>
           <td className="truncate px-2 py-1.5" title={line.title}>{line.title}{line.draft ? <span className="ml-1.5 text-[11px] text-muted-foreground">draft</span> : null}</td>
@@ -207,7 +211,7 @@ export function RosterList(props: RowsProps) {
           className={cn("border-b border-border/50 px-3 py-1.5 outline-none hover:bg-foreground/[0.03] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
             focusN === line.n && "bg-foreground/[0.05]")}>
           <div className="flex min-w-0 items-center gap-2">
-            <span className="w-7 shrink-0"><RowNumber line={line} /></span>
+            <span className="w-7 shrink-0"><RowNumber line={line} onCompose={props.onCompose} /></span>
             <span className="shrink-0"><Pr line={line} onAction={props.onAction} /></span>
             <span className="min-w-0 flex-1 truncate" title={line.title}>{line.title}{line.draft ? <span className="ml-1.5 text-[11px] text-muted-foreground">draft</span> : null}</span>
             <span className="max-w-24 shrink-0 truncate text-muted-foreground"><Reviewer line={line} /></span>

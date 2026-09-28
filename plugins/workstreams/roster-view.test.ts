@@ -4,15 +4,18 @@ import { describe, expect, it } from "vitest";
 import { interpretEffortCommand, type CommandContext } from "./effort-command";
 import type { EffortRoster } from "./effort-roster";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures";
-import { holdCommand, rosterKey, rosterView, rowCommandInput, rowIntent, settle } from "./roster-view-model";
+import { ackView, holdCommand, rosterKey, rosterView, rowCommandInput, rowIntent, settle } from "./roster-view-model";
+import type { CommandBoxProps } from "./roster-command";
 import { keyRow, RosterPane, RosterPicker, typing } from "./roster-view";
 
 const noop = () => {};
-function pane(wide: boolean, roster: EffortRoster = ROSTER, order: "number" | "state" = "number") {
+const box = (command: Partial<CommandBoxProps> = {}): CommandBoxProps =>
+  ({ value: "", onValue: noop, onSubmit: noop, ack: null, open: false, onToggle: noop, onLeave: noop, note: null, ...command });
+function pane(wide: boolean, roster: EffortRoster = ROSTER, order: "number" | "state" = "number", command: Partial<CommandBoxProps> = {}) {
   const view = rosterView(roster, { order, now: NOW, settled: settle(roster), seen: { seq: 400, at: NOW - 60 * 60_000 } });
   return renderToStaticMarkup(createElement(RosterPane, {
-    view, wide, mount: "tab", live: true, order, focusN: null, menuN: null, liveThreads: new Set(["thr_folio_entry"]), note: null, history: roster.history, hasParent: true,
-    onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onMenu: noop, onAction: noop, onToggleGroup: noop, onOpenUrl: noop,
+    view, wide, mount: "tab", live: true, order, focusN: null, menuN: null, liveThreads: new Set(["thr_folio_entry"]), command: box(command), history: roster.history,
+    hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop, onToggleGroup: noop, onOpenUrl: noop,
   }));
 }
 const headers = (html: string) => [...html.matchAll(/<th[^>]*>(.*?)<\/th>/gu)].map((match) => match[1]!.replace(/<[^>]+>/gu, ""));
@@ -37,8 +40,18 @@ describe("roster pane markup", () => {
     }
   });
 
+  it("makes each row's number compose it into the command box, pinned below the rows, without running anything", () => {
+    for (const html of [pane(true), pane(false)]) {
+      expect(html.match(/data-compose="\d+"/gu)).toHaveLength(ROSTER.rows.filter((row) => row.state !== "done").length);
+      expect(html).toContain('title="Add 4 to the command; Shift-click for a range"');
+      expect(html.indexOf('aria-label="Command"')).toBeGreaterThan(html.lastIndexOf("data-compose="));
+    }
+  });
+
   it("keeps every text size at 11px or larger", () => {
-    for (const html of [pane(true), pane(false), pane(true, ROSTER, "state")]) expect(html).not.toMatch(/text-\[(?:[0-9]|10)(?:\.\d+)?px\]/u);
+    const ack = ackView({ ...ROSTER.lastCommand!, fresh: true }, NOW);
+    for (const html of [pane(true), pane(false), pane(true, ROSTER, "state"), pane(true, ROSTER, "number", { ack, open: true })])
+      expect(html).not.toMatch(/text-\[(?:[0-9]|10)(?:\.\d+)?px\]/u);
   });
 
   it("uses amber only on decisions and stale marks, and rose only on system issues", () => {

@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { interpretEffortCommand, type CommandContext } from "./effort-command.js";
 import { effortRosterSchema, type EffortRoster } from "./effort-roster.js";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures.js";
-import { clock, nextWake, rosterView, settle, type RosterGroup, type RosterOrder } from "./roster-view-model.js";
+import { ackChips, ackDetails, ackRows, ackView, clock, commandInput, composeNumber, nextWake, rosterKey, rosterView, settle, type AckParts, type RosterGroup,
+  type RosterOrder } from "./roster-view-model.js";
 
 const view = (order: RosterOrder = "number", roster: EffortRoster = ROSTER, settled = settle(roster)) =>
   rosterView(roster, { order, now: NOW, settled, seen: { seq: 400, at: NOW - (2 * 60 + 16) * 60_000 } });
@@ -161,5 +163,88 @@ describe("roster view model", () => {
     const source = readFileSync(new URL("./roster-view-model.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import (type )?.* from "(.+)";$/gmu)].map((match) => [match[2], match[1] === "type " ? "type" : "value"]);
     expect(imports).toEqual([["./effort-roster", "type"], ["./roster-shared", "value"]]);
+  });
+});
+
+describe("roster command box", () => {
+  const target = (n: number) => ROSTER.rows.find((row) => row.n === n)!.target;
+  /** The parser the server runs over the fixture's numbers, with revision 3 including 1, 2, and 7-17, and 8 held. */
+  function parse(text: string, holds: number[] = [8]) {
+    const base: CommandContext = {
+      effortId: ROSTER.effort.id, snapshot: { id: ROSTER.snapshotId!, effortId: ROSTER.effort.id, stale: false, rows: ROSTER.rows.map(({ n, target: url }) => ({ n, target: url })) },
+      issued: new Map(ROSTER.rows.map((row) => [row.n, row.target])), rows: new Map(), holds: {}, instruction: null, lastRevision: 0, decisions: [],
+      ownerOf: () => ({ effortId: ROSTER.effort.id, name: ROSTER.effort.name }),
+    };
+    const rev = interpretEffortCommand("move 1, 2, 7-17 forward", base);
+    if (rev.kind !== "admit") throw new Error(rev.message);
+    const result = interpretEffortCommand(text, { ...base, instruction: rev.instruction, lastRevision: rev.instruction!.revision,
+      holds: Object.fromEntries(holds.map((n) => [target(n), { reason: "waiting on catalog team copy", heldAt: NOW }])) });
+    if (result.kind !== "admit") throw new Error(result.message);
+    return { ...result.parts, answers: [], starting: [] } satisfies AckParts;
+  }
+  const labels = (parts: AckParts) => ackChips(parts).map((chip) => chip.label);
+
+  it("sends the snapshot it rendered, the revision it showed, and each decision at the revision you read, so an answer can't reach a changed question", () => {
+    expect(commandInput(ROSTER, "D1 A", "req-2")).toEqual({ effortId: ROSTER.effort.id, snapshotId: ROSTER.snapshotId, text: "D1 A", requestId: "req-2", source: "panel",
+      expectedRevision: 4, decisions: [{ n: 1, revision: 1 }, { n: 2, revision: 1 }] });
+    const changed = { ...ROSTER, decisions: ROSTER.decisions.map((decision) => decision.n === 1 ? { ...decision, revision: 3 } : decision) };
+    expect(commandInput(changed, "D1 A", "req-3").decisions).toEqual([{ n: 1, revision: 3 }, { n: 2, revision: 1 }]);
+  });
+
+  it("names the parser's parts in the chip row, held rows included and no merge last, so leaving a row alone never reads as holding it", () => {
+    expect(labels(parse("move 1-6 forward, leave 3 alone"))).toEqual(["+4-6 added", "1, 2 kept", "3 left alone, not a hold", "8 held, hold wins", "no merge"]);
+    // A hold you set a moment ago still shows when the next command names the row (A8).
+    expect(labels(parse("move 1..6 forward except 3", [5, 8]))).toEqual(["+4-6 added", "1, 2 kept", "3 left alone, not a hold", "5, 8 held, hold wins", "no merge"]);
+    // Even a command about another row names the held one.
+    expect(labels(parse("release 4"))).toContain("8 held, hold wins");
+    expect(labels(parse("hold 6 because waiting on copy"))).toEqual(["6 now held", "8 held, hold wins", "no merge"]);
+  });
+
+  it("labels the details block the way the thread's acknowledgment reads, and keeps any finding the parts don't carry", () => {
+    const { result } = ROSTER.lastCommand!;
+    if (result.kind !== "admit") throw new Error("the fixture's last command was admitted");
+    const details = ackDetails(result.parts!, result.revision, result.acknowledgment);
+    expect(details.map((detail) => detail.label)).toEqual(["Added", "Kept", "Still included", "Excluded", "Still held", "Effects", "Not granted", "Starting", "Also"]);
+    const text = Object.fromEntries(details.map((detail) => [detail.label, [detail.numbers, detail.text].filter(Boolean).join(" · ")]));
+    expect(text).toMatchObject({ Added: "4-6 · move forward · rev 4", Kept: "1, 2 · already included; effects unchanged", Excluded: "3 · this instruction only, not a hold",
+      "Still held": "8 · outlasts every instruction · release 8 to include", "Not granted": "mark ready, request review, merge",
+      Also: "Instruction r4 · 16 PRs · stops at Ready · reports changes" });
+    expect(text.Starting).toContain("2 fix failing checks · new worker: the only quill thread is busy on #185");
+    expect(text.Starting).toContain("1 address review feedback · reused thread: idle, on the same branch");
+    // Release includes only a held row the instruction includes: one this command leaves alone stays out, and a merge preview includes nothing (A2).
+    const stillHeld = (parts: AckParts) => ackDetails(parts, 4).find((detail) => detail.label === "Still held");
+    expect(stillHeld(parse("move 1-6 forward, leave 5 alone", [5, 8]))).toEqual({ label: "Still held", numbers: "5, 8",
+      text: "outlasts every instruction · release 8 to include · 5 also left alone this instruction" });
+    expect(stillHeld(parse("merge 8"))).toEqual({ label: "Still held", numbers: "8", text: "outlasts every instruction" });
+    // What a recheck found is only in the text, so it shows; the plain line the parts already say doesn't repeat.
+    const recheck = { ...result.parts!, added: [], kept: [], stillIncluded: [], leftAlone: [], effects: [], notGranted: [], starting: [],
+      interventions: [{ action: "recheck" as const, release: false, targets: [{ target: target(17), n: 17 }] }] };
+    expect(ackDetails(recheck, 4, ["Recheck: 17", "Recheck 17: short of Ready: approved"]).at(-1)).toEqual({ label: "Also", numbers: null, text: "Recheck 17: short of Ready: approved" });
+  });
+
+  it("shows where and when a command came from, and settles the rows it named", () => {
+    const view = ackView({ ...ROSTER.lastCommand!, fresh: false }, NOW);
+    expect(view.meta).toMatch(/^roster · \d\d:\d\d:\d\d · rev 4 · S-41a7c3e90b2d · 0 model turns$/u);
+    expect(view.chips.at(-1)).toEqual({ kind: "no", label: "no merge" });
+    const { result } = ROSTER.lastCommand!;
+    expect(ackRows((result as Extract<typeof result, { kind: "admit" }>).parts!).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
+    // A thread command cost the parent a turn; a clarification changed nothing and has no chips.
+    expect(ackView({ ...ROSTER.lastCommand!, origin: "thread", fresh: false }, NOW).meta).not.toContain("0 model turns");
+    const clarified = ackView({ ...ROSTER.lastCommand!, result: { kind: "clarify", message: "move forward needs rows.", normalized: "move 1-6 forward" }, fresh: true }, NOW);
+    expect(clarified).toMatchObject({ kind: "clarify", chips: [], details: [], message: "move forward needs rows.", normalized: "move 1-6 forward" });
+  });
+
+  it("composes a clicked number into the command, and a Shift-click into a range from the last one", () => {
+    expect(composeNumber("", 4, false)).toBe("4");
+    expect(composeNumber("move ", 4, false)).toBe("move 4");
+    expect(composeNumber("move 4", 6, true)).toBe("move 4-6");
+    expect(composeNumber("move 6", 4, true)).toBe("move 4-6");
+    expect(composeNumber("move 4-6", 9, true)).toBe("move 4-9");
+    expect(composeNumber("D2 13", 15, false)).toBe("D2 13 15");
+    expect(composeNumber("hold ", 8, true)).toBe("hold 8");
+  });
+
+  it("puts you in the command box on /", () => {
+    expect(rosterKey({ key: "/", shiftKey: false, metaKey: false, ctrlKey: false, altKey: false }, { control: false, held: false })).toEqual({ kind: "command" });
   });
 });
