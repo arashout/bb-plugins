@@ -139,6 +139,27 @@ it("moves the whole ticket cohort from remote-only PR inventory and rejects a st
   expect(await env.move(target, destinationEffort.key, preview)).toMatchObject({ ok: false, error: expect.stringContaining("changed") });
 });
 
+it("moves tickets recorded only in a remote PR description with their connected PRs", async () => {
+  const env = await setup();
+  const described = parsePrList(JSON.stringify([{ number: 46, url: "https://github.com/inkwell/atlas/pull/46",
+    state: "OPEN", title: "ABC-303 Improve atlas lookup", headRefName: "atlas-lookup",
+    body: "https://linear.app/inkwell/issue/ABC-404\nRefs: ABC-405" }]))!.pr;
+  const connected = remotePr(47, "ABC-405");
+  env.setRemote([described, connected]);
+  await env.refresh();
+  const target = { prUrl: described.url };
+  const preview = await env.context(target);
+  expect(preview).toMatchObject({ ok: true, affected: {
+    tickets: ["ABC-303", "ABC-404", "ABC-405"], prUrls: [described.url, connected.url], checkoutPaths: [],
+  } });
+  const destinationEffort = preview.efforts.find((item) => item.key !== preview.source.effortKey)!;
+  expect(await env.move(target, destinationEffort.key, preview)).toMatchObject({ ok: true });
+  const owner = env.store.owner("prUrl", described.url);
+  expect(owner?.name).toBe(destinationEffort.name);
+  expect(env.store.owner("ticket", "ABC-404")?.id).toBe(owner?.id);
+  expect(env.store.owner("ticket", "ABC-405")?.id).toBe(owner?.id);
+});
+
 it("blocks a move during automatic dispatch without changing the checkout owner", async () => {
   const env = await setup();
   const target = { path };

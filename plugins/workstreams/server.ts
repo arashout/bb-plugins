@@ -1676,12 +1676,16 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Canonical PR, checkout, ownership, and thread evidence for board and context readers. */
+  function prTicketIds(pr: Pick<Pr, "title" | "headRefName" | "ticketRefs">, pattern: RegExp): string[] {
+    return ticketsIn([pr.title, pr.headRefName ?? "", ...(pr.ticketRefs?.urls ?? []), ...(pr.ticketRefs?.mentions ?? [])].join("\n"), pattern);
+  }
+
   function readWorkContext(current: { groups: Board["groups"]; prInventory: { entries: Board["prInventory"]["entries"] } }, pattern: RegExp, includeRaw = false) {
     const units = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units));
     const remotes = current.prInventory.entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale,
-      tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.title }));
+      tickets: prTicketIds(entry.pr, pattern), value: entry.pr.title }));
     const locals = [...units.flatMap((unit) => unit.pr ? [{ url: unit.pr.url, path: unit.path,
-      tickets: [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])],
+      tickets: [...prTicketIds(unit.pr, pattern), ...(unit.ticket ? [unit.ticket] : [])],
       value: unit.pr.title }] : []), ...(includeRaw ? readUnits().flatMap((unit) => unit.pr ? [{ url: unit.pr.url,
       path: unit.path, tickets: [] as string[], value: unit.pr.title }] : []) : [])];
     return workContextIndex({ remotes, locals, ownerOf: (kind, id) => effortStore.owner(kind, id),
@@ -3254,10 +3258,10 @@ export default async function plugin(bb: BbPluginApi) {
     const freshPaths = new Set(scanned.filter((unit) => unit.observed?.pr === true).map((unit) => unit.path));
     const work = workItemIndex(
       current.prInventory.entries.filter((entry) => !entry.stale).map((entry) => ({ url: entry.pr.url, stale: false,
-        tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.url })),
+        tickets: prTicketIds(entry.pr, pattern), value: entry.pr.url })),
       current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
         unit.pr && freshPaths.has(unit.path) ? [{ url: unit.pr.url, path: unit.path,
-          tickets: [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])],
+          tickets: [...prTicketIds(unit.pr, pattern), ...(unit.ticket ? [unit.ticket] : [])],
           value: unit.pr.url }] : []))),
     );
     const recordedUrls = (db.prepare(`SELECT pr_url FROM action_runs WHERE thread_id = ? AND pr_url IS NOT NULL ORDER BY id DESC LIMIT 100`)
