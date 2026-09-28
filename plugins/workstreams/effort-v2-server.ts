@@ -116,6 +116,9 @@ const parentContextSchema = z.object({
 export const effortV2Contract = {
   /** `since` is a `through` an earlier read returned: the roster then says what changed after it. */
   effort_roster_get: { input: z.object({ effortId: z.string().min(1).max(500), since: z.number().int().nonnegative().optional() }).strict(), output: effortRosterSchema },
+  /** Every saved effort's roster: how it runs, and the parent thread a v2 effort reports to. Surfaces find a thread's roster here without a read per thread. */
+  effort_roster_list: { input: z.null(), output: z.array(z.object({ id: z.string(), key: z.string(), name: z.string(), archived: z.boolean(),
+    mode: z.enum(["legacy", "v2"]), parentThreadId: z.string().nullable() })) },
   effort_reconcile: { input: z.object({ effortId: z.string().min(1).max(500), prUrl: z.string().max(500) }).strict(),
     output: z.object({ status: z.enum(["checked", "failed"]), error: z.string().optional(), row: rosterRowSchema }) },
   effort_v2_preview: { input: z.object({ effortId: z.string().min(1).max(500) }).strict(), output: effortV2PreviewSchema },
@@ -1345,6 +1348,11 @@ export function createEffortV2(deps: EffortV2Deps) {
   }
   const handlers = {
     effort_roster_get: ({ effortId, since }: { effortId: string; since?: number }) => roster(effortId, since),
+    effort_roster_list: () => deps.efforts.list().map((effort) => {
+      const { mode } = deps.execution.get(effort.id);
+      // A legacy coordinator isn't an effort parent: nothing reports to it, and its roster only reads.
+      return { id: effort.id, key: effort.key, name: effort.name, archived: Boolean(effort.archivedAt), mode, parentThreadId: mode === "v2" ? effort.coordinatorThreadId : null };
+    }),
     effort_reconcile: ({ effortId, prUrl }: { effortId: string; prUrl: string }) => reconcile(effortId, prUrl),
     effort_v2_preview: ({ effortId }: { effortId: string }) => preview(effortId),
     effort_v2_set: setMode,

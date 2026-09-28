@@ -845,6 +845,24 @@ describe("effort instructions", () => {
     expect(await context("thr_catalog_parent")).toBeNull();
   });
 
+  it("lists every roster with its mode, naming a parent thread only where a v2 effort reports to one", async () => {
+    const env = await instructed();
+    const shelving = env.efforts["Shelving entry"]!;
+    const vault = env.efforts["Vault audits"]!;
+    env.store.save({ ...env.store.getRecord(env.effort.id)!, coordinatorThreadId: "thr_catalog_parent", coordinatorState: "ready" });
+    // A legacy coordinator thread gets no roster button: nothing reports to it.
+    env.store.save({ ...env.store.getRecord(shelving.id)!, coordinatorThreadId: "thr_shelving_coordinator", coordinatorState: "ready" });
+    env.store.setArchived(vault.id, true);
+    expect(await env.harness.callRpc("effort_roster_list", null)).toEqual(expect.arrayContaining([
+      { id: env.effort.id, key: env.effort.key, name: "Catalog follow-ups", archived: false, mode: "v2", parentThreadId: "thr_catalog_parent" },
+      { id: shelving.id, key: shelving.key, name: "Shelving entry", archived: false, mode: "legacy", parentThreadId: null },
+      // An archived roster stays readable, so it stays listed.
+      { id: vault.id, key: vault.key, name: "Vault audits", archived: true, mode: "legacy", parentThreadId: null },
+    ]));
+    env.work.setMode(env.effort.id, "legacy", 1, () => []);
+    expect(await env.harness.callRpc("effort_roster_list", null)).toContainEqual(expect.objectContaining({ id: env.effort.id, mode: "legacy", parentThreadId: null }));
+  });
+
   it("blocks merging efforts while either has an active instruction", async () => {
     const env = await instructed();
     const shelving = env.efforts["Shelving entry"]!;
