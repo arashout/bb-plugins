@@ -1,0 +1,145 @@
+// The PR inventory, the front door: every open PR you author, and every PR an
+// effort names as a member, grouped by the effort that owns it (explicitly or
+// through its ticket), with "No effort" last. Each row says who reviews it, its
+// state in the board's words, what needs attention with the next step, its
+// owner, and its age, when GitHub last answered for it, and who works on it.
+// Pure: the server gathers the facts; this shapes and counts them.
+import { z } from "zod";
+import type { Pr } from "./contract.js";
+import type { PrObservation } from "./inventory-store.js";
+import { attentionReasonSchema, type AttentionReason } from "./pr-attention.js";
+import { prHoldSchema, type PrHold } from "./pr-holds.js";
+import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } from "./pipeline.js";
+import type { ResolvedThreadLink } from "./work-context.js";
+import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
+import { prTarget } from "./ghactions.js";
+
+export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
+export type InventoryQuestion = (typeof INVENTORY_QUESTIONS)[number];
+
+const threadSchema = z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict();
+export const inventoryRowSchema = z.object({
+  prUrl: z.string(), repo: z.string(), number: z.number(), title: z.string(),
+  /** False for a PR an effort names that someone else authored: the inventory reads its checkout, or its roster's last read. */
+  authored: z.boolean(),
+  reviewers: z.object({ requested: z.array(z.string()), reviewed: z.array(z.object({ login: z.string(), state: z.string(), submittedAt: z.string().optional() }).strict()) }).strict(),
+  /** The board's stage, and its state word there: the roster's when a v2 roster manages the PR. */
+  stage: z.enum(PIPELINE_STAGES).nullable(), status: z.string(),
+  /** Your open PR in its repository that this one of yours is stacked on, by number: file this row under that one, which merges first. */
+  stackedOn: z.number().nullable(),
+  draft: z.boolean().nullable(), head: z.string().nullable(),
+  attention: z.array(attentionReasonSchema),
+  /** The last read GitHub answered, and the last it didn't, with why, while no read since has succeeded. */
+  checkedAt: z.string().nullable(), failure: z.object({ at: z.string(), error: z.string().nullable() }).strict().nullable(),
+  /** The last full inventory read no longer listed it, or couldn't read it. */
+  stale: z.boolean(),
+  hold: prHoldSchema.nullable(),
+  /** The thread the work started in, and the one working on it now or last. */
+  threads: z.object({ origin: threadSchema.nullable(), executor: threadSchema.nullable() }).strict(),
+  managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
+}).strict();
+export type InventoryRow = z.infer<typeof inventoryRowSchema>;
+const effortSchema = z.object({ id: z.string(), name: z.string() }).strict();
+export const inventoryViewSchema = z.object({
+  /** One group per effort that owns a row, by name, then "No effort" (a null effort). */
+  groups: z.array(z.object({ effort: effortSchema.nullable(), rows: z.array(inventoryRowSchema) }).strict()),
+  /** Rows with at least one reason of each question, across every row, whatever the filter. */
+  counts: z.object({ "forgotten-draft": z.number(), "missing-reviewer": z.number(), "needs-nudge": z.number() }).strict(),
+  /** The last complete read, and the last attempt, of your authored PRs. */
+  checkedAt: z.string().nullable(), attemptedAt: z.string().nullable(), refreshing: z.boolean(),
+  /** GitHub's rate limit holds reads until then. */
+  rateLimitedUntil: z.number().nullable(),
+  warnings: z.array(z.string()),
+}).strict();
+export type InventoryView = z.infer<typeof inventoryViewSchema>;
+
+export type ThreadRef = { title: string | null; titleFallback: string | null; status: string; updatedAt: number };
+/** Everything one row reads. `pr` is null for a PR an effort names that nothing on the board has read. */
+export type InventoryRowInput = {
+  prUrl: string; pr: Pr | null; authored: boolean; stale: boolean;
+  /** When no Pr facts exist: the roster's last full read of the PR. */
+  read: { title: string; isDraft: boolean; headOid: string } | null;
+  reasons: readonly AttentionReason[]; hold: PrHold | null; observation: PrObservation | null;
+  managed: ManagedPr | null; stackedOn: number | null;
+  links: readonly ResolvedThreadLink[];
+  /** The thread of this PR's newest v2 attempt. */
+  attemptThread: string | null;
+  threads: ReadonlyMap<string, ThreadRef>;
+};
+
+const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
+
+export function inventoryRow(input: InventoryRowInput): InventoryRow {
+  const { pr, observation, managed, stackedOn } = input;
+  const thread = (id: string | null | undefined): InventoryRow["threads"]["origin"] => {
+    const known = id ? input.threads.get(id) : undefined;
+    return id && known ? { id, title: (known.title ?? known.titleFallback ?? id).slice(0, 200), active: known.status === "active" } : null;
+  };
+  const known = (link: ResolvedThreadLink) => input.threads.has(link.threadId);
+  // Where the work started: a thread started for its ticket, or one whose metadata names the PR.
+  const origin = input.links.find((link) => known(link) && link.tier === "started" && link.sources.some((source) => source === "cluster" || source === "metadata"));
+  // Who works on it: our v2 attempt's thread, else the busiest, newest legacy worker, dispatch, or run thread.
+  const executor = input.attemptThread ?? input.links.filter((link) => known(link) && link.sources.some((source) => EXECUTORS.has(source)))
+    .sort((a, b) => Number(input.threads.get(b.threadId)!.status === "active") - Number(input.threads.get(a.threadId)!.status === "active") ||
+      input.threads.get(b.threadId)!.updatedAt - input.threads.get(a.threadId)!.updatedAt)[0]?.threadId;
+  const stage = pr === null ? null : stageFor(prLifecycle(pr), pr, stackedOn);
+  const target = prTarget(input.prUrl);
+  return {
+    prUrl: input.prUrl, repo: target?.slug ?? "", number: target?.number ?? 0,
+    title: displayTitle(pr?.title ?? input.read?.title ?? ""), authored: input.authored,
+    reviewers: { requested: pr?.reviewRequests ?? [], reviewed: (pr?.latestReviews ?? []).filter((review) => review.state !== "PENDING") },
+    stage, status: managed ? managedLabel(managed) : pr && stage ? blockerFor(pr, stage, input.hold, stackedOn, input.stale).label
+      : input.read ? "Not polled; read by its roster" : "Not read yet",
+    stackedOn,
+    draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
+    attention: [...input.reasons],
+    checkedAt: observation?.checkedAt ?? null,
+    failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
+    stale: input.stale, hold: input.hold,
+    threads: { origin: thread(origin?.threadId), executor: thread(executor) },
+    managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
+  };
+}
+
+/** Rows by effort, "No effort" last; only rows with a reason of `only`'s question when given. Counts always cover every row. */
+export function inventoryView(rows: readonly (InventoryRow & { effort: { id: string; name: string } | null })[],
+  meta: Omit<InventoryView, "groups" | "counts">, only?: InventoryQuestion): InventoryView {
+  const asks = (row: InventoryRow, question: InventoryQuestion) => row.attention.some((reason) => reason.question === question);
+  const groups = new Map<string, InventoryView["groups"][number]>();
+  for (const { effort, ...row } of rows) {
+    if (only && !asks(row, only)) continue;
+    const key = effort?.id ?? "";
+    const group = groups.get(key) ?? { effort, rows: [] };
+    group.rows.push(row);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) group.rows.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
+  return {
+    groups: [...groups.values()].sort((a, b) => Number(a.effort === null) - Number(b.effort === null) ||
+      (a.effort?.name ?? "").localeCompare(b.effort?.name ?? "") || (a.effort?.id ?? "").localeCompare(b.effort?.id ?? "")),
+    counts: Object.fromEntries(INVENTORY_QUESTIONS.map((question) => [question, rows.filter((row) => asks(row, question)).length])) as InventoryView["counts"],
+    ...meta,
+  };
+}
+
+/** The plain list the CLI prints: `repo #n · title · reviewers · status · next steps (owner, age) · checked`. */
+export function inventoryText(view: InventoryView, now: number): string {
+  const { counts } = view;
+  const lines = [`${counts["forgotten-draft"]} forgotten in draft · ${counts["missing-reviewer"]} missing a reviewer · ${counts["needs-nudge"]} need a nudge · ` +
+    `last read ${relativeTime(view.checkedAt, now)}${view.refreshing ? " · reading now" : ""}`];
+  if (view.rateLimitedUntil !== null) lines.push(`GitHub rate limit: the next read waits until ${new Date(view.rateLimitedUntil).toISOString()}.`);
+  for (const group of view.groups) {
+    lines.push(group.effort?.name ?? "No effort");
+    for (const row of group.rows) {
+      const reviewers = [...row.reviewers.requested.map((login) => `@${login} (requested)`),
+        ...row.reviewers.reviewed.map((review) => `@${review.login} (${review.state.toLowerCase().replace(/_/gu, " ")})`)].join(", ") || "no reviewer";
+      const steps = row.attention.map((reason) => `${reason.nextStep} (${reason.owner}${reason.since === null ? "" : `, ${compactAge(reason.since, now)}`})`);
+      lines.push(`  ${[`${row.repo} #${row.number}`, row.title || "—", reviewers, row.status, ...steps,
+        row.failure ? `read failed ${relativeTime(row.failure.at, now)}${row.failure.error ? `: ${row.failure.error}` : ""}` : `checked ${relativeTime(row.checkedAt, now)}`,
+        ...row.hold ? [row.hold.reason ? `held: ${row.hold.reason}` : "held"] : [],
+        ...row.managed ? [`roster ${row.managed.effortName}${row.managed.n === null ? "" : ` #${row.managed.n}`}`] : []].join(" · ")}`);
+    }
+  }
+  if (view.groups.length === 0) lines.push("Nothing to show.");
+  return lines.concat(view.warnings.map((warning) => `Warning: ${warning}`)).join("\n");
+}

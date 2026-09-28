@@ -2,18 +2,20 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePrList } from "./gh.js";
 import type { Pr } from "./contract.js";
-import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION,
+  PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { INVENTORY_LIMIT, type InventoryEntry, type InventoryResult } from "./inventory.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
-function setup(datesStates = false, keepsErrors = false) {
+function setup(datesStates = false, keepsErrors = false, keepsClosed = false) {
   const db = new Database(":memory:");
   databases.push(db);
   for (const migration of INVENTORY_MIGRATIONS) db.exec(migration);
   db.exec(PR_OBSERVATIONS_MIGRATION);
   if (datesStates) db.exec(PR_STATE_SINCE_MIGRATION);
   if (keepsErrors) db.exec(PR_OBSERVATION_ERROR_MIGRATION);
+  if (keepsClosed) db.exec(PR_OBSERVATION_CLOSED_MIGRATION);
   let clock = 1_000;
   return { db, store: createInventoryStore(db, () => clock), tick: () => { clock += 1_000; } };
 }
@@ -122,6 +124,26 @@ describe("authored PR cache coverage", () => {
     tick();
     store.inspect({ entries: [first], closed: [], failed: [], warnings: [] });
     expect(store.observation(first.pr.url)).toEqual({ checkedAt: new Date(4_000).toISOString(), failedAt: null, error: null });
+  });
+
+  it("remembers that the last read found a PR merged, closed, or gone from your open PRs, until a read finds it open", () => {
+    const { store, tick } = setup(false, true, true);
+    const first = entry(1), second = entry(2), third = entry(3);
+    store.apply(result([first, second, third]));
+    tick();
+    // #1 left a repository's full listing, a read of #2 found it closed, and a checkout scan found #3 merged.
+    store.apply(result([second, third]));
+    store.inspect({ entries: [], closed: [second.pr.url], failed: [], warnings: [] });
+    store.observe([{ ...third.pr, state: "MERGED" }]);
+    expect([first, second, third].map((row) => store.closed(row.pr.url))).toEqual([true, true, true]);
+    tick();
+    // Reopened, #1 is listed again.
+    store.apply(result([first]));
+    expect([first, second].map((row) => store.closed(row.pr.url))).toEqual([false, true]);
+    // A copy of a database from before the column still records the read, and reads no closure.
+    const old = setup(false, true).store;
+    old.inspect({ entries: [], closed: [first.pr.url], failed: [], warnings: [] });
+    expect([old.observation(first.pr.url)?.checkedAt, old.closed(first.pr.url)]).toEqual([expect.any(String), false]);
   });
 
   it("reflects fresh checkout observations without adding unauthored PRs", () => {

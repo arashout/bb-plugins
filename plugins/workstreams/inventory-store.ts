@@ -13,6 +13,8 @@ export const INVENTORY_MIGRATIONS = [
 export const PR_OBSERVATIONS_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_observations (url TEXT PRIMARY KEY, checked_at TEXT, failed_at TEXT)`;
 /** Why the last read of a PR failed, kept beside its time until a read succeeds. */
 export const PR_OBSERVATION_ERROR_MIGRATION = `ALTER TABLE pr_observations ADD COLUMN error TEXT`;
+/** The last successful read of a PR found it merged, closed, or gone from your open PRs; a read that finds it open clears it. */
+export const PR_OBSERVATION_CLOSED_MIGRATION = `ALTER TABLE pr_observations ADD COLUMN closed INTEGER NOT NULL DEFAULT 0`;
 /** When a read first saw a PR in a state GitHub doesn't date (red checks, a conflict); the row goes when a read sees the state end. */
 export const PR_STATE_SINCE_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_state_since (url TEXT NOT NULL, state TEXT NOT NULL, since TEXT NOT NULL, PRIMARY KEY (url, state))`;
 export type PrObservation = { checkedAt: string | null; failedAt: string | null; error?: string | null };
@@ -57,14 +59,18 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
   /** After each write, so a refresh that rewrites a PR keeps its dates and a PR that leaves the inventory takes its dates along. */
   const pruneStates = () => { if (datesStates) db.prepare(`DELETE FROM pr_state_since WHERE url NOT IN (SELECT url FROM authored_prs)`).run(); };
   const writeMeta = (meta: InventoryMeta) => db.prepare(`INSERT OR REPLACE INTO authored_pr_metadata (id, value) VALUES (1, ?)`).run(JSON.stringify(meta));
-  // A read-only copy of a database from before the column keeps failure times without their reasons.
-  const keepsErrors = db.prepare(`SELECT 1 FROM pragma_table_info('pr_observations') WHERE name = 'error'`).get() !== undefined;
-  const success = db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)
-    ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL${keepsErrors ? ", error = NULL" : ""}`);
+  // A read-only copy of a database from before these columns keeps failure times without their reasons, and closures as plain reads.
+  const column = (name: string) => db.prepare(`SELECT 1 FROM pragma_table_info('pr_observations') WHERE name = ?`).get(name) !== undefined;
+  const keepsErrors = column("error"), keepsClosed = column("closed");
+  const succeeded = (closed: 0 | 1) => db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at${keepsClosed ? ", closed" : ""})
+    VALUES (?, ?, NULL${keepsClosed ? `, ${closed}` : ""}) ON CONFLICT(url) DO UPDATE SET checked_at = excluded.checked_at, failed_at = NULL` +
+    `${keepsErrors ? ", error = NULL" : ""}${keepsClosed ? ", closed = excluded.closed" : ""}`);
+  const success = succeeded(0), closure = succeeded(1);
   const failure = keepsErrors ? db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at, error) VALUES (?, NULL, ?, ?)
     ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at, error = excluded.error`) : db.prepare(`INSERT INTO pr_observations (url, checked_at, failed_at)
     VALUES (?, NULL, ?) ON CONFLICT(url) DO UPDATE SET failed_at = excluded.failed_at`);
   const recordSuccess = (url: string, at: string) => success.run(url.toLowerCase(), at);
+  const recordClosed = (url: string, at: string) => closure.run(url.toLowerCase(), at);
   const recordFailure = (url: string, at: string, error: string) => failure.run(url.toLowerCase(), at, ...keepsErrors ? [error.slice(0, 500)] : []);
   function metadata(): InventoryMeta {
     const row = db.prepare(`SELECT value FROM authored_pr_metadata WHERE id = 1`).get() as { value: string } | undefined;
@@ -91,6 +97,10 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       const row = db.prepare(`SELECT checked_at, failed_at${keepsErrors ? ", error" : ""} FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as
         { checked_at: string | null; failed_at: string | null; error?: string | null } | undefined;
       return row === undefined ? null : { checkedAt: row.checked_at, failedAt: row.failed_at, ...keepsErrors ? { error: row.error ?? null } : {} };
+    },
+    /** The last successful read found this PR merged, closed, or gone from your open PRs. */
+    closed(url: string): boolean {
+      return keepsClosed && (db.prepare(`SELECT closed FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as { closed: number } | undefined)?.closed === 1;
     },
     lastCheckedAt(): string | null {
       const row = db.prepare(`SELECT MAX(checked_at) AS checked_at FROM pr_observations`).get() as { checked_at: string | null };
@@ -123,8 +133,12 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
         db.prepare(`UPDATE authored_prs SET stale = 1`).run();
         for (const entry of entries()) {
           const repo = entry.repo.toLowerCase();
-          if (!result.owners.includes(repo.split("/")[0]!) || coverage.get(repo) === true ||
-              (result.discoveryComplete && !coverage.has(repo))) remove.run(entry.pr.url.toLowerCase());
+          const scoped = result.owners.includes(repo.split("/")[0]!);
+          if (!scoped || coverage.get(repo) === true || (result.discoveryComplete && !coverage.has(repo))) {
+            remove.run(entry.pr.url.toLowerCase());
+            // Gone from your open PRs, it merged or closed; if it is still listed, its read below says so.
+            if (scoped) recordClosed(entry.pr.url, at);
+          }
         }
         for (const entry of result.entries) if (entry.pr.state === "OPEN") {
           insert(entry, stored.get(entry.pr.url.toLowerCase()));
@@ -145,7 +159,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       const at = new Date(now()).toISOString();
       db.transaction(() => {
         const known = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
-        for (const url of result.closed) { remove.run(url.toLowerCase()); recordSuccess(url, at); }
+        for (const url of result.closed) { remove.run(url.toLowerCase()); recordClosed(url, at); }
         for (const url of result.failed) {
           db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
           recordFailure(url, at, failureOf(url, result.warnings, "GitHub could not read this PR."));
@@ -167,7 +181,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       const known = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry]));
       db.transaction(() => {
         for (const pr of prs) {
-          recordSuccess(pr.url, at);
+          (pr.state === "OPEN" ? recordSuccess : recordClosed)(pr.url, at);
           const entry = known.get(pr.url.toLowerCase());
           if (entry === undefined) continue;
           if (pr.state !== "OPEN") remove.run(pr.url.toLowerCase());

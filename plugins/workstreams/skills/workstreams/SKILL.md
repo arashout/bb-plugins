@@ -660,6 +660,30 @@ Zoom bands span depth ranges and adapt to the depth the board actually
 collapsed to, so every band boundary reveals something. On a two-level board
 the thresholds are exactly what they were before the hierarchy existed.
 
+## PR inventory
+
+The inventory lists every open PR you author, and every open PR an unarchived
+effort names as a member, grouped by the effort that owns it (as a member or
+through its ticket), with "No effort" last. A background read refreshes your
+authored PRs every `inventoryPollSeconds`. PRs you don't author show their
+checkout's facts or their roster's last read, until the board's latest read
+finds them merged or closed.
+
+```
+bb workstreams inventory [--attention draft|reviewer|nudge] [--json]
+```
+
+Each row gives the PR, its requested and past reviewers, its state in the
+board's words (its roster's when a v2 roster manages it), the PR of yours it is
+stacked on (`stackedOn`, whose row it files under), and each attention
+reason with its next step, owner, and age. It also gives when GitHub last
+answered for the PR, its last failed read and why, any hold, and the thread the
+work started in and the one working on it. The header counts PRs forgotten in
+draft, missing a reviewer, and needing a nudge; `--attention` filters to one
+question. The `inventory_get` RPC returns the same view, and the
+`inventory-changed` realtime event fires after each read, hold, or inventory
+action.
+
 ## Effort rosters (v2)
 
 An effort can move to its v2 roster: one permanently numbered row per PR the

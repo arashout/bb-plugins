@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
 import { advancePreviewJobSchema } from "./bulk-advance.js";
 import type { Pr, RawUnit } from "./contract.js";
+import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
+import type { InventoryView } from "./inventory-view.js";
 import type { InventoryInspection, InventoryResult } from "./inventory.js";
 import plugin, { type Board } from "./server.js";
 
@@ -20,6 +22,12 @@ const listing = (prs: Pr[], extra: Partial<InventoryResult> = {}): InventoryResu
   discoveryComplete: true, repositories: prs.length ? [{ repo: "inkwell/folio", complete: true }] : [], complete: true, warnings: [], ...extra });
 const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githubRepo: "inkwell/folio", branch: "abc-42-shelves", dirty: false,
   ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
+/** A full read of an open PR, as Advance and the roster keep it. */
+const advanceFacts = (number: number): AdvanceFacts => ({ prUrl: url(number), number, title: pr(number).title, repo: "inkwell/folio",
+  headRefName: `abc-${number}-shelves`, baseRefName: "main", headOid: HEAD, baseOid: "d".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false,
+  reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention",
+  detail: "Needs a review", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
+  approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
@@ -52,10 +60,7 @@ async function setup(options: { advanceJob?: boolean } = {}) {
     throw new Error(`Unexpected host method ${method}`);
   } });
   if (options.advanceJob) {
-    const facts: AdvanceFacts = { prUrl: url(42), number: 42, title: pr(42).title, repo: "inkwell/folio", headRefName: "abc-42-shelves", baseRefName: "main",
-      headOid: HEAD, baseOid: "d".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "CLEAN",
-      mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention", detail: "Needs a review", unresolvedThreads: 0, threadsComplete: true,
-      checks: "passed", basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } };
+    const facts = advanceFacts(42);
     const db = bb.storage.database();
     db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
     const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: JOB, hiddenFromProgress: false, status: "needs-attention",
@@ -172,6 +177,19 @@ describe("the inventory poll", () => {
     expect(board.prInventory.entries.find((entry) => entry.pr.number === 43)).toMatchObject({ stale: true,
       pr: { approvalFeedback: evidence, approvalFeedbackVerified: true, updatedAt: "2026-09-25T11:00:00Z" } });
     expect(board.prObservations[url(43)]).toMatchObject({ failedAt: expect.any(String), error: "inkwell/folio #43: PR refresh failed: HTTP 502" });
+  });
+
+  it("leaves a PR the poll found closed out of the inventory view, though its checkout and its roster's last read still say open", async () => {
+    const env = await setup();
+    createEffortStore(env.db).establish({ sourceKey: "pr:42", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
+      coordinatorState: "none", members: { tickets: [], prUrls: [url(42), url(43)] } });
+    // The roster read #43 an hour ago, while it was open; the poll rescans no checkout, so #42's still says open until the next scan.
+    createPrFactsStore(env.db).full(url(43), { facts: advanceFacts(43), fullAt: Date.now() - 3_600_000, signature: null, cheapAt: null });
+    env.state.polled = listing([]);
+    env.state.inspection = (urls) => ({ entries: [], closed: urls, failed: [], warnings: [] });
+    expect(await env.poll()).toEqual(["pollAuthoredPrs", "inspectPrs"]);
+    expect((await env.board()).groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units)).map((unit) => unit.pr?.state)).toEqual(["OPEN"]);
+    expect((await env.harness.callRpc("inventory_get", {}) as InventoryView).groups).toEqual([]);
   });
 
   it("stops at GitHub's rate limit until its reset, and names the reset in each PR's failure", async () => {

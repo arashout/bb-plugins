@@ -48,7 +48,8 @@ import { effortParent, activeCheckoutThread } from "./effort-routing.js";
 import { createRepoControllerService } from "./repo-controller.js";
 import { cardThreadPrompt, type CardThreadSnapshot } from "./card-thread.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
-import { canonicalPrUrl, prHoldsSchema } from "./pr-holds.js";
+import { canonicalPrUrl, prHoldFor, prHoldsSchema } from "./pr-holds.js";
+import { INVENTORY_QUESTIONS, inventoryRow, inventoryText, inventoryView, inventoryViewSchema, type InventoryQuestion, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, prAttention } from "./pr-attention.js";
 import { stackParent } from "./pr-backlog.js";
 import { pipelineCards } from "./pipeline.js";
@@ -57,7 +58,8 @@ import { canonicalConversationScope, conversationExclusionSchema, conversationSc
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
-import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION,
+  PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { carryReviewFacts, type InventoryEntry, type InventoryInspection, type InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
@@ -167,6 +169,8 @@ const NAMING_TIMEOUT_MS = 5 * 60 * 1_000;
 /** How long a dead host worker waits for the dispose that says a reload killed it. */
 const RELOAD_GRACE_MS = 5_000;
 const BOARD_CHANGED = "board-changed";
+/** The PR inventory changed: a read landed, or a hold or an inventory action changed a row. Membership moves publish board-changed. */
+const INVENTORY_CHANGED = "inventory-changed";
 /** Several runs finishing together share one targeted rescan. */
 const RESCAN_DELAY_MS = 3_000;
 /** More paths than this in one batch: rescan everything instead. */
@@ -405,6 +409,8 @@ export const rpcContract = defineRpcContract({
     expectedParentThreadId: z.null(), apply: z.boolean() }).strict(),
     output: z.object({ threadId: z.string(), parentThreadId: z.string().nullable(), updated: z.boolean() }).strict() },
   inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean() }) },
+  /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
+  inventory_get: { input: z.object({ attention: z.enum(INVENTORY_QUESTIONS).optional() }).strict(), output: inventoryViewSchema },
   dispatch_set: {
     input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
     output: boardSchema.shape.dispatch,
@@ -794,6 +800,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...EFFORT_JOURNAL_MIGRATIONS,
     PR_STATE_SINCE_MIGRATION,
     PR_OBSERVATION_ERROR_MIGRATION,
+    PR_OBSERVATION_CLOSED_MIGRATION,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -968,6 +975,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   let inventoryRefreshing = false;
   let inventoryTargeting = false;
+  const inventoryChanged = () => bb.realtime.publish(INVENTORY_CHANGED, { refreshing: inventoryRefreshing || inventoryTargeting });
   /**
    * A roster Refresh skips the scan lock, so a scan read that began before it
    * can land after it. Reads are numbered as they begin, and a scan's older read
@@ -1101,7 +1109,7 @@ export default async function plugin(bb: BbPluginApi) {
       return false;
     } finally {
       inventoryRefreshing = false;
-      if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (!disposal.signal.aborted) { bb.realtime.publish(BOARD_CHANGED, { scanning }); inventoryChanged(); }
       if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
     }
   }
@@ -1222,7 +1230,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       } finally {
         inventoryRefreshing = false;
-        if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+        if (!disposal.signal.aborted) { bb.realtime.publish(BOARD_CHANGED, { scanning }); inventoryChanged(); }
         if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
       }
     })();
@@ -1252,7 +1260,7 @@ export default async function plugin(bb: BbPluginApi) {
       return true;
     } finally {
       inventoryTargeting = false;
-      if (!disposal.signal.aborted) bb.realtime.publish(BOARD_CHANGED, { scanning });
+      if (!disposal.signal.aborted) { bb.realtime.publish(BOARD_CHANGED, { scanning }); inventoryChanged(); }
       queueMicrotask(() => void reconcileAllThreadIntents());
     }
   }
@@ -4721,6 +4729,7 @@ export default async function plugin(bb: BbPluginApi) {
         await applyInspection(cheap, hostId);
         recordTransitions(readUnits());
         bb.realtime.publish(BOARD_CHANGED, { scanning });
+        inventoryChanged();
       }
       if (read !== undefined) cheapReads.set(prWorkItemKey(prUrl), { signature: cheapSignature(read), at: cheapAt });
       return await fullRead(prUrl, hostId);
@@ -4809,6 +4818,7 @@ export default async function plugin(bb: BbPluginApi) {
         await applyInspection(tracked, hostId);
         recordTransitions(readUnits());
         bb.realtime.publish(BOARD_CHANGED, { scanning });
+        inventoryChanged();
       }
       for (const [url, pr] of [...result.entries.map((entry) => [entry.pr.url, entry.pr] as const), ...result.closed.map((url) => [url, null] as const)]) {
         const signature = cheapSignature(pr);
@@ -5059,6 +5069,45 @@ export default async function plugin(bb: BbPluginApi) {
     publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
   });
 
+  /**
+   * The PR inventory: every open PR you author, and every open PR an unarchived effort names as a member, grouped by the effort that owns
+   * it, explicitly or through its ticket. It reads only what the board keeps: the inventory's reads, checkouts, and the roster's reads.
+   */
+  async function inventoryGet(only?: InventoryQuestion): Promise<InventoryView> {
+    const current = await board();
+    const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
+    const shared = (prUrl: string) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
+      links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
+    const entries = current.prInventory.entries;
+    const rows = entries.map((entry) => {
+      const effort = entry.attention?.effort ?? owner(entry.pr.url);
+      return { effort, ...inventoryRow({ prUrl: prWorkItemKey(entry.pr.url), pr: entry.pr, authored: true, stale: entry.stale, read: null,
+        reasons: entry.attention?.reasons ?? [], observation: inventory.observation(entry.pr.url), stackedOn: stackParent(entry, entries)?.pr.number ?? null,
+        ...shared(entry.pr.url) }) };
+    });
+    const listed = new Set(rows.map((row) => row.prUrl));
+    const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
+      unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []))));
+    for (const prUrl of new Set(current.efforts.filter((effort) => !effort.archivedAt).flatMap((effort) => effort.members.prUrls.map(prWorkItemKey)))) {
+      if (listed.has(prUrl)) continue;
+      const pr = scanned.get(prUrl) ?? null;
+      const kept = prFacts.get(prUrl);
+      const observation = inventory.observation(prUrl) ?? (kept && { checkedAt: kept.fullAt === null ? null : new Date(kept.fullAt).toISOString(),
+        failedAt: kept.failedAt === null ? null : new Date(kept.failedAt).toISOString(), error: kept.error });
+      const state = pr?.state ?? kept?.facts?.state ?? null;
+      // Only open PRs; one read and then dropped has closed or left, and one never read may still be open. The board's newest read
+      // finding it merged or closed settles it over an older checkout or roster read that still says open.
+      if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;
+      const effort = owner(prUrl);
+      rows.push({ effort, ...inventoryRow({ prUrl, pr, authored: false, stale: false, reasons: [], observation, stackedOn: null,
+        read: kept?.facts ? { title: kept.facts.title, isDraft: kept.facts.isDraft, headOid: kept.facts.headOid } : null, ...shared(prUrl) }) });
+    }
+    return inventoryView(rows, { checkedAt: current.prInventory.lastSuccessAt, attemptedAt: current.prInventory.lastAttemptAt,
+      refreshing: current.prInventory.refreshing, rateLimitedUntil: (pollLimitedUntil ?? 0) > Date.now() ? pollLimitedUntil : null,
+      warnings: current.prInventory.warnings }, only);
+  }
+
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     ...effortV2.handlers,
     board_get: () => board(),
@@ -5067,6 +5116,7 @@ export default async function plugin(bb: BbPluginApi) {
     pr_hold_set: async ({ prUrl, held, reason }) => {
       const holds = prHolds.set(prUrl, held, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
       // A hold outlasts every instruction: a v2 row pauses on it, or resumes on release, now.
       const row = effortWork.row(prUrl);
       if (row) await effortV2.settle(row.effortId, "hold", new Set([row.target]));
@@ -5379,6 +5429,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return threadEffortContext(threadId);
     },
+    inventory_get: ({ attention }) => inventoryGet(attention),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };
       void refreshInventory();
@@ -5930,6 +5981,18 @@ export default async function plugin(bb: BbPluginApi) {
       summary: "Read the workstream board and name ticket clusters",
       commands: {
         ...effortV2.commands,
+        inventory: cliCommand({
+          summary: "List every open PR you author, and each PR an effort owns, by effort, with what needs your attention",
+          options: {
+            attention: { type: "enum", values: ["draft", "reviewer", "nudge"], description: "Only PRs forgotten in draft, missing a reviewer, or needing a nudge" },
+            json: { type: "boolean", description: "Emit the inventory as JSON" },
+          },
+          async run({ options }) {
+            const only = options.attention && ({ draft: "forgotten-draft", reviewer: "missing-reviewer", nudge: "needs-nudge" } as const)[options.attention];
+            const view = await inventoryGet(only);
+            return { exitCode: 0, stdout: options.json ? JSON.stringify(view) : inventoryText(view, Date.now()) };
+          },
+        }),
         list: cliCommand({
           summary: "List workstreams, their clusters, and each cluster's lifecycle",
           options: { json: { type: "boolean", description: "Emit the full board as JSON" } },
