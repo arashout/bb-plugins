@@ -246,7 +246,7 @@ type Resolved = { clause: Clause; refs: Ref[]; excluded: (Ref & { marker: string
 
 const q = (text: string) => `"${text}"`;
 /** Numbers as `1, 2, 4-6`, then unnumbered PRs by repository. */
-function formatTargets(targets: readonly CommandTarget[]): string {
+export function formatTargets(targets: readonly CommandTarget[]): string {
   const numbers = [...new Set(targets.flatMap((target) => target.n === null ? [] : [target.n]))].sort((a, b) => a - b);
   const runs: string[] = [];
   for (let i = 0; i < numbers.length; i++) {
