@@ -167,4 +167,101 @@ describe("established effort storage", () => {
     expect(createEffortStore(db).get(destination.id)?.members).toEqual(normalizeMembers({ tickets, prUrls: [] }));
     expect(store.list()).toHaveLength(1);
   });
+
+  it("keeps archived work owned and prevents a stale coordinator save from undoing admin edits", () => {
+    const { store, db } = setup();
+    const captured = store.establish(input);
+    const renamed = store.updateDetails(captured.id, { name: "Editorial review", goal: "Ship the review" });
+    expect(renamed).toMatchObject({ name: "Editorial review", goal: "Ship the review" });
+    store.setArchived(captured.id, true);
+    store.save({ ...captured, coordinatorState: "ready" });
+    const reloaded = createEffortStore(db);
+    expect(reloaded.get(captured.id)).toMatchObject({ name: "Editorial review", goal: "Ship the review", archivedAt: 1000 });
+    expect(reloaded.owner("ticket", "ABC-101")?.id).toBe(captured.id);
+    expect(reloaded.list().map((effort) => effort.id)).toEqual([captured.id]);
+    expect(() => reloaded.claimUnowned(captured.key, { tickets: ["ABC-202"], prUrls: [] })).toThrow("destination effort changed");
+    expect(store.setArchived(captured.id, false).archivedAt).toBeNull();
+    expect(reloaded.owner("prUrl", url)?.id).toBe(captured.id);
+  });
+
+  it("does not change the revision when a coordinator refresh saves the same state", () => {
+    const { store } = setup();
+    const effort = store.establish(input);
+    const ready = store.save({ ...effort, coordinatorState: "ready" });
+    expect(Object.hasOwn(ready, "archivedAt")).toBe(false);
+    expect(Object.hasOwn(ready, "mergedInto")).toBe(false);
+    expect(ready.updatedAt).toBeGreaterThan(effort.updatedAt);
+    expect(store.save({ ...ready }).updatedAt).toBe(ready.updatedAt);
+    expect(store.updateDetails(effort.id, { name: ready.name }).updatedAt).toBe(ready.updatedAt);
+  });
+
+  it("merges ownership and worker history while old keys resolve to the surviving effort", () => {
+    const { store, db } = setup();
+    const copied = `${url}/?view=files`;
+    const source = store.establish({ ...input, sourceKey: "source-key", members: { tickets: ["ABC-101"], prUrls: [copied], checkoutPaths: ["/source"] } });
+    const destination = store.establish({ ...input, sourceKey: "destination-key", members: { tickets: ["ABC-202"], prUrls: [url], checkoutPaths: ["/destination"] } });
+    store.recordWorker(source.id, "worker-source", copied, "pr");
+    store.recordWorker(destination.id, "worker-destination", url, "followup");
+    store.save({ ...source, coordinatorThreadId: "coordinator-source", coordinatorState: "ready" });
+    const sourceRepo = store.claimRepoController({ effortId: source.id, repo: "inkwell/folio", projectId: "project", hostId: "host" }).record;
+    store.saveRepoController({ ...sourceRepo, threadId: "repo-source", state: "ready" });
+    const destinationRepo = store.claimRepoController({ effortId: destination.id, repo: "inkwell/folio", projectId: "project", hostId: "host" }).record;
+    store.saveRepoController({ ...destinationRepo, threadId: "repo-destination", state: "ready" });
+    const otherRepo = store.claimRepoController({ effortId: source.id, repo: "inkwell/other", projectId: "project", hostId: "host" }).record;
+    store.saveRepoController({ ...otherRepo, threadId: "repo-other", state: "ready" });
+
+    const merged = store.merge(source.id, destination.id);
+    const reloaded = createEffortStore(db);
+    expect(merged.members).toEqual({ tickets: ["ABC-101", "ABC-202"], prUrls: [url], checkoutPaths: ["/destination", "/source"] });
+    expect(reloaded.get(source.id)?.id).toBe(destination.id);
+    expect(reloaded.source(source.key)?.id).toBe(destination.id);
+    expect(reloaded.source("source-key")?.id).toBe(destination.id);
+    expect(reloaded.sourceKey(source.id)).toBe("destination-key");
+    expect(reloaded.getRecord(source.id)).toMatchObject({ mergedInto: destination.id, coordinatorThreadId: "coordinator-source", members: { tickets: [], prUrls: [] } });
+    expect(reloaded.list().map((effort) => effort.id)).toEqual([destination.id]);
+    expect(reloaded.listAll()).toHaveLength(2);
+    expect(reloaded.owner("ticket", "ABC-101")?.id).toBe(destination.id);
+    expect(reloaded.owner("checkoutPath", "/source")?.id).toBe(destination.id);
+    expect(reloaded.owner("prUrl", copied)?.id).toBe(destination.id);
+    expect(reloaded.workers(destination.id, url).map((worker) => worker.threadId).sort()).toEqual(["worker-destination", "worker-source"]);
+    expect(reloaded.workers(source.id, copied).map((worker) => worker.threadId).sort()).toEqual(["worker-destination", "worker-source"]);
+    expect(reloaded.repoController(source.id, "inkwell/folio")?.threadId).toBe("repo-destination");
+    expect(reloaded.repoController(destination.id, "inkwell/other")?.threadId).toBe("repo-other");
+    expect(reloaded.repoControllers(source.id).map((record) => record.threadId)).toContain("repo-source");
+    expect(reloaded.workersForEffort(destination.id)).toHaveLength(2);
+    expect(reloaded.establish({ ...input, sourceKey: "source-key" }).id).toBe(destination.id);
+    expect(reloaded.save({ ...source, coordinatorState: "unavailable" }).id).toBe(destination.id);
+    expect(reloaded.getRecord(source.id)?.mergedInto).toBe(destination.id);
+    expect(reloaded.get(destination.id)?.members.tickets).toEqual(["ABC-101", "ABC-202"]);
+    expect((db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl'`).all() as { ref: string }[]).map((row) => row.ref)).toEqual([url]);
+  });
+
+  it("rolls back a merge when repository controller bindings disagree", () => {
+    const { store } = setup();
+    const source = store.establish(input);
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: ["ABC-202"], prUrls: [] } });
+    store.claimRepoController({ effortId: source.id, repo: "inkwell/folio", projectId: "project", hostId: "host-a" });
+    store.claimRepoController({ effortId: destination.id, repo: "inkwell/folio", projectId: "project", hostId: "host-b" });
+    expect(() => store.merge(source.id, destination.id)).toThrow("different projects or hosts");
+    expect(store.getRecord(source.id)?.mergedInto).toBeUndefined();
+    expect(store.owner("ticket", "ABC-101")?.id).toBe(source.id);
+    expect(store.owner("prUrl", url)?.id).toBe(source.id);
+    expect(store.list()).toHaveLength(2);
+  });
+
+  it("adopts the source coordinator only when the destination has no coordinator", () => {
+    const { store } = setup();
+    const source = store.establish(input);
+    store.save({ ...source, coordinatorThreadId: "source-coordinator", coordinatorState: "ready" });
+    const destination = store.establish({ ...input, sourceKey: "destination", members: { tickets: ["ABC-202"], prUrls: [] },
+      projectId: "other-project", coordinatorState: "none" });
+    expect(store.merge(source.id, destination.id)).toMatchObject({
+      coordinatorThreadId: "source-coordinator", coordinatorState: "ready", projectId: "project",
+    });
+
+    const secondSource = store.establish({ ...input, sourceKey: "second-source", members: { tickets: ["ABC-303"], prUrls: [] } });
+    store.save({ ...secondSource, coordinatorThreadId: "second-coordinator", coordinatorState: "ready" });
+    expect(store.merge(secondSource.id, destination.id).coordinatorThreadId).toBe("source-coordinator");
+    expect(store.getRecord(secondSource.id)?.coordinatorThreadId).toBe("second-coordinator");
+  });
 });

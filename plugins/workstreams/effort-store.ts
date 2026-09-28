@@ -9,6 +9,7 @@ export const establishedEffortSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(), goal: z.string(), projectId: z.string(),
   coordinatorThreadId: z.string().nullable(), coordinatorState: z.enum(["none", "creating", "ready", "unavailable"]),
   members: effortMembersSchema, createdAt: z.number(), updatedAt: z.number(),
+  archivedAt: z.number().nullable().optional(), mergedInto: z.string().nullable().optional(),
 });
 export type EffortMembers = z.infer<typeof effortMembersSchema>;
 export type EstablishedEffort = z.infer<typeof establishedEffortSchema>;
@@ -37,15 +38,38 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     if (!row) return null;
     return establishedEffortSchema.parse(JSON.parse((row as { value: string }).value));
   }
-  const get = (id: string) => read(db.prepare(`SELECT value FROM established_efforts WHERE id = ?`).get(id.replace(/^effort:/u, "")));
+  const getRecord = (id: string) => read(db.prepare(`SELECT value FROM established_efforts WHERE id = ?`).get(id.replace(/^effort:/u, "")));
+  function get(id: string): EstablishedEffort | null {
+    let effort = getRecord(id);
+    const seen = new Set<string>();
+    while (effort?.mergedInto) {
+      if (seen.has(effort.id)) throw new Error("Effort merge redirects contain a cycle.");
+      seen.add(effort.id);
+      effort = getRecord(effort.mergedInto);
+    }
+    return effort;
+  }
   function write(effort: EstablishedEffort): EstablishedEffort {
-    const updated = { ...effort, members: normalizeMembers(effort.members), updatedAt: now() };
+    const current = getRecord(effort.id);
+    const normalized = establishedEffortSchema.parse({ ...effort, members: normalizeMembers(effort.members), updatedAt: current?.updatedAt ?? now() });
+    if (normalized.archivedAt === undefined) delete normalized.archivedAt;
+    if (normalized.mergedInto === undefined) delete normalized.mergedInto;
+    if (current && JSON.stringify(normalized) === JSON.stringify(current)) return current;
+    const updated = { ...normalized, updatedAt: Math.max(now(), (current?.updatedAt ?? 0) + 1) };
     db.prepare(`UPDATE established_efforts SET value = ? WHERE id = ?`).run(JSON.stringify(updated), updated.id);
     return updated;
   }
-  /** Coordinator status writes must not restore membership captured before a transfer. */
+  /** Coordinator status writes must not restore membership or lifecycle captured before an admin change. */
   function save(effort: EstablishedEffort): EstablishedEffort {
-    return write({ ...effort, members: get(effort.id)?.members ?? effort.members });
+    return db.transaction(() => {
+      const current = getRecord(effort.id);
+      if (!current) throw new Error("The effort no longer exists. Refresh the preview.");
+      if (current.mergedInto) return get(current.mergedInto)!;
+      const currentVersion = current.updatedAt === effort.updatedAt;
+      return write({ ...effort, name: currentVersion ? effort.name : current.name, goal: currentVersion ? effort.goal : current.goal,
+        projectId: currentVersion ? effort.projectId : current.projectId,
+        members: current.members, archivedAt: current.archivedAt, mergedInto: current.mergedInto });
+    })();
   }
   function owner(kind: "ticket" | "prUrl" | "checkoutPath", ref: string): EstablishedEffort | null {
     if (kind !== "prUrl") {
@@ -60,23 +84,31 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
   }
   return {
     get,
+    getRecord,
     sourceKey(effortId: string): string | null {
-      const row = db.prepare(`SELECT source_key AS sourceKey FROM established_efforts WHERE id = ?`).get(effortId.replace(/^effort:/u, "")) as { sourceKey: string } | undefined;
+      const resolved = get(effortId);
+      const row = resolved && db.prepare(`SELECT source_key AS sourceKey FROM established_efforts WHERE id = ?`).get(resolved.id) as { sourceKey: string } | undefined;
       return row?.sourceKey ?? null;
     },
     repoController(effortId: string, repo: string): RepoController | null {
-      const row = db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? AND repo = ?`).get(effortId, repo.toLowerCase()) as { value: string } | undefined;
+      const resolvedId = get(effortId)?.id ?? effortId;
+      const row = db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? AND repo = ?`).get(resolvedId, repo.toLowerCase()) as { value: string } | undefined;
       return row ? repoControllerSchema.parse(JSON.parse(row.value)) : null;
+    },
+    repoControllers(effortId: string): RepoController[] {
+      return (db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? ORDER BY repo`).all(effortId.replace(/^effort:/u, "")) as { value: string }[])
+        .map((row) => repoControllerSchema.parse(JSON.parse(row.value)));
     },
     claimRepoController(input: { effortId: string; repo: string; projectId: string; hostId: string }): { record: RepoController; created: boolean } {
       return db.transaction(() => {
         const repo = input.repo.toLowerCase();
+        const effort = getRecord(input.effortId);
+        if (!effort || effort.mergedInto || effort.archivedAt) throw new Error("The effort is archived or merged. Refresh the preview.");
         const existing = this.repoController(input.effortId, repo);
         if (existing) {
           if (existing.projectId !== input.projectId || existing.hostId !== input.hostId) throw new Error("The repository controller belongs to a different project or host. Inspect its thread before advancing this PR.");
           return { record: existing, created: false };
         }
-        if (!get(input.effortId)) throw new Error("The effort no longer exists. Refresh the preview.");
         const record: RepoController = { ...input, repo, threadId: null, previousThreadIds: [], state: "creating", createdAt: now(), updatedAt: now() };
         db.prepare(`INSERT INTO effort_repo_controllers (effort_id, repo, value) VALUES (?, ?, ?)`).run(input.effortId, repo, JSON.stringify(record));
         return { record, created: true };
@@ -85,7 +117,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     saveRepoController(record: RepoController): RepoController {
       return db.transaction(() => {
         const current = this.repoController(record.effortId, record.repo);
-        if (!current || current.projectId !== record.projectId || current.hostId !== record.hostId) throw new Error("The repository controller binding changed. Inspect its thread before continuing.");
+        if (getRecord(record.effortId)?.mergedInto || !current || current.projectId !== record.projectId || current.hostId !== record.hostId) throw new Error("The repository controller binding changed. Inspect its thread before continuing.");
         const updated = repoControllerSchema.parse({ ...record, repo: record.repo.toLowerCase(), createdAt: current.createdAt, updatedAt: now() });
         db.prepare(`UPDATE effort_repo_controllers SET value = ? WHERE effort_id = ? AND repo = ?`).run(JSON.stringify(updated), updated.effortId, updated.repo);
         return updated;
@@ -94,16 +126,84 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     beginDeletedRepoReplacement(effortId: string, repo: string, deletedThreadId: string): { record: RepoController; created: boolean } {
       return db.transaction(() => {
         const current = this.repoController(effortId, repo);
-        if (!current) throw new Error("The repository controller record changed. Refresh the preview.");
+        if (!current || getRecord(effortId)?.mergedInto) throw new Error("The repository controller record changed. Refresh the preview.");
         if (current.threadId !== deletedThreadId) return { record: current, created: false };
         const record = repoControllerSchema.parse({ ...current, threadId: null, state: "creating", previousThreadIds: [...current.previousThreadIds, deletedThreadId].slice(-5), updatedAt: now() });
         db.prepare(`UPDATE effort_repo_controllers SET value = ? WHERE effort_id = ? AND repo = ?`).run(JSON.stringify(record), effortId, repo.toLowerCase());
         return { record, created: true };
       })();
     },
-    list: () => (db.prepare(`SELECT value FROM established_efforts ORDER BY id`).all()).map((row) => read(row)!),
-    source: (sourceKey: string) => get(sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(sourceKey)),
+    list: () => (db.prepare(`SELECT value FROM established_efforts ORDER BY id`).all()).map((row) => read(row)!).filter((effort) => !effort.mergedInto),
+    listAll: () => (db.prepare(`SELECT value FROM established_efforts ORDER BY id`).all()).map((row) => read(row)!),
+    source: (sourceKey: string) => {
+      const direct = get(sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(sourceKey));
+      return direct?.mergedInto ? get(direct.mergedInto) : direct;
+    },
     owner,
+    updateDetails(effortId: string, details: { name?: string; goal?: string }): EstablishedEffort {
+      return db.transaction(() => {
+        const current = getRecord(effortId);
+        if (!current || current.mergedInto) throw new Error("The effort changed. Refresh before editing it.");
+        return write({ ...current, ...details });
+      })();
+    },
+    setArchived(effortId: string, archived: boolean): EstablishedEffort {
+      return db.transaction(() => {
+        const current = getRecord(effortId);
+        if (!current || current.mergedInto) throw new Error("The effort changed. Refresh before editing it.");
+        return !!current.archivedAt === archived ? current : write({ ...current, archivedAt: archived ? now() : null });
+      })();
+    },
+    /** Preserve source identity while moving ownership and worker history to the surviving effort. */
+    merge(sourceId: string, destinationId: string): EstablishedEffort {
+      return db.transaction(() => {
+        const source = getRecord(sourceId);
+        const destination = getRecord(destinationId);
+        if (!source || !destination || source.id === destination.id || source.mergedInto || destination.mergedInto || destination.archivedAt)
+          throw new Error("The source or destination effort changed. Refresh before merging.");
+        const sourceControllers = this.repoControllers(source.id);
+        const destinationControllers = new Map(this.repoControllers(destination.id).map((record) => [record.repo, record]));
+        for (const record of sourceControllers) {
+          const existing = destinationControllers.get(record.repo);
+          if (existing && (existing.projectId !== record.projectId || existing.hostId !== record.hostId))
+            throw new Error("Repository controllers use different projects or hosts. Resolve the conflict before merging.");
+        }
+        const prIdentity = (url: string) => canonicalPrUrl(url) ?? url.toLowerCase();
+        const selectedPrs = new Map<string, string>();
+        for (const url of [...destination.members.prUrls, ...source.members.prUrls]) {
+          const canonical = prIdentity(url);
+          if (!selectedPrs.has(canonical)) selectedPrs.set(canonical, url);
+        }
+        const members = effortMembersSchema.parse(normalizeMembers({
+          tickets: [...destination.members.tickets, ...source.members.tickets],
+          prUrls: [...selectedPrs.values()],
+          checkoutPaths: [...(destination.members.checkoutPaths ?? []), ...(source.members.checkoutPaths ?? [])],
+        }));
+        const sourcePrRows = db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl' AND effort_id = ?`).all(source.id) as { ref: string }[];
+        const destinationPrRows = db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl' AND effort_id = ?`).all(destination.id) as { ref: string }[];
+        const destinationPrs = new Set(destinationPrRows.map((row) => prIdentity(row.ref)));
+        for (const row of sourcePrRows) {
+          const canonical = prIdentity(row.ref);
+          const other = (db.prepare(`SELECT ref, effort_id FROM effort_members WHERE kind = 'prUrl' AND ref LIKE ?`).all(`${canonical}%`) as { ref: string; effort_id: string }[])
+            .find((item) => prIdentity(item.ref) === canonical && item.effort_id !== source.id && item.effort_id !== destination.id);
+          if (other) throw new Error("A PR belongs to another effort. Refresh before merging.");
+          if (destinationPrs.has(canonical)) db.prepare(`DELETE FROM effort_members WHERE kind = 'prUrl' AND ref = ?`).run(row.ref);
+          else destinationPrs.add(canonical);
+        }
+        db.prepare(`UPDATE effort_members SET effort_id = ? WHERE effort_id = ?`).run(destination.id, source.id);
+        db.prepare(`UPDATE effort_workers SET effort_id = ? WHERE effort_id = ?`).run(destination.id, source.id);
+        for (const record of sourceControllers) if (!destinationControllers.has(record.repo)) {
+          const transferred = { ...record, effortId: destination.id, updatedAt: now() };
+          db.prepare(`INSERT INTO effort_repo_controllers (effort_id, repo, value) VALUES (?, ?, ?)`).run(destination.id, record.repo, JSON.stringify(transferred));
+        }
+        write({ ...source, members: { tickets: [], prUrls: [] }, mergedInto: destination.id });
+        return write({ ...destination, members,
+          ...(!destination.coordinatorThreadId && source.coordinatorThreadId ? {
+            coordinatorThreadId: source.coordinatorThreadId, coordinatorState: source.coordinatorState, projectId: source.projectId,
+          } : {}),
+        });
+      })();
+    },
     /** Release only the exact coordinator claim whose workspace BB rejected before thread creation. */
     resetRejectedCoordinator(record: EstablishedEffort): boolean {
       return db.transaction(() => {
@@ -117,6 +217,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     /** Restore the prior binding, or discard an exact new claim, after BB rejects its workspace. */
     resetRejectedRepoController(record: RepoController, previous: RepoController | null): boolean {
       return db.transaction(() => {
+        if (getRecord(record.effortId)?.mergedInto) return false;
         const row = db.prepare(`SELECT value FROM effort_repo_controllers WHERE effort_id = ? AND repo = ?`)
           .get(record.effortId, record.repo) as { value: string } | undefined;
         if (!row || row.value !== JSON.stringify(record) || record.state !== "creating" || record.threadId !== null) return false;
@@ -133,7 +234,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     },
     establish(input: { sourceKey: string; name: string; goal: string; projectId: string; members: EffortMembers; coordinatorState?: "none" | "creating" }): EstablishedEffort {
       return db.transaction(() => {
-        const existing = get(input.sourceKey) ?? read(db.prepare(`SELECT value FROM established_efforts WHERE source_key = ?`).get(input.sourceKey));
+        const existing = this.source(input.sourceKey);
         if (existing) return existing;
         const members = normalizeMembers(input.members);
         for (const [kind, refs] of [["ticket", members.tickets], ["prUrl", members.prUrls], ["checkoutPath", members.checkoutPaths ?? []]] as const) {
@@ -171,7 +272,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
             db.prepare(`INSERT INTO effort_members (kind, ref, effort_id) VALUES (?, ?, ?)`).run(kind, ref, id);
           }
         }
-        if (!destination) throw new Error("The destination effort changed. Refresh before moving work.");
+        if (!destination || destination.archivedAt) throw new Error("The destination effort changed. Refresh before moving work.");
         const moving = normalizeMembers(members);
         const canonicalMovingPrs = new Set(moving.prUrls.map((url) => canonicalPrUrl(url) ?? url));
         const aliases = (db.prepare(`SELECT ref, effort_id FROM effort_members WHERE kind = 'prUrl'`).all() as { ref: string; effort_id: string }[])
@@ -203,7 +304,7 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     claimUnowned(destinationKey: string, members: EffortMembers, guard: EffortMembers = members): { effort: EstablishedEffort; claimed: EffortMembers; conflict: boolean } {
       return db.transaction(() => {
         const destination = get(destinationKey);
-        if (!destination) throw new Error("The destination effort changed. Refresh before assigning work.");
+        if (!destination || destination.archivedAt) throw new Error("The destination effort changed. Refresh before assigning work.");
         const canonicalize = (value: EffortMembers) => normalizeMembers({ tickets: value.tickets,
           prUrls: value.prUrls.map((url) => canonicalPrUrl(url) ?? url.toLowerCase()) });
         const cohort = canonicalize(members);
@@ -245,10 +346,21 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
     },
     save,
     recordWorker(effortId: string, threadId: string, prUrl: string, role: "pr" | "followup"): void {
-      db.prepare(`INSERT OR REPLACE INTO effort_workers (thread_id, effort_id, pr_url, role, created_at) VALUES (?, ?, ?, ?, ?)`).run(threadId, effortId, prUrl.toLowerCase(), role, now());
+      const effort = get(effortId);
+      if (!effort) throw new Error("The effort no longer exists. Refresh the preview.");
+      db.prepare(`INSERT OR REPLACE INTO effort_workers (thread_id, effort_id, pr_url, role, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .run(threadId, effort.id, canonicalPrUrl(prUrl) ?? prUrl.toLowerCase(), role, now());
     },
     workers(effortId: string, prUrl: string): { threadId: string; role: "pr" | "followup" }[] {
-      return db.prepare(`SELECT thread_id AS threadId, role FROM effort_workers WHERE effort_id = ? AND pr_url = ? ORDER BY created_at DESC`).all(effortId, prUrl.toLowerCase()) as { threadId: string; role: "pr" | "followup" }[];
+      const canonical = canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
+      return (db.prepare(`SELECT thread_id AS threadId, pr_url AS prUrl, role FROM effort_workers WHERE effort_id = ? AND pr_url LIKE ? ORDER BY created_at DESC`)
+        .all(get(effortId)?.id ?? effortId, `${canonical}%`) as { threadId: string; prUrl: string; role: "pr" | "followup" }[])
+        .filter((row) => (canonicalPrUrl(row.prUrl) ?? row.prUrl) === canonical)
+        .map(({ threadId, role }) => ({ threadId, role }));
+    },
+    workersForEffort(effortId: string): { threadId: string; prUrl: string; role: "pr" | "followup"; createdAt: number }[] {
+      return db.prepare(`SELECT thread_id AS threadId, pr_url AS prUrl, role, created_at AS createdAt FROM effort_workers WHERE effort_id = ? ORDER BY created_at DESC`)
+        .all(effortId.replace(/^effort:/u, "")) as { threadId: string; prUrl: string; role: "pr" | "followup"; createdAt: number }[];
     },
   };
 }
