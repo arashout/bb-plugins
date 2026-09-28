@@ -86,7 +86,9 @@ export function workRequests(conversations: readonly WorkConversation[], batches
       status: "not-started", nextStep: "" };
   });
   for (const batch of batches) if (!linked.has(batch.id)) {
-    requests.push({ id: `batch:${batch.id}`, title: batch.instruction?.trim() || `Prepare ${batch.jobs.length} ${batch.jobs.length === 1 ? "PR" : "PRs"}`,
+    requests.push({ id: `batch:${batch.id}`, title: batch.instruction?.trim() || (batch.jobs.length === 1
+      ? `${batch.jobs[0]!.repo} #${batch.jobs[0]!.number}: ${batch.jobs[0]!.title}`
+      : `Prepare ${batch.jobs.length} PRs`),
       createdAt: batch.createdAt, updatedAt: Math.max(batch.createdAt, ...batch.jobs.map((job) => job.updatedAt)), conversationId: null,
       threadId: null, prUrls: [...new Map(batch.jobs.map((job) => [key(job.prUrl), job.prUrl])).values()], batches: [batch], jobs: latestJobs([batch]),
       status: "not-started", nextStep: "" });

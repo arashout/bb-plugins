@@ -55,6 +55,7 @@ describe("Work request presentation", () => {
     const rows = workRequests([], [old, current], []);
     expect(rows.find((row) => row.id === "batch:old")).toMatchObject({ status: "finished", nextStep: expect.stringMatching(/superseded/u) });
     expect(rows.find((row) => row.id === "batch:current")?.status).toBe("waiting");
+    expect(rows.find((row) => row.id === "batch:old")?.title).toBe("example/widgets #1: Widget 1");
   });
 
   it("uses the current merge action over an old failed result, but never trusts a saved ready result alone", () => {

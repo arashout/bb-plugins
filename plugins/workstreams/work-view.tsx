@@ -49,6 +49,16 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
   const [agent, setAgent] = useState<PipelineAgentRequest | null>(null);
   const [direct, setDirect] = useState<ActionRequest | null>(null);
   const generation = useRef(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(([entry]) => setWide((entry?.contentRect.width ?? node.clientWidth) >= 900));
+    observer.observe(node);
+    setWide(node.clientWidth >= 900);
+    return () => observer.disconnect();
+  }, []);
 
   const refresh = useCallback(async () => {
     const sequence = ++generation.current;
@@ -138,6 +148,13 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
     return [running && `${running} running`, queued && `${queued} queued`, review && `${review} review results`, waiting && `${waiting} waiting`]
       .filter(Boolean).join(" · ") || null;
   };
+  const scopeSummary = (request: WorkRequest) => {
+    const scoped = cards.filter((card) => card.pr && request.prUrls.some((url) => key(url) === key(card.pr!.url)));
+    const efforts = [...new Set(scoped.map((card) => card.effortName).filter((name): name is string => !!name))];
+    const repos = [...new Set(scoped.map((card) => card.repo.split("/").at(-1) ?? card.repo))];
+    const repoLabel = repos.slice(0, 2).join(", ") + (repos.length > 2 ? ` +${repos.length - 2}` : "");
+    return [efforts.length === 1 ? efforts[0] : null, repoLabel].filter(Boolean).join(" · ");
+  };
   const reviewMerge = (card: PipelineCard) => {
     if (!card.pr) return;
     setDirect({ kind: "direct", action: "merge", row: {
@@ -163,9 +180,10 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
       <span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-current", statusTone(request.status))} aria-hidden="true" />
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="min-w-0 break-words text-[13px] font-semibold leading-5">{request.title}</span>
+          <span className="line-clamp-2 min-w-0 max-w-full break-words text-[13px] font-semibold leading-5">{request.title}</span>
           <span className={cn("text-[11px] font-medium", statusTone(request.status))}>{STATUS_LABEL[request.status]}</span>
         </span>
+        {scopeSummary(request) ? <span className="mt-1 block truncate text-[11px] text-muted-foreground">{scopeSummary(request)}</span> : null}
         <span className="mt-1 block text-[11px] text-muted-foreground">{request.prUrls.length} PR{request.prUrls.length === 1 ? "" : "s"} in scope · Updated {time(request.updatedAt)}</span>
         {jobSummary(request) ? <span className="mt-1 block text-[11px] font-medium">{jobSummary(request)}</span> : null}
         <span className="mt-1.5 block break-words text-[12px] leading-5 text-muted-foreground">{request.nextStep}</span>
@@ -181,7 +199,7 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
     </section> : null;
   };
 
-  return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
+  return <div ref={rootRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-2.5">
       <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
         <button type="button" role="tab" aria-selected={false} onClick={onMap} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Map</button>
@@ -191,14 +209,14 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
       <button type="button" onClick={onHow} className="rounded px-2 py-1 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">How it works</button>
     </header>
     <div className="flex min-h-0 flex-1">
-      <main className={cn("min-w-0 flex-1 overflow-y-auto overscroll-contain pb-8", selected && "hidden lg:block lg:border-r lg:border-border/70")}>
+      <main className={cn("min-w-0 flex-1 overflow-y-auto overscroll-contain pb-8", selected && (wide ? "border-r border-border/70" : "hidden"))}>
         <div className="px-4 pb-2 pt-6">
           <h1 className="text-[22px] font-semibold tracking-tight">Work</h1>
           <p className="mt-1 max-w-xl text-[12px] leading-5 text-muted-foreground">Follow requested preparation, inspect results, and choose PRs for the next plan.</p>
           <button type="button" onClick={() => document.getElementById("work-pr-picker")?.scrollIntoView({ block: "start" })} className="mt-4 rounded-md bg-foreground px-3 py-2 text-[11px] font-medium text-background outline-none hover:opacity-85 focus-visible:ring-2 focus-visible:ring-ring">Plan work</button>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-y border-border/70 py-3 text-[12px]">
             <span><strong className="font-semibold">{workingJobs}</strong> jobs queued or running</span>
-            <span><strong className="font-semibold">{requests.filter((item) => ACTIVE.has(item.status)).length}</strong> active requests</span>
+            <span><strong className="font-semibold">{requests.filter((item) => ACTIVE.has(item.status)).length}</strong> requests to follow</span>
             <span><strong className="font-semibold">{readyCards.length}</strong> PRs ready to merge</span>
             <span><strong className="font-semibold">{inventory.length}</strong> open PRs</span>
           </div>
@@ -253,7 +271,7 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
           {historyOpen ? <div className="mt-3 border-t border-border/60">{visibleRequests.filter((request) => request.status === "finished").map(requestRow)}</div> : null}
         </section>
       </main>
-      {selected ? <aside aria-label="Work request details" className="flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-background lg:max-w-[min(55%,680px)]">
+      {selected ? <aside aria-label="Work request details" className={cn("flex min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-background", wide && "max-w-[min(55%,680px)]")}>
         <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/70 bg-background px-4 py-3">
           <button type="button" onClick={() => setSelectedId(null)} className="rounded px-2 py-1 text-[11px] font-medium outline-none hover:bg-foreground/[0.05] focus-visible:ring-2 focus-visible:ring-ring">← Back to work</button>
           <span className={cn("text-[11px] font-medium", statusTone(selected.status))}>{STATUS_LABEL[selected.status]}</span>
