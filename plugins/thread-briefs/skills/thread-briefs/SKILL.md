@@ -21,6 +21,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `model` | `gpt-4o-mini` | Model used for summarizing. Any small instruction-following model works. |
 | `jsonMode` | `true` | Send `response_format: {type: "json_object"}`. Turn **off** for endpoints that reject it (many local servers do). |
 | `quietSeconds` | `120` | How long a thread must be quiet before it is summarized. |
+| `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
 
 The key is a secret setting, so it stays on the server and is never sent to the
 frontend.
@@ -143,12 +144,58 @@ One consequence worth knowing: the header popover shows the **stored** status,
 so a running thread whose brief says "Waiting on you" will say that in the
 popover while its row shows no glyph. The row is live; the popover is the brief.
 
+## Sidebar sections
+
+`bb plugin config thread-briefs set sidebarGrouping status` replaces the
+sidebar's project grouping with three sections, top to bottom, and then bb's own
+**Threads** group:
+
+| Section | Holds |
+| --- | --- |
+| Waiting on you | stored status `waiting-on-me` |
+| Blocked | stored status `waiting-on-other` |
+| Done | stored status `done` |
+| Threads (bb's own) | every thread with **no brief** |
+
+Threads last is the design, not an oversight. A thread with no brief is left
+*unassigned* rather than filed anywhere, so that group is exactly the briefless
+set — including a thread created since the last sync, which needs no sync to
+appear. Hiding it would lose threads, so don't add `threads` to `hiddenGroups`.
+
+There is **no section for running threads**. `working` is live state and never
+reaches a stored brief, so a section keyed on it could not have members; a
+running thread sits where its last brief puts it and keeps bb's own running
+indicator. Grouping on live state would mean the server reacting per thread,
+which is the cost the row glyph design already avoids.
+
+What the sync owns, and hands back on `off`:
+
+- the three sections — deleted on `off`, which clears their assignments
+- `organizationMode` → `chronological`
+- `chronologicalSort` → `updated` (newest first inside each section)
+- `manualSectionOrder` → pinned, the three sections, then `threads`
+
+Prior values are recorded before the first write and restored on `off`; a
+preference bb had never been given is reset rather than guessed at, because
+`thread-list` owns its own defaults. A thread **you** filed in a section of your
+own is left alone while it has no brief, but once it has one the grouping takes it
+over, and `off` cannot put a hand-made placement back.
+
+Reconciles run on plugin start, after any batch of briefs is written (debounced,
+so a burst is one pass), and whenever the setting changes. It is idempotent: a
+thread already in the right section is not touched, and a settled sidebar costs
+no preference writes.
+
 ## Diagnosing
 
 - `bb plugin list` — service and schedule status, including the sweep's
   `last_status` / `last_error`.
 - `bb plugin logs thread-briefs -n 50` — per-thread summarizer failures are
-  logged as warnings and never crash the queue.
+  logged as warnings and never crash the queue. Section syncs log what they
+  moved, and a failed sync logs `sidebar grouping failed` rather than retrying.
+- Sections exist but the sidebar still groups by project: check
+  `bb thread-list prefs get organizationMode`. Something changed it back after
+  the sync; the next reconcile will set it again.
 - No glyphs at all, but the header popover works: the bb client predates
   `experimental_setThreadRowStatus`, which the content script feature-detects.
 - Briefs stuck on "Summarizing…": check `apiKey` is set and

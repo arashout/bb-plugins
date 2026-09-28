@@ -63,6 +63,31 @@ function host(options: { fetch: ReturnType<typeof fakeCompletion> }) {
   });
 }
 
+/** A stored brief row, for seeding kv directly. */
+function storedBrief(
+  threadId: string,
+  fields: Partial<StoredBrief["fields"]>,
+): StoredBrief {
+  return {
+    version: 1,
+    threadId,
+    fields: {
+      goal: "Ship sidebar grouping",
+      currentState: "Sync written",
+      nextStep: "Run the tests",
+      blockedOn: "",
+      constraints: "",
+      ...fields,
+    },
+    modelStage: "implementation",
+    stageOverride: null,
+    stageOverrideSeq: null,
+    endedWithQuestion: false,
+    lastSummarizedAt: 1_000,
+    lastActivitySeen: 12,
+  };
+}
+
 /** The summarizer queue drains off the rpc call, so tests wait on its effect. */
 async function waitFor<T>(read: () => Promise<T | null | undefined>): Promise<T> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -442,6 +467,235 @@ describe("stage override", () => {
     })) as BriefState;
     if (state.state !== "ready") throw new Error("unreachable");
     expect(state.brief.stage).toBe("planning");
+
+    await harness.lifecycle.dispose();
+  });
+});
+
+describe("sidebar grouping by status", () => {
+  const groupedThread = (overrides: Partial<ReturnType<typeof makeThreadResponse>>) =>
+    makeThreadResponse({ visibility: "visible", status: "idle", ...overrides });
+
+  /**
+   * A host with the sections surface stubbed, grouping already on, and the
+   * `thread-list` preference RPC answered in memory so the test can see exactly
+   * which preferences were written and how often.
+   */
+  function groupingHost(options: {
+    threads: ReturnType<typeof makeThreadResponse>[];
+    sections?: { id: string; name: string }[];
+    grouping?: string;
+  }) {
+    const sections = options.sections ?? [];
+    const prefs: Record<string, unknown> = {
+      organizationMode: "project",
+      chronologicalSort: "updated",
+      manualSectionOrder: ["pinned", "sections", "threads"],
+    };
+    let nextSectionId = 1;
+
+    globalThis.fetch = fakeCompletion(SUMMARY) as unknown as typeof globalThis.fetch;
+    const created = createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings: {
+        apiKey: "test-key",
+        baseUrl: "https://api.test/v1",
+        model: "test-model",
+        jsonMode: true,
+        quietSeconds: 120,
+        sidebarGrouping: options.grouping ?? "status",
+      },
+      sdk: {
+        threads: {
+          get: async ({ threadId }) =>
+            options.threads.find((thread) => thread.id === threadId) ??
+            options.threads[0]!,
+          list: async (args) => ((args?.offset ?? 0) === 0 ? options.threads : []),
+          update: async ({ threadId, sectionId }) => {
+            const thread = options.threads.find((entry) => entry.id === threadId);
+            if (thread !== undefined) {
+              Object.assign(thread, { sectionId: sectionId ?? null });
+            }
+            return thread ?? options.threads[0]!;
+          },
+          output: async () => ({ output: "All set." }),
+          conversationOutline: async () => ({ items: [], maxSeq: 0 }),
+          interactions: { list: async () => [] },
+        },
+        threadSections: {
+          list: async () => [...sections],
+          create: async ({ name }) => {
+            const section = { id: `sec_${nextSectionId++}`, name };
+            sections.push(section);
+            return { ...section, updatedThreadCount: 0 };
+          },
+          delete: async ({ id }) => {
+            const index = sections.findIndex((section) => section.id === id);
+            const [removed] = sections.splice(index, 1);
+            return { id, name: removed?.name ?? "", updatedThreadCount: 0 };
+          },
+        },
+        plugins: {
+          callRpc: async ({ method, input }) => {
+            if (method === "listPreferences") return { preferences: { ...prefs } };
+            const { key, value } = input as { key: string; value?: unknown };
+            if (method === "resetPreference") {
+              delete prefs[key];
+              return { key, value: null };
+            }
+            prefs[key] = value;
+            return { key, value };
+          },
+        },
+      },
+    });
+    return { ...created, prefs, sections };
+  }
+
+  /** The grouping reconcile is scheduled, so tests wait on its effect. */
+  const settle = async (read: () => boolean) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (read()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("timed out waiting for the section sync");
+  };
+
+  it("creates the three sections and orders bb's Threads group last", async () => {
+    const { bb, harness, prefs, sections } = groupingHost({ threads: [] });
+    await plugin(bb);
+
+    await settle(() => prefs.organizationMode === "chronological");
+    expect(sections.map((section) => section.name)).toEqual([
+      "Waiting on you",
+      "Blocked",
+      "Done",
+    ]);
+    expect(prefs.manualSectionOrder).toEqual([
+      "pinned",
+      "section:sec_1",
+      "section:sec_2",
+      "section:sec_3",
+      "threads",
+    ]);
+    expect(prefs.chronologicalSort).toBe("updated");
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("files each thread by its brief's status and leaves briefless ones alone", async () => {
+    const threads = [
+      groupedThread({ id: "thr_wait", sectionId: null }),
+      groupedThread({ id: "thr_blocked", sectionId: null }),
+      groupedThread({ id: "thr_done", sectionId: null }),
+      groupedThread({ id: "thr_nobrief", sectionId: null }),
+    ];
+    const { bb, harness } = groupingHost({ threads });
+    await plugin(bb);
+
+    await bb.storage.kv.set("brief:thr_wait", storedBrief("thr_wait", {}));
+    await bb.storage.kv.set(
+      "brief:thr_blocked",
+      storedBrief("thr_blocked", { blockedOn: "Review from Dylan" }),
+    );
+    await bb.storage.kv.set(
+      "brief:thr_done",
+      storedBrief("thr_done", { nextStep: "", blockedOn: "" }),
+    );
+
+    await harness.behavior.callRpc("refresh", { threadId: "thr_wait" });
+    await settle(() => threads[0]!.sectionId !== null);
+
+    const sectionFor = (id: string) =>
+      threads.find((thread) => thread.id === id)?.sectionId;
+    expect(sectionFor("thr_wait")).toBe("sec_1");
+    expect(sectionFor("thr_blocked")).toBe("sec_2");
+    expect(sectionFor("thr_done")).toBe("sec_3");
+    // No brief, so it stays unassigned and falls into bb's Threads group.
+    expect(sectionFor("thr_nobrief")).toBeNull();
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("never files an archived thread, whatever its brief says", async () => {
+    const threads = [
+      groupedThread({ id: "thr_live", sectionId: null }),
+      groupedThread({ id: "thr_old", sectionId: null, archivedAt: 1_000 }),
+    ];
+    const { bb, harness } = groupingHost({ threads });
+    await plugin(bb);
+
+    await bb.storage.kv.set("brief:thr_live", storedBrief("thr_live", {}));
+    await bb.storage.kv.set("brief:thr_old", storedBrief("thr_old", {}));
+
+    await harness.behavior.callRpc("refresh", { threadId: "thr_live" });
+    await settle(() => threads[0]!.sectionId !== null);
+
+    expect(threads[1]!.sectionId).toBeNull();
+    expect(
+      harness.sdk
+        .callsTo("threads.update")
+        .map(([args]) => (args as { threadId: string }).threadId),
+    ).not.toContain("thr_old");
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("writes the preferences once per batch, not once per thread", async () => {
+    const threads = Array.from({ length: 5 }, (_unused, index) =>
+      groupedThread({ id: `thr_${index}`, sectionId: null }),
+    );
+    const { bb, harness } = groupingHost({ threads });
+    await plugin(bb);
+
+    for (const thread of threads) {
+      await bb.storage.kv.set(`brief:${thread.id}`, storedBrief(thread.id, {}));
+    }
+    await harness.behavior.callRpc("refresh", { threadId: "thr_0" });
+    await settle(() => threads.every((thread) => thread.sectionId !== null));
+
+    // The debounce coalesces the batch: one listPreferences plus the three
+    // preference writes that were actually wrong, and no more.
+    const methods = harness.sdk
+      .callsTo("plugins.callRpc")
+      .map(([args]) => (args as { method: string }).method);
+    expect(methods.filter((method) => method === "listPreferences")).toHaveLength(1);
+    expect(methods.filter((method) => method === "setPreference")).toHaveLength(2);
+    expect(threads).toHaveLength(5);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("does nothing at all while grouping is off", async () => {
+    const { bb, harness } = groupingHost({
+      threads: [groupedThread({ id: "thr_1", sectionId: null })],
+      grouping: "off",
+    });
+    await plugin(bb);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(harness.sdk.callsTo("threadSections.create")).toHaveLength(0);
+    expect(harness.sdk.callsTo("plugins.callRpc")).toHaveLength(0);
+    expect(harness.sdk.callsTo("threads.update")).toHaveLength(0);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("removes the sections and restores the preferences when turned off", async () => {
+    const threads = [groupedThread({ id: "thr_1", sectionId: null })];
+    const { bb, harness, prefs, sections } = groupingHost({ threads });
+    await plugin(bb);
+
+    await bb.storage.kv.set("brief:thr_1", storedBrief("thr_1", {}));
+    await harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    await settle(() => threads[0]!.sectionId !== null);
+
+    await harness.behavior.setSettings({ sidebarGrouping: "off" });
+    await settle(() => sections.length === 0);
+
+    // Back to what the sidebar looked like before, not to a guess.
+    expect(prefs.organizationMode).toBe("project");
+    expect(prefs.manualSectionOrder).toEqual(["pinned", "sections", "threads"]);
 
     await harness.lifecycle.dispose();
   });

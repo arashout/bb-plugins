@@ -39,6 +39,27 @@ of its unsent-draft pencil and displacing that everywhere would cost more than
 it says. The live status is folded in per row on the client, off the sidebar view
 it already holds, so `listRowSignals` needs no per-thread lookups.
 
+**Sidebar sections** — optionally, the sidebar groups by status instead of by
+project:
+
+```sh
+bb plugin config thread-briefs set sidebarGrouping status   # on
+bb plugin config thread-briefs set sidebarGrouping off      # off again
+```
+
+**Waiting on you**, **Blocked**, **Done**, then bb's own **Threads** group,
+newest first inside each. Threads is last and holds every thread with no brief —
+including ones created since the last sync — which is why it must not be hidden:
+it is the "the summarizer hasn't reached this yet" bucket as much as a catch-all.
+
+Two things to know. There is **no section for running threads**: `working` is
+live state and never reaches a stored brief, so a thread whose agent is running
+sits in the section its last brief implies and keeps bb's own running indicator —
+the same live-vs-stored split as the popover. And a thread you filed in a section
+of your own is left alone until it has a brief, but once it does the grouping
+takes it over; turning grouping off deletes the three sections and restores the
+sidebar preferences it changed, but cannot put a hand-made placement back.
+
 **Thread header** — a **Brief** control opens the full five fields (empty ones
 are skipped), the derived status, a stage control for the manual override, and
 Re-summarize. It works the same on mobile and desktop; nothing depends on hover.
@@ -59,6 +80,7 @@ configured.
 | Storage | `bb.storage.kv`, one row per thread at `brief:<threadId>` |
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
 | Header UI | `experimental_threadHeaderAction` with a portalled popover |
+| Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 
 ### Why a content script rather than a list fork
 
@@ -78,6 +100,21 @@ into idle, which is the turn-completion signal a poll would be approximating.
 Polling remains only as the 10-minute sweep, for activity whose event never
 arrived — a server restart, a plugin reload, or a turn that ended in `error`
 rather than idle.
+
+### Why sections rather than a grouping mode
+
+Grouping the sidebar by status needs no fork either, because a section is core bb
+state: `thread-list` renders whatever sections exist when its `organizationMode`
+is `chronological`, so assigning threads to sections *is* the grouping. The sync
+reconciles in one full pass — one `threads.list` plus one kv scan — rather than
+per changed brief: it costs less than a `threads.get` per thread once a batch is
+more than a handful, it is self-healing after a write we missed, and startup and
+steady state run the same code. The debounce is what turns a burst of brief
+writes into a single pass, so the preference writes happen once per batch.
+
+Section display order is creation order as far as bb is concerned — a
+`ThreadSection` has no position field — so the sync both creates the sections in
+display order and pins that order in `manualSectionOrder`.
 
 ## Development
 

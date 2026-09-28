@@ -1,4 +1,5 @@
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { BbPluginApi, JsonValue } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import {
   BRIEFS_CHANGED_CHANNEL,
   rpcContract,
@@ -23,6 +24,14 @@ import {
   type CompletionConfig,
 } from "./summarize.js";
 import { endsWithQuestion, renderTranscript, type OutlineItem } from "./transcript.js";
+import {
+  manualSectionOrder,
+  planAssignments,
+  sectionNameForStatus,
+  storedStatus,
+  SECTION_NAMES,
+  type SectionedThread,
+} from "./sections.js";
 
 /** Cap on one summarizer call, so a hung endpoint cannot stall the queue. */
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -30,6 +39,35 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const SWEEP_CRON = "*/10 * * * *";
 /** Threads considered per sweep, newest first. */
 const SWEEP_LIMIT = 200;
+/** The plugin that owns the sidebar list, and so its layout preferences. */
+const THREAD_LIST_PLUGIN_ID = "thread-list";
+/** Where the grouping records what it changed, so `off` can put it back. */
+const SIDEBAR_STATE_KEY = "sidebar-grouping-state";
+/** One page of the thread list while reconciling sections. */
+const SECTION_PAGE_SIZE = 200;
+/**
+ * Cap on a reconcile, so a very long thread list cannot turn one brief write
+ * into an unbounded walk.
+ */
+const SECTION_THREAD_LIMIT = 2_000;
+/**
+ * Quiet period before a reconcile. Brief writes arrive one per summarized
+ * thread; this coalesces a burst of them into a single pass.
+ */
+const SECTION_SYNC_DEBOUNCE_MS = 2_000;
+
+/** The `thread-list` preferences the grouping takes over, and their targets. */
+const GROUPED_PREFS = {
+  organizationMode: "chronological",
+  chronologicalSort: "updated",
+} as const;
+
+/** What the grouping changed, recorded before the first write. */
+interface SidebarGroupingState {
+  applied: boolean;
+  /** Prior preference values, or null for one bb had never been given. */
+  previous: Record<string, unknown> | null;
+}
 
 export { rpcContract };
 
@@ -51,6 +89,14 @@ export default async function plugin(bb: BbPluginApi) {
       type: "number",
       label: "Quiet period before summarizing (seconds)",
       default: 120,
+    },
+    sidebarGrouping: {
+      type: "select",
+      label: "Group sidebar threads by brief status",
+      description:
+        '"status" replaces the sidebar\'s project grouping with Waiting on you / Blocked / Done sections, newest first inside each. "off" puts the previous grouping back and removes the sections.',
+      options: ["off", "status"],
+      default: "off",
     },
   });
 
@@ -148,6 +194,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function drain() {
     if (draining) return;
     draining = true;
+    let wrote = false;
     try {
       while (queue.length > 0 && !lifetime.signal.aborted) {
         const threadId = queue.shift();
@@ -156,7 +203,10 @@ export default async function plugin(bb: BbPluginApi) {
         inFlight = threadId;
         try {
           const changed = await summarizeThread(threadId, force);
-          if (changed) announce();
+          if (changed) {
+            wrote = true;
+            announce();
+          }
         } catch (error) {
           bb.log.warn(
             `brief for ${threadId} failed: ${
@@ -172,6 +222,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
     } finally {
       draining = false;
+      // One reconcile for the whole batch, once the queue is empty.
+      if (wrote) scheduleReconcile();
     }
   }
 
@@ -333,6 +385,231 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  // -------------------------------------------------------- sidebar sections
+
+  const prefsResult = z.object({
+    preferences: z.record(z.string(), z.unknown()),
+  });
+  const prefResult = z.object({ key: z.string(), value: z.unknown() });
+
+  const readThreadListPrefs = async (): Promise<Record<string, unknown>> => {
+    const result = await bb.sdk.plugins.callRpc({
+      pluginId: THREAD_LIST_PLUGIN_ID,
+      method: "listPreferences",
+      input: null,
+      outputSchema: prefsResult,
+    });
+    return result.preferences;
+  };
+
+  const writeThreadListPref = async (key: string, value: JsonValue) => {
+    await bb.sdk.plugins.callRpc({
+      pluginId: THREAD_LIST_PLUGIN_ID,
+      method: "setPreference",
+      input: { key, value },
+      outputSchema: prefResult,
+    });
+  };
+
+  const resetThreadListPref = async (key: string) => {
+    await bb.sdk.plugins.callRpc({
+      pluginId: THREAD_LIST_PLUGIN_ID,
+      method: "resetPreference",
+      input: { key },
+      outputSchema: prefResult,
+    });
+  };
+
+  const readSidebarState = async (): Promise<SidebarGroupingState> =>
+    (await bb.storage.kv.get<SidebarGroupingState>(SIDEBAR_STATE_KEY)) ?? {
+      applied: false,
+      previous: null,
+    };
+
+  /** Our sections in display order, creating any that are missing. */
+  const ensureSections = async (): Promise<{ name: string; id: string }[]> => {
+    const existing = await bb.sdk.threadSections.list();
+    const byName = new Map(existing.map((section) => [section.name, section.id]));
+    const sections: { name: string; id: string }[] = [];
+    // Created in display order, so creation order — which is the order bb hands
+    // sections to a sidebar — already agrees with `manualSectionOrder`.
+    for (const name of SECTION_NAMES) {
+      const id =
+        byName.get(name) ?? (await bb.sdk.threadSections.create({ name })).id;
+      sections.push({ name, id });
+    }
+    return sections;
+  };
+
+  /** Visible, live threads, in pages, capped. */
+  const listGroupableThreads = async (): Promise<SectionedThread[]> => {
+    const threads: SectionedThread[] = [];
+    for (let offset = 0; offset < SECTION_THREAD_LIMIT; offset += SECTION_PAGE_SIZE) {
+      const page = await bb.sdk.threads.list({
+        limit: SECTION_PAGE_SIZE,
+        offset,
+      });
+      for (const thread of page) {
+        if (thread.visibility === "hidden") continue;
+        // Archived threads are out regardless of status: the grouping is for
+        // work still in front of you.
+        if (thread.archivedAt !== null || thread.deletedAt !== null) continue;
+        threads.push({ id: thread.id, sectionId: thread.sectionId ?? null });
+      }
+      if (page.length < SECTION_PAGE_SIZE) break;
+    }
+    return threads;
+  };
+
+  /** Target section per thread, read from stored briefs only. */
+  const sectionIdByThreadId = async (
+    sectionIds: ReadonlyMap<string, string>,
+  ): Promise<Map<string, string>> => {
+    const targets = new Map<string, string>();
+    for (const key of await bb.storage.kv.list("brief:")) {
+      const threadId = threadIdFromKey(key);
+      const stored = await readBrief(threadId);
+      if (stored === null) continue;
+      const name = sectionNameForStatus(storedStatus(stored));
+      if (name === null) continue;
+      const sectionId = sectionIds.get(name);
+      if (sectionId !== undefined) targets.set(threadId, sectionId);
+    }
+    return targets;
+  };
+
+  /** Hand the sidebar back: delete our sections, restore what we changed. */
+  async function teardownGrouping(state: SidebarGroupingState) {
+    // Collected before the first delete: never iterate a list while mutating
+    // what produced it.
+    const ours = (await bb.sdk.threadSections.list())
+      .filter((section) => SECTION_NAMES.includes(section.name))
+      .map((section) => section.id);
+    // Deleting a section removes its thread assignments, so the threads fall
+    // back into bb's Threads group without a pass over them.
+    for (const id of ours) {
+      await bb.sdk.threadSections.delete({ id });
+    }
+    for (const key of [...Object.keys(GROUPED_PREFS), "manualSectionOrder"]) {
+      const previous = state.previous?.[key];
+      // Reset rather than guess when we never saw a prior value: thread-list
+      // owns its own defaults and they can change without us.
+      if (previous === undefined || previous === null) {
+        await resetThreadListPref(key);
+      } else {
+        // Round-tripped through kv JSON, so this really is a JsonValue.
+        await writeThreadListPref(key, previous as JsonValue);
+      }
+    }
+    await bb.storage.kv.set(SIDEBAR_STATE_KEY, { applied: false, previous: null });
+    bb.log.info("sidebar grouping off: sections removed, preferences restored");
+  }
+
+  /**
+   * Reconcile every thread's section against its stored brief.
+   *
+   * Always a full pass rather than a per-thread update: one `threads.list` plus
+   * one kv scan costs less than a `threads.get` per changed brief once a batch
+   * is more than a handful, it is self-healing after a missed write, and it is
+   * the same code path on startup as on a brief write. The debounce is what
+   * turns a burst of brief writes into one pass, so the preference writes below
+   * happen once per batch rather than once per thread.
+   */
+  async function reconcileSections() {
+    const state = await readSidebarState();
+    if ((await settings.get()).sidebarGrouping !== "status") {
+      if (state.applied) await teardownGrouping(state);
+      return;
+    }
+
+    const sections = await ensureSections();
+    const sectionIds = new Map(sections.map(({ name, id }) => [name, id]));
+    const desired: Record<string, JsonValue> = {
+      ...GROUPED_PREFS,
+      manualSectionOrder: manualSectionOrder(sections.map(({ id }) => id)),
+    };
+
+    const prefs = await readThreadListPrefs();
+    if (!state.applied) {
+      await bb.storage.kv.set(SIDEBAR_STATE_KEY, {
+        applied: true,
+        previous: Object.fromEntries(
+          Object.keys(desired).map((key) => [key, prefs[key] ?? null]),
+        ),
+      });
+    }
+    for (const [key, value] of Object.entries(desired)) {
+      // Only write a preference that is actually wrong, so a settled sidebar
+      // costs no writes and a user's own sort choice is not re-stomped hourly.
+      if (JSON.stringify(prefs[key]) !== JSON.stringify(value)) {
+        await writeThreadListPref(key, value);
+      }
+    }
+
+    const moves = planAssignments({
+      threads: await listGroupableThreads(),
+      sectionIdByThreadId: await sectionIdByThreadId(sectionIds),
+      ownedSectionIds: new Set(sectionIds.values()),
+    });
+    for (const move of moves) {
+      await bb.sdk.threads
+        .update({ threadId: move.threadId, sectionId: move.sectionId })
+        .catch((error: unknown) => {
+          bb.log.warn(
+            `could not move ${move.threadId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+    }
+    if (moves.length > 0) {
+      bb.log.info(`sidebar grouping: moved ${moves.length} thread(s)`);
+    }
+  }
+
+  let sectionTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconciling = false;
+  let reconcileAgain = false;
+
+  async function runReconcile() {
+    if (reconciling) {
+      // A brief landed mid-pass; its thread would be missed otherwise.
+      reconcileAgain = true;
+      return;
+    }
+    reconciling = true;
+    try {
+      do {
+        reconcileAgain = false;
+        await reconcileSections();
+      } while (reconcileAgain && !lifetime.signal.aborted);
+    } catch (error) {
+      bb.log.warn(
+        `sidebar grouping failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      reconciling = false;
+    }
+  }
+
+  /** Coalesce a burst of brief writes into one reconcile. */
+  const scheduleReconcile = () => {
+    if (sectionTimer !== null) clearTimeout(sectionTimer);
+    sectionTimer = setTimeout(() => {
+      sectionTimer = null;
+      void runReconcile();
+    }, SECTION_SYNC_DEBOUNCE_MS);
+    sectionTimer.unref?.();
+  };
+
+  // A grouping that is turned on or off should take effect without a reload;
+  // `reconcileSections` reads the setting itself and tears down when it is off.
+  settings.onChange((next, prev) => {
+    if (next.sidebarGrouping !== prev.sidebarGrouping) void runReconcile();
+  });
+
   // ---------------------------------------------------------------- events
 
   bb.events.on("thread.idle", ({ thread }) => {
@@ -402,10 +679,15 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
 
+  // Reconcile once on startup: briefs may have changed while this plugin was
+  // not running, and a section a thread was moved out of by hand is put back.
+  void runReconcile();
+
   bb.onDispose(() => {
     lifetime.abort();
     for (const timer of debounces.values()) clearTimeout(timer);
     debounces.clear();
+    if (sectionTimer !== null) clearTimeout(sectionTimer);
     queue.length = 0;
     forced.clear();
   });
