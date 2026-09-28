@@ -63,6 +63,27 @@ async function setup(state: { units: RawUnit[]; inventory: typeof INKWELL_ROSTER
     await harness.callRpc("effort_reconcile", { effortId, prUrl }) as { status: "checked" | "failed"; error?: string; row: RosterRow };
   return { bb, harness, db, store, efforts, roster, reconcile, threads };
 }
+/**
+ * A `bb thread show --json` export, key for key as the bb CLI prints one, with invented values: the thread and its environment are
+ * nested, and no id or status sits at the top level.
+ */
+const threadShow = ({ id, status, path, prUrl }: { id: string; status: string; path: string; prUrl: string }) => ({
+  thread: { id, projectId: "proj_inkwell", environmentId: `env_${id}`, providerId: "codex", title: "ABC-120 Shelve returned catalog entries", titleFallback: "Shelve returns",
+    sectionId: null, status, parentThreadId: "thr_inkwell_parent", sourceThreadId: null, lifecycleOwnerThreadId: null, originKind: null, originPluginId: "workstreams",
+    visibility: "visible", archivedAt: null, pinnedAt: null, deletedAt: null, lastReadAt: 1_790_000_000_000, latestAttentionAt: 1_790_000_000_000,
+    createdAt: 1_790_000_000_000, updatedAt: 1_790_000_000_000, runtime: { displayStatus: status, hostReconnectGraceExpiresAt: null },
+    activeBackgroundAgentCount: 0, canRestoreEnvironment: false, canSpawnChild: true, queuedMessageCount: 0 },
+  environment: { id: `env_${id}`, name: null, projectId: "proj_inkwell", hostId: "host_inkwell", path, isGitRepo: true, isWorktree: false, branchName: "abc-120-shelve-returns",
+    baseBranch: null, defaultBranch: "main", mergeBaseBranch: null, status: "ready", environmentProviderId: "project-checkout",
+    lifecycle: { phase: "active", retireAt: null, teardown: null }, hostLifecycle: "active",
+    environmentProviderSelection: { inputs: { path }, machine: { type: "existing", hostId: "host_inkwell" } }, environmentProviderInstanceKey: `project-checkout:${path}`,
+    managed: false, workspaceProvisionType: "unmanaged", createdAt: 1_790_000_000_000, updatedAt: 1_790_000_000_000,
+    pullRequest: { status: "available", pullRequest: { url: prUrl, number: Number(prUrl.split("/").at(-1)), title: "ABC-120 Shelve returned catalog entries", state: "open",
+      baseRefName: "main", headRefName: "abc-120-shelve-returns", updatedAt: "2026-09-28T12:00:00Z", attention: "changes_requested",
+      checks: { state: "passing", totalCount: 4, passedCount: 4, failedCount: 0, pendingCount: 0 },
+      mergeability: { state: "blocked", mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE" }, review: { state: "changes_requested", reviewRequestCount: 0 } } } },
+  pendingTodos: null,
+});
 const counts = (roster: EffortRoster) => {
   const open = roster.rows.filter((row) => row.state !== "done");
   return { prs: open.length, done: roster.rows.length - open.length, checkouts: new Set(open.flatMap((row) => row.checkouts)).size,
@@ -362,16 +383,20 @@ describe("roster dry-run script", () => {
     expect(blind.rosters.flatMap((roster: EffortRoster) => roster.rows).find((row: { target: string }) => row.target === catalog.target))
       .toMatchObject({ threadStatus: "unknown-offline" });
 
+    // The files the plan's export writes, in the shapes the bb CLI prints them: a list names each thread's environment only by id, and
+    // `bb thread show --json` nests the thread and its environment. Only the show file says the writer works in Catalog's checkout.
     const threads = join(directory, "threads");
     mkdirSync(threads);
-    writeFileSync(join(threads, "list.json"), JSON.stringify([{ id: "thr_catalog_writer", status: "active", environmentPath: catalog.checkouts[0] }]));
+    const writer = threadShow({ id: "thr_catalog_writer", status: "active", path: catalog.checkouts[0]!, prUrl: catalog.target });
+    writeFileSync(join(threads, "list.json"), JSON.stringify([writer.thread]));
+    writeFileSync(join(threads, "thr_catalog_writer.show.json"), JSON.stringify(writer));
     writeFileSync(join(threads, "thr_vault_parent.context.json"), JSON.stringify({ usedTokens: 1 }));
     const exported = join(directory, "exported.json");
     expect(await dryRun(["--db", path, "--threads", threads, "--out", exported], io().io)).toBe(0);
     const seen = JSON.parse(readFileSync(exported, "utf8"));
     expect(seen.unknownOffline.at(-1)).toEqual({ field: "thread-status", reason: expect.any(String), count: 1 });
     const row = seen.rosters.flatMap((roster: EffortRoster) => roster.rows).find((item: { target: string }) => item.target === catalog.target);
-    expect(row).toMatchObject({ state: "doing", owner: "thread" });
+    expect(row).toMatchObject({ state: "doing", owner: "thread", label: "Thread thr_catalog_writer is active in its checkout" });
     expect(row).not.toHaveProperty("threadStatus");
   });
 });

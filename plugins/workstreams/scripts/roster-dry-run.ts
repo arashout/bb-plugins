@@ -70,15 +70,19 @@ function advanceBatches(db: Database.Database) {
   return (db.prepare(`SELECT body FROM advance_batches`).all() as { body: string }[]).map(({ body }) => advanceBatchSchema.parse(JSON.parse(body)));
 }
 
-/** Thread status and environment from exported `bb thread list/show --json` files; other files are ignored. */
+/**
+ * Thread status and checkout from exported `bb thread show --json` files, which nest them as `{ thread, environment }`, and
+ * status alone from `bb thread list --json`, whose threads name only an environment id; other files are ignored.
+ */
 function exportedThreads(directory: string): { id: string; status: string; environmentPath: string | null }[] {
   const threads = new Map<string, { id: string; status: string; environmentPath: string | null }>();
   for (const file of readdirSync(directory).filter((name) => name.endsWith(".json")).sort()) {
     const parsed: unknown = JSON.parse(readFileSync(join(directory, file), "utf8"));
     for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
-      const thread = value as { id?: unknown; status?: unknown; environmentPath?: unknown; environment?: { path?: unknown } | null };
+      const shown = value as { thread?: { id?: unknown; status?: unknown }; environment?: { path?: unknown } | null } | null;
+      const thread = (shown?.thread ?? shown) as { id?: unknown; status?: unknown } | null;
       if (typeof thread?.id !== "string" || typeof thread.status !== "string") continue;
-      const path = thread.environmentPath ?? thread.environment?.path;
+      const path = shown?.environment?.path;
       threads.set(thread.id, { id: thread.id, status: thread.status, environmentPath: typeof path === "string" ? path : null });
     }
   }
