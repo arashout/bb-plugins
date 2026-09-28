@@ -23,7 +23,8 @@ const LINE_LIMIT = 50_000;
 /** How much of a turn's output a report keeps: its tail, where the result line is. */
 export const RAW_LIMIT = 64 * 1024;
 const sha = z.string().regex(SHA);
-const optionSchema = z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(500) }).strict();
+/** An option a blocker offers, and what choosing it would mean for the work. */
+const optionSchema = z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(500), consequence: z.string().max(500).nullable().default(null) }).strict();
 /** The documented fields and nothing else; the arrays a worker had nothing to put in may be left out. */
 export const envelopeSchema = z.object({
   attemptId: z.string().min(1).max(100),
@@ -38,7 +39,8 @@ export const envelopeSchema = z.object({
   criteria: z.array(z.object({ id: z.string().regex(/^(c\d+|ticket:[A-Za-z][A-Za-z0-9]*-\d+)$/u), outcome: z.enum(["passed", "failed", "not-run"]),
     evidence: z.string().max(4_000) }).strict()).max(100).default([]),
   blockers: z.array(z.object({ kind: z.enum(BLOCKER_KINDS), summary: z.string().min(1).max(1_000), question: z.string().max(1_000).nullable().default(null),
-    options: z.array(optionSchema).max(10).default([]), recommendation: z.string().max(100).nullable().default(null), prUrl: z.string().max(500).nullable().default(null),
+    options: z.array(optionSchema).max(10).default([]), recommendation: z.string().max(100).nullable().default(null),
+    recommendationReason: z.string().max(1_000).nullable().default(null), prUrl: z.string().max(500).nullable().default(null),
     checks: z.array(z.string().max(300)).max(50).default([]), evidence: z.array(z.string().max(500)).max(20).default([]) }).strict()).max(20).default([]),
 }).strict();
 export type Envelope = z.infer<typeof envelopeSchema>;
@@ -120,7 +122,7 @@ export function parseCompletion(output: string, expected: ExpectedReport): Compl
   return {
     ...empty, source: "v1", envelope, rejection: null, key, headOid: envelope.headOid, feedback: feedback || null,
     criteria: envelope.criteria.map((item) => ({ criterion: item.id, target: target ?? expected.target, headOid: envelope.headOid, outcome: item.outcome, accepted: true })),
-    blocker: first ? { summary: first.summary, question: first.question, options: first.options, prUrl: first.prUrl } : null,
+    blocker: first ? { summary: first.summary, question: first.question, options: first.options.map(({ id, label }) => ({ id, label })), prUrl: first.prUrl } : null,
     baseMoved: fresh.baseOid !== "" && envelope.baseOid !== fresh.baseOid,
   };
 

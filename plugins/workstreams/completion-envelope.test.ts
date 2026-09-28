@@ -81,6 +81,18 @@ describe("completion envelope v1", () => {
     expect(parseCompletion(v1(envelope({ outcome: "failed", feedback: undefined })), expected()).key).toBe("failed");
   });
 
+  it("keeps why a worker recommends an option and what each option means, for the decision card, while the routed blocker stays options and labels", () => {
+    const product = { kind: "product-decision", summary: "Out-of-print titles", question: "Allow out-of-print ISBNs at entry?", recommendation: "a",
+      recommendationReason: "It matches the ABC-318 acceptance note", evidence: ["ABC-318 acceptance note"],
+      options: [{ id: "a", label: "Allow with a badge", consequence: "One more check on entry" }, { id: "b", label: "Block at entry" }] };
+    const report = parseCompletion(v1(envelope({ outcome: "blocked", feedback: undefined, blockers: [product] })), expected());
+    expect(report.envelope!.blockers[0]).toMatchObject({ recommendation: "a", recommendationReason: product.recommendationReason, evidence: product.evidence,
+      options: [{ id: "a", label: "Allow with a badge", consequence: "One more check on entry" }, { id: "b", label: "Block at entry", consequence: null }] });
+    expect(report.blocker!.options).toEqual([{ id: "a", label: "Allow with a badge" }, { id: "b", label: "Block at entry" }]);
+    // Still only the documented fields.
+    expect(parseCompletion(v1(envelope({ outcome: "blocked", feedback: undefined, blockers: [{ ...product, confidence: "high" }] })), expected()).key).toBe("report-invalid");
+  });
+
   it("gives a product blocker with checks running a decision, then a named CI wait, and never Ready", () => {
     const product = { kind: "product-decision", summary: "Waitlist copy is undecided", question: "Show the waitlist or hide the shelf?",
       options: [{ id: "a", label: "Show the waitlist" }, { id: "b", label: "Hide the shelf" }] };

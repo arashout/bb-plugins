@@ -103,9 +103,19 @@ export const effortRosterSchema = z.object({
   suggestions: z.array(z.object({ key: z.string(), name: z.string(), tickets: z.array(z.string()), prUrls: z.array(z.string()), overlap: z.array(z.string()) })),
   /** Legacy job rows behind these PRs: why Advance's counts exceed the roster's. */
   history: z.object({ legacyJobs: z.number(), legacyPrs: z.number() }),
-  /** Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. */
+  /**
+   * Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. A worker's question carries
+   * its evidence from every PR that asked it, its recommendation and reason, what each option means for the work, and the attempt that
+   * asked first. A mark-ready question recommends the drafts that are settled with no worker note, and gives each draft's note.
+   * `answer` says where it is answered: by command, or in the worker's thread.
+   */
   decisions: z.array(z.object({ id: z.string(), n: z.number(), revision: z.number(), kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(),
-    question: z.string(), options: z.array(z.object({ id: z.string(), label: z.string() })), targets: z.array(z.object({ target: z.string(), n: z.number().nullable() })) })),
+    question: z.string(), createdAt: z.number().nullable(), answer: z.enum(["command", "open-thread"]),
+    options: z.array(z.object({ id: z.string(), label: z.string(), consequence: z.string().nullable() })),
+    recommendation: z.object({ optionId: z.string().nullable(), numbers: z.array(z.number()).nullable(), reason: z.string().nullable() }).nullable(),
+    evidence: z.array(z.object({ label: z.string(), url: z.string().nullable() })),
+    source: z.object({ attemptId: z.string(), threadId: z.string().nullable(), label: z.string() }).nullable(),
+    targets: z.array(z.object({ target: z.string(), n: z.number().nullable(), note: z.string().nullable(), recommended: z.boolean().nullable() })) })),
   /** The newest admitted command: its text, the surface it came from (null when journaled before surfaces were kept), when, the revision after it, the snapshot it read, and its result. */
   lastCommand: z.object({ requestId: z.string(), text: z.string(), origin: z.enum(["panel", "banner", "thread", "cli"]).nullable(), at: z.number(), revision: z.number().nullable(),
     snapshotId: z.string().nullable(), result: effortCommandResultSchema }).nullable(),

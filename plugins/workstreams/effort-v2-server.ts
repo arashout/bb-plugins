@@ -37,7 +37,7 @@ import type { EffortStore, EstablishedEffort } from "./effort-store.js";
 import { attemptEvidence, decideAttempt, decisionId, holdsPr, sameBody, StaleWriteError, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution,
   type ExecutionMode, type RowWrite, type StoredAttempt, type StoredCodeAction, type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
-import { githubRateLimit } from "./ghactions.js";
+import { githubRateLimit, prTarget } from "./ghactions.js";
 import type { LegacyAttempt } from "./legacy-history.js";
 import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type CriterionEvidence } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
@@ -288,6 +288,49 @@ export function syncDecisions(effortId: string, open: readonly Decision[], next:
     ({ id, n, key, body, expectedRevision, status: body.targets.length ? "open" as const : "withdrawn" as const }));
 }
 
+/**
+ * A decision as its card shows it. A question a worker asked carries, from the newest report of each PR that asked it, the evidence
+ * they gave, the first recommendation and its reason, what each option means for the work, and the attempt that asked first. A
+ * mark-ready question recommends each draft that is settled (checks green, no conflict, no open review thread) and whose worker left
+ * no note on its head; a note is a validation it didn't pass or didn't run. Nothing here is stored: the reports and rows are.
+ */
+export function decisionCard(decision: Decision, input: { createdAt: number | null; row(target: string): WorkRow | null; attempts(target: string): readonly StoredAttempt[] }):
+  EffortRoster["decisions"][number] {
+  const { body } = decision;
+  const same = (question: string | null | undefined) => question?.trim().toLowerCase() === body.question.trim().toLowerCase();
+  const asked = body.targets.flatMap((item) => {
+    const attempt = input.attempts(item.target).find((candidate) => candidate.status === "completed" && candidate.body.report?.envelope?.blockers[0]
+      && same(candidate.body.report.blocker?.question ?? candidate.body.report.blocker?.summary));
+    return attempt ? [{ item, attempt, blocker: attempt.body.report!.envelope!.blockers[0]! }] : [];
+  });
+  const notes = body.subkind === "mark-ready" ? new Map(body.targets.map((item) => {
+    const row = input.row(item.target);
+    const gates = row?.body.gates;
+    const report = input.attempts(item.target).find((attempt) => attempt.status === "completed" && attempt.body.report?.envelope
+      && attempt.body.report.headOid !== null && attempt.body.report.headOid === row?.body.observedHead)?.body.report;
+    const unvalidated = report?.envelope?.validation.find((check) => check.result !== "passed");
+    const note = unvalidated ? unvalidated.detail || `${unvalidated.command}: ${unvalidated.result}` : gates?.["checks-green"] !== true ? "checks aren't green"
+      : gates["no-conflict"] !== true ? "it conflicts with its base" : gates["threads-resolved"] === false ? "review threads are open" : null;
+    return [item.target, note] as const;
+  })) : null;
+  const left = body.targets.filter((item) => notes?.get(item.target) != null);
+  const recommended = body.targets.filter((item) => notes !== null && notes.get(item.target) === null && item.n !== null);
+  const advised = asked.find(({ blocker }) => body.options.some((option) => option.id === blocker.recommendation));
+  return {
+    id: decision.id, n: decision.n, revision: decision.revision, kind: body.kind, subkind: body.subkind, question: body.question, createdAt: input.createdAt,
+    answer: body.kind === "worker-interaction" ? "open-thread" : "command",
+    options: body.options.map((option) => ({ ...option,
+      consequence: asked.map(({ blocker }) => blocker.options.find((offered) => offered.id === option.id)?.consequence).find((value) => value) ?? null })),
+    recommendation: notes ? { optionId: null, numbers: recommended.map((item) => item.n!), reason: left.length
+      ? `Leaves out ${left.map((item) => `${formatTargets([item])}: ${notes.get(item.target)}`).join("; ")}` : "Checks green, no conflicts, and no open review threads on each" }
+      : advised ? { optionId: advised.blocker.recommendation, numbers: null, reason: advised.blocker.recommendationReason } : null,
+    evidence: [...new Set(asked.flatMap(({ blocker }) => blocker.evidence))].map((text) => ({ label: text, url: /^https?:\/\//u.test(text) ? text : null })),
+    source: asked[0] ? { attemptId: asked[0].attempt.id, threadId: asked[0].attempt.threadId,
+      label: `${prTarget(asked[0].item.target)?.name ?? asked[0].item.target} #${prTarget(asked[0].item.target)?.number ?? ""}` } : null,
+    targets: body.targets.map(({ target, n: number }) => ({ target, n: number, note: notes?.get(target) ?? null, recommended: notes ? notes.get(target) === null : null })),
+  };
+}
+
 type Answer = { option: string } | { numbers: number[] } | { text: string };
 /**
  * What one answer does to the instruction. It reaches only the PRs its question named and grants only what the
@@ -431,6 +474,8 @@ export function createEffortV2(deps: EffortV2Deps) {
     const rows = deps.work.rows(effort.id);
     if (!active && rows.length === 0) return undefined;
     const decisions = deps.work.decisions(effort.id);
+    const asked = deps.work.asked(effort.id);
+    const byTarget = new Map(rows.map((row) => [row.target, row]));
     // One contract gives the rollup and its criteria, so they can't disagree.
     const contract = active ? rowContract(effort, active.scope, rows, sources.work, decisions, evidenceOf(rows.map((row) => row.target))) : null;
     return { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target))),
@@ -438,8 +483,8 @@ export function createEffortV2(deps: EffortV2Deps) {
       active: active && { id: active.id, revision: active.revision, text: active.text, reportMode: active.scope.reportMode, outcome: active.scope.outcome },
       rollup: contract?.rollup ?? null,
       contract: contract && { criteria: contract.criteria, outcomeValidated: contract.outcomeValidated, completed: contract.completed },
-      decisions: decisions.map(({ id, n, revision, body }) => ({ id, n, revision, kind: body.kind, subkind: body.subkind, question: body.question, options: body.options,
-        targets: body.targets.map(({ target, n: number }) => ({ target, n: number })) })) };
+      decisions: decisions.map((decision) => decisionCard(decision, { createdAt: asked.get(decision.id) ?? null, row: (target) => byTarget.get(target) ?? null,
+        attempts: (target) => deps.work.attempts(target) })) };
   }
   async function roster(effortId: string, since?: number): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);

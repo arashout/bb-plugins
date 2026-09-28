@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
-import { syncDecisions, type EffortCommandResult } from "./effort-v2-server.js";
-import { createEffortWorkStore, type AttemptBody, type WorkRowBody } from "./effort-work-store.js";
+import { decisionCard, syncDecisions, type EffortCommandResult } from "./effort-v2-server.js";
+import { envelopeSchema } from "./completion-envelope.js";
+import { createEffortWorkStore, type AttemptBody, type Decision, type StoredAttempt, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import { cheapSignature, createPrFactsStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
 import { createEffortStore } from "./effort-store.js";
@@ -1119,12 +1120,78 @@ describe("effort instructions", () => {
       await env.admit("recheck 3");
       expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 2, targets: [1, 2, 3] }, { n: 2, status: "open", revision: 1, targets: [4] }]);
       expect((await env.roster(env.effort.id)).decisions).toEqual([
-        { id: expect.any(String), n: 1, revision: 2, kind: "lifecycle", subkind: "mark-ready", question: MARK_READY,
-          options: [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }], targets: [1, 2, 3].map((n) => ({ target: env.target(n), n })) },
-        expect.objectContaining({ n: 2, subkind: "request-review", targets: [{ target: env.target(4), n: 4 }] })]);
+        { id: expect.any(String), n: 1, revision: 2, kind: "lifecycle", subkind: "mark-ready", question: MARK_READY, createdAt: expect.any(Number), answer: "command",
+          options: [{ id: "ready", label: "Mark ready", consequence: null }, { id: "keep", label: "Keep as draft", consequence: null }], evidence: [], source: null,
+          // Each draft is settled and no worker left a note on it, so all three are recommended.
+          recommendation: { optionId: null, numbers: [1, 2, 3], reason: "Checks green, no conflicts, and no open review threads on each" },
+          targets: [1, 2, 3].map((n) => ({ target: env.target(n), n, note: null, recommended: true })) },
+        expect.objectContaining({ n: 2, subkind: "request-review", recommendation: null, targets: [{ target: env.target(4), n: 4, note: null, recommended: null }] })]);
       // The parent thread's banner answers them too, so it is served each one's revision.
       env.store.save({ ...env.store.getRecord(env.effort.id)!, coordinatorThreadId: "thr_catalog_parent", coordinatorState: "ready" });
       expect(await env.harness.callRpc("effort_parent_context", { threadId: "thr_catalog_parent" })).toMatchObject({ decisions: [{ n: 1, revision: 2 }, { n: 2, revision: 1 }] });
+    });
+
+    describe("decision cards", () => {
+      const pr = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
+      const [outOfPrint, badge, emptyShelf, capacity, photo] = [pr("folio", 415), pr("quill", 93), pr("folio", 418), pr("atlas", 85), pr("catalog", 910)];
+      const HEAD = "7".repeat(40);
+      /** A finished attempt whose report asks this question, or validates its head. */
+      const attempt = (target: string, envelope: Record<string, unknown>, threadId = `thr_${target.split("/").at(-1)}`): StoredAttempt => {
+        const parsed = envelopeSchema.parse({ attemptId: `A-${target.split("/").at(-1)}`, target, actions: ["address_review_feedback"], outcome: "blocked", headOid: HEAD,
+          baseOid: "b".repeat(40), ...envelope });
+        const [first] = parsed.blockers;
+        return { id: parsed.attemptId, target, effortId: "shelving", instructionId: "I-shelving-r4", launchKey: `key-${parsed.attemptId}`, status: "completed", threadId,
+          hostId: "host-inkwell", path: null, createdAt: 1, body: { instructionRevision: 4, recipes: ["address_review_feedback"], role: "code", retryEpoch: 0, retryIndex: 0,
+            start: { headOid: HEAD, baseOid: "b".repeat(40), fingerprint: null, sourceIds: [] },
+            resource: { kind: "reuse", threadId, path: null, hostId: "host-inkwell", projectId: "project", reason: null, workspace: null }, mode: "send", marker: "[attempt]",
+            settledAt: 1, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null,
+            report: { raw: "", source: "v1", envelope: parsed, compat: [], rejection: null, key: first ? `blocked:${first.kind}` as const : "changed", headOid: HEAD, baseMoved: false,
+              criteria: [], blocker: first ? { summary: first.summary, question: first.question, options: first.options.map(({ id, label }) => ({ id, label })), prUrl: null } : null } } };
+      };
+      const decision = (n: number, body: Partial<Decision["body"]>, targets: [string, number][]): Decision => ({ id: `D-shelving-${n}`, effortId: "shelving", n, key: `key-${n}`,
+        status: "open", revision: 1, body: { kind: "product", subkind: null, question: "", options: [], grants: null, answer: null, answeredVia: null,
+          targets: targets.map(([target, number]) => ({ target, n: number, head: HEAD })), ...body } });
+      const gates = (patch: Record<string, boolean | null> = {}) => ({ "checks-green": true, "no-conflict": true, "threads-resolved": true, ...patch }) as WorkRowBody["gates"];
+      const row = (target: string, patch: Record<string, boolean | null> = {}): WorkRow => ({ target, effortId: "shelving", instructionId: "I-shelving-r4", phase: "decision-needed",
+        revision: 1, dueAt: null, body: { n: null, cause: "lifecycle", detail: "", userState: "decision", modifiers: [], nextAction: null, owner: null, wake: null, decision: null,
+          recovery: [], offers: [], retryEpoch: 0, observedHead: HEAD, observedAt: 1, gates: gates(patch), tickets: [] } });
+
+      it("merges the evidence of every PR that asked one question into its card, with the worker's recommendation, its reason, and what each option means", () => {
+        const question = "Out-of-print ISBNs at entry: allow them, or block them?";
+        const options = [{ id: "A", label: "Allow, and show an 'Out of print' badge" }, { id: "B", label: "Block entry and route to the Rare desk" }];
+        const asked = (evidence: string[], recommendation: string | null) => ({ blockers: [{ kind: "product-decision", summary: "Out-of-print titles", question, recommendation,
+          recommendationReason: recommendation && "It matches the ABC-318 acceptance note", evidence, options: [
+            { ...options[0], consequence: "12 already renders the badge; 7 adds one check" }, { ...options[1], consequence: "Needs a Rare-desk route, about one more PR" }] }] });
+        const attempts = new Map([[outOfPrint, [attempt(outOfPrint, asked(["https://github.com/inkwell/folio/pull/415#discussion_r1", "ABC-318 acceptance note"], "A"))]],
+          [badge, [attempt(badge, asked(["ABC-318 acceptance note", "https://linear.app/inkwell/issue/ABC-318"], null))]]]);
+        const card = decisionCard(decision(1, { kind: "product", question, options }, [[outOfPrint, 7], [badge, 12]]),
+          { createdAt: 5, row: () => null, attempts: (target) => attempts.get(target) ?? [] });
+        expect(card).toEqual({ id: "D-shelving-1", n: 1, revision: 1, kind: "product", subkind: null, question, createdAt: 5, answer: "command",
+          options: [{ ...options[0], consequence: "12 already renders the badge; 7 adds one check" }, { ...options[1], consequence: "Needs a Rare-desk route, about one more PR" }],
+          recommendation: { optionId: "A", numbers: null, reason: "It matches the ABC-318 acceptance note" },
+          evidence: [{ label: "https://github.com/inkwell/folio/pull/415#discussion_r1", url: "https://github.com/inkwell/folio/pull/415#discussion_r1" },
+            { label: "ABC-318 acceptance note", url: null }, { label: "https://linear.app/inkwell/issue/ABC-318", url: "https://linear.app/inkwell/issue/ABC-318" }],
+          source: { attemptId: "A-415", threadId: "thr_415", label: "folio #415" },
+          targets: [{ target: outOfPrint, n: 7, note: null, recommended: null }, { target: badge, n: 12, note: null, recommended: null }] });
+        // A report that asks something else lends the card nothing.
+        expect(decisionCard(decision(1, { question: "Shelve by genre?", options }, [[outOfPrint, 7]]), { createdAt: 5, row: () => null,
+          attempts: (target) => attempts.get(target) ?? [] })).toMatchObject({ recommendation: null, evidence: [], source: null, options: options.map((item) => ({ ...item, consequence: null })) });
+      });
+
+      it("recommends marking ready each settled draft whose worker left no note on its head, and says why it leaves one out", () => {
+        const noted = attempt(capacity, { outcome: "changed", validation: [{ command: "npm test -- capacity", result: "passed", detail: "" },
+          { command: "review the capacity threshold", result: "not-run", detail: "TODO left in the threshold" }] });
+        const rows = new Map([[emptyShelf, row(emptyShelf)], [capacity, row(capacity)], [photo, row(photo)]]);
+        const lifecycle = decision(2, { kind: "lifecycle", subkind: "mark-ready", question: "Mark these drafts ready for review?",
+          options: [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }] }, [[emptyShelf, 13], [capacity, 14], [photo, 15]]);
+        const card = (patch: Map<string, WorkRow> = rows, attempts: StoredAttempt[] = [noted]) => decisionCard(lifecycle, { createdAt: 5, row: (target) => patch.get(target) ?? null,
+          attempts: (target) => attempts.filter((item) => item.target === target) });
+        expect(card()).toMatchObject({ recommendation: { optionId: null, numbers: [13, 15], reason: "Leaves out 14: TODO left in the threshold" },
+          targets: [{ n: 13, note: null, recommended: true }, { n: 14, note: "TODO left in the threshold", recommended: false }, { n: 15, note: null, recommended: true }] });
+        // A note on an older head no longer applies; an open review thread keeps a draft out.
+        expect(card(new Map([...rows, [capacity, { ...row(capacity), body: { ...row(capacity).body, observedHead: "8".repeat(40) } }], [photo, row(photo, { "threads-resolved": false })]]))
+          .recommendation).toEqual({ optionId: null, numbers: [13, 14], reason: "Leaves out 15: review threads are open" });
+      });
     });
 
     it("groups the same worker question from two PRs into one decision and a different question into another", () => {
