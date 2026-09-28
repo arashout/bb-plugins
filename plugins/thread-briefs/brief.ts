@@ -296,6 +296,33 @@ export function doneRingIcon(colorIndex?: number): string {
 export const DONE_RING_ICON = `${ICON_PREFIX}done`;
 
 /**
+ * The done ring in grey, for a thread that finished and has not been touched
+ * since.
+ *
+ * One icon, not a set: grey *replaces* the project hue rather than varying with
+ * it, so there is nothing to register per palette slot. That is the reading —
+ * colour on this row means a live project, and a ring that has given its colour
+ * up is one nobody is coming back to. The shape is unchanged, so the row still
+ * says `done` at a glance and the grey only adds "and cold".
+ */
+export const STALE_DONE_RING_ICON = `${ICON_PREFIX}done-stale`;
+
+/**
+ * How long a thread has been idle, for the grey ring's hover label.
+ *
+ * Coarse like {@link summarizedAgo}, and for a stronger reason: this label is
+ * recomputed on a timer, and a phrase that changed every minute would rewrite
+ * every stale row's status a thousand times a day to say the same thing. Days
+ * and hours change rarely enough that the decoration diff absorbs the ticks.
+ */
+export function idleFor(ms: number): string {
+  const hours = Math.floor(Math.max(0, ms) / 3_600_000);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+/**
  * The row decoration for one signal, or null for a row that should keep bb's
  * own glyph.
  *
@@ -338,19 +365,41 @@ export const DONE_RING_ICON = `${ICON_PREFIX}done`;
  * `liveWorking` is client-side truth the sidebar already holds, so applying it
  * here costs no server round trip — which is the whole reason `listRowSignals`
  * does no per-thread lookups.
+ *
+ * `stale` is the same kind of thing: a done thread nobody has touched since,
+ * computed from the attention cursor on the sidebar row beside the same brief.
+ * It takes the ring's colour away rather than adding a mark, because the row
+ * has no second channel to add one to — and giving up the project colour is the
+ * honest thing for a thread that is about to leave the sidebar entirely.
  */
 export function rowDecoration(
   signal: RowSignal,
   liveWorking: boolean,
   project: { id: string; name: string } | null = null,
+  stale: { idleMs: number; archiving: boolean } | null = null,
 ): { icon: string; label: string; tone: "default" | "error" | "running" | "success" } | null {
   if (liveWorking) return null;
   const isDone = signal.status === "done";
+  // Only a done row can be stale; anything else is a caller bug, and drawing
+  // the done ring for it would be worse than ignoring it.
+  const staleDone = isDone ? stale : null;
   const colorIndex =
     project === null ? undefined : projectColorIndex(project.id);
-  const label = rowLabelFor(signal.stage, signal.status);
+  const label =
+    staleDone === null
+      ? rowLabelFor(signal.stage, signal.status)
+      : // The grey is not self-explanatory the way the ring's shape is, so the
+        // label is where "why has this one gone flat" gets answered — including
+        // the fact that it is on its way out, which nothing else says.
+        `${rowLabelFor(signal.stage, signal.status)} · idle ${idleFor(
+          staleDone.idleMs,
+        )}${staleDone.archiving ? ", archiving soon" : ""}`;
   return {
-    icon: isDone ? doneRingIcon(colorIndex) : stageRingIcon(signal.stage, colorIndex),
+    icon: staleDone !== null
+      ? STALE_DONE_RING_ICON
+      : isDone
+        ? doneRingIcon(colorIndex)
+        : stageRingIcon(signal.stage, colorIndex),
     // Never `success`. The colour channel belongs to the project now, and a
     // green that showed up only on the rows this function happens to be handed
     // no project for would be a second, invisible rule competing with it.

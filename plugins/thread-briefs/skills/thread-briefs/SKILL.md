@@ -1,6 +1,6 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the side-panel Brief tab, the re-entry refresher above the composer, the manual stage and status overrides, and renaming threads to the brief's title.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the grey ring and auto-archiving of stale done threads, the side-panel Brief tab, the re-entry refresher above the composer, the manual stage and status overrides, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
@@ -31,6 +31,8 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `quietSeconds` | `120` | How long a thread must be quiet before it is **re**-summarized. A thread's first brief does not wait for it — see [When a brief is regenerated](#when-a-brief-is-regenerated). |
 | `refresherIdleHours` | `8` | Idle hours before opening a thread shows the re-entry refresher above the composer. `0` turns it off. See [The re-entry refresher](#the-re-entry-refresher). |
 | `renameThreads` | `false` | `true` renames each thread to the short name its brief chose. See [Thread titles](#thread-titles). |
+| `doneStaleHours` | `24` | Idle hours after which a `done` thread's ring goes grey instead of taking its project's colour. `0` keeps every done ring coloured. See [Stale done threads](#stale-done-threads). |
+| `doneArchiveHours` | `48` | Idle hours after which a `done` thread is archived. `0` turns auto-archiving off. See [Stale done threads](#stale-done-threads). |
 | `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
 
 The key is a secret setting, so it stays on the server and is never sent to the
@@ -405,9 +407,11 @@ stage the thread has reached:
 
 Names are registered by the app through `app.experimental_icons.register` as
 `thread-briefs/stage-<stage>` and `thread-briefs/done`, each also in a `-c<n>`
-variant per palette slot; a row status takes an icon *name*, not a component, so
-the artwork has to go in the registry first. They are mapped off `BRIEF_STAGES`
-and `PROJECT_RING_HUES`, so adding a stage or a hue adds its rings.
+variant per palette slot, plus `thread-briefs/done-stale`; a row status takes an
+icon *name*, not a component, so the artwork has to go in the registry first.
+They are mapped off `BRIEF_STAGES` and `PROJECT_RING_HUES`, so adding a stage or
+a hue adds its rings. `done-stale` has no `-c<n>` variants — see
+[Stale done threads](#stale-done-threads).
 
 ### The project colour
 
@@ -442,6 +446,57 @@ picks up the name suffix when the project arrives.
 
 Threads with **no brief** get no row status at all, so they get no colour
 either. They sit in bb's unassigned Threads group.
+
+### Stale done threads
+
+A `done` thread with no activity for `doneStaleHours` draws
+`thread-briefs/done-stale` — the same closed ring in grey — and its hover label
+gains the reason: `Review — Done · idle 2 days, archiving soon`. At
+`doneArchiveHours` it is archived.
+
+```sh
+bb plugin config thread-briefs set doneStaleHours 24    # 0 keeps every done ring coloured
+bb plugin config thread-briefs set doneArchiveHours 48  # 0 never auto-archives
+```
+
+The grey **replaces** the project hue; there is no `-c<n>` variant of it. The row
+has one channel, colour on it means a live project, and a thread about to leave
+the sidebar has no use for the mark saying whose it is. The shape is unchanged,
+so the row still reads as done and the grey only adds "and nobody came back".
+
+Idleness is `latestAttentionAt`, not `updatedAt` — this plugin writes thread
+titles and section assignments, and both move `updatedAt`, so filing a done
+thread into ✅ Done would otherwise reset the clock its own section's threads are
+timed on. Not `lastSummarizedAt` either: **Re-summarize** moves that, so reading
+a finished thread would postpone its archiving.
+
+Both halves go through one predicate, `isStaleDone` in `shared.ts`, so a grey
+ring is exactly a thread the sweep will take one threshold later — the grey is
+the warning, not a second opinion. The ring is computed on the client from the
+cursor already on the sidebar row, re-tested every 60s, so a window left open
+overnight greys without a reload; the thresholds ride along on
+`listRowSignals`, which still does no per-thread lookups.
+
+**The archive sweep** (`archive-done`, `17 * * * *`) runs on its own schedule
+rather than inside `brief-sweep`, which returns early with no API key —
+archiving has nothing to do with whether a summarizer is configured. Every other
+rule is a reason *not* to archive:
+
+| Left alone | Why |
+| --- | --- |
+| Pinned threads | A pin is a deliberate "keep this in front of me" and outranks anything inferred. It still greys. |
+| Threads with no brief | Briefs are never backfilled, so a briefless thread is one this plugin has never read. |
+| Threads it archived before | `autoArchivedAt` on the brief row. Un-archiving by hand is final, not an argument to re-win every hour. |
+| Busy, hidden, deleted, already archived | Nothing to do, or not ours. |
+
+`autoArchivedAt` is deliberately **not** carried across a re-summary:
+`summarizeThread` builds a fresh row, and a summary only happens on real new
+activity — so the exemption lasts exactly as long as the thread stays untouched,
+and working in it again puts it back in the normal cycle.
+
+To see what the sweep is doing: `bb plugin logs thread-briefs` shows
+`auto-archived N done thread(s)` per pass, and `could not archive <id>` for one
+it could not take (the next pass retries).
 
 **Why stage and not status.** With `sidebarGrouping status` on, the section
 header already says the status, so a status glyph spends the row's one slot

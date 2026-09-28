@@ -84,6 +84,74 @@ export function projectRingColor(colorIndex: number): string {
 }
 
 /**
+ * The grey a done thread's ring takes once it has gone cold.
+ *
+ * Chroma exactly zero, so it cannot be mistaken for one of
+ * {@link PROJECT_RING_HUES} that happens to render dull — the whole reading is
+ * "this ring has no project colour", and a nearly-grey blue would make that a
+ * judgement call at 16px. Two lightnesses through `light-dark()` for the same
+ * reason the hues have two: one grey that reads against the light sidebar is
+ * muddy on the dark one.
+ */
+export const STALE_DONE_RING_COLOR =
+  "light-dark(oklch(0.62 0 0), oklch(0.58 0 0))";
+
+/** Default hours of no activity before a done thread's ring goes grey. */
+export const DEFAULT_DONE_STALE_HOURS = 24;
+
+/**
+ * Default hours of no activity before a done thread is archived.
+ *
+ * Twice the stale threshold, so the grey ring is a full day's warning rather
+ * than a state the thread passes through on its way out.
+ */
+export const DEFAULT_DONE_ARCHIVE_HOURS = 48;
+
+/** Hours from a setting as milliseconds; 0 or nonsense means "off". */
+export function hoursToMs(hours: unknown): number {
+  return typeof hours === "number" && Number.isFinite(hours) && hours > 0
+    ? hours * 3_600_000
+    : 0;
+}
+
+/**
+ * How long a thread has sat untouched, from bb's own attention cursor.
+ *
+ * `latestAttentionAt` rather than `updatedAt` for the same reason the refresher
+ * uses it: this plugin writes a thread's title and its section, and both move
+ * `updatedAt`. Filing a done thread into the ✅ Done section would otherwise
+ * reset the very clock the threads in that section are being timed on, and
+ * nothing would ever go stale. Not `lastSummarizedAt` either — the panel's
+ * Re-summarize button moves that, so reading a finished thread would postpone
+ * its archiving.
+ *
+ * Clamped at zero: a cursor in the future is clock skew between the server that
+ * stamped it and whoever is reading it, and counting backwards from it would
+ * make a fresh thread look ancient.
+ */
+export function idleMsSince(latestAttentionAt: number, now: number): number {
+  return Math.max(0, now - latestAttentionAt);
+}
+
+/**
+ * Whether a done thread has gone cold: the one rule behind both the grey ring
+ * and the auto-archive, so the ring is always the warning for the archive that
+ * follows rather than a second opinion about it.
+ *
+ * A threshold of 0 means off, matching the settings that feed it.
+ */
+export function isStaleDone(args: {
+  status: string;
+  latestAttentionAt: number;
+  now: number;
+  afterMs: number;
+}): boolean {
+  if (args.status !== "done") return false;
+  if (args.afterMs <= 0) return false;
+  return idleMsSince(args.latestAttentionAt, args.now) >= args.afterMs;
+}
+
+/**
  * The palette slot a project gets, from a hash of its id.
  *
  * Hashed rather than assigned, so the colour needs nothing stored and is the

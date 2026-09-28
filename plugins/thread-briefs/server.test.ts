@@ -491,6 +491,145 @@ describe("summarizing", () => {
   });
 });
 
+describe("the auto-archive sweep", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  /** A host whose thread list and archive call the test can inspect. */
+  function archiveHost(options: {
+    threads: ReturnType<typeof makeThreadResponse>[];
+    doneArchiveHours?: number;
+  }) {
+    globalThis.fetch = fakeCompletion(SUMMARY) as unknown as typeof globalThis.fetch;
+    const archived: string[] = [];
+    const created = createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings: {
+        apiKey: "test-key",
+        baseUrl: "https://api.test/v1",
+        model: "test-model",
+        quietSeconds: 120,
+        doneArchiveHours: options.doneArchiveHours ?? 48,
+      },
+      sdk: {
+        threads: {
+          list: async () => options.threads,
+          get: async ({ threadId }) =>
+            options.threads.find((entry) => entry.id === threadId) ?? thread,
+          archive: async ({ threadId }) => {
+            archived.push(threadId);
+            return { id: threadId, archivedAt: Date.now() };
+          },
+        },
+      },
+    });
+    return { ...created, archived };
+  }
+
+  /** A finished thread, idle for `idleDays`, with a brief to match. */
+  const coldThread = (id: string, idleDays: number, overrides = {}) =>
+    makeThreadResponse({
+      id,
+      visibility: "visible",
+      status: "idle",
+      latestAttentionAt: Date.now() - idleDays * DAY,
+      ...overrides,
+    });
+
+  const seedDoneBrief = async (
+    bb: { storage: { kv: { set: (key: string, value: unknown) => Promise<void> } } },
+    id: string,
+    overrides: Partial<StoredBrief> = {},
+  ) => {
+    await bb.storage.kv.set(`brief:${id}`, {
+      ...storedBrief(id, { nextStep: "", blockedOn: "" }),
+      ...overrides,
+    });
+  };
+
+  it("registers its own schedule, not folded into the brief sweep", async () => {
+    // The brief sweep returns early without an API key; archiving a finished
+    // thread has nothing to do with whether a summarizer is configured.
+    const { bb, harness } = archiveHost({ threads: [] });
+    await plugin(bb);
+    expect(harness.registrations.schedules.map((entry) => entry.name)).toContain(
+      "archive-done",
+    );
+    await harness.lifecycle.dispose();
+  });
+
+  it("archives a done thread that has gone cold", async () => {
+    const { bb, harness, archived } = archiveHost({
+      threads: [coldThread("thr_cold", 3)],
+    });
+    await plugin(bb);
+    await seedDoneBrief(bb, "thr_cold");
+
+    await harness.behavior.runSchedule("archive-done");
+    expect(archived).toEqual(["thr_cold"]);
+
+    // Stamped, so pulling it back out of the archive is final.
+    const stored = (await bb.storage.kv.get("brief:thr_cold")) as StoredBrief;
+    expect(typeof stored.autoArchivedAt).toBe("number");
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("does not archive one that is only grey, not yet past the threshold", async () => {
+    // The grey ring is the warning; a thread showing it has not run out of time.
+    const { bb, harness, archived } = archiveHost({
+      threads: [coldThread("thr_grey", 1.5)],
+    });
+    await plugin(bb);
+    await seedDoneBrief(bb, "thr_grey");
+
+    await harness.behavior.runSchedule("archive-done");
+    expect(archived).toEqual([]);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("leaves a thread it already archived and the user pulled back", async () => {
+    const { bb, harness, archived } = archiveHost({
+      threads: [coldThread("thr_back", 9)],
+    });
+    await plugin(bb);
+    await seedDoneBrief(bb, "thr_back", { autoArchivedAt: Date.now() - 5 * DAY });
+
+    await harness.behavior.runSchedule("archive-done");
+    expect(archived).toEqual([]);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("archives nothing when the setting is off", async () => {
+    const { bb, harness, archived } = archiveHost({
+      threads: [coldThread("thr_cold", 30)],
+      doneArchiveHours: 0,
+    });
+    await plugin(bb);
+    await seedDoneBrief(bb, "thr_cold");
+
+    await harness.behavior.runSchedule("archive-done");
+    expect(archived).toEqual([]);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("hands the thresholds to the sidebar with the row signals", async () => {
+    // One source for both halves, so the grey ring cannot promise an archiving
+    // the sweep is not about to do.
+    const { bb, harness } = archiveHost({ threads: [] });
+    await plugin(bb);
+    const result = (await harness.behavior.callRpc("listRowSignals", null)) as {
+      staleAfterMs: number;
+      archiveAfterMs: number;
+    };
+    expect(result.staleAfterMs).toBe(24 * 60 * 60 * 1000);
+    expect(result.archiveAfterMs).toBe(48 * 60 * 60 * 1000);
+    await harness.lifecycle.dispose();
+  });
+});
+
 describe("stage override", () => {
   it("pins the stage and retires it once the thread moves on", async () => {
     const fetchMock = fakeCompletion(SUMMARY);

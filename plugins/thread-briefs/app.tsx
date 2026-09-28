@@ -22,8 +22,11 @@ import {
   BRIEFS_CHANGED_CHANNEL,
   BRIEF_STAGES,
   PROJECT_RING_HUES,
+  STALE_DONE_RING_COLOR,
   STORED_BRIEF_STATUSES,
+  idleMsSince,
   isLiveWorking,
+  isStaleDone,
   projectRingColor,
   type BriefStage,
   type StoredBriefStatus,
@@ -33,6 +36,7 @@ import {
   DONE_RING_ICON,
   rowDecoration,
   STAGE_LABELS,
+  STALE_DONE_RING_ICON,
   stageRingIcon,
   STATUS_LABELS,
   summarizedAgo,
@@ -52,6 +56,12 @@ const PANEL_ACTION_ID = "brief";
  * narrow and the launcher row, which is a list, has room for the longer name.
  */
 const PANEL_TAB_TITLE = "Brief";
+
+/**
+ * How often the rows are re-tested for staleness. See the `now` state in
+ * {@link BriefSync} for why a timer is needed at all.
+ */
+const STALE_TICK_MS = 60_000;
 
 /**
  * Row glyphs need two things bb keeps in different places: the briefs (server,
@@ -90,11 +100,32 @@ function BriefSync() {
   const rpc = useRpc<typeof rpcContract>();
   const { threads, projects } = experimental_useSidebarThreads();
   const [signals, setSignals] = useState<readonly RowSignal[]>([]);
+  const [thresholds, setThresholds] = useState({
+    staleAfterMs: 0,
+    archiveAfterMs: 0,
+  });
+  // Recomputed on a timer, because staleness is the one thing on this row that
+  // changes with nothing behind it: a window left open overnight would keep
+  // painting yesterday's project colour on a thread the sweep is about to
+  // archive. A minute is far finer than the threshold it is watching, and the
+  // decoration diff in the content script absorbs the ticks that change
+  // nothing — `idleFor` is coarse precisely so that is almost all of them.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), STALE_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   const load = useCallback(() => {
     void rpc
       .call("listRowSignals")
-      .then((result) => setSignals(result.signals))
+      .then((result) => {
+        setSignals(result.signals);
+        setThresholds({
+          staleAfterMs: result.staleAfterMs,
+          archiveAfterMs: result.archiveAfterMs,
+        });
+      })
       .catch(() => {
         // A failed poll leaves the previous glyphs in place rather than
         // clearing every row on a transient error.
@@ -146,18 +177,60 @@ function BriefSync() {
     return byThread;
   }, [projects, threads]);
 
+  /**
+   * When each row last had activity worth your attention.
+   *
+   * bb's own cursor, straight off the sidebar row — so the staleness the ring
+   * draws costs no round trip, the same trade `workingIds` makes above and the
+   * reason `listRowSignals` can stay a flat kv scan.
+   */
+  const attentionByThreadId = useMemo(() => {
+    const byThread = new Map<string, number>();
+    for (const thread of threads) {
+      if (typeof thread.latestAttentionAt === "number") {
+        byThread.set(thread.id, thread.latestAttentionAt);
+      }
+    }
+    return byThread;
+  }, [threads]);
+
   useEffect(() => {
     const next = new Map<string, Decoration>();
     for (const signal of signals) {
+      // A thread with no row in the sidebar has no cursor to age, so it simply
+      // never greys: the one place this can happen is a thread the current
+      // window is not showing, which has no glyph to draw either.
+      const latestAttentionAt = attentionByThreadId.get(signal.threadId);
+      const stale =
+        latestAttentionAt !== undefined &&
+        isStaleDone({
+          status: signal.status,
+          latestAttentionAt,
+          now,
+          afterMs: thresholds.staleAfterMs,
+        })
+          ? {
+              idleMs: idleMsSince(latestAttentionAt, now),
+              archiving: thresholds.archiveAfterMs > 0,
+            }
+          : null;
       const decoration = rowDecoration(
         signal,
         workingIds.has(signal.threadId),
         projectByThreadId.get(signal.threadId) ?? null,
+        stale,
       );
       if (decoration !== null) next.set(signal.threadId, decoration);
     }
     publishDecorations(next);
-  }, [projectByThreadId, signals, workingIds]);
+  }, [
+    attentionByThreadId,
+    now,
+    projectByThreadId,
+    signals,
+    thresholds,
+    workingIds,
+  ]);
 
   return null;
 }
@@ -190,16 +263,14 @@ const RING_QUARTERS = [
  * against a visible whole reads instantly at 16px, where three marks against
  * nothing has to be counted.
  *
- * Without a `colorIndex` everything is `currentColor` and the host's tone class
- * colours it. With one the ring paints itself from the project's hue, which is
- * what lets one glyph carry three facts at 16px: how far round it goes is the
- * stage, whether the centre is filled is `done`, and the hue is the project.
- * Painting explicitly is also what overrides the tone class, so the two modes
- * cannot both colour the same ring.
+ * A `color` of `currentColor` leaves the host's tone class to paint it, which
+ * is what the panel and the stage picker want. An explicit colour overrides
+ * that class, so the two modes cannot both colour the same ring — which is what
+ * lets one glyph carry three facts at 16px: how far round it goes is the stage,
+ * whether the centre is filled is `done`, and the hue is the project (or grey,
+ * for a done thread nobody has come back to).
  */
-function ring(filled: number, complete = false, colorIndex?: number) {
-  const color =
-    colorIndex === undefined ? "currentColor" : projectRingColor(colorIndex);
+function ring(filled: number, complete = false, color = "currentColor") {
   return function StageRing({ className }: { className?: string }) {
     return (
       <svg
@@ -231,14 +302,16 @@ function ring(filled: number, complete = false, colorIndex?: number) {
  * stage added to the list gets its ring here without a second edit.
  */
 function ringSet(colorIndex?: number) {
+  const color =
+    colorIndex === undefined ? "currentColor" : projectRingColor(colorIndex);
   return [
     ...BRIEF_STAGES.map((stage, index) => ({
       name: stageRingIcon(stage, colorIndex),
-      component: ring(index + 1, false, colorIndex),
+      component: ring(index + 1, false, color),
     })),
     {
       name: doneRingIcon(colorIndex),
-      component: ring(RING_QUARTERS.length, true, colorIndex),
+      component: ring(RING_QUARTERS.length, true, color),
     },
   ];
 }
@@ -256,6 +329,12 @@ function ringSet(colorIndex?: number) {
 const RING_ICONS = [
   ...ringSet(),
   ...PROJECT_RING_HUES.flatMap((_hue, colorIndex) => ringSet(colorIndex)),
+  // One, not a set: the grey replaces a project's hue rather than varying with
+  // it. See {@link STALE_DONE_RING_ICON}.
+  {
+    name: STALE_DONE_RING_ICON,
+    component: ring(RING_QUARTERS.length, true, STALE_DONE_RING_COLOR),
+  },
 ];
 
 // ------------------------------------------------------------------ the panel

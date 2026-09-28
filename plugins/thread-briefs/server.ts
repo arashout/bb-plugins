@@ -23,6 +23,16 @@ import {
 } from "./brief.js";
 import { chooseRefresher, refresherSeenKey } from "./refresher.js";
 import {
+  planArchives,
+  type ArchiveBriefFacts,
+  type ArchiveCandidate,
+} from "./archive.js";
+import {
+  hoursToMs,
+  DEFAULT_DONE_ARCHIVE_HOURS,
+  DEFAULT_DONE_STALE_HOURS,
+} from "./shared.js";
+import {
   buildUserPrompt,
   parseSummary,
   requestSummary,
@@ -66,6 +76,25 @@ const firstBriefDelayMs = (quietMs: number) =>
 const SWEEP_CRON = "*/10 * * * *";
 /** Threads considered per sweep, newest first. */
 const SWEEP_LIMIT = 200;
+/**
+ * The auto-archive sweep, on its own schedule rather than folded into the brief
+ * sweep above: that one returns early without an API key, and archiving a
+ * finished thread has nothing to do with whether a summarizer is configured.
+ *
+ * Hourly, on a minute nothing else runs on. The thresholds it compares against
+ * are measured in days, so a sweep that is up to an hour late is invisible —
+ * and running it at :00 alongside the brief sweep would put a burst of archive
+ * writes on top of a burst of summaries.
+ */
+const ARCHIVE_CRON = "17 * * * *";
+/**
+ * Threads considered per archive sweep, newest first.
+ *
+ * The same cap as the brief sweep, and it self-corrects the same way: anything
+ * beyond it is caught on a later pass, because a thread that is eligible today
+ * is still eligible in an hour.
+ */
+const ARCHIVE_LIMIT = 500;
 /** The plugin that owns the sidebar list, and so its layout preferences. */
 const THREAD_LIST_PLUGIN_ID = "thread-list";
 /** Where the grouping records what it changed, so `off` can put it back. */
@@ -135,6 +164,20 @@ export default async function plugin(bb: BbPluginApi) {
       description:
         "Replaces bb's opening-prompt title with the short name the summarizer chose, refreshed on every summary. Stops renaming a thread for good once you rename it yourself. bb's original title is not kept anywhere, so turning this off leaves the last name it wrote in place.",
       default: false,
+    },
+    doneStaleHours: {
+      type: "number",
+      label: "Grey out a done thread's ring after this many idle hours",
+      description:
+        "A thread whose brief says done and which has had no activity for this long draws a grey ring instead of its project's colour, so a finished-and-forgotten thread reads differently from one that finished this morning. Set to 0 to keep every done ring in its project colour.",
+      default: DEFAULT_DONE_STALE_HOURS,
+    },
+    doneArchiveHours: {
+      type: "number",
+      label: "Archive a done thread after this many idle hours",
+      description:
+        "Archives a thread whose brief says done and which has had no activity for this long. Pinned threads are never archived, and a thread you un-archive is left alone until you work in it again. Set to 0 to never archive automatically.",
+      default: DEFAULT_DONE_ARCHIVE_HOURS,
     },
     sidebarGrouping: {
       type: "select",
@@ -629,10 +672,16 @@ export default async function plugin(bb: BbPluginApi) {
         const stored = await readBrief(threadIdFromKey(key));
         if (stored === null) continue;
         // No live thread lookups here: the client folds the running/queued
-        // override in per row, off the sidebar view it already has.
+        // override and the staleness in per row, off the sidebar view it
+        // already has.
         signals.push(rowSignalFor(resolveBrief(stored)));
       }
-      return { signals };
+      const values = await settings.get();
+      return {
+        signals,
+        staleAfterMs: hoursToMs(values.doneStaleHours),
+        archiveAfterMs: hoursToMs(values.doneArchiveHours),
+      };
     },
 
     setStageOverride: async ({ threadId, stage }) => {
@@ -954,6 +1003,15 @@ export default async function plugin(bb: BbPluginApi) {
   // `reconcileSections` reads the setting itself and tears down when it is off.
   settings.onChange((next, prev) => {
     if (next.sidebarGrouping !== prev.sidebarGrouping) void runReconcile();
+    // The thresholds reach the sidebar with the row signals, so a changed one
+    // has to be pushed for the rings to go grey — or come back — without a
+    // reload.
+    if (
+      next.doneStaleHours !== prev.doneStaleHours ||
+      next.doneArchiveHours !== prev.doneArchiveHours
+    ) {
+      announce();
+    }
   });
 
   // ---------------------------------------------------------------- events
@@ -1052,6 +1110,89 @@ export default async function plugin(bb: BbPluginApi) {
       // missed. `summarizeThread` re-checks the real cursor before spending a
       // request.
       if (stored.lastSummarizedAt < thread.updatedAt) enqueue(thread.id);
+    }
+  });
+
+  // ------------------------------------------------------------ auto-archive
+
+  /**
+   * Archive the threads that finished and were never come back to.
+   *
+   * The end of the same arc the grey ring draws: `planArchives` and the ring
+   * both go through `isStaleDone`, so a row that has gone grey is exactly a row
+   * this will take, one threshold later. That is the whole user-facing promise
+   * — the colour draining out of a ring is the warning — and it only holds
+   * because there is one predicate rather than two agreeing ones.
+   *
+   * Independent of the summarizer: no API key check, because archiving reads
+   * briefs that already exist and writes no new ones.
+   */
+  bb.background.schedule("archive-done", ARCHIVE_CRON, async () => {
+    const values = await settings.get();
+    const archiveAfterMs = hoursToMs(values.doneArchiveHours);
+    if (archiveAfterMs <= 0) return;
+
+    const threads = await bb.sdk.threads.list({ limit: ARCHIVE_LIMIT });
+    const candidates: ArchiveCandidate[] = threads.map((thread) => ({
+      id: thread.id,
+      latestAttentionAt: thread.latestAttentionAt,
+      pinnedAt: thread.pinnedAt,
+      archivedAt: thread.archivedAt,
+      deletedAt: thread.deletedAt,
+      visibility: thread.visibility,
+      status: thread.status,
+    }));
+
+    // Briefs read per candidate rather than by scanning the kv prefix: the
+    // list is already bounded and this is one pass an hour, where the section
+    // reconcile's scan runs on every brief write.
+    const briefs = new Map<string, ArchiveBriefFacts>();
+    for (const candidate of candidates) {
+      const stored = await readBrief(candidate.id);
+      if (stored === null) continue;
+      briefs.set(candidate.id, {
+        status: effectiveStatus(stored),
+        autoArchivedAt: stored.autoArchivedAt ?? null,
+      });
+    }
+
+    const ids = planArchives({
+      threads: candidates,
+      briefs,
+      now: Date.now(),
+      archiveAfterMs,
+    });
+    if (ids.length === 0) return;
+
+    let archived = 0;
+    for (const threadId of ids) {
+      try {
+        await bb.sdk.threads.archive({ threadId });
+      } catch (error) {
+        // One thread that will not archive is not worth abandoning the rest of
+        // the sweep over, and the next pass retries it anyway.
+        bb.log.warn(
+          `could not archive ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        continue;
+      }
+      archived += 1;
+      // Stamped only after the archive actually landed, so a failed call
+      // leaves the thread eligible rather than silently exempt for good. Read
+      // again rather than reusing the row above: a summary may have landed
+      // during the sweep, and that brief's `autoArchivedAt` of absent is the
+      // one this must not resurrect.
+      const stored = await readBrief(threadId);
+      if (stored !== null) {
+        await writeBrief({ ...stored, autoArchivedAt: Date.now() });
+      }
+    }
+    if (archived > 0) {
+      bb.log.info(`auto-archived ${archived} done thread(s)`);
+      // The rows are gone from the sidebar; drop their glyphs with them.
+      announce();
     }
   });
 

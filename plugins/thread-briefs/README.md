@@ -69,6 +69,29 @@ folded in per row on the client, off the sidebar view it already holds, so
 The same rings label the stage control in the Brief panel, which is where the
 vocabulary is learned: four rings in a row, each next to its name.
 
+**A done thread that goes cold loses its colour.** A day after it finished, with
+no activity since, the closed ring turns **grey** and its hover label says how
+long and what is coming (`Review — Done · idle 2 days, archiving soon`). A day
+after that it is [archived](#auto-archiving-finished-threads).
+
+```sh
+bb plugin config thread-briefs set doneStaleHours 24   # 0 keeps every done ring coloured
+```
+
+Grey *replaces* the project hue rather than joining it, because the row has one
+channel: colour on this row means a live project, and a thread on its way out of
+the sidebar has no use for the mark that says whose it is. The shape does not
+change, so the row still reads as done at a glance and the grey only adds "and
+nobody came back".
+
+Staleness is measured from bb's own `latestAttentionAt`, and the whole rule is
+one predicate (`isStaleDone` in `shared.ts`) shared by the ring and the sweep —
+so a ring that has gone grey is exactly a thread the sweep will take, one
+threshold later. That is the point of the grey: it is the warning, not a second
+opinion. It is computed on the client from the cursor already on the sidebar row,
+on a one-minute tick, so a window left open overnight greys without a reload and
+`listRowSignals` still needs no per-thread lookups.
+
 **The thread title itself** — optionally, the brief's name replaces it:
 
 ```sh
@@ -191,6 +214,43 @@ quiet period is there to stop a busy thread being re-summarized every turn, and
 a thread with no brief has nothing to protect — only an empty panel, a missing
 ring and no section, for as long as its first turn takes.
 
+## Auto-archiving finished threads
+
+A thread whose brief says **done** and which has had no activity for two days is
+archived.
+
+```sh
+bb plugin config thread-briefs set doneArchiveHours 48   # 0 turns it off
+```
+
+The [grey ring](#where-briefs-show-up) is the warning: both go through the same
+`isStaleDone`, so a ring that has lost its colour is exactly a thread the next
+sweep will take once the second threshold passes. A day of grey is the notice
+period.
+
+Every other rule is a reason *not* to archive, which is the right default for a
+sweep that runs unattended — a thread wrongly left in the sidebar costs a glance,
+a thread wrongly archived costs a search for something you believe you left on
+screen:
+
+- **A pinned thread is never archived.** A pin is a deliberate "keep this in
+  front of me" and outranks anything inferred. It still greys.
+- **A thread with no brief is never archived.** Briefs are never backfilled, so a
+  briefless thread is one this plugin has never read; it has no claim to make
+  about whether the work is finished.
+- **Un-archiving is final.** The brief records `autoArchivedAt` when the sweep
+  takes a thread, and a thread carrying it is never auto-archived again — so
+  pulling one back out is not an argument you have to win every hour. That
+  exemption lasts exactly as long as the thread stays untouched: a summary writes
+  a fresh brief row without the stamp, so working in the thread again puts it
+  back in the normal cycle.
+- **Nothing busy, hidden, deleted or already archived** is touched.
+
+The sweep runs hourly on its own schedule rather than inside the brief sweep,
+which returns early with no API key — archiving a finished thread has nothing to
+do with whether a summarizer is configured. Its thresholds are compared in days,
+so a sweep running up to an hour late is invisible.
+
 ## How it is built
 
 | Concern | Mechanism |
@@ -199,7 +259,8 @@ ring and no section, for as long as its first turn takes.
 | Summarizer input | `threads.conversationOutline()` head + tail with the middle elided, `threads.output()` for the last message in full, and the previous brief |
 | Storage | `bb.storage.kv`, one row per thread at `brief:<threadId>` |
 | Sidebar glyph | a content script's `experimental_setThreadRowStatus`, fed by an `experimental_appOverlay` that owns the rpc + realtime subscription |
-| Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, since a row status takes an icon *name* and not a component |
+| Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, in every palette colour, plus one grey done ring — since a row status takes an icon *name* and not a component, every combination has to be registered at init, before any project is known |
+| Auto-archive | a `17 * * * *` `bb.background.schedule` over `threads.list`, `planArchives` deciding purely, `threads.archive` doing it, and `autoArchivedAt` on the brief row remembering it |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
 | Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `experimental_onSubmitted` for the send that retires it |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |

@@ -237,6 +237,23 @@ export const storedBriefSchema = z
      * is a brief that shows no refresher.
      */
     refresher: storedRefresherSchema.nullable().optional(),
+    /**
+     * When the archive sweep archived this thread by itself, or null/absent if
+     * it never has.
+     *
+     * The whole of "do not re-archive something you pulled back out". The sweep
+     * refuses to archive a thread whose brief carries this, so un-archiving one
+     * by hand is final rather than an argument you have to win again every
+     * hour.
+     *
+     * Deliberately *not* carried across a re-summary: `summarizeThread` builds
+     * a fresh row, and a summary only happens when the thread has real new
+     * activity. So the exemption lasts exactly as long as the thread stays
+     * untouched — work in it again and it rejoins the normal cycle, which is
+     * the same "sticks until real thread activity" contract the overrides above
+     * get from their sequence anchors.
+     */
+    autoArchivedAt: z.number().nullable().optional(),
     lastSummarizedAt: z.number(),
     /** The thread's `conversationOutline().maxSeq` at summarize time. */
     lastActivitySeen: z.number(),
@@ -340,7 +357,23 @@ export const rpcContract = defineRpcContract({
    */
   listRowSignals: {
     input: z.null(),
-    output: z.object({ signals: z.array(rowSignalSchema) }).strict(),
+    output: z
+      .object({
+        signals: z.array(rowSignalSchema),
+        /**
+         * How long a done thread may sit untouched before its ring goes grey,
+         * and how long before the sweep archives it. 0 means off.
+         *
+         * Sent with the signals rather than read from settings on the client,
+         * because the sweep on the server decides with these same numbers: one
+         * source, so the grey ring cannot promise an archiving the sweep is not
+         * about to do. The client needs `archiveAfterMs` only to decide whether
+         * the label may say so.
+         */
+        staleAfterMs: z.number(),
+        archiveAfterMs: z.number(),
+      })
+      .strict(),
   },
   /** Set or clear the manual stage. Clearing returns to the model's judgement. */
   setStageOverride: {

@@ -16,7 +16,11 @@ import {
   PROJECT_RING_HUES,
   projectColorIndex,
 } from "./shared.js";
-import { doneRingIcon, stageRingIcon } from "./brief.js";
+import {
+  doneRingIcon,
+  stageRingIcon,
+  STALE_DONE_RING_ICON,
+} from "./brief.js";
 
 
 const READY: BriefState = {
@@ -45,11 +49,17 @@ const sidebarThread = (
     status: "idle",
     hasPendingInteraction: false,
     projectId: "proj_alpha",
+    // Freshly active unless a test says otherwise, so every existing
+    // expectation is also an assertion that a done row keeps its project
+    // colour until it has actually gone cold.
+    latestAttentionAt: Date.now(),
     ...overrides,
   }) as PluginSidebarThread;
 
 /** The ring `proj_alpha` hashes to, which every default fixture thread draws. */
 const ALPHA = projectColorIndex("proj_alpha");
+
+const DAY = 24 * 60 * 60 * 1000;
 
 let app: CapturedPluginApp | null = null;
 const loadApp = async () => {
@@ -97,8 +107,11 @@ describe("registrations", () => {
       }
       expect(names).toContain(doneRingIcon(colorIndex));
     }
+    // Every ring in every colour, plus the one grey done ring — one, because
+    // grey replaces a project's hue rather than varying with it.
+    expect(names).toContain(STALE_DONE_RING_ICON);
     expect(captured.icons).toHaveLength(
-      (BRIEF_STAGES.length + 1) * (PROJECT_RING_HUES.length + 1),
+      (BRIEF_STAGES.length + 1) * (PROJECT_RING_HUES.length + 1) + 1,
     );
   });
 
@@ -223,7 +236,11 @@ describe("the brief panel", () => {
           setStageOverride: options.setStageOverride ?? (() => READY),
           setStatusOverride: options.setStatusOverride ?? (() => READY),
           refresh: options.refresh ?? (() => ({ queued: true })),
-          listRowSignals: () => ({ signals: [] }),
+          listRowSignals: () => ({
+            signals: [],
+            staleAfterMs: 0,
+            archiveAfterMs: 0,
+          }),
         },
       },
     );
@@ -418,6 +435,8 @@ describe("sidebar row glyphs", () => {
     threads?: PluginSidebarThread[];
     projects?: { id: string; name: string }[];
     omitSetter?: boolean;
+    staleAfterMs?: number;
+    archiveAfterMs?: number;
   }) => {
     const captured = await loadApp();
     const scripts = await mountPluginContentScripts(captured, {
@@ -430,7 +449,13 @@ describe("sidebar row glyphs", () => {
       captured.appOverlays[0]!,
       {},
       {
-        rpc: { listRowSignals: () => ({ signals: options.signals }) },
+        rpc: {
+          listRowSignals: () => ({
+            signals: options.signals,
+            staleAfterMs: options.staleAfterMs ?? DAY,
+            archiveAfterMs: options.archiveAfterMs ?? 2 * DAY,
+          }),
+        },
         sidebarThreads: {
           threads: options.threads ?? [sidebarThread({ id: "thr_1" })],
           projects: (options.projects ?? [
@@ -444,6 +469,97 @@ describe("sidebar row glyphs", () => {
 
   it("paints the closed ring on a finished row", async () => {
     const { scripts, slot } = await mountBoth({ signals: [signal()] });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: doneRingIcon(ALPHA),
+        label: "Review — Done (Alpha)",
+        tone: "default",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("greys a done row that has gone cold, taking its project colour away", async () => {
+    // The warning light for the auto-archive that follows. Grey replaces the
+    // hue rather than joining it: the row has one channel, and a thread about
+    // to leave the sidebar has no use for the colour that says whose it is.
+    const { scripts, slot } = await mountBoth({
+      signals: [signal()],
+      threads: [
+        sidebarThread({ id: "thr_1", latestAttentionAt: Date.now() - 2 * DAY }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: STALE_DONE_RING_ICON,
+        // The grey says nothing on its own, so the label is where "why has this
+        // one gone flat, and what happens next" gets answered.
+        label: "Review — Done · idle 2 days, archiving soon (Alpha)",
+        tone: "default",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("does not promise an archiving that is switched off", async () => {
+    const { scripts, slot } = await mountBoth({
+      signals: [signal()],
+      threads: [
+        sidebarThread({ id: "thr_1", latestAttentionAt: Date.now() - 2 * DAY }),
+      ],
+      archiveAfterMs: 0,
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: STALE_DONE_RING_ICON,
+        label: "Review — Done · idle 2 days (Alpha)",
+        tone: "default",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("leaves an unfinished row its colour however long it has sat", async () => {
+    // Staleness is a fact about a finished thread. An old thread still waiting
+    // on you is the opposite of something to fade out.
+    const { scripts, slot } = await mountBoth({
+      signals: [
+        signal({ status: "waiting-on-me", label: "Review — Waiting on you" }),
+      ],
+      threads: [
+        sidebarThread({ id: "thr_1", latestAttentionAt: Date.now() - 30 * DAY }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({
+        icon: stageRingIcon("review", ALPHA),
+        label: "Review — Waiting on you (Alpha)",
+        tone: "default",
+      }),
+    );
+
+    slot.lifecycle.unmount();
+    await scripts.lifecycle.dispose();
+  });
+
+  it("keeps every done ring coloured when greying is switched off", async () => {
+    const { scripts, slot } = await mountBoth({
+      signals: [signal()],
+      threads: [
+        sidebarThread({ id: "thr_1", latestAttentionAt: Date.now() - 90 * DAY }),
+      ],
+      staleAfterMs: 0,
+    });
 
     await waitFor(() =>
       expect(scripts.inspection.getThreadRowStatus("thr_1")).toEqual({

@@ -3,6 +3,7 @@ import {
   deriveStatus,
   effectiveStage,
   effectiveStatus,
+  idleFor,
   isStageOverrideStale,
   isStatusOverrideStale,
   planRename,
@@ -432,6 +433,64 @@ describe("rowDecoration", () => {
     it("draws nothing while the agent is running, project or not", () => {
       expect(rowDecoration(signalFor(stored()), true, alpha)).toBeNull();
     });
+  });
+
+  describe("gone cold", () => {
+    const alpha = { id: "proj_alpha", name: "Alpha" };
+    const stale = { idleMs: 2 * 24 * 60 * 60 * 1000, archiving: true };
+
+    it("swaps the project's colour for the grey ring", () => {
+      // The row has one channel. A thread on its way out of the sidebar has no
+      // use for the colour that says whose project it is, so the grey takes it
+      // rather than trying to share it.
+      const decoration = rowDecoration(signalFor(done), false, alpha, stale);
+      expect(decoration?.icon).toBe("thread-briefs/done-stale");
+      expect(decoration?.tone).toBe("default");
+    });
+
+    it("says how long, and that it is on its way out", () => {
+      // The shape still says done; nothing but the label says why the colour
+      // has drained out of it or what happens next.
+      expect(rowDecoration(signalFor(done), false, alpha, stale)?.label).toBe(
+        "Implementation — Done · idle 2 days, archiving soon (Alpha)",
+      );
+    });
+
+    it("does not promise an archiving that is switched off", () => {
+      expect(
+        rowDecoration(signalFor(done), false, alpha, {
+          ...stale,
+          archiving: false,
+        })?.label,
+      ).toBe("Implementation — Done · idle 2 days (Alpha)");
+    });
+
+    it("ignores staleness on a row that is not done", () => {
+      // Only a finished thread can be finished-and-forgotten. A caller that
+      // passed one anyway must not get the done ring drawn for it.
+      const decoration = rowDecoration(signalFor(blocked), false, alpha, stale);
+      expect(decoration?.icon).toBe(
+        `thread-briefs/stage-implementation-c${projectColorIndex(alpha.id)}`,
+      );
+      expect(decoration?.label).toBe("Implementation — Blocked (Alpha)");
+    });
+
+    it("still draws nothing while the agent is running", () => {
+      expect(rowDecoration(signalFor(done), true, alpha, stale)).toBeNull();
+    });
+  });
+});
+
+describe("idleFor", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  it("is coarse, because it is recomputed on a timer", () => {
+    // A phrase that changed every minute would rewrite every stale row's
+    // status a thousand times a day to say the same thing.
+    expect(idleFor(HOUR)).toBe("1 hour");
+    expect(idleFor(5 * HOUR + 59 * 60 * 1000)).toBe("5 hours");
+    expect(idleFor(24 * HOUR)).toBe("1 day");
+    expect(idleFor(70 * HOUR)).toBe("2 days");
   });
 });
 
