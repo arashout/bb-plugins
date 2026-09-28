@@ -11,7 +11,7 @@ import { keyFocus, RosterPane, RosterPicker, typing } from "./roster-view";
 const noop = () => {};
 const idle: PaneState = { focus: null, open: null, picks: new Map(), subsets: new Map(), hint: null };
 const asks = (roster: EffortRoster, wide: boolean, state: PaneState = { ...idle, focus: firstAsk(askCards(roster).asks) }) => ({ ...askCards(roster), state, wide, now: NOW,
-  onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onOpenThread: noop, onOpenUrl: noop });
+  onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onOpenThread: noop, onOpenUrl: noop });
 const box = (command: Partial<CommandBoxProps> = {}): CommandBoxProps =>
   ({ value: "", onValue: noop, onSubmit: noop, ack: null, open: false, onToggle: noop, onLeave: noop, note: null, ...command });
 function pane(wide: boolean, roster: EffortRoster = ROSTER, order: "number" | "state" = "number", command: Partial<CommandBoxProps> = {}) {

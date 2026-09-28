@@ -1,9 +1,11 @@
-// The asks above the roster (V2-UI-SPEC §4.2): decision cards, and the
-// receipts that replace them while an answer waits ten seconds for Undo.
+// The asks above the roster (V2-UI-SPEC §4.2): decision cards, the receipts
+// that replace them while an answer waits ten seconds for Undo, and system
+// issues with their recovery commands.
 // Each action control shows the command it sends before you use it, and each
 // card's footer carries the thread's text for the same answer, which a click
 // writes into the command box. Product decisions take an explicit option;
-// only a lifecycle subset accepts with Enter (plan amendment A9, call 3).
+// only a lifecycle subset or a system issue's recovery accepts with Enter
+// (plan amendment A9, call 3), and a recovery that drops a claim confirms.
 // Presentational only: data and callbacks come in as props, no SDK hook is
 // called, and imports stay relative, so static-markup tests can render it.
 import { useState, type ReactNode } from "react";
@@ -11,7 +13,8 @@ import { Checkbox } from "./components/ui/checkbox";
 import { cn } from "./lib/utils";
 import { formatTargets } from "./roster-shared";
 import { TONE_CLASS } from "./roster-rows";
-import { answerCommand, answerKey, askKind, clock, UNDO_WINDOW, type AnswerReply, type Ask, type DecisionAsk, type PaneState, type Receipt } from "./roster-view-model";
+import { answerCommand, answerKey, askKind, clock, UNDO_WINDOW, type AnswerReply, type Ask, type DecisionAsk, type IssueAsk, type PaneState, type Receipt,
+  type Recovery } from "./roster-view-model";
 
 export type AskActions = {
   /** Keyboard focus moves to this ask; a narrow pane opens its line. */
@@ -25,6 +28,8 @@ export type AskActions = {
   /** Write a command into the command box without sending it. */
   onCompose(text: string): void;
   onUndo(receipt: Receipt): void;
+  /** Run a system issue's recovery; one marked confirm opens its confirmation instead. */
+  onRecover(ask: IssueAsk, recovery: Recovery): void;
   onOpenThread(threadId: string): void;
   onOpenUrl(url: string): void;
 };
@@ -52,10 +57,12 @@ function AskKey({ id, tone }: { id: string; tone: "decision" | "issue" | null })
     tone ? TONE_CLASS[tone] : "border-foreground/30")}>{id}</span>;
 }
 
-/** The card frame: amber only for decisions; focused, it gets a ring. */
+const toneOf = (ask: Ask) => ask.kind === "issue" ? "issue" as const : "decision" as const;
+/** The card frame: amber for decisions and rose for system issues; focused, it gets a ring. */
 function Card({ ask, focused, children, onFocusAsk }: { ask: Ask; focused: boolean; children: ReactNode; onFocusAsk(id: string): void }) {
-  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} onClick={() => onFocusAsk(ask.id)} data-tone="decision"
-    className={cn("min-w-0 rounded-md border border-amber-500/30 bg-foreground/[0.03] px-3 py-2 text-[12px] outline-none", focused && "ring-2 ring-ring")}>
+  return <article data-roster-ask={ask.id} tabIndex={-1} aria-label={`${ask.id} ask`} onClick={() => onFocusAsk(ask.id)} data-tone={toneOf(ask)}
+    className={cn("min-w-0 rounded-md border bg-foreground/[0.03] px-3 py-2 text-[12px] outline-none", ask.kind === "issue" ? "border-rose-500/30" : "border-amber-500/30",
+      focused && "ring-2 ring-ring")}>
     {children}
   </article>;
 }
@@ -180,27 +187,67 @@ export function AnswerReceipt({ receipt, now, onUndo }: { receipt: Receipt; now:
   </div>;
 }
 
-/** A narrow pane's ask: one line until it's open. */
-function AskLine({ ask, focused, onOpen }: { ask: Ask; focused: boolean; onOpen(): void }) {
-  return <button type="button" data-roster-ask={ask.id} data-tone="decision" onClick={onOpen} aria-expanded={false}
-    className={cn("flex w-full min-w-0 items-center gap-2 rounded-md border border-amber-500/30 bg-foreground/[0.03] px-2 py-1.5 text-left text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      focused && "ring-2 ring-ring")}>
-    <AskKey id={ask.id} tone="decision" /><span className="shrink-0 tabular-nums text-muted-foreground">{ask.numbers.join(" ")}</span>
-    <span className="shrink-0 text-muted-foreground">· {{ authority: "authority", worker: "worker question", product: "product", lifecycle: "lifecycle" }[askKind(ask)]} ·</span>
-    <span className="min-w-0 flex-1 truncate">{ask.decision.question}</span><span aria-hidden className="text-muted-foreground">›</span>
-  </button>;
+/**
+ * A system issue: what failed or paused, which rows it holds, and its recovery commands. The first that drops no claim runs on click or
+ * Enter; one that drops a claim (`reset 17 release`) opens a confirmation naming the likely worker thread.
+ */
+export function IssueCard({ ask, state, focused, now, ...actions }: AskActions & { ask: IssueAsk; state: PaneState; focused: boolean; now: number }) {
+  const { issue } = ask;
+  const hint = state.hint?.id === ask.id ? state.hint.text : null;
+  return <Card ask={ask} focused={focused} onFocusAsk={actions.onFocusAsk}>
+    <header className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+      <AskKey id={ask.id} tone="issue" /><span>System issue</span><Numbers numbers={ask.numbers} onFocus={actions.onFocus} />
+      <span className="ml-auto">{issue.raisedAt ? `raised ${clock(issue.raisedAt, now)} · ` : ""}recovery, not a decision</span>
+    </header>
+    <p className="mt-1 text-[13px] font-medium">{issue.label}</p>
+    {issue.detail ? <p className="mt-0.5 text-muted-foreground">{issue.detail}</p> : null}
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      {issue.recovery.map((recovery) => <button key={recovery.command} type="button" onClick={(event) => { event.stopPropagation(); actions.onRecover(ask, recovery); }}
+        title={recovery.confirm ? `Asks you to confirm no worker is writing, then sends ${recovery.command}` : `Sends ${recovery.command}`}
+        className={cn(button, recovery === ask.primary ? "border-foreground/40 bg-foreground/[0.08] hover:bg-foreground/[0.12]" : quiet)}>{recovery.label}</button>)}
+      {issue.likelyThreadId ? <button type="button" className={cn(button, quiet)} onClick={(event) => { event.stopPropagation(); actions.onOpenThread(issue.likelyThreadId!); }}>
+        Open likely thread</button> : null}
+    </div>
+    <footer className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+      <span>{hint ?? (ask.primary ? `Enter sends ${ask.primary.command}` : issue.recovery.length ? "Each recovery here needs your confirmation" : "Nothing recovers this from here")}</span>
+      {issue.recovery.length ? <ThreadText commands={issue.recovery.map((recovery) => recovery.command)} onCompose={actions.onCompose} /> : null}
+    </footer>
+  </Card>;
+}
+
+/** A narrow pane's ask: one line until it's open. A system issue's line carries its first recovery. */
+function AskLine({ ask, focused, onOpen, onRecover }: { ask: Ask; focused: boolean; onOpen(): void } & Pick<AskActions, "onRecover">) {
+  const tone = toneOf(ask);
+  const [kind, summary] = ask.kind === "issue" ? ["system", ask.issue.label]
+    : [{ authority: "authority", worker: "worker question", product: "product", lifecycle: "lifecycle" }[askKind(ask)], ask.decision.question];
+  return <div data-tone={tone} className={cn("flex min-w-0 items-center gap-2 rounded-md border bg-foreground/[0.03] pr-1 text-[12px]",
+    tone === "issue" ? "border-rose-500/30" : "border-amber-500/30", focused && "ring-2 ring-ring")}>
+    <button type="button" data-roster-ask={ask.id} onClick={onOpen} aria-expanded={false}
+      className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <AskKey id={ask.id} tone={tone} /><span className="shrink-0 tabular-nums text-muted-foreground">{ask.numbers.join(" ")}</span>
+      <span className="shrink-0 text-muted-foreground">· {kind} ·</span>
+      <span className="min-w-0 flex-1 truncate">{summary}</span><span aria-hidden className="text-muted-foreground">›</span>
+    </button>
+    {ask.kind === "issue" && ask.primary ? <button type="button" onClick={() => onRecover(ask, ask.primary!)} title={`Sends ${ask.primary.command}`}
+      className={cn(button, quiet, "h-6 shrink-0")}>{ask.primary.label}</button> : null}
+  </div>;
 }
 
 /** Every ask, then the receipts. Wide, each card shows in full, two to a row; narrow, one line each and one open at a time. */
 export function AsksBlock({ asks, receipts, state, wide, now, ...actions }: AsksProps) {
   if (asks.length === 0 && receipts.length === 0) return null;
   const focused = (ask: Ask) => state.focus !== null && "ask" in state.focus && state.focus.ask === ask.id;
-  const card = (ask: Ask) => !wide && state.open !== ask.id ? <AskLine key={ask.id} ask={ask} focused={focused(ask)} onOpen={() => actions.onFocusAsk(ask.id)} />
+  const card = (ask: Ask) => !wide && state.open !== ask.id
+    ? <AskLine key={ask.id} ask={ask} focused={focused(ask)} onOpen={() => actions.onFocusAsk(ask.id)} onRecover={actions.onRecover} />
+    : ask.kind === "issue" ? <IssueCard key={ask.id} ask={ask} state={state} focused={focused(ask)} now={now} {...actions} />
     // A decision's card is keyed by its revision too, so words or numbers typed for a question that changed don't carry over.
     : ask.answer === "subset" ? <LifecycleDecisionCard key={answerKey(ask)} ask={ask} state={state} focused={focused(ask)} {...actions} />
     : <ProductDecisionCard key={answerKey(ask)} ask={ask} state={state} focused={focused(ask)} now={now} {...actions} />;
+  const decisions = asks.filter((ask) => ask.kind === "decision");
+  const strips = asks.filter((ask) => ask.kind !== "decision");
   return <section aria-label="Asks" className="grid gap-1.5 px-3 pt-2">
-    {asks.length ? <div className={cn("grid gap-1.5", wide && "grid-cols-2")}>{asks.map(card)}</div> : null}
+    {decisions.length ? <div className={cn("grid gap-1.5", wide && "grid-cols-2")}>{decisions.map(card)}</div> : null}
     {receipts.map((receipt) => <AnswerReceipt key={receipt.requestId} receipt={receipt} now={now} onUndo={actions.onUndo} />)}
+    {strips.map(card)}
   </section>;
 }

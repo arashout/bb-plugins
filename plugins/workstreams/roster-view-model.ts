@@ -625,7 +625,13 @@ export type DecisionAsk = {
   /** A lifecycle question's preselected subset. */
   recommended: number[];
 };
-export type Ask = DecisionAsk;
+type Issue = EffortRoster["issues"][number];
+export type Recovery = Issue["recovery"][number];
+/** A system issue: a shared failure, or new launches paused. Its recovery is a command, never a decision; one that drops a claim confirms first. */
+export type IssueAsk = { kind: "issue"; id: string; issue: Issue; numbers: number[];
+  /** What Enter runs: the first recovery that drops no claim. */
+  primary: Recovery | null };
+export type Ask = DecisionAsk | IssueAsk;
 /** An answer the server holds for Undo, in place of its card. */
 export type Receipt = PendingAnswer & { id: string; numbers: number[] };
 export type AnswerReply = { optionId: string } | { numbers: number[] } | { text: string };
@@ -645,12 +651,14 @@ function decisionAsk(decision: Decision, rows: readonly RosterRow[]): DecisionAs
     recommended: decision.subkind ? (decision.recommendation?.numbers ?? numbersOf(decision.targets.filter((item) => item.recommended))).filter((n) => numbers.includes(n)) : [] };
 }
 
-/** The asks in the order you clear them: decisions by number. A decision whose answer waits for Undo shows as its receipt instead. */
+/** The asks in the order you clear them: decisions by number, then system issues as raised. A decision whose answer waits for Undo shows as its receipt instead. */
 export function askCards(roster: EffortRoster, pending: readonly PendingAnswer[] = roster.pending): { asks: Ask[]; receipts: Receipt[] } {
   const waiting = new Set(pending.flatMap((item) => item.decisions));
   const decisions = [...roster.decisions].sort((a, b) => a.n - b.n);
   return {
-    asks: decisions.filter((decision) => !waiting.has(decision.n)).map((decision) => decisionAsk(decision, roster.rows)),
+    asks: [...decisions.filter((decision) => !waiting.has(decision.n)).map((decision): Ask => decisionAsk(decision, roster.rows)),
+      ...roster.issues.map((issue, index): Ask => ({ kind: "issue", id: issue.ref ?? `S${index + 1}`, issue, numbers: issue.numbers,
+        primary: issue.recovery.find((item) => !item.confirm) ?? null }))],
     receipts: pending.map((item) => ({ ...item, id: item.decisions.map((n) => `D${n}`).join(" "),
       numbers: numbersOf(decisions.filter((decision) => item.decisions.includes(decision.n)).flatMap((decision) => decision.targets)) })),
   };
@@ -682,17 +690,25 @@ export function latestUndo(receipts: readonly Receipt[], now: number): Receipt |
   return receipts.filter((item) => item.until > now).sort((a, b) => b.until - a.until)[0] ?? null;
 }
 
+/** A reset that drops a launch claim, awaiting your confirmation that no worker is writing in the likely thread. */
+export type ResetConfirm = { command: string; label: string; numbers: number[]; threadId: string | null };
+/** What a recovery button does: send its command, or, for one that drops a claim, ask you to confirm first; it never sends that one itself. */
+export function recoveryIntent(ask: IssueAsk, recovery: Recovery): { kind: "send"; command: string } | { kind: "confirm"; reset: ResetConfirm } {
+  return recovery.confirm ? { kind: "confirm", reset: { command: recovery.command, label: recovery.command.replace(/^reset /u, "").replace(/ release$/u, ""),
+    numbers: ask.numbers, threadId: ask.issue.likelyThreadId } } : { kind: "send", command: recovery.command };
+}
+
 /** Where keyboard focus is: an ask by id, a row by number, or nowhere. */
 export type PaneFocus = { ask: string } | { row: number } | null;
 /** The asks' client state: focus, the one ask open in a narrow pane, each product decision's picked option and each lifecycle subset by answerKey, and a hint. */
 export type PaneState = { focus: PaneFocus; open: string | null; picks: ReadonlyMap<string, string>; subsets: ReadonlyMap<string, readonly number[]>;
   hint: { id: string; text: string } | null };
-/** What a key asks the container to do. Only `answer` and `subset` send, and nothing here merges. */
-export type PaneEffect = { kind: "answer"; ask: DecisionAsk; reply: AnswerReply } | { kind: "hint"; text: string }
+/** What a key asks the container to do. Only `answer` and `recover` send, and nothing here merges. */
+export type PaneEffect = { kind: "answer"; ask: DecisionAsk; reply: AnswerReply } | { kind: "recover"; ask: IssueAsk; command: string } | { kind: "hint"; text: string }
   | { kind: "row"; n: number; id: MenuItem["id"] } | { kind: "menu"; n: number } | { kind: "order" | "seen" | "keys" | "command" | "undo" };
 
 /** Asks an answer moves focus to: decisions and system issues, never merge candidates, so a run of Enter can't reach a merge. */
-const answerable = (ask: Ask) => ask.kind === "decision";
+const answerable = (ask: Ask) => ask.kind === "decision" || ask.kind === "issue";
 /** The first ask focus rests on: the first one you can answer, or nothing. */
 export function firstAsk(asks: readonly Ask[]): PaneFocus {
   const first = asks.find(answerable);
@@ -711,6 +727,12 @@ export function afterAnswer(asks: readonly Ask[], state: PaneState, id: string, 
 function accept(asks: readonly Ask[], ask: Ask, state: PaneState, wide: boolean): { state: PaneState; effect: PaneEffect | null } {
   if (!wide && state.open !== ask.id) return { state: { ...state, open: ask.id, hint: null }, effect: null };
   const hint = (text: string) => ({ state: { ...state, hint: { id: ask.id, text } }, effect: { kind: "hint" as const, text } });
+  if (ask.kind === "issue") {
+    // A recovery that drops a claim (`reset N release`) never runs on one key: it needs its confirm.
+    if (ask.primary) return { state: afterAnswer(asks, state, ask.id, wide), effect: { kind: "recover", ask, command: ask.primary.command } };
+    const confirm = ask.issue.recovery.find((item) => item.confirm);
+    return hint(confirm ? `${confirm.label} needs your confirmation first: use its button` : "Nothing recovers this from here");
+  }
   if (ask.answer === "thread") return hint(`${ask.id} is answered in its worker's thread: open it from the card`);
   if (ask.answer === "option") {
     const picked = state.picks.get(answerKey(ask));

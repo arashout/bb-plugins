@@ -7,12 +7,12 @@ import { AsksBlock } from "./roster-asks";
 import { answerKey, askCards, firstAsk, type DecisionAsk, type PaneState } from "./roster-view-model";
 
 const noop = () => {};
-const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, "\"").replace(/\s+/gu, " ").trim();
+const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, "\"").replace(/&#x27;/gu, "'").replace(/\s+/gu, " ").trim();
 const start = (roster: EffortRoster): PaneState => ({ focus: firstAsk(askCards(roster).asks), open: null, picks: new Map(), subsets: new Map(), hint: null });
 function asks(options: { wide?: boolean; roster?: EffortRoster; state?: Partial<PaneState> } = {}) {
   const roster = options.roster ?? ROSTER;
   return renderToStaticMarkup(createElement(AsksBlock, { ...askCards(roster), state: { ...start(roster), ...options.state }, wide: options.wide ?? true, now: NOW,
-    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onOpenThread: noop, onOpenUrl: noop }));
+    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onOpenThread: noop, onOpenUrl: noop }));
 }
 const keyOf = (id: string, roster = ROSTER) => answerKey(askCards(roster).asks.find((ask) => ask.id === id) as DecisionAsk);
 const card = (html: string, id: string) => html.match(new RegExp(`<article data-roster-ask="${id}"[\\s\\S]*?</article>`, "u"))?.[0] ?? "";
@@ -82,5 +82,24 @@ describe("roster decision cards", () => {
     expect(card(html, "D1")).toBe("");
     expect(text(html)).toContain("✓ D1 D1 A sends in 8s · 7, 12 get it in their next step Undo · 8s");
     expect(text(asks({ roster: { ...waiting, pending: [{ ...waiting.pending[0]!, until: NOW - 1 }] } }))).not.toContain("Undo");
+  });
+});
+
+describe("roster system issues", () => {
+  it("shows S1 in rose with its recoveries, running recheck launches on Enter and confirming the reset", () => {
+    const s1 = card(asks(), "S1");
+    expect(s1).toContain('data-tone="issue"');
+    expect(s1).not.toMatch(/amber/u);
+    expect(text(s1)).toContain("S1 System issue 17");
+    expect(text(s1)).toContain("Launch outcomes uncertain; new launches paused Readback hasn't found the worker for 17 or ruled one out; running work continues");
+    expect(s1).toContain('title="Sends recheck launches"');
+    expect(s1).toContain('title="Asks you to confirm no worker is writing, then sends reset 17 release"');
+    expect(text(s1)).toContain("Recheck launches Reset 17… Open likely thread");
+    expect(text(s1)).toMatch(/Enter sends recheck launches Thread recheck launches · reset 17 release$/u);
+  });
+
+  it("keeps the first recovery on S1's line in a narrow pane", () => {
+    const narrow = asks({ wide: false, state: { open: null } });
+    expect(text(narrow)).toContain("S1 17 · system · Launch outcomes uncertain; new launches paused › Recheck launches");
   });
 });

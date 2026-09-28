@@ -5,7 +5,7 @@ import { effortRosterSchema, type EffortRoster } from "./effort-roster.js";
 import { INKWELL_SHELVING_ROSTER as ROSTER, SHELVING_ROSTER_NOW as NOW } from "./inkwell-fixtures.js";
 import { ANSWER_DELAY } from "./effort-v2-server.js";
 import { ackChips, ackDetails, ackRows, ackView, answerCommand, answerInput, answerKey, askCards, clock, commandInput, composeNumber, fieldAnswerInput, firstAsk, latestUndo, nextWake,
-  paneKey, rosterKey, rosterView, settle, shownCommand, UNDO_WINDOW, type AckParts, type CommandRecord, type DecisionAsk, type KeyEvent, type PaneEffect, type PaneState, type RosterGroup,
+  paneKey, recoveryIntent, rosterKey, rosterView, settle, shownCommand, UNDO_WINDOW, type AckParts, type CommandRecord, type DecisionAsk, type IssueAsk, type KeyEvent, type PaneEffect, type PaneState, type RosterGroup,
   type RosterOrder } from "./roster-view-model.js";
 
 const view = (order: RosterOrder = "number", roster: EffortRoster = ROSTER, settled = settle(roster)) =>
@@ -286,7 +286,7 @@ describe("roster decisions", () => {
     .map((effect) => answerCommand((effect as Extract<PaneEffect, { kind: "answer" }>).ask, (effect as Extract<PaneEffect, { kind: "answer" }>).reply));
 
   it("offers D1's options without preselecting its recommendation, and preselects D2's recommended drafts with the reason for leaving 14 out", () => {
-    expect(asks.map((item) => [item.id, item.answer])).toEqual([["D1", "option"], ["D2", "subset"]]);
+    expect(asks.map((item) => [item.id, item.kind === "decision" ? item.answer : item.kind])).toEqual([["D1", "option"], ["D2", "subset"], ["S1", "issue"]]);
     expect(ask("D1").options.map((option) => [option.key, option.id, option.recommended])).toEqual([["a", "A", true], ["b", "B", false]]);
     expect(ask("D1").recommended).toEqual([]);
     expect(ask("D2").recommended).toEqual([13, 15]);
@@ -304,9 +304,11 @@ describe("roster decisions", () => {
     expect(narrow.state.open).toBe("D1");
   });
 
-  it("answers D1 with the option you picked, then accepts D2's subset on Enter, and then rests on nothing", () => {
+  it("answers D1 with the option you picked, accepts D2's subset and S1's recovery on Enter, and then rests on nothing", () => {
     const { effects, state } = press(["b", "a", "Enter", "Enter", "Enter", "Enter"]);
     expect(sends(effects)).toEqual(["D1 A", "D2 13 15"]);
+    expect(effects[4]).toMatchObject({ kind: "recover", command: "recheck launches" });
+    expect(effects[5]).toBeNull();
     expect(state.focus).toBeNull();
     // A subset you changed is the one Enter accepts; a letter picks nothing on a lifecycle ask.
     const changed = press(["j", "a", "Enter"], true, { ...start, subsets: new Map([[answerKey(ask("D2")), [13]]]) });
@@ -361,7 +363,7 @@ describe("roster decisions", () => {
   it("shows an answer waiting for Undo as a receipt in place of its card, and takes back the newest on u", () => {
     const waiting = { ...ROSTER, pending: [{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000 }] };
     const cards = askCards(waiting);
-    expect(cards.asks.map((item) => item.id)).toEqual(["D2"]);
+    expect(cards.asks.map((item) => item.id)).toEqual(["D2", "S1"]);
     expect(cards.receipts).toEqual([{ requestId: "req-d1", text: "D1 A", decisions: [1], until: NOW + 8_000, id: "D1", numbers: [7, 12] }]);
     const later = { ...cards.receipts[0]!, requestId: "req-d2", id: "D2", until: NOW + 9_000 };
     expect(latestUndo([cards.receipts[0]!, later], NOW)?.requestId).toBe("req-d2");
@@ -374,6 +376,32 @@ describe("roster decisions", () => {
     expect(rosterKey(key("r"), { control: false, held: false, ask: true })).toBeNull();
     expect(rosterKey(key("c"), { control: false, held: false })).toEqual({ kind: "row", id: "recheck" });
     // j walks from the asks into the rows.
-    expect(press(["j", "j"]).state.focus).toEqual({ row: 1 });
+    expect(press(["j", "j", "j"]).state.focus).toEqual({ row: 1 });
+  });
+});
+
+describe("roster system issues", () => {
+  const { asks } = askCards(ROSTER);
+  const s1 = asks.find((item) => item.id === "S1")!;
+  const key = (name: string): KeyEvent => ({ key: name, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false });
+  const at = (focus: PaneState["focus"]): PaneState => ({ focus, open: null, picks: new Map(), subsets: new Map(), hint: null });
+
+  it("lists S1 after the decisions with its recoveries, and runs on Enter only the one that drops no claim", () => {
+    expect(s1).toMatchObject({ kind: "issue", numbers: [17], primary: { command: "recheck launches", confirm: false } });
+    expect(paneKey(view(), asks, at({ ask: "S1" }), key("Enter"), { control: false, wide: true })?.effect).toMatchObject({ kind: "recover", command: "recheck launches" });
+  });
+
+  it("confirms a recovery that drops a claim, naming the likely thread, and sends every other one", () => {
+    const [recheck, reset] = (s1 as IssueAsk).issue.recovery;
+    expect(recoveryIntent(s1 as IssueAsk, recheck!)).toEqual({ kind: "send", command: "recheck launches" });
+    expect(recoveryIntent(s1 as IssueAsk, reset!)).toEqual({ kind: "confirm", reset: { command: "reset 17 release", label: "17", numbers: [17], threadId: "thr_folio_421" } });
+  });
+
+  it("never runs reset N release on one key: an issue with only that recovery points you at its confirm", () => {
+    const resetOnly = { ...ROSTER, issues: ROSTER.issues.map((issue) => ({ ...issue, recovery: issue.recovery.filter((item) => item.confirm) })) };
+    const cards = askCards(resetOnly).asks;
+    const step = paneKey(view("number", resetOnly), cards, at({ ask: "S1" }), key("Enter"), { control: false, wide: true });
+    expect(step?.effect).toEqual({ kind: "hint", text: "Reset 17… needs your confirmation first: use its button" });
+    expect(step?.state.focus).toEqual({ ask: "S1" });
   });
 });

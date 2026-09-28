@@ -28,8 +28,8 @@ import type { RosterListEntry } from "./roster-parents";
 import { HATCH, RosterList, RosterTable, TONE_CLASS, type RowActions } from "./roster-rows";
 import { ROSTER_CHANGED } from "./roster-shared";
 import { ackRows, ackView, afterAnswer, answerCommand, answerInput, answerKey, askCards, commandInput, composeNumber, fieldAnswerInput, firstAsk, holdCommand, latestUndo, liveGroup,
-  paneKey, ROSTER_KEYS, rosterView, rowCommandInput, rowIntent, settle, shownCommand, type AnswerReply, type CommandRecord, type DecisionAsk, type GroupKey, type MenuItem,
-  type PaneEffect, type PaneFocus, type PaneState, type RosterLine, type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
+  paneKey, recoveryIntent, ROSTER_KEYS, rosterView, rowCommandInput, rowIntent, settle, shownCommand, type AnswerReply, type CommandRecord, type DecisionAsk, type GroupKey, type MenuItem,
+  type Ask, type PaneEffect, type ResetConfirm, type PaneFocus, type PaneState, type RosterLine, type RosterOrder, type RosterView as View, type Seen, type SincePart } from "./roster-view-model";
 
 export type RosterPaneProps = RowActions & {
   view: View;
@@ -362,7 +362,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const [ackOpen, setAckOpen] = useState<boolean | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [holding, setHolding] = useState<RosterLine | null>(null);
-  const [resetting, setResetting] = useState<RosterLine | null>(null);
+  const [resetting, setResetConfirm] = useState<ResetConfirm | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   const [wide, setWide] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -484,7 +484,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     keep(text, requestId, result);
   }, [roster, rpc, keep]);
   /** A click answers, like Enter does: focus moves to the next ask you can answer, never onto a merge. */
-  const answered = useCallback((ask: DecisionAsk) => {
+  const answered = useCallback((ask: Ask) => {
     const next = afterAnswer(asks, pane, ask.id, wide);
     setPane(next);
     domFocus(next.focus);
@@ -520,7 +520,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     else if (intent.kind === "open-pr") navigate.openUrl(intent.url);
     else if (intent.kind === "open-thread") navigate.toThread(intent.threadId);
     else if (intent.kind === "hold") setHolding(line);
-    else if (intent.kind === "confirm-reset") setResetting(line);
+    else if (intent.kind === "confirm-reset") setResetConfirm({ command: `reset ${line.n} release`, label: String(line.n), numbers: [line.n], threadId: line.threadId });
     else if (intent.kind === "send") void send(intent.command, "row", [line.n]);
     else if (intent.kind === "refresh") {
       const { command } = intent;
@@ -536,6 +536,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
   const run = useCallback((effect: PaneEffect) => {
     const line = "n" in effect ? lineOf(effect.n) : null;
     if (effect.kind === "answer") void answer(effect.ask, effect.reply);
+    else if (effect.kind === "recover") void send(effect.command, "row", effect.ask.numbers);
     else if (effect.kind === "row" && line) act(line, effect.id);
     else if (effect.kind === "menu") setMenuN(effect.n);
     else if (effect.kind === "order") toggleOrder();
@@ -543,7 +544,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     else if (effect.kind === "keys") setKeysOpen(true);
     else if (effect.kind === "command") inputRef.current?.focus();
     else if (effect.kind === "undo") void undo(latestUndo(receipts, Date.now()));
-  }, [lineOf, answer, act, toggleOrder, markSeen, undo, receipts]);
+  }, [lineOf, answer, send, act, toggleOrder, markSeen, undo, receipts]);
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (typing(event.target) || !view) return;
     const control = event.target instanceof Element && event.target.closest("button, a") !== null;
@@ -573,6 +574,11 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
         onAnswer: (ask, reply) => { answered(ask); void answer(ask, reply); }, onField: (ask, field) => { answered(ask); void answer(ask, { field }); },
         onSubset: (ask, numbers) => setPane((current) => ({ ...current, subsets: new Map([...current.subsets, [answerKey(ask), numbers]]) })),
         onCompose: (text) => { setCommandText(text); inputRef.current?.focus(); }, onUndo: (receipt) => void undo(receipt),
+        onRecover: (ask, recovery) => {
+          const intent = recoveryIntent(ask, recovery);
+          if (intent.kind === "confirm") setResetConfirm(intent.reset);
+          else { answered(ask); void send(intent.command, "row", ask.numbers); }
+        },
         onOpenThread: (id) => navigate.toThread(id), onOpenUrl: (url) => navigate.openUrl(url) }}
       onOpenUrl={(url) => navigate.openUrl(url)}
       onToggleGroup={(key) => setExpanded((current) => { const next = new Set(current); if (!next.delete(key)) next.add(key); return next; })}
@@ -583,8 +589,8 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
         else if (action === "all") navigate.toPluginPanel("board", { subPath: "roster" });
       }} />
     <HoldDialog line={holding} onClose={() => setHolding(null)} onHold={(line, command) => { setHolding(null); void send(command, "row", [line.n]); }} />
-    <ResetDialog line={resetting} thread={resetting?.threadId ? titles.get(resetting.threadId) ?? null : null} onClose={() => setResetting(null)}
-      onOpenThread={(id) => navigate.toThread(id)} onReset={(line) => { setResetting(null); void send(`reset ${line.n} release`, "row", [line.n]); }} />
+    <ResetDialog reset={resetting} thread={resetting?.threadId ? titles.get(resetting.threadId) ?? null : null} onClose={() => setResetConfirm(null)}
+      onOpenThread={(id) => navigate.toThread(id)} onReset={(reset) => { setResetConfirm(null); void send(reset.command, "row", reset.numbers); }} />
     <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
       <DialogContent className={cn("max-w-sm", POINTER_CURSORS)}>
         <DialogHeader><DialogTitle>Roster keys</DialogTitle><DialogDescription>They work while the roster has focus, never while you type.</DialogDescription></DialogHeader>
@@ -618,17 +624,18 @@ function HoldDialog({ line, onClose, onHold }: { line: RosterLine | null; onClos
 }
 
 /** Dropping an uncertain launch's claim could leave two writers, so it names the likely thread and asks you to confirm none is writing. */
-function ResetDialog({ line, thread, onClose, onOpenThread, onReset }: { line: RosterLine | null; thread: string | null; onClose(): void; onOpenThread(id: string): void;
-  onReset(line: RosterLine): void }) {
-  return <Dialog open={line !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
+function ResetDialog({ reset, thread, onClose, onOpenThread, onReset }: { reset: ResetConfirm | null; thread: string | null; onClose(): void; onOpenThread(id: string): void;
+  onReset(reset: ResetConfirm): void }) {
+  const numbers = reset?.label;
+  return <Dialog open={reset !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent className={cn("max-w-md", POINTER_CURSORS)}>
-      <DialogHeader><DialogTitle>Reset {line?.n} and release its launch?</DialogTitle>
+      <DialogHeader><DialogTitle>Reset {numbers} and release its launch?</DialogTitle>
         <DialogDescription>Its launch outcome is uncertain. Check {thread ? `"${thread}"` : "its likely worker thread"} first: if a worker is writing there, a reset could start a second one.</DialogDescription></DialogHeader>
-      <p className="font-mono text-[11px] text-muted-foreground">reset {line?.n} release</p>
+      <p className="font-mono text-[11px] text-muted-foreground">{reset?.command}</p>
       <DialogFooter>
         <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-        {line?.threadId ? <Button type="button" variant="outline" onClick={() => onOpenThread(line.threadId!)}>Open likely thread</Button> : null}
-        <Button type="button" onClick={() => { if (line) onReset(line); }}>No worker is writing · reset {line?.n}</Button>
+        {reset?.threadId ? <Button type="button" variant="outline" onClick={() => onOpenThread(reset.threadId!)}>Open likely thread</Button> : null}
+        <Button type="button" onClick={() => { if (reset) onReset(reset); }}>No worker is writing · reset {numbers}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

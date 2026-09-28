@@ -21,7 +21,7 @@ const pane = (wide: boolean, order: RosterOrder) => renderToStaticMarkup(createE
   command: { value: wide ? "" : "hold 8 because ", onValue: noop, onSubmit: noop, ack: ackView({ ...ROSTER.lastCommand!, fresh: wide }, NOW), open: wide, onToggle: noop,
     onLeave: noop, note: null },
   asks: { ...askCards(ROSTER), wide, now: NOW, state: { focus: { ask: "D1" }, open: wide ? null : "D1", picks: new Map(), subsets: new Map(), hint: null },
-    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onOpenThread: noop, onOpenUrl: noop },
+    onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onOpenThread: noop, onOpenUrl: noop },
   history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop,
   onToggleGroup: noop, onOpenUrl: noop,
 }));
