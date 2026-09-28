@@ -93,6 +93,13 @@ export const effortV2PreviewSchema = z.object({
 export type EffortV2Preview = z.infer<typeof effortV2PreviewSchema>;
 const effortV2SetResultSchema = z.object({ execution: executionSchema, parentThreadId: z.string().nullable(),
   cancelled: z.array(legacyJobSchema), draining: z.array(legacyJobSchema) });
+/** How long the roster pane holds an answer for Undo before it is admitted. */
+export const ANSWER_DELAY = 10_000;
+/**
+ * Only the roster pane holds an answer, and only a decision answer: `ANSWER_DELAY` holds it for Undo, and 0 or none admits it at once.
+ * The banner and the thread always admit at once.
+ */
+const delaySchema = z.union([z.literal(0), z.literal(ANSWER_DELAY)]).optional();
 /** An open decision as a surface showed it. */
 const shownDecisionSchema = z.object({ n: z.number().int().positive(), revision: z.number().int().positive() }).strict();
 const parentContextSchema = z.object({
@@ -121,17 +128,23 @@ export const effortV2Contract = {
    */
   effort_command: { input: z.object({ effortId: z.string().min(1).max(500), snapshotId: z.string().max(100).nullable(), text: z.string().min(1).max(4_000),
     requestId: z.string().min(1).max(200), source: z.enum(["panel", "banner"]), expectedRevision: z.number().int().nonnegative().optional(),
-    decisions: z.array(shownDecisionSchema).max(1_000).optional() }).strict(), output: effortCommandResultSchema },
+    decisions: z.array(shownDecisionSchema).max(1_000).optional(), delayMs: delaySchema }).strict(), output: effortCommandResultSchema },
   /**
    * Answer one decision by id, as the roster showed it at `expectedRevision`: an option, the row numbers a lifecycle
    * question applies to (empty for none), or your own words. The same as `Dn …` in a command.
    */
   effort_decision_answer: { input: z.object({ decisionId: z.string().min(1).max(600), optionId: z.string().min(1).max(100).optional(),
     numbers: z.array(z.number().int().positive()).max(1_000).optional(), text: z.string().min(1).max(4_000).optional(),
-    expectedRevision: z.number().int().positive(), requestId: z.string().min(1).max(200) }).strict(), output: effortCommandResultSchema },
+    expectedRevision: z.number().int().positive(), requestId: z.string().min(1).max(200), delayMs: delaySchema }).strict(), output: effortCommandResultSchema },
+  /** Take back a roster answer still held for Undo. Nothing it answered changes; one already admitted stays. */
+  effort_command_undo: { input: z.object({ effortId: z.string().min(1).max(500), requestId: z.string().min(1).max(200) }).strict(),
+    output: z.object({ undone: z.boolean(), message: z.string() }) },
   /** What the composer banner shows in an effort's parent thread; null in any other thread. */
   effort_parent_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: parentContextSchema.nullable() },
 };
+
+type CommandInput = z.infer<typeof effortV2Contract.effort_command.input>;
+type AnswerInput = z.infer<typeof effortV2Contract.effort_decision_answer.input>;
 
 /** The one prompt a new parent receives: it holds rosters and decisions and takes no model turn beyond this reply. */
 export const parentPrompt = (name: string) => `This is the effort parent thread for ${name}. Workstreams posts rosters and decisions here. Reply only: Ready.`;
@@ -393,7 +406,7 @@ export type EffortV2Deps = {
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
   work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision"
     | "attempts" | "attempt" | "claims" | "release" | "requestStop" | "due" | "markDue" | "reschedule" | "note" | "notes" | "completeInstruction" | "journal" | "asked"
-    | "lastCommand" | "entered">;
+    | "lastCommand" | "entered" | "held" | "undone">;
   /**
    * v2 launches: the v2Execution setting, whether a new one may start now, reading one whose outcome is uncertain back from BB, and
    * whether this process is making one on a PR now.
@@ -498,6 +511,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const issues = numberIssues(effort.id, read);
     const changes = changesSince(effort.id, read.rows, since);
     return { ...read, issues: issues.list, lastCommand: lastCommand(effort.id), ...changes,
+      pending: (deps.work.held(effort.id) as Held[]).map(({ requestId, text, decisions, until }) => ({ requestId, text, decisions, until })),
       since: changes.since && { ...changes.since, issuesOpened: issues.opened(since!) } };
   }
   type IssueRefs = { refs: Record<string, { ref: string; raisedAt: number; openedAfter: number }>; next: number };
@@ -706,17 +720,100 @@ export function createEffortV2(deps: EffortV2Deps) {
     return `Recheck ${name}: short of Ready: ${missing.join(", ") || row?.body.detail || "it isn't in the instruction"}`;
   }
   const refuse = (message: string): EffortCommandResult => ({ kind: "clarify", message, normalized: null });
-  /** A request to an effort, in its queue: a repeated request gets its first result, and a legacy effort takes none. */
-  function request(effort: EstablishedEffort, requestId: string, run: () => Promise<EffortCommandResult>): Promise<EffortCommandResult> {
+  /**
+   * A request to an effort, in its queue: a repeated request gets its first result, or its held answer while it waits, and a legacy
+   * effort takes none. A request you took back with Undo stays taken back. `due` runs a held request that fell due.
+   */
+  function request(effort: EstablishedEffort, requestId: string, run: () => Promise<EffortCommandResult>, due = false): Promise<EffortCommandResult> {
     return serial(effort.id, async () => {
       const replay = deps.work.command(effort.id, requestId);
       if (replay !== null) return effortCommandResultSchema.parse(replay);
+      if (deps.work.undone(effort.id, requestId)) return refuse("You took this answer back with Undo, so nothing was sent.");
+      const waiting = due ? undefined : (deps.work.held(effort.id) as Held[]).find((item) => item.requestId === requestId);
+      if (waiting) return { kind: "pending", requestId, text: waiting.text, decisions: waiting.decisions, until: waiting.until };
       if (deps.execution.get(effort.id).mode !== "v2") return refuse(legacyRefusal(effort.name));
       return run();
     });
   }
-  async function command(input: z.infer<typeof effortV2Contract.effort_command.input>): Promise<EffortCommandResult> {
+  /** A roster answer held for Undo, as the journal keeps it: the request that runs when it falls due. */
+  type Held = { requestId: string; text: string; decisions: number[]; until: number;
+    request: { kind: "command"; input: CommandInput } | { kind: "answer"; input: AnswerInput } };
+  /**
+   * Hold a roster answer for Undo. It changes nothing until the reconciler admits it when it falls due. A decision holds one answer at a
+   * time: a second would be refused once the first is admitted, so the one you picked last would never apply.
+   */
+  function hold(effort: EstablishedEffort, item: Omit<Held, "until">): EffortCommandResult {
+    const waiting = (deps.work.held(effort.id) as Held[]).find((other) => other.decisions.some((n) => item.decisions.includes(n)));
+    if (waiting) return refuse(`An answer to ${item.decisions.filter((n) => waiting.decisions.includes(n)).map((n) => `D${n}`).join(", ")} is already waiting: ${waiting.text}. `
+      + "Undo it, then answer again. Nothing was admitted.");
+    const until = deps.reconciler.now() + ANSWER_DELAY;
+    deps.work.note(effort.id, "held", { ...item, until } satisfies Held, "panel");
+    deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+    nudge();
+    return { kind: "pending", requestId: item.requestId, text: item.text, decisions: item.decisions, until };
+  }
+  /** Take back a held answer before it is admitted. */
+  function undo({ effortId, requestId }: z.infer<typeof effortV2Contract.effort_command_undo.input>): Promise<{ undone: boolean; message: string }> {
+    const { effort } = resolve(effortId);
+    return serial(effort.id, async () => {
+      if (deps.work.command(effort.id, requestId) !== null) return { undone: false, message: "That answer was already sent. Answer the decision again to change it." };
+      if (deps.work.undone(effort.id, requestId)) return { undone: true, message: "That answer was already taken back; nothing was sent." };
+      const item = (deps.work.held(effort.id) as Held[]).find((entry) => entry.requestId === requestId);
+      if (!item) return { undone: false, message: "No answer is waiting under that request." };
+      deps.work.note(effort.id, "undone", { requestId }, "panel");
+      deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+      return { undone: true, message: `Took back ${item.text}; nothing was sent.` };
+    });
+  }
+  /**
+   * Admit each held answer that fell due, once. One that can no longer apply (its decision changed or closed, the effort left v2) is
+   * journaled with its clarification, so its request has one final answer and is never tried again.
+   */
+  async function commitDue(): Promise<void> {
+    const now = deps.reconciler.now();
+    for (const effort of deps.efforts.list()) for (const item of deps.work.held(effort.id) as Held[]) {
+      if (item.until > now) continue;
+      let result: EffortCommandResult;
+      try { result = item.request.kind === "answer" ? await answer(item.request.input, true) : await command(item.request.input, true); }
+      catch (error) { result = refuse(`${error instanceof Error ? error.message : String(error)} Nothing was admitted.`); }
+      if (result.kind === "clarify") await serial(effort.id, async () => {
+        if (deps.work.command(effort.id, item.requestId) !== null || deps.work.undone(effort.id, item.requestId)) return;
+        deps.work.commit({ effortId: effort.id, baseRevision: deps.work.lastRevision(effort.id), source: "command", rows: [], instruction: null, journal: { requestId: item.requestId,
+          text: item.text, result, origin: "panel", snapshotId: item.request.kind === "command" ? item.request.input.snapshotId : null } });
+        deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+      });
+    }
+  }
+  /** When the next held answer falls due, or Infinity. */
+  const nextDue = () => Math.min(...deps.efforts.list().flatMap((effort) => (deps.work.held(effort.id) as Held[]).map((item) => item.until)));
+  /**
+   * A command's answers applied in order to the scope its other clauses leave. The first that can't apply clarifies, and nothing is admitted.
+   */
+  function applyAnswers(effort: EstablishedEffort, result: Extract<CommandResult, { kind: "admit" }>, scope: InstructionScope | null, open: readonly Decision[],
+    lastRevision: number, source: "panel" | "banner"): { ok: false; clarify: EffortCommandResult }
+    | { ok: true; scope: InstructionScope | null; answered: DecisionWrite[]; lines: string[]; parts: AckParts["answers"]; asked: Set<string> } {
+    const answered: DecisionWrite[] = [];
+    const lines: string[] = [];
+    const parts: AckParts["answers"] = [];
+    const asked = new Set<string>();
+    if (effort.archivedAt && result.answers.length) return { ok: false, clarify: refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`) };
+    for (const reply of result.answers) {
+      const decision = open.find((item) => item.n === reply.decision);
+      if (!decision || !scope) return { ok: false, clarify: refuse(`D${reply.decision} isn't an open decision.`) };
+      const applied = answerDecision(decision, reply, scope, lastRevision + 1);
+      if ("clarify" in applied) return { ok: false, clarify: { kind: "clarify", message: `${applied.clarify} Nothing was admitted.`, normalized: result.normalized } };
+      scope = applied.scope;
+      answered.push({ id: decision.id, n: decision.n, key: decision.key, status: "answered", expectedRevision: decision.revision,
+        body: { ...decision.body, answer: applied.answer, answeredVia: source } });
+      lines.push(`D${decision.n}: ${applied.answer}`);
+      parts.push({ n: decision.n, answer: applied.answer });
+      for (const target of applied.targets) asked.add(target);
+    }
+    return { ok: true, scope, answered, lines, parts, asked };
+  }
+  async function command(input: CommandInput, due = false): Promise<EffortCommandResult> {
     const { effort } = resolve(input.effortId);
+    if (input.delayMs && input.source !== "panel") throw new Error("Only an answer from the roster pane waits for Undo; the banner and the thread send at once.");
     return request(effort, input.requestId, async () => {
       const sources = await deps.sources();
       const active = deps.work.instruction(effort.id);
@@ -740,11 +837,20 @@ export function createEffortV2(deps: EffortV2Deps) {
           : `D${n} isn't on the roster you answered from; it asks about ${formatTargets(body.targets)}. Read it, then answer.`;
         return { kind: "clarify", normalized: result.normalized, message: `${reread} Nothing was admitted.` };
       }
+      if (input.delayMs && !due) {
+        const answersOnly = result.answers.length > 0 && result.instruction === null && !result.cancel && !result.recheckLaunches && !result.postRoster
+          && [result.holds, result.releases, result.interventions, result.mergePreviews].every((list) => list.length === 0);
+        if (!answersOnly) return { kind: "clarify", normalized: result.normalized, message: "Only a decision answer waits for Undo; send the rest at once. Nothing was admitted." };
+        const applied = applyAnswers(effort, result, active?.scope ?? null, open, deps.work.lastRevision(effort.id), "panel");
+        if (!applied.ok) return applied.clarify;
+        const { delayMs: _delay, ...now } = input;
+        return hold(effort, { requestId: input.requestId, text: input.text, decisions: result.answers.map((reply) => reply.decision), request: { kind: "command", input: now } });
+      }
       return admit(effort, result, input, sources);
-    });
+    }, due);
   }
   /** Answer one decision as the roster showed it; a decision that changed since is read again first. */
-  async function answer(input: z.infer<typeof effortV2Contract.effort_decision_answer.input>): Promise<EffortCommandResult> {
+  async function answer(input: AnswerInput, due = false): Promise<EffortCommandResult> {
     const found = deps.work.decision(input.decisionId);
     if (!found) throw new Error("That decision does not exist. Reload the roster.");
     const given: DecisionAnswer[] = [...input.optionId === undefined ? [] : [{ decision: found.n, option: input.optionId }],
@@ -759,9 +865,16 @@ export function createEffortV2(deps: EffortV2Deps) {
       if (decision.revision !== input.expectedRevision) return refuse(`${name} changed since you read it; it now asks about ${formatTargets(decision.body.targets)}. Read it again, then answer.`);
       const reply = given[0]!;
       const text = `${name} ${"option" in reply ? reply.option : "numbers" in reply ? reply.numbers.join(", ") || "none" : reply.text}`;
-      return admit(effort, { kind: "admit", normalized: text, acknowledgment: [], parts: NO_PARTS, instruction: null, cancel: false, holds: [], releases: [], interventions: [],
-        recheckLaunches: false, postRoster: false, mergePreviews: [], answers: [reply] }, { requestId: input.requestId, text, source: "panel", snapshotId: null }, await deps.sources());
-    });
+      const result: Extract<CommandResult, { kind: "admit" }> = { kind: "admit", normalized: text, acknowledgment: [], parts: NO_PARTS, instruction: null, cancel: false, holds: [],
+        releases: [], interventions: [], recheckLaunches: false, postRoster: false, mergePreviews: [], answers: [reply] };
+      if (input.delayMs && !due) {
+        const applied = applyAnswers(effort, result, deps.work.instruction(effort.id)?.scope ?? null, [decision], deps.work.lastRevision(effort.id), "panel");
+        if (!applied.ok) return applied.clarify;
+        const { delayMs: _delay, ...now } = input;
+        return hold(effort, { requestId: input.requestId, text, decisions: [decision.n], request: { kind: "answer", input: now } });
+      }
+      return admit(effort, result, { requestId: input.requestId, text, source: "panel", snapshotId: null }, await deps.sources());
+    }, due);
   }
   /** Admit a read command in one commit: the revision its changes and answers write, its holds, and the rows whose step changed. */
   async function admit(effort: EstablishedEffort, result: Extract<CommandResult, { kind: "admit" }>,
@@ -774,7 +887,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const stops = result.interventions.filter((item) => item.action === "stop");
     if (stops.length && await deps.launches.execution() !== "on") return refuse(`${dryRunStopRefusal(formatTargets(stops),
       stops.map((item) => deps.work.attempts(item.target).find((attempt) => attempt.status === "running")?.threadId ?? "its worker's thread").join(", "))} Nothing was admitted.`);
-    if (effort.archivedAt && (result.instruction || result.answers.length)) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
+    if (effort.archivedAt && result.instruction) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
     // A launch this process is still making settles its own claim when BB answers; releasing it first would let its worker start unrecorded.
     const making = result.interventions.filter((item) => item.release && deps.launches.launching(item.target));
     if (making.length) return refuse(`${formatTargets(making)}'s launch is still waiting on BB, and settles as running or uncertain on its own. `
@@ -784,22 +897,10 @@ export function createEffortV2(deps: EffortV2Deps) {
     const includeOf = (value: InstructionScope | null) => JSON.stringify(value?.include.map((grant) => grant.target));
     const before = includeOf(scope);
     const open = deps.work.decisions(effort.id);
-    const answered: DecisionWrite[] = [];
-    const answerLines: string[] = [];
-    const answerParts: AckParts["answers"] = [];
-    const asked = new Set<string>();
-    for (const reply of result.answers) {
-      const decision = open.find((item) => item.n === reply.decision);
-      if (!decision || !scope) return refuse(`D${reply.decision} isn't an open decision.`);
-      const applied = answerDecision(decision, reply, scope, lastRevision + 1);
-      if ("clarify" in applied) return { kind: "clarify", message: `${applied.clarify} Nothing was admitted.`, normalized: result.normalized };
-      scope = applied.scope;
-      answered.push({ id: decision.id, n: decision.n, key: decision.key, status: "answered", expectedRevision: decision.revision,
-        body: { ...decision.body, answer: applied.answer, answeredVia: input.source } });
-      answerLines.push(`D${decision.n}: ${applied.answer}`);
-      answerParts.push({ n: decision.n, answer: applied.answer });
-      for (const target of applied.targets) asked.add(target);
-    }
+    const applied = applyAnswers(effort, result, scope, open, lastRevision, input.source);
+    if (!applied.ok) return applied.clarify;
+    const { answered, lines: answerLines, parts: answerParts, asked } = applied;
+    scope = applied.scope;
     // The revision holds the command's changes and its answers together.
     const revised = result.instruction !== null || answered.length > 0 ? scope : null;
     // Refresh and recheck read GitHub, the threads, and the checkouts first. Recheck then reads the latest attempt's turn
@@ -1100,6 +1201,7 @@ export function createEffortV2(deps: EffortV2Deps) {
    * and act.
    */
   async function tick(): Promise<void> {
+    await commitDue();
     const now = deps.reconciler.now();
     let due = deps.work.due(now, RECONCILE.duePerTick);
     const watched = v2Rows().flatMap((row) => { const on = waitsOn(row); return on ? [{ on, row }] : []; });
@@ -1135,6 +1237,8 @@ export function createEffortV2(deps: EffortV2Deps) {
       catch (error) { deps.reconciler.warn(`v2 readback of ${claim.id} failed: ${String(error).slice(0, 300)}`); }
     }
     deps.work.markDue(v2Rows().map((row) => row.target), deps.reconciler.now());
+    // An answer held for Undo that fell due while the plugin was stopped is admitted now, once.
+    await commitDue();
   }
   /** The `effort-v2` background service: pass 0, then a tick every 15 seconds or at the next event, until stopped. */
   async function run(signal: AbortSignal): Promise<void> {
@@ -1147,7 +1251,8 @@ export function createEffortV2(deps: EffortV2Deps) {
       // A plain setTimeout would sleep through the stop and leave the plugin degraded on reload.
       await new Promise<void>((resolve) => {
         const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); wake = null; resolve(); };
-        const timer = setTimeout(done, RECONCILE.tick);
+        // A held answer falls due sooner than the next tick: wake for it.
+        const timer = setTimeout(done, Math.max(0, Math.min(RECONCILE.tick, nextDue() - deps.reconciler.now())));
         signal.addEventListener("abort", done, { once: true });
         wake = done;
       });
@@ -1240,8 +1345,9 @@ export function createEffortV2(deps: EffortV2Deps) {
     effort_reconcile: ({ effortId, prUrl }: { effortId: string; prUrl: string }) => reconcile(effortId, prUrl),
     effort_v2_preview: ({ effortId }: { effortId: string }) => preview(effortId),
     effort_v2_set: setMode,
-    effort_command: command,
-    effort_decision_answer: answer,
+    effort_command: (input: CommandInput) => command(input),
+    effort_decision_answer: (input: AnswerInput) => answer(input),
+    effort_command_undo: undo,
     effort_parent_context: ({ threadId }: { threadId: string }) => parentContext(threadId),
   };
   /** A CLI effort argument: id, key, or exact name. */

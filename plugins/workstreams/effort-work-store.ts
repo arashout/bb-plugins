@@ -339,9 +339,21 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
     reschedule(target: string, revision: number, dueAt: number | null): void {
       db.prepare(`UPDATE effort_pr_work SET due_at = ? WHERE target = ? AND revision = ?`).run(dueAt, prWorkItemKey(target), revision);
     },
-    /** Journal an effort-level fact the reconciler observed, such as a criterion's status changing. */
-    note(effortId: string, cause: string, detail: unknown): void {
-      db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES (?, ?, ?, ?, 'reconciler')`).run(effortId, now(), cause, JSON.stringify(detail));
+    /** Journal an effort-level fact, such as a criterion's status the reconciler saw change, or an answer the roster holds for Undo. */
+    note(effortId: string, cause: string, detail: unknown, source = "reconciler"): void {
+      db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES (?, ?, ?, ?, ?)`).run(effortId, now(), cause, JSON.stringify(detail), source);
+    },
+    /** Requests held for Undo: each `held` note that neither the command it became nor an `undone` note for its request followed, oldest first. */
+    held(effortId: string): unknown[] {
+      return (db.prepare(`SELECT detail FROM effort_transitions h WHERE h.effort_id = ? AND h.target IS NULL AND h.cause = 'held' AND NOT EXISTS (
+        SELECT 1 FROM effort_transitions c WHERE c.effort_id = h.effort_id AND c.target IS NULL AND c.cause IN ('command', 'undone') AND c.seq > h.seq
+          AND json_extract(c.detail, '$.requestId') = json_extract(h.detail, '$.requestId')) ORDER BY h.seq`).all(effortId) as { detail: string }[])
+        .map((row) => JSON.parse(row.detail) as unknown);
+    },
+    /** Whether a request held for Undo was taken back. */
+    undone(effortId: string, requestId: string): boolean {
+      return db.prepare(`SELECT 1 FROM effort_transitions WHERE effort_id = ? AND target IS NULL AND cause = 'undone' AND json_extract(detail, '$.requestId') = ?`)
+        .get(effortId, requestId) !== undefined;
     },
     /** The effort's journaled facts of one kind, newest first. */
     notes(effortId: string, cause: string, limit = 1_000): unknown[] {

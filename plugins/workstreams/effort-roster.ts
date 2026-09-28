@@ -119,6 +119,8 @@ export const effortRosterSchema = z.object({
   /** The newest admitted command: its text, the surface it came from (null when journaled before surfaces were kept), when, the revision after it, the snapshot it read, and its result. */
   lastCommand: z.object({ requestId: z.string(), text: z.string(), origin: z.enum(["panel", "banner", "thread", "cli"]).nullable(), at: z.number(), revision: z.number().nullable(),
     snapshotId: z.string().nullable(), result: effortCommandResultSchema }).nullable(),
+  /** Roster answers held for Undo, oldest first: each is admitted at `until` unless taken back with effort_command_undo. */
+  pending: z.array(z.object({ requestId: z.string(), text: z.string(), decisions: z.array(z.number()), until: z.number() })),
   /** The effort's newest journal sequence: pass it back as `since` to read what changed after this roster. */
   through: z.number(),
   /**
@@ -458,7 +460,7 @@ export function effortRoster(input: {
     launches: input.launches ? { breakerOpen: input.launches.breakerOpen, capacityFull: input.launches.capacityFull, uncertain } : null,
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
     suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
-    lastCommand: null, through: 0, since: null,
+    lastCommand: null, pending: [], through: 0, since: null,
   };
 }
 

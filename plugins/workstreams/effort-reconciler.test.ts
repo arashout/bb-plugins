@@ -1178,3 +1178,115 @@ describe("the v2 reconciler's bounded repairs", () => {
       recovery: [{ command: `refresh ${numbers.join(", ")}`, label: `Refresh ${numbers.join(", ")}`, confirm: false }] }]);
   });
 });
+
+describe("roster answers held for Undo", () => {
+  /** Two drafts whose branches and checks are settled ask one mark-ready question, D1. */
+  async function asked() {
+    const env = await setup([331, 332], { live: () => ({ isDraft: true, reviewDecision: null }) });
+    await env.reconciler.recoverAll();
+    await env.reconciler.tick();
+    const roster = async (harness = env.harness) => await harness.callRpc("effort_roster_get", { effortId: env.effort.id }) as EffortRoster;
+    const d1 = (await roster()).decisions[0]!;
+    expect(d1).toMatchObject({ n: 1, subkind: "mark-ready", targets: [{ n: 1 }, { n: 2 }] });
+    /** Mark 1 ready from D1's card, held for Undo. */
+    const card = async (requestId: string, harness = env.harness) => await harness.callRpc("effort_decision_answer", { decisionId: d1.id, numbers: [1],
+      expectedRevision: d1.revision, requestId, delayMs: 10_000 }) as EffortCommandResult;
+    const sent = (requestId: string, db = env.db) => (db.prepare(`SELECT count(*) AS count FROM effort_transitions WHERE cause = 'command'
+      AND json_extract(detail, '$.requestId') = ?`).get(requestId) as { count: number }).count;
+    return { ...env, roster, d1, card, sent, revision: env.work.lastRevision(env.effort.id) };
+  }
+
+  it("changes nothing for ten seconds, so Undo takes an answer back with nothing sent, and admits one that falls due exactly once", async () => {
+    const env = await asked();
+    const held = { kind: "pending", requestId: "pane-1", text: "D1 1", decisions: [1], until: START + 10_000 };
+    expect(await env.card("pane-1")).toEqual(held);
+    // A retried request finds the same held answer, never a second one.
+    expect(await env.card("pane-1")).toEqual(held);
+    expect((await env.roster()).pending).toEqual([{ requestId: "pane-1", text: "D1 1", decisions: [1], until: START + 10_000 }]);
+    env.at(9_000);
+    await env.reconciler.tick();
+    expect(env.work.lastRevision(env.effort.id)).toBe(env.revision);
+    expect((await env.roster()).decisions.map((decision) => decision.n)).toEqual([1]);
+    expect(await env.harness.callRpc("effort_command_undo", { effortId: env.effort.id, requestId: "pane-1" }))
+      .toEqual({ undone: true, message: "Took back D1 1; nothing was sent." });
+    env.at(11_000);
+    await env.reconciler.tick();
+    expect(env.work.lastRevision(env.effort.id)).toBe(env.revision);
+    expect(await env.roster()).toMatchObject({ pending: [], decisions: [{ n: 1, revision: env.d1.revision }] });
+    expect(env.sent("pane-1")).toBe(0);
+    expect(await env.card("pane-1")).toMatchObject({ kind: "clarify", message: "You took this answer back with Undo, so nothing was sent." });
+
+    expect(await env.card("pane-2")).toMatchObject({ kind: "pending", until: START + 21_000 });
+    env.at(21_000);
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    expect(env.sent("pane-2")).toBe(1);
+    expect(env.work.lastRevision(env.effort.id)).toBe(env.revision + 1);
+    expect(await env.roster()).toMatchObject({ pending: [], decisions: [], lastCommand: { requestId: "pane-2", text: "D1 1", origin: "panel", result: { kind: "admit" } } });
+    expect(await env.harness.callRpc("effort_command_undo", { effortId: env.effort.id, requestId: "pane-2" }))
+      .toEqual({ undone: false, message: "That answer was already sent. Answer the decision again to change it." });
+  });
+
+  it("holds one answer per decision, so changing your mind means Undo and answer again, and the answer you picked last is the one admitted", async () => {
+    const env = await asked();
+    expect(await env.card("pane-1")).toMatchObject({ kind: "pending" });
+    const other = async (requestId: string) => await env.harness.callRpc("effort_decision_answer", { decisionId: env.d1.id, numbers: [2],
+      expectedRevision: env.d1.revision, requestId, delayMs: 10_000 }) as EffortCommandResult;
+    expect(await other("pane-2")).toEqual({ kind: "clarify", normalized: null, message: "An answer to D1 is already waiting: D1 1. Undo it, then answer again. Nothing was admitted." });
+    expect((await env.roster()).pending.map((item) => item.requestId)).toEqual(["pane-1"]);
+    await env.harness.callRpc("effort_command_undo", { effortId: env.effort.id, requestId: "pane-1" });
+    expect(await other("pane-2")).toMatchObject({ kind: "pending", text: "D1 2" });
+    env.at(11_000);
+    await env.reconciler.tick();
+    expect(await env.roster()).toMatchObject({ pending: [], decisions: [],
+      lastCommand: { requestId: "pane-2", result: { kind: "admit", parts: { answers: [{ n: 1, answer: "mark ready 2; keep as a draft 1" }] } } } });
+  });
+
+  it("ends a held answer that can no longer apply with one journaled clarification, so it leaves the queue and the reconciler never retries it", async () => {
+    const env = await asked();
+    expect(await env.card("pane-1")).toMatchObject({ kind: "pending" });
+    // The parent thread's banner answered D1 at once while the pane's answer waited.
+    expect(await env.harness.callRpc("effort_command", { effortId: env.effort.id, snapshotId: (await env.roster()).snapshotId, text: "D1 2", requestId: "banner-1",
+      source: "banner", decisions: [{ n: 1, revision: env.d1.revision }] })).toMatchObject({ kind: "admit" });
+    env.at(11_000);
+    await env.reconciler.tick();
+    await env.reconciler.tick();
+    expect((await env.roster()).pending).toEqual([]);
+    expect(env.sent("pane-1")).toBe(1);
+    // Its request has that one final answer.
+    expect(await env.card("pane-1")).toMatchObject({ kind: "clarify", message: expect.stringContaining("D1 was already answered: mark ready 2; keep as a draft 1") });
+  });
+
+  it("admits an answer that fell due while the plugin was stopped at the next start, once", async () => {
+    const env = await asked();
+    expect(await env.card("pane-1")).toMatchObject({ kind: "pending" });
+    const restarted = await env.harness.lifecycle.reload(plugin);
+    cleanups.push(() => restarted.harness.lifecycle.dispose());
+    env.at(15_000);
+    const reconciler = reconcilers.at(-1)!;
+    await reconciler.recoverAll();
+    await reconciler.tick();
+    const db = restarted.bb.storage.database();
+    expect(env.sent("pane-1", db)).toBe(1);
+    expect(createEffortWorkStore(db).lastRevision(env.effort.id)).toBe(env.revision + 1);
+    expect((await env.roster(restarted.harness)).pending).toEqual([]);
+  });
+
+  it("holds only a roster pane answer: a command box answer may wait, the banner never does, and a command that does more than answer sends at once or not at all", async () => {
+    const env = await asked();
+    const roster = await env.roster();
+    const command = async (text: string, requestId: string, source = "panel") => await env.harness.callRpc("effort_command", { effortId: env.effort.id,
+      snapshotId: roster.snapshotId, text, requestId, source, decisions: [{ n: 1, revision: env.d1.revision }], delayMs: 10_000 }) as EffortCommandResult;
+    await expect(command("D1 1", "banner-1", "banner")).rejects.toThrow("Only an answer from the roster pane waits for Undo");
+    expect(await command("D1 1, hold 2", "pane-mixed")).toMatchObject({ kind: "clarify", message: "Only a decision answer waits for Undo; send the rest at once. Nothing was admitted." });
+    // An answer that can't apply is clarified now, not ten seconds later.
+    expect(await command("D1 3", "pane-outside")).toMatchObject({ kind: "clarify", message: expect.stringContaining("D1 asks about 1, 2; 3 isn't part of it.") });
+    expect(await command("D1 all but 2", "pane-1")).toEqual({ kind: "pending", requestId: "pane-1", text: "D1 all but 2", decisions: [1], until: START + 10_000 });
+    env.at(10_000);
+    await env.reconciler.tick();
+    expect(await env.roster()).toMatchObject({ decisions: [], lastCommand: { requestId: "pane-1", text: "D1 all but 2", snapshotId: roster.snapshotId,
+      result: { kind: "admit", parts: { answers: [{ n: 1, answer: "mark ready 1; keep as a draft 2" }] } } } });
+    expect([env.sent("banner-1"), env.sent("pane-mixed"), env.sent("pane-outside")]).toEqual([0, 0, 0]);
+  });
+});
+

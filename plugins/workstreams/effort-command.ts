@@ -122,6 +122,8 @@ export const effortCommandResultSchema = z.discriminatedUnion("kind", [
     revision: z.number().nullable(),
     /** Ready rows whose fresh merge preview the surface opens; the command grants no merge. */
     mergePreviews: z.array(z.object({ target: z.string(), n: z.number().nullable() })) }),
+  /** A roster answer held for Undo: it is admitted at `until` unless taken back first, and nothing it answers changes until then. */
+  z.object({ kind: z.literal("pending"), requestId: z.string(), text: z.string(), decisions: z.array(z.number()), until: z.number() }),
 ]);
 export type EffortCommandResult = z.infer<typeof effortCommandResultSchema>;
 export type CommandResult =

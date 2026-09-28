@@ -519,13 +519,13 @@ describe("effort instructions", () => {
       { effortId: effort.id, snapshotId: first.snapshotId, text, requestId: `req-${++request}`, source: "panel", ...extra }) as EffortCommandResult;
     const admit = async (text: string, extra: Record<string, unknown> = {}) => {
       const result = await command(text, extra);
-      if (result.kind !== "admit") throw new Error(`Expected ${text} to be admitted: ${result.message}`);
+      if (result.kind !== "admit") throw new Error(`Expected ${text} to be admitted: ${result.kind === "clarify" ? result.message : result.kind}`);
       return result;
     };
     /** A command admitted in another effort. */
     const admitIn = async (effortId: string, text: string, snapshotId: string | null = null) => {
       const result = await env.harness.callRpc("effort_command", { effortId, snapshotId, text, requestId: `req-${++request}`, source: "panel" }) as EffortCommandResult;
-      if (result.kind !== "admit") throw new Error(`Expected ${text} to be admitted: ${result.message}`);
+      if (result.kind !== "admit") throw new Error(`Expected ${text} to be admitted: ${result.kind === "clarify" ? result.message : result.kind}`);
       return result;
     };
     const n = (target: string) => first.rows.find((row) => row.target === target)!.n;
