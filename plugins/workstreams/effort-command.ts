@@ -9,7 +9,7 @@
 import { z } from "zod";
 import { prTarget } from "./ghactions.js";
 import { canonicalPrUrl, prHoldFor, type PrHolds } from "./pr-holds.js";
-import { formatTargets } from "./roster-shared.js";
+import { EFFECT_LABEL as SHARED_EFFECT_LABEL, formatTargets } from "./roster-shared.js";
 
 export { formatTargets };
 
@@ -335,8 +335,7 @@ type Ref = CommandTarget & { named: boolean; owner: { effortId: string; name: st
 type Resolved = { clause: Clause; refs: Ref[]; excluded: (Ref & { marker: string })[] };
 
 const q = (text: string) => `"${text}"`;
-const EFFECT_LABEL: Record<Effect, string> = { "code-fix": "fix", test: "test", push: "push", "pr-reply": "reply", "resolve-addressed-threads": "resolve threads",
-  "retarget-base": "retarget", "rerun-checks": "rerun failed checks", "request-rereview": "re-request review", "mark-ready": "mark ready", "request-review": "request review" };
+const EFFECT_LABEL: Record<Effect, string> = SHARED_EFFECT_LABEL;
 const REPORT_LABEL: Record<ReportMode, string> = { changes: "changes", "decisions-only": "decisions only", quiet: "quiet" };
 
 function render({ clause, refs, excluded }: Resolved, replace: boolean): string {

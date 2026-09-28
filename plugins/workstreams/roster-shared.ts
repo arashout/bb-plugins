@@ -27,5 +27,9 @@ export function formatTargets(targets: readonly TargetRef[]): string {
 export const STATE_LABEL = { doing: "Doing", waiting: "Waiting", decision: "Decision", ready: "Ready", issue: "System issue", done: "Done",
   "not-in-instruction": "Not in instruction" } as const;
 
+/** What each effect an instruction grants is called, in acknowledgments and on the roster. */
+export const EFFECT_LABEL = { "code-fix": "fix", test: "test", push: "push", "pr-reply": "reply", "resolve-addressed-threads": "resolve threads",
+  "retarget-base": "retarget", "rerun-checks": "rerun failed checks", "request-rereview": "re-request review", "mark-ready": "mark ready", "request-review": "request review" } as const;
+
 /** The rollup's four lines, in order; the server writes each as `<label>: <text>`. */
 export const ROLLUP_LABELS = ["Outcome", "Validated", "Still needed", "Needs a decision"] as const;

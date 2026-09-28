@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { formatTargets } from "./roster-shared.js";
+import { EFFECTS } from "./effort-command.js";
+import { EFFECT_LABEL, formatTargets } from "./roster-shared.js";
 
 const url = "https://github.com/inkwell/quill/pull/93";
 
@@ -16,5 +17,9 @@ describe("roster-shared", () => {
     expect(formatTargets(numbered)).toBe("1, 2, 4-17");
     expect(formatTargets([{ target: "b", n: 10 }, { target: "a", n: 9 }, { target: "a", n: 9 }])).toBe("9, 10");
     expect(formatTargets([{ target: url, n: null }, { target: "c", n: 3 }, { target: url, n: null }])).toBe(`3, ${url}`);
+  });
+
+  it("names every effect an instruction can grant, so the pane and the thread's acknowledgment use the same words for it", () => {
+    expect(Object.keys(EFFECT_LABEL).sort()).toEqual([...EFFECTS].sort());
   });
 });
