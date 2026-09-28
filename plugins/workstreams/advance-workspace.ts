@@ -5,7 +5,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { githubRepoFromRemote } from "./gh.js";
 import { prTarget, type GhRunner, type Run } from "./ghactions.js";
 import { readAdvancePr } from "./advance-host.js";
-import { advanceWorkspaceInputSchema, type AdvanceWorkspaceInput, type AdvanceWorkspace } from "./advance-contract.js";
+import { advanceWorkspaceInputSchema, checkoutInspectionInputSchema, type AdvanceWorkspaceInput, type AdvanceWorkspace, type CheckoutInspection,
+  type CheckoutInspectionInput } from "./advance-contract.js";
 
 export type AdvanceGitRunner = (args: string[], cwd: string) => Promise<Run>;
 
@@ -71,5 +72,33 @@ export async function prepareAdvanceWorkspace(
     return { ok: true, path, workerPath, sourcePath, created: true };
   } catch (error) {
     return fail(`Could not prepare the isolated PR checkout: ${String(error)}`);
+  }
+}
+
+/**
+ * Read a candidate checkout for v2 without changing it: only rev-parse, status,
+ * cat-file -e, and merge-base --is-ancestor run. It must be a checkout root.
+ * Ancestry needs the PR head in the local object store; without it, whether
+ * HEAD holds commits the PR lacks is unknown rather than guessed.
+ */
+export async function inspectCheckout(git: AdvanceGitRunner, input: CheckoutInspectionInput): Promise<CheckoutInspection> {
+  const fail = (error: string): CheckoutInspection => ({ ok: false, error: error.slice(0, 800) });
+  if (!checkoutInspectionInputSchema.safeParse(input).success || !isAbsolute(input.path)) return fail("Invalid checkout inspection request.");
+  try {
+    const path = await realpath(input.path);
+    const [root, head, branch, status, common] = await Promise.all([
+      git(["rev-parse", "--show-toplevel"], path), git(["rev-parse", "HEAD"], path), git(["rev-parse", "--abbrev-ref", "HEAD"], path),
+      git(["status", "--porcelain"], path), git(["rev-parse", "--git-common-dir"], path),
+    ]);
+    if (!root.ok || await realpath(root.stdout.trim()) !== path) return fail(`${input.path} is not a checkout root.`);
+    if (!head.ok || !branch.ok || !status.ok || !common.ok) return fail(`Could not read the checkout at ${input.path}.`);
+    const oid = head.stdout.trim();
+    const read = { ok: true as const, head: oid, branch: branch.stdout.trim() === "HEAD" ? null : branch.stdout.trim(),
+      clean: status.stdout.trim() === "", commonDir: await realpath(resolve(path, common.stdout.trim())) };
+    if (oid === input.expectedHeadOid) return { ...read, relation: "at-head" };
+    if (!(await git(["cat-file", "-e", `${input.expectedHeadOid}^{commit}`], path)).ok) return { ...read, relation: "unknown" };
+    return { ...read, relation: (await git(["merge-base", "--is-ancestor", oid, input.expectedHeadOid], path)).ok ? "behind" : "diverged" };
+  } catch (error) {
+    return fail(`Could not read the checkout at ${input.path}: ${String(error)}`);
   }
 }

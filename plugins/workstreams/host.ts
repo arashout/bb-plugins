@@ -23,7 +23,7 @@ import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs } from "./inventory.js";
 import { readAdvancePr, readEqualHeadTrees } from "./advance-host.js";
-import { prepareAdvanceWorkspace } from "./advance-workspace.js";
+import { inspectCheckout, prepareAdvanceWorkspace } from "./advance-workspace.js";
 
 const GIT_TIMEOUT_MS = 10_000;
 const GH_TIMEOUT_MS = 20_000;
@@ -564,6 +564,7 @@ export default experimental_defineHostEntry({
       readEqualHeadTrees(ghRunner(context.signal), prUrl, priorHeadOid, currentHeadOid),
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
       (args, cwd) => run("git", args, cwd, GH_WRITE_TIMEOUT_MS, context.signal), ghRunner(context.signal), input),
+    inspectCheckout: (input, context) => inspectCheckout((args, cwd) => run("git", args, cwd, GIT_TIMEOUT_MS, context.signal), input),
     authoredPrs: ({ owners }, context) => readAuthoredPrs(ghRunner(context.signal), owners),
     inspectPrs: ({ prUrls }, context) => readInventoryPrs(ghRunner(context.signal), prUrls),
     checkoutState: async ({ path }, context) => {

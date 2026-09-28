@@ -3,7 +3,7 @@
 // schemas below are the single definition of what a scan returns.
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema } from "./advance-contract.js";
+import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema, checkoutInspectionInputSchema, checkoutInspectionSchema } from "./advance-contract.js";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
 
 /**
@@ -283,6 +283,8 @@ export const hostContract = defineRpcContract({
     ]),
   },
   advanceWorkspace: { input: advanceWorkspaceInputSchema, output: advanceWorkspaceSchema },
+  /** Read-only: a candidate checkout's HEAD, cleanliness, and relation to the PR head, before v2 chooses where work runs. */
+  inspectCheckout: { input: checkoutInspectionInputSchema, output: checkoutInspectionSchema },
   authoredPrs: {
     input: z.object({ owners: z.array(z.string().max(39)).max(50) }).strict(),
     output: inventoryResultSchema,

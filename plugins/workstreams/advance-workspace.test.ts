@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { prepareAdvanceWorkspace, type AdvanceGitRunner } from "./advance-workspace.js";
+import { inspectCheckout, prepareAdvanceWorkspace, type AdvanceGitRunner } from "./advance-workspace.js";
 import type { GhRunner } from "./ghactions.js";
 
 const exec = promisify(execFile);
@@ -99,5 +99,60 @@ describe("isolated advance workspaces", () => {
       sourcePath: "/synthetic", prUrl: "https://github.com/example/widget/pull/42", expectedHeadOid: "a".repeat(40), expectedBaseOid: "b".repeat(40), batchId: "../escape", jobId: "job",
     })).toMatchObject({ ok: false });
     expect(called).toBe(false);
+  });
+});
+
+describe("candidate checkout inspection", () => {
+  // Choosing where v2 works must not change any checkout: these are the only git commands it may run.
+  const READS = [["rev-parse"], ["status", "--porcelain"], ["cat-file", "-e"], ["merge-base", "--is-ancestor"]];
+  function readOnly(run: AdvanceGitRunner) {
+    const refused: string[] = [];
+    const guarded: AdvanceGitRunner = async (args, cwd) => {
+      if (READS.some((prefix) => prefix.every((word, index) => args[index] === word))) return run(args, cwd);
+      refused.push(args.join(" "));
+      return { ok: false, error: "refused" };
+    };
+    return { guarded, refused };
+  }
+  async function worktree(f: Awaited<ReturnType<typeof fixture>>) {
+    const created = await prepareAdvanceWorkspace(f.run, f.gh, f.input, f.root);
+    if (!created.ok) throw new Error(created.error);
+    return created.path;
+  }
+
+  it("reads a worktree and the author checkout it came from, sharing one Git directory, without touching either", async () => {
+    const f = await fixture();
+    const path = await worktree(f);
+    const { guarded, refused } = readOnly(f.run);
+    const detached = await inspectCheckout(guarded, { path, expectedHeadOid: f.head });
+    const author = await inspectCheckout(guarded, { path: f.sourcePath, expectedHeadOid: f.head });
+    expect(detached).toMatchObject({ ok: true, head: f.head, branch: null, clean: true, relation: "at-head" });
+    expect(author).toMatchObject({ ok: true, head: f.head, branch: "feature", clean: false, relation: "at-head" });
+    expect(detached.ok && author.ok && detached.commonDir === author.commonDir).toBe(true);
+    expect(await readFile(join(f.sourcePath, "file.txt"), "utf8")).toBe("uncommitted author work\n");
+    expect(refused).toEqual([]);
+  });
+
+  it("tells a clean worktree behind the PR head from one holding commits the PR lacks, and never guesses without the head", async () => {
+    const f = await fixture();
+    const path = await worktree(f);
+    await f.git("commit", "--allow-empty", "-m", "Reviewer follow-up");
+    const next = await f.git("rev-parse", "HEAD");
+    const { guarded, refused } = readOnly(f.run);
+    expect(await inspectCheckout(guarded, { path, expectedHeadOid: next })).toMatchObject({ ok: true, relation: "behind" });
+    // A PR head this repository never fetched can't prove the worktree holds no unpushed commits.
+    expect(await inspectCheckout(guarded, { path, expectedHeadOid: "d".repeat(40) })).toMatchObject({ ok: true, relation: "unknown" });
+    await exec("git", ["commit", "--allow-empty", "-m", "Unpushed worker commit"], { cwd: path });
+    expect(await inspectCheckout(guarded, { path, expectedHeadOid: next })).toMatchObject({ ok: true, relation: "diverged" });
+    expect(refused).toEqual([]);
+  });
+
+  it("refuses a directory inside a checkout, or one that is gone, instead of reading the checkout around it", async () => {
+    const f = await fixture();
+    await mkdir(join(f.sourcePath, "nested"));
+    const { guarded } = readOnly(f.run);
+    expect(await inspectCheckout(guarded, { path: join(f.sourcePath, "nested"), expectedHeadOid: f.head }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("not a checkout root") });
+    expect(await inspectCheckout(guarded, { path: join(f.directory, "gone"), expectedHeadOid: f.head })).toMatchObject({ ok: false });
   });
 });

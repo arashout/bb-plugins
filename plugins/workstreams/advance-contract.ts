@@ -38,3 +38,21 @@ export const advanceWorkspaceSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
 ]);
 export type AdvanceWorkspace = z.infer<typeof advanceWorkspaceSchema>;
+
+export const checkoutInspectionInputSchema = z.object({
+  path: z.string().max(1_000), expectedHeadOid: z.string().regex(/^[0-9a-f]{40}$/u),
+}).strict();
+export type CheckoutInspectionInput = z.infer<typeof checkoutInspectionInputSchema>;
+/**
+ * A candidate checkout read without changing it. `relation` compares HEAD with
+ * the PR head: equal, strictly behind it (so it holds no commits the PR lacks),
+ * diverged (unpushed or rewritten commits), or unknown when the PR head isn't
+ * fetched there. `commonDir` is the shared Git directory, so a worktree can be
+ * matched to its source repository.
+ */
+export const checkoutInspectionSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), head: z.string().regex(/^[0-9a-f]{40}$/u), branch: z.string().max(300).nullable(), clean: z.boolean(),
+    commonDir: z.string().max(1_000), relation: z.enum(["at-head", "behind", "diverged", "unknown"]) }).strict(),
+  z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
+]);
+export type CheckoutInspection = z.infer<typeof checkoutInspectionSchema>;
