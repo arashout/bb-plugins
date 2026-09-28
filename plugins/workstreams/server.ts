@@ -3664,12 +3664,14 @@ export default async function plugin(bb: BbPluginApi) {
       .run(source.id, destination.id, JSON.stringify([...actions.values()]));
   }
 
-  async function syncMergedThreadIntents(sourceId: string, destinationId: string): Promise<number> {
+  /** Apply a merge's saved thread updates; returns how many still need a retry, and the notice that says so or names kept titles. */
+  async function syncMergedThreadIntents(sourceId: string, destinationId: string): Promise<{ pending: number; notice: string | null }> {
     const plan = readAdminSync(sourceId);
-    if (!plan) return 0;
+    if (!plan) return { pending: 0, notice: null };
     if (plan.destinationId !== destinationId) throw new Error("The saved thread sync targets a different effort. Inspect the merge history.");
     const pending: EffortAdminSyncAction[] = [];
-    for (const action of plan.actions) {
+    const notices: string[] = [];
+    for (let action of plan.actions) {
       try {
         const thread = await bb.sdk.threads.get({ threadId: action.threadId });
         if (thread.deletedAt !== null) continue;
@@ -3693,8 +3695,12 @@ export default async function plugin(bb: BbPluginApi) {
           update.parentThreadId = action.parentThreadId;
         }
         if (action.title && thread.title !== action.title) {
-          if (thread.title !== action.expectedTitle) throw new Error("title changed after the merge");
-          update.title = action.title;
+          if (thread.title === action.expectedTitle) update.title = action.title;
+          else {
+            // A rename since planning, by you or by thread-briefs' renameThreads, wins; the merge still moves the thread's effort and parent.
+            notices.push(`Thread ${action.threadId} was renamed after this merge was planned, so it keeps its title instead of "${action.title}".`);
+            action = { ...action, title: undefined, expectedTitle: undefined };
+          }
         }
         if ("parentThreadId" in update || "title" in update) await bb.sdk.threads.update(update);
       } catch (error) {
@@ -3705,7 +3711,9 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (pending.length) db.prepare(`UPDATE effort_admin_sync SET actions = ? WHERE source_id = ?`).run(JSON.stringify(pending), sourceId);
     else db.prepare(`DELETE FROM effort_admin_sync WHERE source_id = ?`).run(sourceId);
-    return pending.length;
+    for (const notice of notices) bb.log.info(`effort merge ${sourceId}: ${notice}`);
+    if (pending.length) notices.push(`${pending.length} thread assignments still need syncing. Retry this merge to finish.`);
+    return { pending: pending.length, notice: notices.join(" ") || null };
   }
 
   async function ensureRepoController(effort: NonNullable<ReturnType<typeof effortStore.get>>, repo: string, projectId: string, hostId: string) {
@@ -4953,9 +4961,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (result.preview.blockers.length) return { ok: false as const, error: result.preview.blockers.join(" ").slice(0, 2_000) };
       if (source && destination && source.mergedInto === destination.id) {
         try {
-          const pendingThreadSync = await syncMergedThreadIntents(source.id, destination.id);
-          return { ok: true as const, effort: effortStore.get(destination.id)!, pendingThreadSync,
-            notice: pendingThreadSync ? `${pendingThreadSync} thread assignments still need syncing. Retry this merge to finish.` : null };
+          const { pending, notice } = await syncMergedThreadIntents(source.id, destination.id);
+          return { ok: true as const, effort: effortStore.get(destination.id)!, pendingThreadSync: pending, notice };
         } catch (error) { return { ok: false as const, error: `Thread assignment sync could not be checked: ${String(error).slice(0, 300)}. Retry this merge.` }; }
       }
       try {
@@ -4986,9 +4993,8 @@ export default async function plugin(bb: BbPluginApi) {
         })();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
         await syncV2Targets();
-        const pendingThreadSync = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
-        return { ok: true as const, effort, pendingThreadSync,
-          notice: pendingThreadSync ? `${pendingThreadSync} thread assignments still need syncing. Retry this merge to finish.` : null };
+        const { pending, notice } = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
+        return { ok: true as const, effort, pendingThreadSync: pending, notice };
       } catch (error) { return { ok: false as const, error: `Effort merge could not finish: ${String(error).slice(0, 300)}. Reopen the preview or retry the merge.` }; }
     },
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),

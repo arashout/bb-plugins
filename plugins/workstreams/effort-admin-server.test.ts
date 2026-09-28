@@ -197,6 +197,37 @@ it("keeps a saved sync action after metadata succeeds but a thread update fails"
   expect(env.threads.get("thr-coordinator")?.title).toBe(effortTitle(destination.name));
 });
 
+it("finishes a merge whose coordinator was renamed after planning, keeping the new title and still moving effort metadata and parents", async () => {
+  const env = await setup();
+  const { source, destination } = env.seed();
+  env.store.save({ ...source, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
+  env.threads.set("thr-coordinator", makeThreadResponse({ id: "thr-coordinator", projectId: "project",
+    title: "Old coordinator title", status: "idle" } as never));
+  env.metadata.set("thr-coordinator", { effortId: source.id, workEffortId: source.id, role: "coordinator" });
+  // The source's controller sits outside the coordinator, so the merge also moves it under the coordinator.
+  env.threads.set("thr-controller", makeThreadResponse({ id: "thr-controller", projectId: "project", status: "idle", parentThreadId: null } as never));
+  env.metadata.set("thr-controller", { effortId: source.id, role: "repo" });
+  const { record } = env.store.claimRepoController({ effortId: source.id, repo: "inkwell/folio", projectId: "project", hostId: "host" });
+  env.store.saveRepoController({ ...record, threadId: "thr-controller", state: "ready" });
+  const keys = { sourceKey: source.key, destinationKey: destination.key };
+  const preview = await env.call("effort_admin_merge_preview", keys);
+  expect(preview).toMatchObject({ ok: true, preview: { blockers: [] } });
+  // Both thread updates fail once, so every planned action is still pending when the coordinator is renamed.
+  env.failNextMetadataWrite();
+  env.failNextThreadUpdate();
+  expect(await env.call("effort_admin_merge", { ...keys, expectedScope: preview.preview.scope })).toMatchObject({ ok: true, pendingThreadSync: 2 });
+  // A person, or thread-briefs' renameThreads, renames the coordinator before the retry.
+  env.threads.set("thr-coordinator", { ...env.threads.get("thr-coordinator")!, title: "Shelf fixes brief" });
+  const retry = await env.call("effort_admin_merge_preview", keys);
+  expect(await env.call("effort_admin_merge", { ...keys, expectedScope: retry.preview.scope })).toEqual({ ok: true, effort: expect.anything(), pendingThreadSync: 0,
+    notice: `Thread thr-coordinator was renamed after this merge was planned, so it keeps its title instead of "${effortTitle(destination.name)}".` });
+  expect(env.threads.get("thr-coordinator")?.title).toBe("Shelf fixes brief");
+  expect(env.metadata.get("thr-coordinator")).toMatchObject({ effortId: destination.id, workEffortId: destination.id });
+  expect(env.metadata.get("thr-controller")).toMatchObject({ effortId: destination.id });
+  expect(env.threads.get("thr-controller")?.parentThreadId).toBe("thr-coordinator");
+  expect(await env.call("effort_admin_merge_preview", keys)).toMatchObject({ ok: true, preview: { pendingThreadSync: 0 } });
+});
+
 it("finds an active coordinator from the stored binding even without plugin metadata", async () => {
   const env = await setup();
   const { source, destination } = env.seed();

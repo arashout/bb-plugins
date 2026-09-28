@@ -432,7 +432,11 @@ it, and preview **Merge into…** before combining membership. The destination
 keeps its identity; old effort IDs resolve to it. Thread histories stay
 separate. Archived efforts retain linked work. Merge previews identify routing
 conflicts and blockers; resolve them before applying the merge. Retry pending
-thread updates when an external update fails.
+thread updates when an external update fails. A thread renamed after the merge
+was planned keeps its new title, and the merge still moves its effort and
+parent; the merge notice names it. Keep the thread-briefs plugin's
+`renameThreads` setting off beside Workstreams, which titles coordinator and
+worker threads itself.
 
 **Work** follows saved planning conversations and preparation runs in a
 vertical list, alongside Map and Pipeline. It preserves each conversation's
