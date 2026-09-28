@@ -106,7 +106,7 @@ describe("numbered effort commands", () => {
     expect(admit("hold 4-6 except 5", active).holds.map((item) => item.n)).toEqual([4, 6]);
   });
 
-  it("narrows the rows a command adds when a narrowing names none, and ends a hold reason at a comma", () => {
+  it("narrows the rows a command adds when a narrowing names none, and ends a hold reason at the command after it", () => {
     expect(admit("move 1-3 forward, local only").instruction!.include.map((item) => item.effects)).toEqual([1, 2, 3].map(() => ["code-fix", "test"]));
     const result = admit("hold 4 because the copy is pending, move 5 forward");
     expect(result.holds).toEqual([{ target: at(4), n: 4, reason: "the copy is pending" }]);
@@ -372,5 +372,70 @@ describe("command grammar golden table", () => {
     expect(admit("recheck launches")).toMatchObject({ recheckLaunches: true, interventions: [], acknowledgment: ["Recheck launches: read back every uncertain launch"] });
     expect(admit("recheck 4-6")).toMatchObject({ recheckLaunches: false, interventions: [4, 5, 6].map((n) => ({ target: at(n), n, action: "recheck", release: false })) });
     expect(admit("refresh 4").interventions).toEqual([{ target: at(4), n: 4, action: "refresh", release: false }]);
+  });
+});
+
+// Amendment A11: the report's own phrasing, reasons, repeated answers, and undo.
+describe("parser hardening", () => {
+  // The report numbers rows past this fixture's 11, so these goldens number 7 more PRs in the same effort.
+  const wider = [...TARGETS, ...Array.from({ length: 7 }, (_, index) => pr("atlas", 420 + index))];
+  const wide = (overrides: Partial<CommandContext> = {}) => context({
+    snapshot: { id: "S-5a1f0c2e9b7d", effortId: EFFORT, stale: false, rows: wider.map((target, index) => ({ n: index + 1, target })) },
+    issued: new Map(wider.map((target, index) => [index + 1, target])),
+    ownerOf: (target) => wider.includes(target) ? { effortId: EFFORT, name: "Shelving" } : null, ...overrides });
+  const decisions = [{ n: 1, options: ["A", "B"], targets: [7] }, { n: 2, options: [], targets: [13, 14, 15] }];
+
+  it("reads a comma-separated number list as one list of rows for every verb, because reports and receipts write lists that way", () => {
+    expect(admit("merge 9, 16", wide()).mergePreviews.map((item) => item.n)).toEqual([9, 16]);
+    expect(admit("D2 13, 15", wide({ decisions })).answers).toEqual([{ decision: 2, numbers: [13, 15] }]);
+    expect(admit("hold 5, 6", wide()).holds.map((item) => item.n)).toEqual([5, 6]);
+    expect(numbers(admit("move 1, 2 forward", wide()).instruction!)).toEqual([1, 2]);
+    expect(admit("mark 13, 15 ready", wide()).instruction!.include.map((item) => [item.n, item.effects])).toEqual([[13, ["mark-ready"]], [15, ["mark-ready"]]]);
+  });
+
+  it("ends a hold reason at the next clause that reads as a command, keeps other free text in it, and asks when bare rows follow it", () => {
+    const ci = admit("hold 5 because flaky, fix ci 2");
+    expect(ci.holds).toEqual([{ target: at(5), n: 5, reason: "flaky" }]);
+    expect(ci.instruction!.include.map((item) => [item.n, item.work])).toEqual([[2, ["fix_failing_checks"]]]);
+    // Filler before the verb, and `only` before a work verb, still start a command.
+    expect(admit("hold 5 because flaky, and fix ci 2").normalized).toBe("hold 5 because flaky; fix ci 2");
+    expect(admit("hold 5 because flaky, only fix ci 2").normalized).toBe("hold 5 because flaky; only fix ci 2");
+    const review = admit("hold 5 because flaky; address review 1");
+    expect(review.holds).toEqual([{ target: at(5), n: 5, reason: "flaky" }]);
+    expect(review.instruction!.include.map((item) => [item.n, item.work])).toEqual([[1, ["address_review_feedback"]]]);
+    // Free text after a comma is more of the reason, not a command nobody recognizes.
+    expect(admit("hold 5 because waiting on copy, legal review").holds).toEqual([{ target: at(5), n: 5, reason: "waiting on copy, legal review" }]);
+    // A command missing its rows still ends the reason, so it asks instead of hiding in the reason, and nothing is held.
+    expect(clarify("hold 5 because flaky, fix ci").message).toBe("Name the rows, for example: fix ci 1-9, 11. Nothing was admitted.");
+    // Bare rows could be more rows to hold or more of the reason, so the reply asks and offers the rows reading.
+    expect(clarify("hold 5 because flaky, 6")).toEqual({ kind: "clarify", normalized: "hold 5, 6 because flaky",
+      message: `"6" follows a hold reason, so it could be more rows or more of the reason. To hold it too, send: hold 5, 6 because flaky. To keep it in the reason, leave out the comma before it.` });
+    expect(admit("hold 5 because flaky 6").holds).toEqual([{ target: at(5), n: 5, reason: "flaky 6" }]);
+    // An exclusion after a reason still trims the hold's own rows.
+    expect(admit("hold 4-6 because flaky, except 5").holds.map((item) => [item.n, item.reason])).toEqual([[4, "flaky"], [6, "flaky"]]);
+    expect(admit("hold 4-6 because flaky, but not 5").holds.map((item) => [item.n, item.reason])).toEqual([[4, "flaky"], [6, "flaky"]]);
+  });
+
+  it("asks when a clause after a hold reason names a row or a verb anywhere, because a reason that swallows it would drop a hold or a command", () => {
+    expect(clarify("hold 5 because flaky, can you move 6 forward")).toEqual({ kind: "clarify", normalized: "hold 5 because flaky; move 6 forward",
+      message: `I didn't recognize "can", "you".\n"can you move 6 forward" follows a hold reason and names a row or a verb, so it could be a command or more of the reason. `
+        + "To run it, end the reason with a semicolon. To keep it in the reason, leave out the comma before it." });
+    // Each would otherwise leave 6 unheld, or a verb unrun, inside the reason text.
+    for (const after of ["6 too", "fix the tests on 6", "only 6", "S1 recheck launches"])
+      expect(clarify(`hold 5 because flaky, ${after}`).message).toContain(`"${after}" follows a hold reason and names a row or a verb`);
+  });
+
+  it("clarifies a reply that answers one decision twice and runs none of it, because the two answers contradict", () => {
+    expect(clarify("D1 A, D1 B", wide({ decisions })).message).toBe(`This reply answers D1 twice, "D1 A" and "D1 B". Send one answer.`);
+    // The hold beside it doesn't run either.
+    expect(clarify("hold 3, D2 13, D2 15", wide({ decisions })).message).toBe(`This reply answers D2 twice, "D2 13" and "D2 15". Send one answer.`);
+  });
+
+  it("reads undo Dn, and says Undo isn't available because every answer takes effect when it's admitted", () => {
+    expect(clarify("undo D1", wide({ decisions }))).toEqual({ kind: "clarify", normalized: "undo D1",
+      message: "Undo isn't available for D1: an answer takes effect as soon as it's admitted." });
+    // An undo never reads as an answer to the decision it names, and nothing beside it runs.
+    expect(clarify("D2 13, undo D1", wide({ decisions })).message).toBe("Undo isn't available for D1: an answer takes effect as soon as it's admitted.");
+    expect(clarify("undo").message).toBe("Undo isn't available: an answer takes effect as soon as it's admitted.");
   });
 });

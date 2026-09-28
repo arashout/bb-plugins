@@ -106,6 +106,7 @@ type Head =
   | { op: "narrow"; remove: Effect[]; phrase: string }
   | { op: "report"; mode: ReportMode; phrase: string }
   | { op: "answer"; decision: number }
+  | { op: "undo"; decision: number | null }
   | { op: "mark-ready" | "request-review" | "hold" | "release" | "stop" | "cancel" | "retry" | "refresh" | "recheck" | "recheck-launches" | "reset" | "drop" | "merge" | "post-roster" | "outcome" | "done-when" };
 const decisionsOnly: Head = { op: "report", mode: "decisions-only", phrase: "decisions only" };
 const noReply: Head = { op: "narrow", remove: ["pr-reply"], phrase: "don't reply" };
@@ -125,12 +126,13 @@ const HEADS = ([
   ["hold", { op: "hold" }], ["release", { op: "release" }], ["stop", { op: "stop" }], ["cancel", { op: "cancel" }], ["retry", { op: "retry" }],
   ["refresh", { op: "refresh" }], ["recheck launches", { op: "recheck-launches" }], ["recheck", { op: "recheck" }], ["reset", { op: "reset" }],
   ["drop", { op: "drop" }], ["remove", { op: "drop" }], ["merge", { op: "merge" }], ["post roster", { op: "post-roster" }],
-  ["outcome", { op: "outcome" }], ["done when", { op: "done-when" }],
+  ["outcome", { op: "outcome" }], ["done when", { op: "done-when" }], ["undo", { op: "undo", decision: null }],
 ] satisfies [string, Head][]).map(([phrase, head]) => [phrase.split(" "), head] as const).sort((a, b) => b[0].length - a[0].length);
 const FILLERS = new Set(["and", "also", "add", "then", "please", "for", "on", "in", "the", "pr", "prs", "row", "rows", "number", "numbers", "of", "now", "with"]);
 const INCLUDES = new Set<Head["op"]>(["work", "mark-ready", "request-review"]);
 const TARGETED = new Set<Head["op"]>(["work", "mark-ready", "request-review", "hold", "release", "retry", "refresh", "recheck", "reset", "merge"]);
-const UNTARGETED = new Set<Head["op"]>(["report", "recheck-launches", "post-roster", "outcome"]);
+const UNTARGETED = new Set<Head["op"]>(["report", "recheck-launches", "post-roster", "outcome", "undo"]);
+const EXCLUDING = new Set(["except", "skip", "without", "leave"]);
 
 type Token = { kind: "url" | "ref" | "range" | "hash" | "num" | "login" | "word" | "sep" | "soft" | "other"; text: string; word: string; start: number; end: number };
 const TOKEN = /(?<url>https?:\/\/[^\s,;]*[^\s,;.)])|(?<ref>[\w.-]+(?:\/[\w.-]+)?#\d+)|(?<range>\d+\s*(?:\.\.|[-–—])\s*\d+)|(?<hash>#\d+)|(?<num>\d+)|(?<login>@[\w-]+)|(?<word>[a-z][a-z0-9'’]*)|(?<sep>[;\n]|\.(?=\s|$))|(?<soft>[,:])|(?<space>[^\S\n]+)|(?<other>.)/giu;
@@ -142,7 +144,9 @@ function tokenize(text: string): Token[] {
 }
 
 type Atom = { kind: "n"; n: number; hash: boolean } | { kind: "range"; from: number; to: number } | { kind: "all" } | { kind: "url"; url: string } | { kind: "ref"; repo: string; number: number };
-type Clause = { head: Head; include: Atom[]; exclude: { atom: Atom; marker: string }[]; flags: Set<string>; text: string | null; logins: string[]; criteria: string[]; option: string | null };
+type Clause = { head: Head; include: Atom[]; exclude: { atom: Atom; marker: string }[]; flags: Set<string>; text: string | null; logins: string[]; criteria: string[]; option: string | null;
+  /** A clause after a hold reason's comma that names rows or a verb without starting as a command; `rows` when it is bare rows. */
+  afterReason: { text: string; rows: boolean } | null };
 
 /** Clauses start at a verb and run to the next verb or a hard break (`;`, a newline, or a sentence end). */
 function parse(source: string, decisions: readonly OpenDecision[]) {
@@ -177,10 +181,34 @@ function parse(source: string, decisions: readonly OpenDecision[]) {
     }
     return token?.word === "all" ? { atom: { kind: "all" }, last: i } : null;
   }
+  const decisionAt = (i: number) => {
+    const match = tokens[i]?.kind === "word" ? /^d(\d+)$/u.exec(tokens[i]!.word) : null;
+    return match ? Number(match[1]) : null;
+  };
   function headAt(i: number): { head: Head; length: number } | null {
     for (const [words, head] of HEADS) if (words.every((word, k) => tokens[i + k]?.kind === "word" && tokens[i + k]!.word === word)) return { head, length: words.length };
-    const answer = tokens[i]?.kind === "word" ? /^d(\d+)$/u.exec(tokens[i]!.word) : null;
-    return answer ? { head: { op: "answer", decision: Number(answer[1]) }, length: 1 } : null;
+    const decision = decisionAt(i);
+    return decision === null ? null : { head: { op: "answer", decision }, length: 1 };
+  }
+  /** Whether the text from `i` reads as grammar: a verb, `only` before a work verb, or an exclusion, after any filler. */
+  function commandAt(i: number): boolean {
+    while (tokens[i]?.kind === "word" && FILLERS.has(tokens[i]!.word)) i++;
+    const word = tokens[i]?.kind === "word" ? tokens[i]!.word : "";
+    return headAt(i) !== null || (word === "only" && headAt(i + 1)?.head.op === "work") || EXCLUDING.has(word) || (word === "but" && tokens[i + 1]?.word === "not");
+  }
+  /** Whether `from` to `to` holds rows and filler only, which the grammar would read as bare rows. */
+  function rowsOnly(from: number, to: number): boolean {
+    let rows = false;
+    for (let i = from; i < to; i++) {
+      const atom = atomAt(i);
+      if (atom) { rows = true; i = atom.last; } else if (!(tokens[i]!.kind === "word" && FILLERS.has(tokens[i]!.word))) return false;
+    }
+    return rows;
+  }
+  /** Whether `from` to `to` names a row or a verb anywhere. */
+  function namesGrammar(from: number, to: number): boolean {
+    for (let i = from; i < to; i++) if (atomAt(i) || headAt(i)) return true;
+    return false;
   }
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
@@ -208,7 +236,15 @@ function parse(source: string, decisions: readonly OpenDecision[]) {
         || (word === "from" && op === "request-review") || (word === "release" && op === "reset" && !atomAt(i + 1))) { clause.flags.add(word); continue; }
       if (word === "review" && op === "mark-ready" && clause.flags.has("ready")) continue;
       if (word === "because" && op === "hold") {
-        const to = end(i + 1, true);
+        // A reason runs past a comma until the next clause reads as a command. Free text continues it; a clause naming rows or a verb
+        // anywhere could be either, and the reason would swallow a command, so it asks.
+        let to = end(i + 1, true);
+        while (tokens[to]?.text === ",") {
+          const next = end(to + 1, true);
+          if (next === to + 1 || commandAt(to + 1)) break;
+          if (namesGrammar(to + 1, next)) { clause.afterReason = { text: slice(to + 1, next), rows: rowsOnly(to + 1, next) }; break; }
+          to = next;
+        }
         clause.text = slice(i + 1, to);
         i = to - 1;
         continue;
@@ -218,7 +254,7 @@ function parse(source: string, decisions: readonly OpenDecision[]) {
     const head = word ? headAt(i) : null;
     if (head) {
       // Only `move` needs `forward`; `advance` and `prepare` are whole verbs.
-      clause = { head: head.head, include: [], exclude: [], flags: new Set(token.word === "move" ? ["move"] : []), text: null, logins: [], criteria: [], option: null };
+      clause = { head: head.head, include: [], exclude: [], flags: new Set(token.word === "move" ? ["move"] : []), text: null, logins: [], criteria: [], option: null, afterReason: null };
       clauses.push(clause);
       excluding = null;
       i += head.length - 1;
@@ -235,9 +271,11 @@ function parse(source: string, decisions: readonly OpenDecision[]) {
           i = to - 1;
         }
       }
+      const undone = started.op === "undo" ? decisionAt(i + 1) : null;
+      if (undone !== null) { clause.head = { op: "undo", decision: undone }; i++; }
       continue;
     }
-    if (word && ["except", "skip", "without", "leave"].includes(word)) { looseExclusion ||= !clause; excluding = word === "leave" ? "leave alone" : word; continue; }
+    if (word && EXCLUDING.has(word)) { looseExclusion ||= !clause; excluding = word === "leave" ? "leave alone" : word; continue; }
     if (word === "alone" && excluding === "leave alone") { excluding = null; continue; }
     if (word === "but" && tokens[i + 1]?.word === "not") { looseExclusion ||= !clause; excluding = "but not"; i++; continue; }
     if (word === "but" && clause?.include.at(-1)?.kind === "all" && !excluding) { excluding = "all but"; continue; }
@@ -288,6 +326,7 @@ function render({ clause, refs, excluded }: Resolved, replace: boolean): string 
     case "post-roster": return "post roster";
     case "outcome": return `outcome: ${clause.text ?? ""}`;
     case "done-when": return `done when${targets ? ` ${targets}` : ""}: ${clause.text ?? ""}`;
+    case "undo": return `undo${head.decision === null ? "" : ` D${head.decision}`}`;
     default: return `${head.op}${targets ? ` ${targets}` : ""}${except}`;
   }
 }
@@ -395,7 +434,9 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
       first.refs = first.refs.filter((item) => !strays.some((other) => other.target === item.target));
     }
   }
-  for (const { clause, refs } of resolved) {
+  const answered = new Map<number, Resolved>();
+  for (const item of resolved) {
+    const { clause, refs } = item;
     const { head } = clause;
     if (TARGETED.has(head.op) && clause.include.length === 0) {
       const example = (head.op === "work" ? openNumbers : openNumbers.slice(0, 1)).map((item) => ({ ...item, named: false, owner: null, outside: false }));
@@ -412,6 +453,17 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
     else if (head.op === "answer" && clause.flags.has("none") && clause.include.length > 0) issue(`D${head.decision} can't be none and ${formatTargets(refs)} at once.`);
     if (head.op === "drop" && clause.include.length === 0 && clause.criteria.length === 0) issue("drop needs rows or criteria, for example: drop 4 or drop c1.");
     if (head.op === "cancel" && clause.include.length > 0) issue(`cancel takes no rows. To take ${formatTargets(refs)} out, drop ${formatTargets(refs)}; to interrupt a running turn, stop ${formatTargets(refs)}.`);
+    if (clause.afterReason) issue(clause.afterReason.rows
+      ? `${q(clause.afterReason.text)} follows a hold reason, so it could be more rows or more of the reason. To hold it too, send: ${render(item, false)}. To keep it in the reason, leave out the comma before it.`
+      : `${q(clause.afterReason.text)} follows a hold reason and names a row or a verb, so it could be a command or more of the reason. To run it, end the reason with a semicolon. To keep it in the reason, leave out the comma before it.`);
+    // Two answers to one decision contradict each other, so neither runs.
+    if (head.op === "answer") {
+      const first = answered.get(head.decision);
+      if (first) issue(`This reply answers D${head.decision} twice, ${q(render(first, false))} and ${q(render(item, false))}. Send one answer.`);
+      else answered.set(head.decision, item);
+    }
+    // No answer waits before it takes effect, so there is none for undo to take back.
+    if (head.op === "undo") issue(`Undo isn't available${head.decision === null ? "" : ` for D${head.decision}`}: an answer takes effect as soon as it's admitted.`);
   }
   const foreign = resolved.flatMap(({ refs, excluded }) => [...refs, ...excluded]).filter((item) => item.owner);
   if (foreign.length) {
