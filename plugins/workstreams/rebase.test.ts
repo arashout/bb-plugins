@@ -5,8 +5,8 @@ describe("checkoutBranch", () => {
   const rebase = (name: string | null) => [{ present: true, name }, { present: false, name: null }];
 
   it("keeps the PR's branch visible while a checkout is detached for a rebase", () => {
-    expect(checkoutBranch("HEAD", rebase("refs/heads/matts/cre-607-lock-eligibility-dob\n"))).toEqual({
-      branch: "matts/cre-607-lock-eligibility-dob",
+    expect(checkoutBranch("HEAD", rebase("refs/heads/reader/abc-607-lock-gift-card-balance\n"))).toEqual({
+      branch: "reader/abc-607-lock-gift-card-balance",
       rebasing: true,
     });
     expect(checkoutBranch("HEAD", [{ present: false, name: null }, { present: true, name: "refs/heads/feature/dob" }])).toEqual({

@@ -17,12 +17,12 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean; approvalFeedback?: boolean; inspection?: "open" | "closed" | "failed" } = {}) {
   const calls: { method: string; input: unknown }[] = [];
   const beforeLive = vi.fn(async () => {});
-  const primary = { ...(options.cohort ? { ...PR, title: "EPD-42: Improve manuscript review", headRefName: "epd-42-review" } : PR),
+  const primary = { ...(options.cohort ? { ...PR, title: "ABC-42: Improve manuscript review", headRefName: "abc-42-review" } : PR),
     headRefOid: SHA,
     approvalFeedback: options.approvalFeedback
       ? { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-42"] }
       : { status: "none" as const, fingerprint: null, sourceIds: [] } };
-  const entries = [{ repo: "inkwell/folio", pr: primary }, ...(options.cohort ? [{ repo: "inkwell/folio", pr: { ...primary, number: 43, url: URL.replace("/42", "/43"), title: "EPD-42: Improve manuscript review validation" } }] : [])];
+  const entries = [{ repo: "inkwell/folio", pr: primary }, ...(options.cohort ? [{ repo: "inkwell/folio", pr: { ...primary, number: 43, url: URL.replace("/42", "/43"), title: "ABC-42: Improve manuscript review validation" } }] : [])];
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "project-folio", name: "Folio", sources: [{ hostId: "host-inkwell", path: "/p" }] }] as never },
@@ -132,15 +132,15 @@ describe("authored backlog server actions", () => {
   it("projects a repeated remote ticket into one effort without inventing checkouts", async () => {
     const env = await setup({ cohort: true });
     const board = await env.board();
-    const group = board.groups.find((entry) => entry.key === "ticket:EPD-42");
+    const group = board.groups.find((entry) => entry.key === "ticket:ABC-42");
     expect(group).toMatchObject({ level: "effort", clusters: [], repoCount: 1, total: 2 });
     expect(group?.name).toContain("Improve manuscript review");
     expect(board.prInventory.entries.every((entry) => entry.effortKey === group?.key)).toBe(true);
     expect(await env.harness.callRpc("effort_plan", { groupKey: group!.key })).toMatchObject({ ok: true,
-      members: { tickets: ["EPD-42"], prUrls: [URL, URL.replace("/42", "/43")] }, projects: [{ id: "project-folio" }] });
+      members: { tickets: ["ABC-42"], prUrls: [URL, URL.replace("/42", "/43")] }, projects: [{ id: "project-folio" }] });
     env.entries.pop();
     await env.harness.runCli(["refresh"]);
-    expect((await env.board()).groups.some((entry) => entry.key === "ticket:EPD-42")).toBe(false);
+    expect((await env.board()).groups.some((entry) => entry.key === "ticket:ABC-42")).toBe(false);
   });
   it("keeps a PR hold across rescans and blocks merge without changing approval facts", async () => {
     const env = await setup({ local: true });

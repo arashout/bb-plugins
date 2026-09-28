@@ -7,23 +7,23 @@ const row = (path: string, effortKey = "care") => ({
   key: path,
   effortKey,
   effort: "Care support",
-  repo: "marketing-www",
+  repo: "catalog",
   title: "Fail closed for clinician matching",
   section: "respond",
   verb: "Changes requested",
-  unit: { pr: { number: 1098, url: "https://github.com/bitcomplete/marketing-www/pull/1098" } },
+  unit: { pr: { number: 57, url: "https://github.com/inkwell/catalog/pull/57" } },
 }) as Row;
 
 const run = (path: string, at: number, result: string | null): WireRun => ({
   id: at, kind: "agent", action: "address-review", path, ticket: null,
-  prUrl: "https://github.com/bitcomplete/marketing-www/pull/1098", prNumber: 1098,
+  prUrl: "https://github.com/inkwell/catalog/pull/57", prNumber: 57,
   threadId: `thr-${path}`, mode: "subthread", startedAt: at - 100,
   status: "done", finishedAt: at, result, error: null,
 });
 
 type Attempt = Board["dispatch"]["attempts"][number];
 const attempt = (path: string, status: Attempt["status"], startedAt: number): Attempt => ({
-  id: startedAt, path, prUrl: "https://github.com/bitcomplete/marketing-www/pull/1098",
+  id: startedAt, path, prUrl: "https://github.com/inkwell/catalog/pull/57",
   action: "address-review", status, detail: "Review gate cleared on fresh scan",
   threadId: `thr-${path}`, startedAt,
 });
