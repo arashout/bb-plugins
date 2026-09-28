@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
-import type { EffortCommandResult } from "./effort-v2-server.js";
-import { createEffortWorkStore } from "./effort-work-store.js";
+import { syncDecisions, type EffortCommandResult } from "./effort-v2-server.js";
+import { createEffortWorkStore, type WorkRowBody } from "./effort-work-store.js";
 import { cheapSignature, createPrFactsStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
 import { createEffortStore } from "./effort-store.js";
@@ -789,7 +789,7 @@ describe("effort instructions", () => {
       counts: { doing: 0, waiting: 0, decision: 0, ready: 0, issue: 0, done: 0 } });
     const admitted = await env.admit("move 1-3 forward");
     expect(await context("thr_catalog_parent")).toEqual({ effort: { id: env.effort.id, key: env.effort.key, name: "Catalog follow-ups", archived: false },
-      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, rollup: admitted.rollup, counts: { doing: 0, waiting: 3, decision: 0, ready: 0, issue: 0, done: 0 } });
+      snapshotId: env.first.snapshotId, revision: 1, lastRevision: 1, decisions: [], rollup: admitted.rollup, counts: { doing: 0, waiting: 3, decision: 0, ready: 0, issue: 0, done: 0 } });
     expect(await context("thr_someone_else")).toBeNull();
     createEffortWorkStore(env.db).setMode(env.effort.id, "legacy", 1, () => []);
     expect(await context("thr_catalog_parent")).toBeNull();
@@ -827,5 +827,207 @@ describe("effort instructions", () => {
       expect((await env.command(text)).kind, text).toBe("admit");
     for (const path of ["threads.spawn", "threads.send", "threads.update"]) expect(env.harness.inspection.sdk.callsTo(path)).toEqual([]);
     expect(env.harness.inspection.experimental_hostRpcCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))).toEqual([]);
+  });
+
+  describe("decisions", () => {
+    const heads = new Map(INKWELL_ROSTER.inventory.map(({ pr }) => [pr.url, pr.headRefOid!]));
+    const draft = { isDraft: true, reviewDecision: null };
+    /** Rows 1-4 of Catalog follow-ups, each read from GitHub as its test sets it, at the head the board shows unless a test moves it. */
+    async function asking(reads: Record<number, Record<string, unknown>>) {
+      const state = new Map<string, Record<string, unknown>>();
+      const env = await instructed("Catalog follow-ups", { call: (method, input) => method === "inspectPrs" ? { entries: [], closed: [], failed: [], warnings: [] }
+        : method === "advanceInspect" ? facts(input.prUrl, { headOid: heads.get(input.prUrl), ...state.get(input.prUrl) }) : undefined });
+      const target = (n: number) => env.first.rows.find((row) => row.n === n)!.target;
+      const set = (n: number, patch: Record<string, unknown>) => state.set(target(n), patch);
+      for (const [n, patch] of Object.entries(reads)) set(Number(n), patch);
+      const decisions = () => (env.db.prepare(`SELECT ordinal AS n, status, revision, body FROM effort_decisions ORDER BY ordinal`).all() as { n: number; status: string; revision: number; body: string }[])
+        .map(({ body, ...decision }) => ({ ...decision, targets: (JSON.parse(body) as { targets: { n: number }[] }).targets.map((item) => item.n) }));
+      let answers = 0;
+      const answer = async (input: Record<string, unknown>) => await env.harness.callRpc("effort_decision_answer", { requestId: `answer-${++answers}`, ...input }) as EffortCommandResult;
+      /** The open decisions as the roster shows them now, which a command typed against it answers. */
+      const seen = async () => ({ decisions: (await env.roster(env.effort.id)).decisions.map(({ n, revision }) => ({ n, revision })) });
+      return { ...env, target, set, decisions, answer, seen };
+    }
+    const MARK_READY = "Mark these drafts ready for review? Their branches and checks are settled.";
+
+    it("records one decision per real choice: PRs asking the same question share it, and a PR that asks it later joins it", async () => {
+      const env = await asking({ 1: draft, 2: draft, 3: draft, 4: { reviewDecision: null } });
+      await env.admit("move 1-4 forward");
+      const asked = await env.admit("recheck 1, 2, 4");
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 1, targets: [1, 2] }, { n: 2, status: "open", revision: 1, targets: [4] }]);
+      expect(asked.rollup![3]).toBe(`Needs a decision: D1 ${MARK_READY} (1, 2); D2 Request review from whom? No review is requested on these PRs yet. (4)`);
+      await env.admit("recheck 3");
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 2, targets: [1, 2, 3] }, { n: 2, status: "open", revision: 1, targets: [4] }]);
+      expect((await env.roster(env.effort.id)).decisions).toEqual([
+        { id: expect.any(String), n: 1, revision: 2, kind: "lifecycle", subkind: "mark-ready", question: MARK_READY,
+          options: [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }], targets: [1, 2, 3].map((n) => ({ target: env.target(n), n })) },
+        expect.objectContaining({ n: 2, subkind: "request-review", targets: [{ target: env.target(4), n: 4 }] })]);
+      // The parent thread's banner answers them too, so it is served each one's revision.
+      env.store.save({ ...env.store.getRecord(env.effort.id)!, coordinatorThreadId: "thr_catalog_parent", coordinatorState: "ready" });
+      expect(await env.harness.callRpc("effort_parent_context", { threadId: "thr_catalog_parent" })).toMatchObject({ decisions: [{ n: 1, revision: 2 }, { n: 2, revision: 1 }] });
+    });
+
+    it("groups the same worker question from two PRs into one decision and a different question into another", () => {
+      const product = { key: "product:keep shelf order per reader or per store?", kind: "product", subkind: null, question: "Keep shelf order per reader or per store?",
+        options: [{ id: "a", label: "Per reader" }, { id: "b", label: "Per store" }], grants: null, answer: "command" as const };
+      const body = (n: number, decision: WorkRowBody["decision"]): WorkRowBody => ({ n, cause: "product", detail: "", userState: "decision", modifiers: [], nextAction: null,
+        owner: null, wake: null, decision, recovery: [], offers: [], retryEpoch: 0, observedHead: head, observedAt: null, gates: null, tickets: [] });
+      const row = (n: number, decision: WorkRowBody["decision"]) => ({ target: `https://github.com/inkwell/quill/pull/${n}`, phase: "decision-needed" as const, body: body(n, decision) });
+      const writes = syncDecisions("e-shelving", [], 3, [row(2, product), row(5, product), row(7, { ...product, key: "product:shelve by genre?", question: "Shelve by genre?" })]);
+      expect(writes.map((write) => [write.n, write.status, write.body.question, write.body.targets.map((item) => item.n)])).toEqual([
+        [3, "open", product.question, [2, 5]], [4, "open", "Shelve by genre?", [7]]]);
+    });
+
+    it.each([
+      ["D1 1 3", "mark ready 1, 3; keep as a draft 2", [1, 3]],
+      ["D1 all", "mark ready 1-3", [1, 2, 3]],
+      ["D1 none", "keep as a draft 1-3", []],
+    ])("answers a lifecycle decision (%s) with the next revision, granting or declining exactly its rows and re-planning only them", async (text, reading, granted) => {
+      const env = await asking({ 1: draft, 2: draft, 3: draft });
+      await env.admit("move 1-4 forward");
+      await env.admit("recheck 1-4");
+      // The board saw row 4 change since its full read, so re-planning it would ask for a read: the answer must leave it alone.
+      env.db.prepare(`INSERT OR REPLACE INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)`).run(env.target(4), new Date(Date.now() + 60_000).toISOString());
+      const untouched = env.transitions(env.target(4));
+      const answered = await env.admit(text, await env.seen());
+      expect(answered).toMatchObject({ revision: 2, acknowledgment: [`D1: ${reading}`, expect.stringMatching(/^Next \(planned/u)] });
+      const { scope } = env.work.instruction(env.effort.id)!;
+      expect([1, 2, 3].filter((n) => scope.include.find((grant) => grant.n === n)!.effects.includes("mark-ready"))).toEqual(granted);
+      const kept = [1, 2, 3].filter((n) => !granted.includes(n));
+      expect(scope.answers).toEqual([{ decisionId: expect.any(String), n: 1, subkind: "mark-ready", question: MARK_READY, answer: reading,
+        targets: [1, 2, 3].map(env.target), declined: kept.map(env.target), revision: 2 }]);
+      // Granted drafts queue the code action; the kept ones wait on you and aren't asked again in this instruction.
+      expect(env.rows()).toEqual([1, 2, 3, 4].map((n) => [n, ...n === 4 ? ["prepared", "merge-candidate", "ready"]
+        : granted.includes(n) ? ["queued", "code-action", "waiting"] : ["waiting", "draft", "waiting"]]));
+      expect(env.decisions()).toEqual([{ n: 1, status: "answered", revision: 2, targets: [1, 2, 3] }]);
+      // Only the rows that asked are due now, in a new retry epoch; row 4 wasn't written.
+      expect(env.transitions(env.target(4))).toEqual(untouched);
+      for (const n of [1, 2, 3]) expect(env.work.row(env.target(n))).toMatchObject({ dueAt: expect.any(Number), body: { retryEpoch: 1 } });
+      expect([1, 2, 3].every((n) => env.work.row(env.target(n))!.dueAt! <= Date.now())).toBe(true);
+    });
+
+    it("clarifies an answer that would reach beyond what its question asked, and writes nothing", async () => {
+      const env = await asking({ 1: draft, 2: draft, 3: draft, 4: { reviewDecision: null } });
+      await env.admit("move 1-4 forward");
+      await env.admit("recheck 1, 2, 4");
+      const [d1] = (await env.roster(env.effort.id)).decisions;
+      const written = () => [env.work.lastRevision(env.effort.id), env.count("effort_transitions"), env.decisions()];
+      const before = written();
+      expect(await env.answer({ decisionId: d1!.id, expectedRevision: d1!.revision, numbers: [1, 4] }))
+        .toEqual({ kind: "clarify", message: "D1 asks about 1, 2; 4 isn't part of it. Nothing was admitted.", normalized: "D1 1, 4" });
+      // Words can't stand in for the rows a lifecycle answer grants, and a review request needs the reviewers only its command names.
+      const shown = await env.seen();
+      expect(await env.command("D1 mark them all ready", shown)).toMatchObject({ kind: "clarify", message: expect.stringContaining("D1 takes the rows to mark ready, all, or none") });
+      expect(await env.command("D2 4", shown)).toMatchObject({ kind: "clarify", message: "Name the reviewers with: request review 4 from @login. D2 none requests no review. Nothing was admitted." });
+      expect(written()).toEqual(before);
+      // A PR joined D1 after the roster showed it, so an answer for all of D1 would reach a PR the user didn't see.
+      await env.admit("recheck 3");
+      const joined = written();
+      expect(await env.answer({ decisionId: d1!.id, expectedRevision: d1!.revision, optionId: "ready" }))
+        .toEqual({ kind: "clarify", normalized: null, message: "D1 changed since you read it; it now asks about 1-3. Read it again, then answer." });
+      // Typed as a command, all of D1, a range, or its granting option is held to the revision shown just the same.
+      for (const text of ["D1 all", "D1 1-3", "D1 ready"]) expect(await env.command(text, shown))
+        .toMatchObject({ kind: "clarify", message: "D1 changed since you read it; it now asks about 1-3. Read it again, then answer. Nothing was admitted." });
+      // A surface that didn't show D1 can't answer it either.
+      expect(await env.command("D1 all")).toMatchObject({ kind: "clarify", message: "D1 isn't on the roster you answered from; it asks about 1-3. Read it, then answer. Nothing was admitted." });
+      expect(written()).toEqual(joined);
+    });
+
+    it("grants exactly what an authority question named on allow, and takes the PR out of the instruction on leave it", async () => {
+      const env = await asking({ 1: { checks: "failed" }, 2: { checks: "failed" } });
+      await env.admit("move 1, 2 forward");
+      await env.admit("no push for 1, 2");
+      await env.admit("recheck 1, 2");
+      expect((await env.roster(env.effort.id)).decisions.map((decision) => [decision.n, decision.kind, decision.question, decision.targets.map((item) => item.n)])).toEqual([
+        ...[1, 2].map((n) => [n, "authority", `${env.first.rows[n - 1]!.repo} #${env.first.rows[n - 1]!.number} needs push, which this instruction doesn't grant. Allow it?`, [n]])]);
+      const effects = (n: number) => env.work.instruction(env.effort.id)!.scope.include.find((grant) => grant.n === n)?.effects;
+      const narrowed = effects(1);
+      const allowed = await env.admit("D1 allow", await env.seen());
+      expect(allowed.acknowledgment[0]).toBe("D1: Allow");
+      expect(effects(1)).toEqual([...narrowed!.slice(0, 2), "push", ...narrowed!.slice(2)]);
+      expect(env.work.row(env.target(1))).toMatchObject({ phase: "queued", body: { nextAction: ["fix_failing_checks"] } });
+      const left = await env.admit("D2 leave", await env.seen());
+      expect(left.acknowledgment[0]).toBe("D2: leave 2 alone this instruction");
+      expect(env.work.instruction(env.effort.id)!.scope).toMatchObject({ exclude: [{ target: env.target(2), n: 2, reason: "D2: leave it" }] });
+      expect(env.work.row(env.target(2))).toMatchObject({ phase: "finished", body: { cause: "cancelled" } });
+      expect(env.decisions().map((decision) => decision.status)).toEqual(["answered", "answered"]);
+    });
+
+    it("re-plans the PR a whole-effort criterion moves to when leave it takes the PR that had it out", async () => {
+      const env = await asking({ 1: { checks: "failed" } });
+      await env.admit("move 1-3 forward");
+      await env.admit("no push for 1");
+      await env.admit("recheck 1-3");
+      await env.admit("done when: the catalog loads");
+      // The criterion lands on PR 1, the lowest-numbered, which asks for push to fix its checks first.
+      expect(env.rows()).toEqual([[1, "decision-needed", "authority", "decision"], [2, "prepared", "merge-candidate", "ready"], [3, "prepared", "merge-candidate", "ready"]]);
+      const left = await env.admit("D1 leave", await env.seen());
+      // With PR 1 out, PR 2 has the criterion to prove: its row leaves Ready, as the rollup says.
+      expect(left.rollup![2]).toMatch(/^Still needed: c1: validate_criteria \(2\)/u);
+      expect(env.rows()).toEqual([[1, "finished", "cancelled", "done"], [2, "queued", "launching", "waiting"], [3, "prepared", "merge-candidate", "ready"]]);
+    });
+
+    it("keeps an answer's grants when the same command also changes the instruction", async () => {
+      const env = await asking({ 1: draft, 2: draft });
+      await env.admit("move 1, 2 forward");
+      await env.admit("recheck 1, 2");
+      expect(await env.admit("D1 1, move 3 forward", await env.seen())).toMatchObject({ revision: 2, acknowledgment: expect.arrayContaining(["Added: 3 (move forward)", "D1: mark ready 1; keep as a draft 2"]) });
+      const { scope } = env.work.instruction(env.effort.id)!;
+      expect(scope.include.map((grant) => [grant.n, grant.effects.includes("mark-ready")])).toEqual([[1, true], [2, false], [3, false]]);
+      expect(scope.answers.map((answer) => [answer.n, answer.declined])).toEqual([[1, [env.target(2)]]]);
+    });
+
+    it("withdraws a decision once its PR merges or a new head stops asking it, holds it through a re-read at the same head, and never reuses its number", async () => {
+      const env = await asking({ 1: draft, 2: draft });
+      await env.admit("move 1-3 forward");
+      await env.admit("recheck 1, 2");
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 1, targets: [1, 2] }]);
+      // The board saw PR 1 change after its full read, at the same head: until it is read again, its row keeps asking D1.
+      env.db.prepare(`INSERT OR REPLACE INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)`).run(env.target(1), new Date(Date.now() + 60_000).toISOString());
+      await env.admit("move 4 forward");
+      expect(env.work.row(env.target(1))).toMatchObject({ phase: "decision-needed", body: { gates: null, decision: { key: "lifecycle:mark-ready" } } });
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 1, targets: [1, 2] }]);
+      // The board then lists PR 1 on a new head that nothing has read in full: the new head doesn't inherit the old head's question.
+      const url = env.target(1).toLowerCase();
+      const { entry } = env.db.prepare(`SELECT entry FROM authored_prs WHERE url = ?`).get(url) as { entry: string };
+      env.db.prepare(`UPDATE authored_prs SET entry = ? WHERE url = ?`).run(JSON.stringify({ ...JSON.parse(entry), pr: { ...JSON.parse(entry).pr, headRefOid: "d".repeat(40) } }), url);
+      env.db.prepare(`INSERT OR REPLACE INTO pr_observations (url, checked_at, failed_at) VALUES (?, ?, NULL)`).run(env.target(1), new Date(Date.now() + 120_000).toISOString());
+      await env.admit("decisions only");
+      expect(env.work.row(env.target(1))).toMatchObject({ phase: "verifying", body: { nextAction: "observe", observedHead: "d".repeat(40), decision: null } });
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 2, targets: [2] }]);
+      // Read in full, that head's checks are running, so it doesn't ask either.
+      env.set(1, { ...draft, headOid: "d".repeat(40), checks: "pending" });
+      await env.admit("recheck 1");
+      expect(env.work.row(env.target(1))).toMatchObject({ phase: "waiting", body: { cause: "ci" } });
+      expect(env.decisions()).toEqual([{ n: 1, status: "open", revision: 2, targets: [2] }]);
+      // Its last PR merging withdraws D1.
+      env.set(2, { ...draft, state: "MERGED", headOid: "" });
+      await env.admit("recheck 2");
+      expect(env.decisions()).toEqual([{ n: 1, status: "withdrawn", revision: 3, targets: [] }]);
+      expect((await env.roster(env.effort.id)).decisions).toEqual([]);
+      expect(await env.command("D1 all")).toMatchObject({ kind: "clarify", message: "D1 isn't an open decision." });
+      // Asked again on the new head, it is a new decision with a new number.
+      env.set(1, { ...draft, headOid: "d".repeat(40) });
+      await env.admit("recheck 1");
+      expect(env.decisions()).toEqual([{ n: 1, status: "withdrawn", revision: 3, targets: [] }, { n: 2, status: "open", revision: 1, targets: [1] }]);
+    });
+
+    it("answers a repeated request once, and changes nothing for an answer to a decision already answered", async () => {
+      const env = await asking({ 1: draft, 2: draft });
+      await env.admit("move 1, 2 forward");
+      await env.admit("recheck 1, 2");
+      const [d1] = (await env.roster(env.effort.id)).decisions;
+      const request = { decisionId: d1!.id, expectedRevision: d1!.revision, numbers: [1], requestId: "answer-once" };
+      const first = await env.harness.callRpc("effort_decision_answer", request);
+      expect(first).toMatchObject({ kind: "admit", revision: 2, acknowledgment: expect.arrayContaining(["D1: mark ready 1; keep as a draft 2"]) });
+      const written = () => [env.count("effort_instructions"), env.count("effort_transitions"), env.decisions()];
+      const after = written();
+      expect(await env.harness.callRpc("effort_decision_answer", request)).toEqual(first);
+      expect(await env.answer({ decisionId: d1!.id, expectedRevision: d1!.revision, numbers: [1] }))
+        .toEqual({ kind: "clarify", normalized: null, message: "D1 was already answered: mark ready 1; keep as a draft 2. Nothing changed." });
+      expect(await env.command("D1 1")).toMatchObject({ kind: "clarify", message: "D1 isn't an open decision." });
+      expect(written()).toEqual(after);
+      await expect(env.answer({ decisionId: d1!.id, expectedRevision: 1, numbers: [1], optionId: "ready" })).rejects.toThrow("exactly one");
+    });
   });
 });

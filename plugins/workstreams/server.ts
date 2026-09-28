@@ -28,7 +28,7 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortV2, effortV2Contract, type ParentCandidate } from "./effort-v2-server.js";
-import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
+import { createEffortWorkStore, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type V2Target } from "./effort-work-store.js";
 import { rosterTargets } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
@@ -731,6 +731,7 @@ export default async function plugin(bb: BbPluginApi) {
     PR_FACTS_MIGRATION,
     ...EFFORT_EXECUTION_MIGRATIONS,
     ...EFFORT_INSTRUCTION_MIGRATIONS,
+    ...EFFORT_DECISION_MIGRATIONS,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);

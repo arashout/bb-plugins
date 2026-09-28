@@ -321,6 +321,10 @@ describe("command grammar golden table", () => {
     expect(admit("D2 keep 4 as a draft until the copy lands", context({ decisions })).answers).toEqual([{ decision: 2, text: "keep 4 as a draft until the copy lands" }]);
     expect(clarify("D2 3", context({ decisions })).message).toBe("D2 asks about 2, 4, 5, 6; 3 isn't part of it.");
     expect(clarify("D3 A", context({ decisions })).message).toBe("D3 isn't an open decision.");
+    // `none` answers with no rows, unless the decision offers an option by that name.
+    expect(admit("D2 none", context({ decisions })).answers).toEqual([{ decision: 2, numbers: [] }]);
+    expect(admit("D2 none", context({ decisions: [{ n: 2, options: ["name", "none"], targets: [2] }] })).answers).toEqual([{ decision: 2, option: "none" }]);
+    expect(clarify("D2 none 4", context({ decisions })).message).toBe("D2 can't be none and 4 at once.");
   });
 
   it("move forward with no rows clarifies with a suggested command and starts nothing", () => {

@@ -8,8 +8,11 @@
 // time, beside one current row per PR and an append-only journal of every row
 // change and admitted command. A command's writes land in one transaction at
 // the revisions it read, or not at all.
+//
+// A decision is recorded once per real choice: rows asking the same question
+// share one open decision, numbered D1, D2, ... for good within the effort.
 import { z } from "zod";
-import { instructionScopeSchema, type InstructionScope } from "./effort-command.js";
+import { EFFECTS, instructionScopeSchema, WORK_RECIPES, type InstructionScope } from "./effort-command.js";
 import type { Phase } from "./effort-phase.js";
 import { RECIPE_IDS } from "./effort-recipes.js";
 import { GATE_IDS } from "./pr-gates.js";
@@ -32,6 +35,12 @@ export const EFFORT_INSTRUCTION_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS effort_transitions (seq INTEGER PRIMARY KEY AUTOINCREMENT, effort_id TEXT NOT NULL, target TEXT, row_revision INTEGER, at INTEGER NOT NULL, from_phase TEXT, to_phase TEXT, cause TEXT NOT NULL, detail TEXT NOT NULL, attempt_id TEXT, source TEXT NOT NULL, observed_at INTEGER, UNIQUE (target, row_revision))`,
 ];
 
+/** Append-only: server.ts adds these after the instruction migrations (ids 47-48). */
+export const EFFORT_DECISION_MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS effort_decisions (id TEXT PRIMARY KEY, effort_id TEXT NOT NULL, ordinal INTEGER NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('open','answered','withdrawn')), body TEXT NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER, UNIQUE (effort_id, ordinal))`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS effort_decisions_open ON effort_decisions (effort_id, dedupe_key) WHERE status = 'open'`,
+];
+
 const sourceSchema = z.object({ kind: z.enum(["panel", "banner", "thread", "cli"]), threadId: z.string().nullable(), eventId: z.string().nullable() }).strict();
 export type CommandSource = z.infer<typeof sourceSchema>;
 /** One revision of the standing instruction: its scope, and the command and surface that produced it. */
@@ -44,6 +53,7 @@ export const USER_STATES = ["doing", "waiting", "decision", "ready", "issue", "d
 export type UserState = (typeof USER_STATES)[number];
 const PHASES = ["queued", "executing", "verifying", "waiting", "paused", "decision-needed", "repair-needed", "prepared", "finished"] as const satisfies readonly Phase[];
 const optionSchema = z.object({ id: z.string(), label: z.string() }).strict();
+const grantsSchema = z.object({ work: z.array(z.enum(WORK_RECIPES)), effects: z.array(z.enum(EFFECTS)) }).strict().nullable();
 /** One PR's current row: decide()'s step, the facts it read, and the retry epoch its attempts count in. */
 export const workRowBodySchema = z.object({
   n: z.number().int().positive().nullable(),
@@ -54,7 +64,7 @@ export const workRowBodySchema = z.object({
   owner: z.object({ kind: z.enum(["v2-attempt", "legacy-job", "thread", "user", "github", "reviewer", "ci", "pr"]), ref: z.string().nullable() }).strict().nullable(),
   wake: z.object({ event: z.string(), ref: z.string().nullable(), dueAt: z.number() }).strict().nullable(),
   decision: z.object({ key: z.string(), kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(), question: z.string(),
-    options: z.array(optionSchema), answer: z.enum(["command", "open-thread"]) }).strict().nullable(),
+    options: z.array(optionSchema), grants: grantsSchema, answer: z.enum(["command", "open-thread"]) }).strict().nullable(),
   recovery: z.array(z.string()), offers: z.array(z.literal("stop")),
   retryEpoch: z.number().int().nonnegative(),
   observedHead: z.string().nullable(), observedAt: z.number().nullable(),
@@ -65,6 +75,21 @@ export type WorkRowBody = z.infer<typeof workRowBodySchema>;
 export type WorkRow = { target: string; effortId: string; instructionId: string; phase: Phase; revision: number; dueAt: number | null; body: WorkRowBody };
 /** A row write at the revision it was decided from; 0 for a PR with no row yet. */
 export type RowWrite = { target: string; expectedRevision: number; phase: Phase; body: WorkRowBody; dueAt: number | null };
+
+/**
+ * One question and the PRs asking it, each at the head it asked on. `answer` is the command's reading of the answer;
+ * the instruction revision it wrote holds what the answer granted and declined.
+ */
+const decisionBodySchema = z.object({
+  kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(), question: z.string(), options: z.array(optionSchema), grants: grantsSchema,
+  targets: z.array(z.object({ target: z.string(), n: z.number().int().positive().nullable(), head: z.string().nullable() }).strict()),
+  answer: z.string().nullable(), answeredVia: z.enum(["panel", "banner", "thread", "cli"]).nullable(),
+}).strict();
+export type DecisionBody = z.infer<typeof decisionBodySchema>;
+export type DecisionStatus = "open" | "answered" | "withdrawn";
+export type Decision = { id: string; effortId: string; n: number; key: string; status: DecisionStatus; revision: number; body: DecisionBody };
+/** A decision to write at the revision it was read at; 0 for a new one, numbered by its caller. */
+export type DecisionWrite = Omit<Decision, "effortId" | "revision"> & { expectedRevision: number };
 
 export type ExecutionMode = "legacy" | "v2";
 export type Execution = { mode: ExecutionMode; revision: number };
@@ -82,6 +107,9 @@ const ROW = `target, effort_id AS effortId, instruction_id AS instructionId, pha
 type StoredRow = Omit<WorkRow, "body"> & { body: string };
 const readRow = ({ body, ...row }: StoredRow): WorkRow => ({ ...row, phase: z.enum(PHASES).parse(row.phase), body: workRowBodySchema.parse(JSON.parse(body)) });
 const instructionId = (effortId: string, revision: number) => `I-${effortId}-r${revision}`;
+export const decisionId = (effortId: string, n: number) => `D-${effortId}-${n}`;
+const DECISION = `id, effort_id AS effortId, ordinal AS n, dedupe_key AS key, status, revision, body`;
+const readDecision = ({ body, ...decision }: Omit<Decision, "body"> & { body: string }): Decision => ({ ...decision, body: decisionBodySchema.parse(JSON.parse(body)) });
 
 export function createEffortWorkStore(db: WorkDb, now = Date.now) {
   function lastRevision(effortId: string): number {
@@ -140,6 +168,19 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
     instruction: activeInstruction,
     /** The effort's newest instruction revision, active or not, or 0. */
     lastRevision,
+    /** The effort's open decisions, by number. */
+    decisions(effortId: string): Decision[] {
+      return (db.prepare(`SELECT ${DECISION} FROM effort_decisions WHERE effort_id = ? AND status = 'open' ORDER BY ordinal`).all(effortId) as
+        (Omit<Decision, "body"> & { body: string })[]).map(readDecision);
+    },
+    decision(id: string): Decision | null {
+      const stored = db.prepare(`SELECT ${DECISION} FROM effort_decisions WHERE id = ?`).get(id) as (Omit<Decision, "body"> & { body: string }) | undefined;
+      return stored ? readDecision(stored) : null;
+    },
+    /** The number the effort's next decision takes. Numbers are never reused, so an answer typed from an old report can't reach a newer question. */
+    nextDecision(effortId: string): number {
+      return ((db.prepare(`SELECT MAX(ordinal) AS n FROM effort_decisions WHERE effort_id = ?`).get(effortId) as { n: number | null }).n ?? 0) + 1;
+    },
     rows(effortId: string): WorkRow[] {
       return (db.prepare(`SELECT ${ROW} FROM effort_pr_work WHERE effort_id = ? ORDER BY target`).all(effortId) as StoredRow[]).map(readRow);
     },
@@ -156,6 +197,7 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
      */
     commit(input: { effortId: string; baseRevision: number; source: string; rows: readonly RowWrite[];
       instruction: { scope: InstructionScope; text: string; source: CommandSource; snapshotId: string | null; requestId: string } | "cancel" | null;
+      decisions?: readonly DecisionWrite[];
       journal: { requestId: string; text: string; result: unknown } | null; also?: () => void }): void {
       db.transaction(() => {
         const at = now();
@@ -189,6 +231,19 @@ export function createEffortWorkStore(db: WorkDb, now = Date.now) {
             .run(target, input.effortId, instructionId(input.effortId, newest), write.phase, revision, write.dueAt, JSON.stringify(body), at);
           db.prepare(`INSERT INTO effort_transitions (effort_id, target, row_revision, at, from_phase, to_phase, cause, detail, source, observed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.effortId, target, revision, at, stored?.phase ?? null, write.phase, body.cause, body.detail, input.source, body.observedAt);
+        }
+        for (const write of input.decisions ?? []) {
+          const body = JSON.stringify(decisionBodySchema.parse(write.body));
+          const resolved = write.status === "open" ? null : at;
+          if (write.expectedRevision === 0) db.prepare(`INSERT INTO effort_decisions (id, effort_id, ordinal, dedupe_key, status, body, revision, created_at, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`).run(write.id, input.effortId, write.n, write.key, write.status, body, at, resolved);
+          else {
+            // Only an open decision changes, and only at the revision its writer read.
+            db.prepare(`UPDATE effort_decisions SET status = ?, body = ?, revision = revision + 1, resolved_at = ? WHERE id = ? AND effort_id = ? AND revision = ? AND status = 'open'`)
+              .run(write.status, body, resolved, write.id, input.effortId, write.expectedRevision);
+            if ((db.prepare(`SELECT changes() AS count`).get() as { count: number }).count !== 1)
+              throw new Error(`D${write.n} changed while this command was read. Reload the roster and send it again.`);
+          }
         }
         if (input.journal) db.prepare(`INSERT INTO effort_transitions (effort_id, at, cause, detail, source) VALUES (?, ?, 'command', ?, ?)`)
           .run(input.effortId, at, JSON.stringify(input.journal), input.source);

@@ -122,7 +122,9 @@ export function pendingCriteria(scope: InstructionScope, rows: readonly Contract
 }
 
 /** The contract for the included PRs (`rows`), each with its current step. Pure: no reads, no model, no SDK. */
-export function evidenceContract(input: { scope: InstructionScope; goal: string; rows: readonly (ContractRow & { step: RowStep })[]; evidence: readonly CriterionEvidence[] }): EvidenceContract {
+export function evidenceContract(input: { scope: InstructionScope; goal: string; rows: readonly (ContractRow & { step: RowStep })[]; evidence: readonly CriterionEvidence[];
+  /** The number of the open decision a question belongs to, so the rollup names it the way an answer does. */
+  ordinal?(key: string): number | null }): EvidenceContract {
   const { scope, rows, evidence } = input;
   const finished = (row: ContractRow) => row.state === "MERGED" || row.state === "CLOSED";
   const fromRows = (id: string, source: Criterion["source"], label: string, short: readonly (ContractRow & { step: RowStep })[]): Criterion => ({
@@ -177,7 +179,8 @@ export function evidenceContract(input: { scope: InstructionScope; goal: string;
   const ticketPrs = [...new Map(shortTickets.flatMap((item) => item.affected).map((target) => [target.target, target])).values()].sort(byNumber);
   const decisions = new Map<string, { question: string; rows: CommandTarget[] }>();
   for (const row of rows) if (row.step.phase === "decision-needed" && row.step.decision) {
-    const decision = decisions.get(row.step.decision.key) ?? { question: row.step.decision.question, rows: [] };
+    const n = input.ordinal?.(row.step.decision.key) ?? null;
+    const decision = decisions.get(row.step.decision.key) ?? { question: `${n ? `D${n} ` : ""}${row.step.decision.question}`, rows: [] };
     decisions.set(row.step.decision.key, { ...decision, rows: [...decision.rows, row] });
   }
   return {

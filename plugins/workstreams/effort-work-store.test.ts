@@ -1,7 +1,8 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { InstructionScope } from "./effort-command.js";
-import { createEffortWorkStore, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type RowWrite, type V2Target, type WorkRowBody } from "./effort-work-store.js";
+import { createEffortWorkStore, decisionId, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, type DecisionBody, type DecisionWrite,
+  type RowWrite, type V2Target, type WorkRowBody } from "./effort-work-store.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => { databases.splice(0).forEach((db) => db.close()); });
@@ -11,7 +12,7 @@ const [folio, quill, atlas] = [pr("folio", 12), pr("quill", 14), pr("atlas", 16)
 function open() {
   const db = new Database(":memory:");
   databases.push(db);
-  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS].forEach((sql) => db.exec(sql));
+  [...EFFORT_EXECUTION_MIGRATIONS, ...EFFORT_INSTRUCTION_MIGRATIONS, ...EFFORT_DECISION_MIGRATIONS].forEach((sql) => db.exec(sql));
   let clock = 1_000;
   return { db, work: createEffortWorkStore(db, () => ++clock) };
 }
@@ -72,7 +73,7 @@ describe("effort execution mode", () => {
 });
 
 describe("effort instructions and rows", () => {
-  const scope = (revision: number, targets: string[]): InstructionScope => ({ revision, stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [],
+  const scope = (revision: number, targets: string[]): InstructionScope => ({ revision, stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [],
     exclude: [], removed: [], include: targets.map((target, index) => ({ target, n: index + 1, outsideMembership: false, work: ["integrate_base"],
       effects: ["code-fix", "test", "push"], reviewers: [], addedInRevision: revision })) });
   const source = { kind: "panel" as const, threadId: null, eventId: null };
@@ -158,5 +159,35 @@ describe("effort instructions and rows", () => {
     work.commit({ effortId: "gifts", baseRevision: 1, source: "command", instruction: null,
       rows: [write(folio, 2, "verifying", "observe"), write(quill, 1, "verifying", "observe")], journal: null });
     expect([folio, quill].map((target) => work.row(target)?.effortId)).toEqual(["gifts", "gifts"]);
+  });
+});
+
+describe("effort decisions", () => {
+  const question: DecisionBody = { kind: "lifecycle", subkind: "mark-ready", question: "Mark these drafts ready for review?", grants: { work: [], effects: ["mark-ready"] },
+    options: [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }], targets: [{ target: folio, n: 1, head: "a".repeat(40) }], answer: null, answeredVia: null };
+  const decide = (n: number, patch: Partial<DecisionWrite> = {}): DecisionWrite =>
+    ({ id: decisionId("returns", n), n, key: "lifecycle:mark-ready", status: "open", body: question, expectedRevision: 0, ...patch });
+  const commit = (work: ReturnType<typeof open>["work"], decisions: DecisionWrite[]) =>
+    work.commit({ effortId: "returns", baseRevision: 0, source: "command", instruction: null, rows: [], decisions, journal: null });
+
+  it("keeps one open decision per question, changes one only at the revision it was read at, and never reuses a number", () => {
+    const { db, work } = open();
+    commit(work, [decide(1)]);
+    expect(work.decisions("returns")).toEqual([{ id: decisionId("returns", 1), effortId: "returns", n: 1, key: "lifecycle:mark-ready", status: "open", revision: 1, body: question }]);
+    // The same question can't open twice: rows that ask it join D1 instead.
+    expect(() => commit(work, [decide(2)])).toThrow(/UNIQUE/u);
+    const joined = { ...question, targets: [...question.targets, { target: quill, n: 2, head: "b".repeat(40) }] };
+    commit(work, [decide(1, { body: joined, expectedRevision: 1 })]);
+    // A writer that read D1 before that change changes nothing.
+    expect(() => commit(work, [decide(1, { status: "withdrawn", expectedRevision: 1 })])).toThrow("D1 changed while this command was read");
+    commit(work, [decide(1, { status: "answered", body: { ...joined, answer: "mark ready 1, 2", answeredVia: "panel" }, expectedRevision: 2 })]);
+    expect(work.decision(decisionId("returns", 1))).toMatchObject({ status: "answered", revision: 3, body: { answer: "mark ready 1, 2" } });
+    // An answered decision is closed for good; the same question asked again is a new number.
+    expect(() => commit(work, [decide(1, { status: "withdrawn", expectedRevision: 3 })])).toThrow("D1 changed");
+    expect([work.decisions("returns"), work.nextDecision("returns"), work.nextDecision("gifts")]).toEqual([[], 2, 1]);
+    commit(work, [decide(2)]);
+    expect(work.decisions("returns").map((decision) => decision.n)).toEqual([2]);
+    expect(db.prepare(`SELECT ordinal, status, resolved_at IS NOT NULL AS resolved FROM effort_decisions ORDER BY ordinal`).all())
+      .toEqual([{ ordinal: 1, status: "answered", resolved: 1 }, { ordinal: 2, status: "open", resolved: 0 }]);
   });
 });

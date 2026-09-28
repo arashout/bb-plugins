@@ -9,7 +9,7 @@
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
-import type { Effect, InstructionScope } from "./effort-command.js";
+import type { Effect, InstructionScope, WorkRecipe } from "./effort-command.js";
 import { authorityNeed, recipe, WORKER_RESULTS, WORKER_ROUTES, type CodeRecipe, type CodeRecipeId, type RecipeId, type WorkerRecipe, type WorkerRecipeId } from "./effort-recipes.js";
 import { prBlocker, prWriter, selectResource, type Resource, type ResourceAttempt, type ResourceInput } from "./effort-resources.js";
 import type { ExecutionMode } from "./effort-work-store.js";
@@ -45,7 +45,8 @@ export type Attempt = ResourceAttempt & {
 export type CodeAction = { recipe: CodeRecipeId; headOid: string } & ({ status: "pending" | "done" | "write-refused" }
   /** When it may run again: GitHub's reset time plus 30 s, or the secondary-limit backoff. */
   | { status: "rate-limited"; retryAt: number });
-export type RowDecision = { key: string; kind: string; subkind: Lifecycle | null; question: string; options: Option[] };
+/** `grants` is exactly what answering allow (or, for a lifecycle question, naming a PR) adds to that PR's grant; null when an answer grants nothing. */
+export type RowDecision = { key: string; kind: string; subkind: Lifecycle | null; question: string; options: Option[]; grants: { work: WorkRecipe[]; effects: Effect[] } | null };
 
 export type DecideInput = {
   now: number;
@@ -164,8 +165,8 @@ export function decide(input: DecideInput): Next {
   };
   const observe = (detail: string) => next("verifying", "observe", detail, { nextAction: "observe" });
   const issue = (cause: string, detail: string) => next("repair-needed", cause, detail, { owner: user, recovery: ["retry N"] });
-  const ask = (cause: string, question: string, options: Option[], key: string, subkind: Lifecycle | null = null, answer: "command" | "open-thread" = "command") =>
-    next("decision-needed", cause, question, { owner: user, decision: { key, kind: cause, subkind, question, options, answer } });
+  const ask = (cause: string, question: string, options: Option[], key: string, subkind: Lifecycle | null = null, answer: "command" | "open-thread" = "command",
+    grants: RowDecision["grants"] = null) => next("decision-needed", cause, question, { owner: user, decision: { key, kind: cause, subkind, question, options, grants, answer } });
   const waiting = (cause: string, detail: string, owner: Next["owner"], more: Partial<Next> = {}) => {
     const step = next("waiting", cause, detail, { owner, ...more });
     return { ...step, wake: step.wake && { ...step.wake, ref: owner?.ref ?? null } };
@@ -177,8 +178,12 @@ export function decide(input: DecideInput): Next {
     : resource.kind === "decision" ? { ...ask("authority", `${resource.reason}. Allow v2 to push to ${name} anyway?`, [{ id: "allow", label: "Allow" }, { id: "leave", label: "Leave it" }], `authority:${target}:checkout`), resource }
     : waiting(resource.cause, resource.reason, resource.cause === "legacy-drain" ? { kind: "legacy-job", ref: resource.ref }
       : resource.cause === "draft" ? user : { kind: "thread", ref: resource.ref }, { resource });
-  const authority = (missing: string[]) => ask("authority", `${name} needs ${missing.join(", ")}, which this instruction doesn't grant. Allow it?`,
-    [{ id: "allow", label: "Allow" }, { id: "leave", label: "Leave it" }], `authority:${target}:${missing.join(",")}`);
+  /** The question names everything allow grants, so an answer never widens the instruction beyond what it read. */
+  const authority = (work: WorkRecipe[], effects: Effect[]) => {
+    const missing = [...work.map((id) => id.replaceAll("_", " ")), ...effects];
+    return ask("authority", `${name} needs ${missing.join(", ")}, which this instruction doesn't grant. Allow it?`,
+      [{ id: "allow", label: "Allow" }, { id: "leave", label: "Leave it" }], `authority:${target}:${missing.join(",")}`, null, "command", { work, effects });
+  };
 
   // Our claim: attach to it, answer for it, or recover it. Never a second launch.
   const claimed = (attempt: Attempt): Next => {
@@ -236,10 +241,11 @@ export function decide(input: DecideInput): Next {
     if (previous?.status === "done") return null;
     const need = authorityNeed(id, effects(id));
     if (need?.kind === "lifecycle") return input.declined.includes(need.subkind) ? null : need.subkind === "mark-ready"
-      ? ask("lifecycle", "Mark these drafts ready for review? Their branches and checks are settled.", [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }], "lifecycle:mark-ready", "mark-ready")
+      ? ask("lifecycle", "Mark these drafts ready for review? Their branches and checks are settled.", [{ id: "ready", label: "Mark ready" }, { id: "keep", label: "Keep as draft" }],
+        "lifecycle:mark-ready", "mark-ready", "command", { work: [], effects: ["mark-ready"] })
       : ask("lifecycle", "Request review from whom? No review is requested on these PRs yet.", [{ id: "name", label: "Name reviewers: request review N from @login" },
         { id: "none", label: "Don't request review" }], "lifecycle:request-review", "request-review");
-    if (need) return authority(need.missing);
+    if (need) return authority([], need.missing);
     if (!gates.fresh) return observe(`${CODE_LABEL[id]} needs a read under two minutes old`);
     const busy = prWriter(input.resources);
     return busy ? fromResource(busy) : next("queued", "code-action", CODE_LABEL[id], { nextAction: [id] });
@@ -312,8 +318,8 @@ export function decide(input: DecideInput): Next {
   }
   if (failing.length) {
     const allowed = failing.filter((id) => (grant.work as string[]).includes(id) && !authorityNeed(id, grant.effects));
-    if (allowed.length === 0) return authority([...new Set(failing.flatMap((id) => (grant.work as string[]).includes(id)
-      ? (authorityNeed(id, grant.effects) as { missing: Effect[] }).missing : [id.replaceAll("_", " ")]))]);
+    if (allowed.length === 0) return authority(failing.filter((id): id is WorkRecipe => !(grant.work as string[]).includes(id)),
+      [...new Set(failing.flatMap((id) => (authorityNeed(id, grant.effects) as { missing: Effect[] } | null)?.missing ?? []))]);
     if (!gates.fresh) return observe("A launch needs a read under two minutes old");
     const fingerprint = facts.approvalFeedback.status === "present" ? facts.approvalFeedback.fingerprint : null;
     const same = (recipes: readonly string[]) => [...recipes].sort().join() === [...allowed].sort().join();

@@ -21,7 +21,7 @@ const CI = step("waiting", "ci", { owner: { kind: "ci", ref: null }, wake: wake(
 const MERGED = step("finished", "merged", { wake: null });
 const FIX_CHECKS = step("queued", "launching", { nextAction: ["fix_failing_checks"] });
 const AUTHORITY = step("decision-needed", "authority", { owner: { kind: "user", ref: null }, wake: wake("an answer, or the PR merging"),
-  decision: { key: "authority:folio-313:push", kind: "authority", subkind: null, question: "Allow v2 to push to inkwell/folio #313?", options: [{ id: "allow", label: "Allow" }], answer: "command" } });
+  decision: { key: "authority:folio-313:push", kind: "authority", subkind: null, question: "Allow v2 to push to inkwell/folio #313?", options: [{ id: "allow", label: "Allow" }], grants: { work: [], effects: ["push"] }, answer: "command" } });
 
 type Row = ContractRow & { step: RowStep };
 const row = (n: number, overrides: Partial<Row> = {}): Row =>
@@ -31,7 +31,7 @@ type UserCriterion = InstructionScope["criteria"][number];
 const criterion = (id: string, text: string, binding: number[] | "effort"): UserCriterion =>
   ({ id, text, binding: binding === "effort" ? { kind: "effort" } : { kind: "targets", n: binding }, addedInRevision: 1, droppedInRevision: null });
 const scope = (rows: readonly Row[], criteria: UserCriterion[] = [], outcome: string | null = null): InstructionScope => ({
-  revision: 1, stopAt: "prepared", reportMode: "changes", outcome, criteria, exclude: [], removed: [],
+  revision: 1, stopAt: "prepared", reportMode: "changes", outcome, criteria, exclude: [], removed: [], answers: [],
   include: rows.map((item) => ({ target: item.target, n: item.n, outsideMembership: false, work: [...VERBS["move forward"].work], effects: [...DEFAULT_EFFECTS], reviewers: [], addedInRevision: 1 })),
 });
 const proof = (id: string, n: number, headOid = head(n), more: Partial<CriterionEvidence> = {}): CriterionEvidence =>

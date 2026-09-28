@@ -44,6 +44,12 @@ export const instructionScopeSchema = z.object({
   criteria: z.array(z.object({ id: z.string(), text: z.string().max(4_000),
     binding: z.union([z.object({ kind: z.literal("targets"), n: z.array(z.number().int().positive()) }).strict(), z.object({ kind: z.literal("effort") }).strict()]),
     addedInRevision: z.number().int().positive(), droppedInRevision: z.number().int().positive().nullable() }).strict()),
+  /**
+   * Each answered decision, as the answer read. A lifecycle answer lists the PRs it declined, which aren't asked again
+   * in this instruction; its grants are already in `include`. Workers get the answers for their PRs in the work order.
+   */
+  answers: z.array(z.object({ decisionId: z.string(), n: z.number().int().positive(), subkind: z.enum(["mark-ready", "request-review"]).nullable(),
+    question: z.string(), answer: z.string().max(4_000), targets: z.array(z.string()), declined: z.array(z.string()), revision: z.number().int().positive() }).strict()),
 }).strict();
 export type InstructionScope = z.infer<typeof instructionScopeSchema>;
 type Grant = InstructionScope["include"][number];
@@ -221,6 +227,8 @@ function parse(source: string, decisions: readonly OpenDecision[]) {
         const options = decisions.find((decision) => decision.n === started.decision)?.options ?? [];
         const next = tokens[i + 1];
         if (next?.kind === "word" && options.some((option) => option.toLowerCase() === next.word)) { clause.option = next.text; i++; }
+        // `none` names no rows, unless the decision offers an option by that name.
+        else if (next?.word === "none") { clause.flags.add("none"); i++; }
         else if (next && next.kind !== "sep" && next.kind !== "soft" && !atomAt(i + 1)) {
           const to = end(i + 1, false);
           clause.text = slice(i + 1, to);
@@ -270,7 +278,7 @@ function render({ clause, refs, excluded }: Resolved, replace: boolean): string 
     case "work": return `${replace ? "only " : ""}${head.verb === "move forward" ? `move ${targets} forward` : `${head.verb} ${targets}`}${except}`;
     case "narrow": return `${head.phrase}${targets ? ` for ${targets}` : ""}`;
     case "report": return head.phrase;
-    case "answer": return `D${head.decision} ${clause.option ?? clause.text ?? `${formatTargets(refs)}`}`;
+    case "answer": return `D${head.decision} ${clause.option ?? clause.text ?? (clause.flags.has("none") ? "none" : formatTargets(refs))}`;
     case "mark-ready": return `mark ${targets} ready`;
     case "request-review": return `request review ${targets} from ${clause.logins.map((login) => `@${login}`).join(" ")}`;
     case "hold": return `hold ${targets}${clause.text ? ` because ${clause.text}` : ""}`;
@@ -399,7 +407,9 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
     if (head.op === "request-review" && clause.logins.length === 0) issue(`Name the reviewers: request review ${formatTargets(refs) || "N"} from @login.`);
     if ((head.op === "outcome" || head.op === "done-when") && !clause.text) issue(`${head.op === "outcome" ? "outcome" : "done when"} needs its text after a colon, for example: ${head.op === "outcome" ? "outcome: readers can filter shelves by genre" : "done when 2: the shelf test passes"}.`);
     if (head.op === "answer" && !ctx.decisions.some((item) => item.n === head.decision)) issue(`D${head.decision} isn't an open decision.`);
-    else if (head.op === "answer" && clause.option === null && clause.text === null && clause.include.length === 0) issue(`D${head.decision} needs an answer: an option, row numbers, or text.`);
+    else if (head.op === "answer" && clause.option === null && clause.text === null && clause.include.length === 0 && !clause.flags.has("none"))
+      issue(`D${head.decision} needs an answer: an option, row numbers, all, none, or text.`);
+    else if (head.op === "answer" && clause.flags.has("none") && clause.include.length > 0) issue(`D${head.decision} can't be none and ${formatTargets(refs)} at once.`);
     if (head.op === "drop" && clause.include.length === 0 && clause.criteria.length === 0) issue("drop needs rows or criteria, for example: drop 4 or drop c1.");
     if (head.op === "cancel" && clause.include.length > 0) issue(`cancel takes no rows. To take ${formatTargets(refs)} out, drop ${formatTargets(refs)}; to interrupt a running turn, stop ${formatTargets(refs)}.`);
   }
@@ -414,7 +424,7 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
   }
 
   // Apply the instruction clauses to a copy of the active scope.
-  const base: InstructionScope = prev ?? { revision: 0, include: [], exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [] };
+  const base: InstructionScope = prev ?? { revision: 0, include: [], exclude: [], removed: [], stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] };
   const next = structuredClone(base);
   const inclusions = resolved.filter((item) => INCLUDES.has(item.clause.head.op));
   const excludedHere = unique(inclusions.flatMap((item) => item.excluded)).filter((item) => !item.owner);
@@ -616,7 +626,6 @@ export function interpretEffortCommand(text: string, ctx: CommandContext): Comma
     recheckLaunches ? "Recheck launches: read back every uncertain launch" : null,
     postRoster ? "Post roster" : null,
     mergePreviews.length ? `Merge ${formatTargets(mergePreviews)}: open the fresh merge preview from the Ready list. This command grants no merge.` : null,
-    ...answers.map((answer) => `D${answer.decision}: ${"option" in answer ? answer.option : "numbers" in answer ? answer.numbers.join(", ") : q(answer.text)}`),
   ].filter((line): line is string => line !== null);
   return {
     kind: "admit", normalized, acknowledgment: lines,

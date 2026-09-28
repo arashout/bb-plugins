@@ -54,6 +54,9 @@ export const effortRosterSchema = z.object({
   suggestions: z.array(z.object({ key: z.string(), name: z.string(), tickets: z.array(z.string()), prUrls: z.array(z.string()), overlap: z.array(z.string()) })),
   /** Legacy job rows behind these PRs: why Advance's counts exceed the roster's. */
   history: z.object({ legacyJobs: z.number(), legacyPrs: z.number() }),
+  /** Open decisions, one per real choice, each answered by `Dn …` or effort_decision_answer at its revision. */
+  decisions: z.array(z.object({ id: z.string(), n: z.number(), revision: z.number(), kind: z.string(), subkind: z.enum(["mark-ready", "request-review"]).nullable(),
+    question: z.string(), options: z.array(z.object({ id: z.string(), label: z.string() })), targets: z.array(z.object({ target: z.string(), n: z.number().nullable() })) })),
 });
 export type EffortRoster = z.infer<typeof effortRosterSchema>;
 export type RosterRow = z.infer<typeof rosterRowSchema>;
@@ -242,8 +245,8 @@ export function effortRoster(input: {
   effort: EstablishedEffort; redirectedFrom: string | null; sources: RosterSources;
   /** Numbers the targets in display order; see the roster store. */
   number(targets: string[]): { rows: { n: number; target: string; provisional: boolean }[]; snapshotId: string | null };
-  /** The active instruction, its rows, and its rollup; absent for a legacy effort or a copy without them. */
-  v2?: RosterInstruction & { active: EffortRoster["instruction"]; rollup: string[] | null };
+  /** The active instruction, its rows, its rollup, and its open decisions; absent for a legacy effort or a copy without them. */
+  v2?: RosterInstruction & { active: EffortRoster["instruction"]; rollup: string[] | null; decisions: EffortRoster["decisions"] };
 }): EffortRoster {
   const { effort, sources, v2 = null } = input;
   const owned = new Set(rosterTargets(effort, sources.work));
@@ -272,7 +275,7 @@ export function effortRoster(input: {
       redirectedFrom: input.redirectedFrom, coordinatorThreadId: effort.coordinatorThreadId },
     snapshotId: numbered.snapshotId, instruction: v2?.active ?? null, rollup: v2?.rollup ?? null, observedAt: sources.now, rows, issues: [...issues.values()],
     ticketsWithoutPrs: uncovered.map((id) => ({ id, title: details.get(id)?.title ?? null, url: details.get(id)?.url ?? null })),
-    suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length },
+    suggestions, history: { legacyJobs: legacy.reduce((sum, jobs) => sum + jobs, 0), legacyPrs: legacy.length }, decisions: v2?.decisions ?? [],
   };
 }
 
@@ -291,6 +294,7 @@ export function rosterText(roster: EffortRoster): string {
       row.title.slice(0, 120) || "—", [state[row.state], ...row.hold ? ["held"] : [], ...row.modifiers, ...row.outsideMembership ? ["outside membership"] : []].join(" · "),
       row.label].join(" · ")),
   ];
+  for (const decision of roster.decisions) lines.push(`D${decision.n} · ${decision.question} (${decision.targets.map((item) => item.n ?? item.target).join(", ")}) · ${decision.options.map((option) => option.id).join(" | ")}`);
   if (roster.issues.length > 0) lines.push(...roster.issues.map((issue) => `System issue: ${issue.label} (${issue.numbers.join(", ")})`));
   if (roster.ticketsWithoutPrs.length > 0) lines.push(`Tickets without PRs: ${roster.ticketsWithoutPrs.map((ticket) => ticket.title ? `${ticket.id} ${ticket.title}` : ticket.id).join("; ")}`);
   for (const suggestion of roster.suggestions) lines.push(`Suggestion: ${suggestion.name} (${suggestion.tickets.join(", ")}) already covers ${suggestion.overlap.length} roster PRs`);

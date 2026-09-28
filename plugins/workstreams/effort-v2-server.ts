@@ -9,17 +9,25 @@
 // PR's next step with decide(), and commits the instruction revision, the rows
 // that changed, and the acknowledgment together. Until the reconciler runs,
 // every step is a plan: nothing launches, sends, or writes to GitHub.
+//
+// Rows that ask the same question share one numbered decision. An answer
+// (`Dn …` or effort_decision_answer) applies only to the decision's revision its
+// surface showed. It writes the next instruction revision with what it granted
+// or declined, and re-plans only the PRs that asked, unless it took a PR out of
+// the instruction.
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { AdvanceJob } from "./bulk-advance.js";
-import { capAcknowledgment, formatTargets, interpretEffortCommand, type CommandRow, type CommandTarget, type InstructionScope } from "./effort-command.js";
-import { decide, PREPARED, type Next } from "./effort-phase.js";
+import { capAcknowledgment, EFFECTS, formatTargets, interpretEffortCommand, WORK_RECIPES, type CommandResult, type CommandRow, type CommandTarget,
+  type DecisionAnswer, type InstructionScope } from "./effort-command.js";
+import { decide, PREPARED, type DecideInput, type Next, type RowDecision } from "./effort-phase.js";
 import type { ResourceWriter } from "./effort-resources.js";
 import { activeWriters, effortRoster, effortRosterSchema, observedFacts, rosterRowSchema, rosterTargets, rosterText, type EffortRoster, type RosterSources } from "./effort-roster.js";
 import type { createEffortRosterStore } from "./effort-roster-store.js";
 import { RECIPES } from "./effort-recipes.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
-import { holdsPr, USER_STATES, type createEffortWorkStore, type Execution, type ExecutionMode, type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
+import { decisionId, holdsPr, USER_STATES, type createEffortWorkStore, type Decision, type DecisionWrite, type Execution, type ExecutionMode, type RowWrite,
+  type UserState, type WorkRow, type WorkRowBody } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
 import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
@@ -66,11 +74,15 @@ const commandResultSchema = z.discriminatedUnion("kind", [
     mergePreviews: z.array(z.object({ target: z.string(), n: z.number().nullable() })) }),
 ]);
 export type EffortCommandResult = z.infer<typeof commandResultSchema>;
+/** An open decision as a surface showed it. */
+const shownDecisionSchema = z.object({ n: z.number().int().positive(), revision: z.number().int().positive() }).strict();
 const parentContextSchema = z.object({
   effort: z.object({ id: z.string(), key: z.string(), name: z.string(), archived: z.boolean() }),
   /** The snapshot a command typed here resolves its numbers against. */
   snapshotId: z.string().nullable(),
   revision: z.number().nullable(), lastRevision: z.number(),
+  /** The open decisions the rollup names, which a command typed here answers. */
+  decisions: z.array(shownDecisionSchema),
   counts: z.record(z.enum(USER_STATES), z.number()),
   rollup: z.array(z.string()).nullable(),
 });
@@ -83,9 +95,20 @@ export const effortV2Contract = {
   /** `parentThreadId` names a preview candidate, or null to start one new parent; opting in requires one. */
   effort_v2_set: { input: z.object({ effortId: z.string().min(1).max(500), mode: z.enum(["legacy", "v2"]), expectedRevision: z.number().int().nonnegative(),
     parentThreadId: z.string().min(1).max(200).nullable().optional() }).strict(), output: effortV2SetResultSchema },
-  /** One numbered command against the snapshot the surface rendered; `expectedRevision` is the instruction revision it showed. */
+  /**
+   * One numbered command against the snapshot the surface rendered; `expectedRevision` is the instruction revision it showed,
+   * and `decisions` the open decisions it showed, each at its revision. A `Dn` answer applies only to the revision shown.
+   */
   effort_command: { input: z.object({ effortId: z.string().min(1).max(500), snapshotId: z.string().max(100).nullable(), text: z.string().min(1).max(4_000),
-    requestId: z.string().min(1).max(200), source: z.enum(["panel", "banner"]), expectedRevision: z.number().int().nonnegative().optional() }).strict(), output: commandResultSchema },
+    requestId: z.string().min(1).max(200), source: z.enum(["panel", "banner"]), expectedRevision: z.number().int().nonnegative().optional(),
+    decisions: z.array(shownDecisionSchema).max(1_000).optional() }).strict(), output: commandResultSchema },
+  /**
+   * Answer one decision by id, as the roster showed it at `expectedRevision`: an option, the row numbers a lifecycle
+   * question applies to (empty for none), or your own words. The same as `Dn …` in a command.
+   */
+  effort_decision_answer: { input: z.object({ decisionId: z.string().min(1).max(600), optionId: z.string().min(1).max(100).optional(),
+    numbers: z.array(z.number().int().positive()).max(1_000).optional(), text: z.string().min(1).max(4_000).optional(),
+    expectedRevision: z.number().int().positive(), requestId: z.string().min(1).max(200) }).strict(), output: commandResultSchema },
   /** What the composer banner shows in an effort's parent thread; null in any other thread. */
   effort_parent_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: parentContextSchema.nullable() },
 };
@@ -108,7 +131,9 @@ function shown(step: Next): Pick<WorkRowBody, "userState" | "modifiers"> {
  * leaves the checkout and thread to the reconciler's reads. No worker has reported, so no criterion has proof yet.
  */
 export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode; scope: InstructionScope | null; sources: RosterSources;
-  models: Record<ModelRole, ModelChoice>; held(target: string): boolean; targets: readonly { target: string; n: number | null; retryEpoch: number }[] }): PlannedRow[] {
+  models: Record<ModelRole, ModelChoice>; held(target: string): boolean; targets: readonly { target: string; n: number | null; retryEpoch: number }[];
+  /** The open decision a PR asked, and the head it asked on. */
+  open?(target: string): { decision: RowDecision; head: string | null } | null }): PlannedRow[] {
   const { sources, scope } = input;
   const read = input.targets.map(({ target, n, retryEpoch }) => {
     const observed = observedFacts(target, sources);
@@ -124,13 +149,19 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
   const included = new Set(scope?.include.map((grant) => prWorkItemKey(grant.target)));
   const pending = scope ? pendingCriteria(scope, read.filter((row) => included.has(row.target)).map((row) => row.contract), []) : new Map<string, string[]>();
   return read.map((row) => {
-    const step = decide({ now: sources.now, target: row.target, effort: { id: input.effort.id, mode: input.mode, archived: Boolean(input.effort.archivedAt) },
+    const decideInput: DecideInput = { now: sources.now, target: row.target, effort: { id: input.effort.id, mode: input.mode, archived: Boolean(input.effort.archivedAt) },
       ownerId: sources.work.ownerForPr(row.target)?.id ?? null, instruction: scope, held: input.held(row.target), full: row.observed.full, feedback: row.feedback,
-      reviewers: row.observed.pr, attempts: [], codeActions: [], retryEpoch: row.retryEpoch, decision: null, declined: [],
+      reviewers: row.observed.pr, attempts: [], codeActions: [], retryEpoch: row.retryEpoch, decision: null,
+      declined: (scope?.answers ?? []).flatMap((answer) => answer.subkind && answer.declined.includes(row.target) ? [answer.subkind] : []),
       criteriaPending: (pending.get(row.target)?.length ?? 0) > 0, settledDependencies: new Set(), admission: { capacityFull: false, breakerOpen: false }, models: input.models,
       // No checkout is chosen yet, so every active writer counts against the PR.
       resources: { legacy: sources.legacy.get(row.target) ?? null, inspections: null,
-        writers: activeWriters(row.target, row.item?.paths ?? [], sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })) } });
+        writers: activeWriters(row.target, row.item?.paths ?? [], sources).map(({ owner, ref }): ResourceWriter => ({ owner, ref, path: null })) } };
+    let step = decide(decideInput);
+    // An open decision holds its row while the facts that asked it are read again, so its number stays put. Once they are
+    // read, decide() asks again only if the question still applies; a new head never inherits the old head's question.
+    const open = step.nextAction === "observe" ? input.open?.(row.target) : null;
+    if (open && open.head === (row.observed.facts?.headOid || null)) step = decide({ ...decideInput, decision: open.decision });
     return { target: row.target, phase: step.phase, step, criteria: pending.get(row.target) ?? [],
       body: { n: row.n, cause: step.cause, detail: step.detail, ...shown(step), nextAction: step.nextAction, owner: step.owner, wake: step.wake, decision: step.decision,
         recovery: step.recovery, offers: step.offers, retryEpoch: row.retryEpoch, observedHead: row.observed.facts?.headOid || null,
@@ -138,10 +169,11 @@ export function planRows(input: { effort: EstablishedEffort; mode: ExecutionMode
   });
 }
 
-/** The evidence contract over the instruction's rows as stored, so the rollup reads exactly what the roster shows. */
-export function rowContract(effort: Pick<EstablishedEffort, "goal">, scope: InstructionScope, rows: readonly Pick<WorkRow, "target" | "phase" | "body">[], work: RosterSources["work"]) {
+/** The evidence contract over the instruction's rows as stored, so the rollup reads exactly what the roster shows, naming each open decision by number. */
+export function rowContract(effort: Pick<EstablishedEffort, "goal">, scope: InstructionScope, rows: readonly Pick<WorkRow, "target" | "phase" | "body">[], work: RosterSources["work"],
+  decisions: readonly Pick<Decision, "n" | "key">[] = []) {
   const byTarget = new Map(rows.map((row) => [row.target, row]));
-  return evidenceContract({ scope, goal: effort.goal, evidence: [], rows: scope.include.flatMap((grant) => {
+  return evidenceContract({ scope, goal: effort.goal, evidence: [], ordinal: (key) => decisions.find((decision) => decision.key === key)?.n ?? null, rows: scope.include.flatMap((grant) => {
     const row = byTarget.get(prWorkItemKey(grant.target));
     if (!row) return [];
     const { body } = row;
@@ -157,11 +189,100 @@ export function rowContract(effort: Pick<EstablishedEffort, "goal">, scope: Inst
 const comparable = (body: WorkRowBody) => JSON.stringify({ ...body, wake: body.wake && { ...body.wake, dueAt: 0 } },
   (_key, value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 
+/**
+ * The decisions after these rows are written: each row joins the open decision its step asks, at the head it asked on,
+ * and leaves any other. A decision no row asks any more is withdrawn: its PRs merged, left the instruction, or a new
+ * head stopped asking. Numbers are never reused. Rows not written keep their step, so their decisions stand.
+ */
+export function syncDecisions(effortId: string, open: readonly Decision[], next: number, rows: readonly Pick<RowWrite, "target" | "phase" | "body">[]): DecisionWrite[] {
+  const byKey = new Map(open.map((decision) => [decision.key, { ...decision, body: structuredClone(decision.body), expectedRevision: decision.revision, changed: false }]));
+  for (const row of rows) {
+    const target = prWorkItemKey(row.target);
+    const asked = row.phase === "decision-needed" ? row.body.decision : null;
+    for (const decision of byKey.values()) if (decision.key !== asked?.key && decision.body.targets.some((item) => item.target === target)) {
+      decision.body.targets = decision.body.targets.filter((item) => item.target !== target);
+      decision.changed = true;
+    }
+    if (!asked) continue;
+    let decision = byKey.get(asked.key);
+    if (!decision) {
+      const n = next++;
+      decision = { id: decisionId(effortId, n), effortId, n, key: asked.key, status: "open", revision: 0, expectedRevision: 0, changed: true,
+        body: { kind: asked.kind, subkind: asked.subkind, question: asked.question, options: asked.options, grants: asked.grants, targets: [], answer: null, answeredVia: null } };
+      byKey.set(asked.key, decision);
+    }
+    const entry = { target, n: row.body.n, head: row.body.observedHead };
+    if (JSON.stringify(decision.body.targets.find((item) => item.target === target)) !== JSON.stringify(entry)) {
+      decision.body.targets = [...decision.body.targets.filter((item) => item.target !== target), entry]
+        .sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity) || a.target.localeCompare(b.target));
+      decision.changed = true;
+    }
+  }
+  return [...byKey.values()].filter((decision) => decision.changed).map(({ id, n, key, body, expectedRevision }) =>
+    ({ id, n, key, body, expectedRevision, status: body.targets.length ? "open" as const : "withdrawn" as const }));
+}
+
+type Answer = { option: string } | { numbers: number[] } | { text: string };
+/**
+ * What one answer does to the instruction. It reaches only the PRs its question named and grants only what the
+ * question named: a lifecycle answer grants the action to the numbers it lists and declines it for the rest; allow
+ * grants an authority question's work and effects; leave it takes the PR out of this instruction, as `leave N alone`
+ * does. A question's answer is recorded for its worker's next work order. Any other reading is clarified.
+ */
+export function answerDecision(decision: Decision, answer: Answer, scope: InstructionScope, revision: number):
+  { clarify: string } | { scope: InstructionScope; answer: string; targets: string[] } {
+  const { body } = decision;
+  const name = `D${decision.n}`;
+  const targets = body.targets.map((item) => item.target);
+  const ids = body.options.map((option) => option.id).join(", ");
+  const option = "option" in answer ? body.options.find((item) => item.id.toLowerCase() === answer.option.toLowerCase()) ?? null : null;
+  if ("option" in answer && !option) return { clarify: `${name}'s options are ${ids}.` };
+  if (body.kind === "worker-interaction") return { clarify: `${name} is answered in its worker's thread; open it from the roster.` };
+  const next = structuredClone(scope);
+  const grantOf = (target: string) => next.include.find((grant) => prWorkItemKey(grant.target) === target);
+  const give = (target: string, grants: NonNullable<Decision["body"]["grants"]>) => {
+    const grant = grantOf(target);
+    if (!grant) return;
+    grant.work = WORK_RECIPES.filter((id) => grant.work.includes(id) || grants.work.includes(id));
+    grant.effects = EFFECTS.filter((effect) => grant.effects.includes(effect) || grants.effects.includes(effect));
+  };
+  let declined: CommandTarget[] = [];
+  let reading: string;
+  if (body.subkind) {
+    if ("text" in answer) return { clarify: `${name} takes the rows to ${body.subkind === "mark-ready" ? "mark ready" : "request review on"}, all, or none, for example: ${name} ${formatTargets(body.targets)}.` };
+    const numbers = "numbers" in answer ? answer.numbers : [];
+    const outside = numbers.filter((n) => !body.targets.some((item) => item.n === n));
+    if (outside.length) return { clarify: `${name} asks about ${formatTargets(body.targets)}; ${outside.join(", ")} ${outside.length === 1 ? "isn't" : "aren't"} part of it.` };
+    const chosen = body.targets.filter((item) => option?.id === "ready" || numbers.includes(item.n ?? 0));
+    // A review request names its reviewers, so here an answer can only decline; the request itself is a command.
+    if (body.subkind === "request-review" && (chosen.length || option?.id === "name"))
+      return { clarify: `Name the reviewers with: request review ${formatTargets(chosen.length ? chosen : body.targets)} from @login. ${name} none requests no review.` };
+    for (const item of chosen) give(item.target, body.grants!);
+    declined = body.targets.filter((item) => !chosen.includes(item));
+    reading = [chosen.length ? `mark ready ${formatTargets(chosen)}` : null,
+      declined.length ? `${body.subkind === "mark-ready" ? "keep as a draft" : "request no review on"} ${formatTargets(declined)}` : null].filter(Boolean).join("; ");
+  } else if (body.kind === "authority" && option?.id === "leave") {
+    for (const item of body.targets) {
+      next.include = next.include.filter((grant) => prWorkItemKey(grant.target) !== item.target);
+      if (!next.exclude.some((other) => prWorkItemKey(other.target) === item.target)) next.exclude.push({ target: item.target, n: item.n, reason: `${name}: leave it` });
+    }
+    reading = `leave ${formatTargets(body.targets)} alone this instruction`;
+  } else if ("numbers" in answer) {
+    return { clarify: `${name} takes one of its options (${ids}) or your own words.` };
+  } else {
+    if (option?.id === "allow" && body.grants) for (const target of targets) give(target, body.grants);
+    reading = "text" in answer ? JSON.stringify(answer.text) : option!.label;
+  }
+  next.answers.push({ decisionId: decision.id, n: decision.n, subkind: body.subkind, question: body.question, answer: reading, targets,
+    declined: declined.map((item) => item.target), revision });
+  return { scope: { ...next, revision }, answer: reading, targets };
+}
+
 export type EffortV2Deps = {
   efforts: Pick<EffortStore, "get" | "getRecord" | "list">;
   numbers: ReturnType<typeof createEffortRosterStore>["numbers"];
   snapshots: Pick<ReturnType<typeof createEffortRosterStore>, "snapshot" | "issued" | "latest">;
-  work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit">;
+  work: Pick<ReturnType<typeof createEffortWorkStore>, "instruction" | "lastRevision" | "rows" | "row" | "command" | "commit" | "decisions" | "decision" | "nextDecision">;
   /** Holds write through the existing store, inside the command's transaction; `changed` tells the board afterward. */
   holds: { set(prUrl: string, held: boolean, reason?: string): unknown; changed(): void };
   models(): Promise<Record<ModelRole, ModelChoice>>;
@@ -207,9 +328,12 @@ export function createEffortV2(deps: EffortV2Deps) {
     const active = deps.work.instruction(effort.id);
     const rows = deps.work.rows(effort.id);
     if (!active && rows.length === 0) return undefined;
+    const decisions = deps.work.decisions(effort.id);
     return { rows: new Map(rows.map((row) => [row.target, row])), included: new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target))),
       active: active && { id: active.id, revision: active.revision, text: active.text, reportMode: active.scope.reportMode, outcome: active.scope.outcome },
-      rollup: active ? rowContract(effort, active.scope, rows, sources.work).rollup : null };
+      rollup: active ? rowContract(effort, active.scope, rows, sources.work, decisions).rollup : null,
+      decisions: decisions.map(({ id, n, revision, body }) => ({ id, n, revision, kind: body.kind, subkind: body.subkind, question: body.question, options: body.options,
+        targets: body.targets.map(({ target, n: number }) => ({ target, n: number })) })) };
   }
   async function roster(effortId: string): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);
@@ -223,9 +347,12 @@ export function createEffortV2(deps: EffortV2Deps) {
     queues.set(effortId, next.catch(() => undefined));
     return next;
   }
-  /** Plan the included PRs and any row still open under the effort, and the writes for the rows whose step changed. */
+  /**
+   * Plan the included PRs and any row still open under the effort, the writes for the rows whose step changed, and the
+   * decisions those writes ask or leave. A retry, reset, or answer starts a row's new epoch and makes it due now.
+   */
   async function replan(effort: EstablishedEffort, scope: InstructionScope | null, sources: RosterSources,
-    options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string> }) {
+    options: { held(target: string): boolean; retry: ReadonlySet<string>; only?: ReadonlySet<string>; decisions: readonly Decision[] }) {
     const open = deps.work.rows(effort.id).filter((row) => row.phase !== "finished").map((row) => row.target);
     const numberOf = new Map([...deps.snapshots.issued(effort.id)].map(([n, target]) => [target, n]));
     // A row another effort holds is that effort's to plan, even while this instruction still names its PR.
@@ -237,15 +364,21 @@ export function createEffortV2(deps: EffortV2Deps) {
         const row = stored.get(target);
         const mine = row?.effortId === effort.id ? row : null;
         return { target, n: numberOf.get(target) ?? mine?.body.n ?? null, retryEpoch: (mine?.body.retryEpoch ?? 0) + (options.retry.has(target) ? 1 : 0) };
-      }) });
+      }),
+      open: (target) => {
+        const decision = options.decisions.find((item) => item.body.targets.some((entry) => entry.target === target));
+        return decision ? { decision: { key: decision.key, kind: decision.body.kind, subkind: decision.body.subkind, question: decision.body.question,
+          options: decision.body.options, grants: decision.body.grants }, head: decision.body.targets.find((entry) => entry.target === target)!.head } : null;
+      } });
     // Every row is planned, so a criterion bound to the whole effort still lands on its lowest-numbered PR; `only` limits the writes.
     const writes = planned.flatMap((row) => {
       if (options.only && !options.only.has(row.target)) return [];
       const current = stored.get(row.target);
       if (current?.effortId === effort.id && current.phase === row.phase && comparable(current.body) === comparable(row.body)) return [];
-      return [{ target: row.target, expectedRevision: current?.revision ?? 0, phase: row.phase, body: row.body, dueAt: row.step.wake?.dueAt ?? null }];
+      return [{ target: row.target, expectedRevision: current?.revision ?? 0, phase: row.phase, body: row.body,
+        dueAt: options.retry.has(row.target) ? sources.now : row.step.wake?.dueAt ?? null }];
     });
-    return { planned, writes };
+    return { planned, writes, decisions: syncDecisions(effort.id, options.decisions, deps.work.nextDecision(effort.id), writes) };
   }
   /**
    * After an event (archive, restore, a mode change, a hold, a refresh): plan the effort's rows again from stored
@@ -259,10 +392,10 @@ export function createEffortV2(deps: EffortV2Deps) {
       const effort = deps.efforts.get(found.id);
       if (lastRevision === 0 || !effort) return;
       const sources = await deps.sources();
-      const { writes } = await replan(effort, deps.work.instruction(effort.id)?.scope ?? null, sources,
-        { held: (target) => prHoldFor(target, sources.holds) !== null, retry: new Set(), ...only ? { only } : {} });
+      const { writes, decisions } = await replan(effort, deps.work.instruction(effort.id)?.scope ?? null, sources,
+        { held: (target) => prHoldFor(target, sources.holds) !== null, retry: new Set(), decisions: deps.work.decisions(effort.id), ...only ? { only } : {} });
       if (writes.length === 0) return;
-      deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source, rows: writes, instruction: null, journal: null });
+      deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source, rows: writes, instruction: null, decisions, journal: null });
       deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
     });
   }
@@ -296,60 +429,130 @@ export function createEffortV2(deps: EffortV2Deps) {
     const missing = [...PREPARED.filter((gate) => gates?.[gate] !== true), ...row?.criteria ?? []];
     return `Recheck ${name}: short of Ready: ${missing.join(", ") || row?.body.detail || "it isn't in the instruction"}`;
   }
+  const refuse = (message: string): EffortCommandResult => ({ kind: "clarify", message, normalized: null });
+  /** A request to an effort, in its queue: a repeated request gets its first result, and a legacy effort takes none. */
+  function request(effort: EstablishedEffort, requestId: string, run: () => Promise<EffortCommandResult>): Promise<EffortCommandResult> {
+    return serial(effort.id, async () => {
+      const replay = deps.work.command(effort.id, requestId);
+      if (replay !== null) return commandResultSchema.parse(replay);
+      if (deps.execution.get(effort.id).mode !== "v2") return refuse(`${effort.name} runs on legacy launchers. Move it to its roster before instructing it there.`);
+      return run();
+    });
+  }
   async function command(input: z.infer<typeof effortV2Contract.effort_command.input>): Promise<EffortCommandResult> {
     const { effort } = resolve(input.effortId);
-    return serial(effort.id, async () => {
-      const replay = deps.work.command(effort.id, input.requestId);
-      if (replay !== null) return commandResultSchema.parse(replay);
-      const refuse = (message: string): EffortCommandResult => ({ kind: "clarify", message, normalized: null });
-      if (deps.execution.get(effort.id).mode !== "v2") return refuse(`${effort.name} runs on legacy launchers. Move it to its roster before instructing it there.`);
-      let sources = await deps.sources();
+    return request(effort, input.requestId, async () => {
+      const sources = await deps.sources();
       const active = deps.work.instruction(effort.id);
-      const lastRevision = deps.work.lastRevision(effort.id);
       const issued = deps.snapshots.issued(effort.id);
       const known = new Set([...issued.values(), ...active?.scope.include.map((grant) => prWorkItemKey(grant.target)) ?? []]);
+      const open = deps.work.decisions(effort.id);
       const result = interpretEffortCommand(input.text, {
         effortId: effort.id, snapshot: input.snapshotId === null ? null : deps.snapshots.snapshot(input.snapshotId), issued,
         rows: new Map([...known].map((target) => [target, commandRow(target, sources)])), holds: sources.holds,
-        instruction: active?.scope ?? null, lastRevision, decisions: [], ...input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision },
+        instruction: active?.scope ?? null, lastRevision: deps.work.lastRevision(effort.id),
+        decisions: open.map(({ n, body }) => ({ n, options: body.options.map((option) => option.id), targets: body.targets.flatMap((item) => item.n ?? []) })),
+        ...input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision },
         ownerOf: (target) => ownerOf(target, sources),
       });
       if (result.kind === "clarify") return result;
-      if (result.postRoster) return refuse("post roster arrives with parent-thread reports; open the roster instead. Nothing was admitted.");
-      if (effort.archivedAt && result.instruction) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
-      // Refresh and recheck read GitHub, the threads, and the checkouts first; every other step plans from stored facts.
-      const reads = new Map<string, Awaited<ReturnType<EffortV2Deps["observe"]>>>();
-      for (const item of result.interventions) if (item.action === "refresh" || item.action === "recheck")
-        reads.set(item.target, await observeOnce(item.target, sources.work.items.get(item.target)?.paths ?? []));
-      if (reads.size) sources = await deps.sources();
-      const held = (target: string) => result.holds.some((item) => item.target === target)
-        || (!result.releases.some((item) => item.target === target) && prHoldFor(target, sources.holds) !== null);
-      const scope = result.cancel ? null : result.instruction ?? active?.scope ?? null;
-      const { planned, writes } = await replan(effort, scope, sources,
-        { held, retry: new Set(result.interventions.filter((item) => item.action === "reset" || item.action === "retry").map((item) => item.target)) });
-      const byTarget = new Map(planned.map((row) => [row.target, row]));
-      const included = new Set(scope?.include.map((grant) => prWorkItemKey(grant.target)));
-      const touched = new Set([...result.holds, ...result.releases, ...result.interventions].map((item) => item.target));
-      const next = planned.filter((row) => included.has(row.target) && (result.instruction !== null || touched.has(row.target)));
-      const answer: EffortCommandResult = {
-        kind: "admit", normalized: result.normalized, revision: scope?.revision ?? null, mergePreviews: result.mergePreviews,
-        acknowledgment: capAcknowledgment([...result.acknowledgment,
-          ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
-          ...next.length ? [`Next (planned; nothing runs until v2 execution is on): ${steps(next)}`] : []]),
-        rollup: scope ? rowContract(effort, scope, planned, sources.work).rollup : null,
-      };
-      deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source: "command", rows: writes,
-        instruction: result.cancel ? "cancel" : result.instruction && { scope: result.instruction, text: input.text,
-          source: { kind: input.source, threadId: null, eventId: null }, snapshotId: input.snapshotId, requestId: input.requestId },
-        journal: { requestId: input.requestId, text: input.text, result: answer },
-        also: () => {
-          for (const item of result.holds) deps.holds.set(item.target, true, item.reason);
-          for (const item of result.releases) deps.holds.set(item.target, false);
-        } });
-      if (result.holds.length || result.releases.length) deps.holds.changed();
-      deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
-      return answer;
+      // An answer reaches only the rows its decision showed: `all`, a range, or an option never reaches a PR that joined since.
+      const shown = new Map(input.decisions?.map((item) => [item.n, item.revision]));
+      for (const { n, revision, body } of open.filter((item) => result.answers.some((reply) => reply.decision === item.n))) {
+        if (shown.get(n) === revision) continue;
+        const reread = shown.has(n) ? `D${n} changed since you read it; it now asks about ${formatTargets(body.targets)}. Read it again, then answer.`
+          : `D${n} isn't on the roster you answered from; it asks about ${formatTargets(body.targets)}. Read it, then answer.`;
+        return { kind: "clarify", normalized: result.normalized, message: `${reread} Nothing was admitted.` };
+      }
+      return admit(effort, result, input, sources);
     });
+  }
+  /** Answer one decision as the roster showed it; a decision that changed since is read again first. */
+  async function answer(input: z.infer<typeof effortV2Contract.effort_decision_answer.input>): Promise<EffortCommandResult> {
+    const found = deps.work.decision(input.decisionId);
+    if (!found) throw new Error("That decision does not exist. Reload the roster.");
+    const given: DecisionAnswer[] = [...input.optionId === undefined ? [] : [{ decision: found.n, option: input.optionId }],
+      ...input.numbers === undefined ? [] : [{ decision: found.n, numbers: input.numbers }], ...input.text === undefined ? [] : [{ decision: found.n, text: input.text }]];
+    if (given.length !== 1) throw new Error("Answer with exactly one of an option, row numbers, or text.");
+    const { effort } = resolve(found.effortId);
+    return request(effort, input.requestId, async () => {
+      const decision = deps.work.decision(found.id)!;
+      const name = `D${decision.n}`;
+      if (decision.status !== "open") return refuse(decision.status === "answered" ? `${name} was already answered: ${decision.body.answer}. Nothing changed.`
+        : `${name} was withdrawn: no PR asks it any more. Nothing changed.`);
+      if (decision.revision !== input.expectedRevision) return refuse(`${name} changed since you read it; it now asks about ${formatTargets(decision.body.targets)}. Read it again, then answer.`);
+      const reply = given[0]!;
+      const text = `${name} ${"option" in reply ? reply.option : "numbers" in reply ? reply.numbers.join(", ") || "none" : reply.text}`;
+      return admit(effort, { kind: "admit", normalized: text, acknowledgment: [], instruction: null, cancel: false, holds: [], releases: [], interventions: [],
+        recheckLaunches: false, postRoster: false, mergePreviews: [], answers: [reply] }, { requestId: input.requestId, text, source: "panel", snapshotId: null }, await deps.sources());
+    });
+  }
+  /** Admit a read command in one commit: the revision its changes and answers write, its holds, and the rows whose step changed. */
+  async function admit(effort: EstablishedEffort, result: Extract<CommandResult, { kind: "admit" }>,
+    input: { requestId: string; text: string; source: "panel" | "banner"; snapshotId: string | null }, read: RosterSources): Promise<EffortCommandResult> {
+    let sources = read;
+    const active = deps.work.instruction(effort.id);
+    const lastRevision = deps.work.lastRevision(effort.id);
+    if (result.postRoster) return refuse("post roster arrives with parent-thread reports; open the roster instead. Nothing was admitted.");
+    if (effort.archivedAt && (result.instruction || result.answers.length)) return refuse(`Restore ${effort.name} before changing its instruction. Nothing was admitted.`);
+    // Answers amend what the rest of the command leaves, in the same revision.
+    let scope = result.cancel ? null : result.instruction ?? active?.scope ?? null;
+    const includeOf = (value: InstructionScope | null) => JSON.stringify(value?.include.map((grant) => grant.target));
+    const before = includeOf(scope);
+    const open = deps.work.decisions(effort.id);
+    const answered: DecisionWrite[] = [];
+    const answerLines: string[] = [];
+    const asked = new Set<string>();
+    for (const reply of result.answers) {
+      const decision = open.find((item) => item.n === reply.decision);
+      if (!decision || !scope) return refuse(`D${reply.decision} isn't an open decision.`);
+      const applied = answerDecision(decision, reply, scope, lastRevision + 1);
+      if ("clarify" in applied) return { kind: "clarify", message: `${applied.clarify} Nothing was admitted.`, normalized: result.normalized };
+      scope = applied.scope;
+      answered.push({ id: decision.id, n: decision.n, key: decision.key, status: "answered", expectedRevision: decision.revision,
+        body: { ...decision.body, answer: applied.answer, answeredVia: input.source } });
+      answerLines.push(`D${decision.n}: ${applied.answer}`);
+      for (const target of applied.targets) asked.add(target);
+    }
+    // The revision holds the command's changes and its answers together.
+    const revised = result.instruction !== null || answered.length > 0 ? scope : null;
+    // Refresh and recheck read GitHub, the threads, and the checkouts first; every other step plans from stored facts.
+    const reads = new Map<string, Awaited<ReturnType<EffortV2Deps["observe"]>>>();
+    for (const item of result.interventions) if (item.action === "refresh" || item.action === "recheck")
+      reads.set(item.target, await observeOnce(item.target, sources.work.items.get(item.target)?.paths ?? []));
+    if (reads.size) sources = await deps.sources();
+    const held = (target: string) => result.holds.some((item) => item.target === target)
+      || (!result.releases.some((item) => item.target === target) && prHoldFor(target, sources.holds) !== null);
+    const touched = new Set([...result.holds, ...result.releases, ...result.interventions].map((item) => item.target));
+    const { planned, writes, decisions } = await replan(effort, scope, sources, { held, decisions: open.filter((item) => !answered.some((other) => other.id === item.id)),
+      retry: new Set([...result.interventions.filter((item) => item.action === "reset" || item.action === "retry").map((item) => item.target), ...asked]),
+      // An answer alone re-plans only the PRs that asked it, and other rows keep their revisions, unless it changed which PRs the
+      // instruction includes: a whole-effort criterion follows that set to another PR.
+      ...result.instruction === null && !result.cancel && touched.size === 0 && asked.size > 0 && includeOf(scope) === before ? { only: asked } : {} });
+    const byTarget = new Map(planned.map((row) => [row.target, row]));
+    const included = new Set(scope?.include.map((grant) => prWorkItemKey(grant.target)));
+    const next = planned.filter((row) => included.has(row.target) && (result.instruction !== null || touched.has(row.target) || asked.has(row.target)));
+    const after = [...decisions, ...open.filter((item) => ![...answered, ...decisions].some((other) => other.id === item.id))].filter((item) => item.status === "open");
+    const answer: EffortCommandResult = {
+      kind: "admit", normalized: result.normalized, revision: scope?.revision ?? null, mergePreviews: result.mergePreviews,
+      acknowledgment: capAcknowledgment([...result.acknowledgment, ...answerLines,
+        ...result.interventions.filter((item) => item.action === "recheck").map((item) => recheckLine(item, reads.get(item.target)!, byTarget.get(item.target), sources)),
+        ...next.length ? [`Next (planned; nothing runs until v2 execution is on): ${steps(next)}`] : []]),
+      rollup: scope ? rowContract(effort, scope, planned, sources.work, after).rollup : null,
+    };
+    deps.work.commit({ effortId: effort.id, baseRevision: lastRevision, source: "command", rows: writes,
+      instruction: result.cancel ? "cancel" : revised && { scope: revised, text: input.text,
+        source: { kind: input.source, threadId: null, eventId: null }, snapshotId: input.snapshotId, requestId: input.requestId },
+      // An answered decision closes before any row asks a new one.
+      decisions: [...answered, ...decisions],
+      journal: { requestId: input.requestId, text: input.text, result: answer },
+      also: () => {
+        for (const item of result.holds) deps.holds.set(item.target, true, item.reason);
+        for (const item of result.releases) deps.holds.set(item.target, false);
+      } });
+    if (result.holds.length || result.releases.length) deps.holds.changed();
+    deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId: effort.id });
+    return answer;
   }
   /** The banner's view of an effort parent thread: its counts, rollup, and the snapshot and revision a command there reads. */
   async function parentContext(threadId: string): Promise<z.infer<typeof parentContextSchema> | null> {
@@ -358,10 +561,11 @@ export function createEffortV2(deps: EffortV2Deps) {
     const active = deps.work.instruction(effort.id);
     const included = new Set(active?.scope.include.map((grant) => prWorkItemKey(grant.target)));
     const rows = deps.work.rows(effort.id).filter((row) => included.has(row.target));
+    const decisions = deps.work.decisions(effort.id);
     return { effort: { id: effort.id, key: effort.key, name: effort.name, archived: Boolean(effort.archivedAt) }, snapshotId: deps.snapshots.latest(effort.id),
-      revision: active?.revision ?? null, lastRevision: deps.work.lastRevision(effort.id),
+      revision: active?.revision ?? null, lastRevision: deps.work.lastRevision(effort.id), decisions: decisions.map(({ n, revision }) => ({ n, revision })),
       counts: Object.fromEntries(USER_STATES.map((state) => [state, rows.filter((row) => row.body.userState === state).length])) as Record<UserState, number>,
-      rollup: active ? rowContract(effort, active.scope, rows, (await deps.sources()).work).rollup : null };
+      rollup: active ? rowContract(effort, active.scope, rows, (await deps.sources()).work, decisions).rollup : null };
   }
   const observing = new Map<string, ReturnType<EffortV2Deps["observe"]>>();
   /** Concurrent reads of one PR share one read. */
@@ -473,6 +677,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     effort_v2_preview: ({ effortId }: { effortId: string }) => preview(effortId),
     effort_v2_set: setMode,
     effort_command: command,
+    effort_decision_answer: answer,
     effort_parent_context: ({ threadId }: { threadId: string }) => parentContext(threadId),
   };
   /** A CLI effort argument: id, key, or exact name. */

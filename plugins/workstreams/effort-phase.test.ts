@@ -30,7 +30,7 @@ const verified = (headOid: string): ApprovalFeedbackRecord => ({ attemptId: "A-0
 const grant = (overrides: Partial<InstructionScope["include"][number]> = {}): InstructionScope["include"][number] =>
   ({ target: PR_URL, n: 4, outsideMembership: false, work: [...VERBS["move forward"].work], effects: [...DEFAULT_EFFECTS], reviewers: [], addedInRevision: 1, ...overrides });
 const scope = (include = [grant()], removed: InstructionScope["removed"] = []): InstructionScope =>
-  ({ revision: 1, include, exclude: [], removed, stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [] });
+  ({ revision: 1, include, exclude: [], removed, stopAt: "prepared", reportMode: "changes", outcome: null, criteria: [], answers: [] });
 const attempt = (overrides: Partial<Attempt> = {}): Attempt => ({
   id: "A-1", status: "completed", threadId: "thr_origin", path: AUTHOR, workspace: null, recipes: ["address_review_feedback"], retryEpoch: 0,
   headOid: HEAD, fingerprint: FINGERPRINT, endedAt: NOW - 2 * MINUTE, result: "changed", blocker: null, failure: null, releasedReason: null,
@@ -164,7 +164,7 @@ describe("decide()", () => {
     expect(state(decide(row({ attempts: onHead }, { approvalFeedback: { ...FEEDBACK.approvalFeedback, fingerprint: "f".repeat(64) } })))).toBe("queued:launching");
     expect(state(decide(row({ attempts: onHead, retryEpoch: 1 }, FEEDBACK)))).toBe("queued:launching");
     expect(state(decide(row({ feedback: verified(OLD_HEAD) }, { ...FEEDBACK, headOid: OLD_HEAD })))).toBe("prepared:merge-candidate");
-    const decision = { key: "product:keep shelf order per reader?", kind: "product", subkind: null, question: "Keep shelf order per reader?", options: [{ id: "a", label: "Per reader" }] };
+    const decision = { key: "product:keep shelf order per reader?", kind: "product", subkind: null, question: "Keep shelf order per reader?", options: [{ id: "a", label: "Per reader" }], grants: null };
     expect(decide(row({ decision, feedback: verified(OLD_HEAD) }, FEEDBACK))).toMatchObject({ phase: "decision-needed", cause: "product", decision: { key: decision.key } });
   });
 
@@ -316,10 +316,15 @@ describe("decide()", () => {
     expect(state(decide(row({ full: { facts: facts(unknown), at: NOW - 5 * MINUTE } })))).toBe("verifying:observe");
   });
 
-  it("asks for authority when the instruction doesn't grant what the failing gates need", () => {
+  it("asks for authority when the instruction doesn't grant what the failing gates need, naming everything allow would grant", () => {
     const noPush = decide(row({ instruction: scope([grant({ effects: DEFAULT_EFFECTS.filter((effect) => effect !== "push") })]) }, FEEDBACK));
-    expect(noPush).toMatchObject({ phase: "decision-needed", cause: "authority", decision: { key: `authority:${PR_URL}:push` } });
-    expect(decide(row({ instruction: scope([grant({ work: ["fix_failing_checks"] })]) }, { mergeStateStatus: "BEHIND" })).detail).toContain("integrate base");
+    expect(noPush).toMatchObject({ phase: "decision-needed", cause: "authority", decision: { key: `authority:${PR_URL}:push`, grants: { work: [], effects: ["push"] } } });
+    expect(decide(row({ instruction: scope([grant({ work: ["fix_failing_checks"] })]) }, { mergeStateStatus: "BEHIND" })))
+      .toMatchObject({ detail: expect.stringContaining("needs integrate base,"), decision: { grants: { work: ["integrate_base"], effects: [] } } });
+    // Work the verb didn't grant, on a PR its push was taken from: allow grants both, so the question names both.
+    const narrowed = grant({ work: ["fix_failing_checks"], effects: ["code-fix", "test", "rerun-checks"] });
+    expect(decide(row({ instruction: scope([narrowed]) }, { mergeStateStatus: "BEHIND" })).decision)
+      .toMatchObject({ question: "inkwell/folio #313 needs integrate base, push, which this instruction doesn't grant. Allow it?", grants: { work: ["integrate_base"], effects: ["push"] } });
     // Criteria run alone only when nothing else is due, and only when the instruction covers them.
     expect(decide(row({ criteriaPending: true }))).toMatchObject({ nextAction: ["validate_criteria"] });
     expect(decide(row({ criteriaPending: true }, FEEDBACK))).toMatchObject({ nextAction: ["address_review_feedback"] });
