@@ -4,6 +4,8 @@
 // numbered set a user saw, so ranges and `all` expand against exactly that set.
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { advanceFactsSchema, type AdvanceFacts } from "./advance-contract.js";
+import type { Pr } from "./contract.js";
 import type { EffortStore } from "./effort-store.js";
 import { canonicalPrUrl } from "./pr-holds.js";
 import type { RunDb } from "./runstore.js";
@@ -14,6 +16,8 @@ export const EFFORT_ROSTER_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS effort_roster_snapshots (id TEXT PRIMARY KEY, effort_id TEXT NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS effort_roster_snapshots_effort ON effort_roster_snapshots (effort_id, created_at)`,
 ];
+/** Append-only: server.ts adds this after the roster migrations (id 38). */
+export const PR_FACTS_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_facts (pr_url TEXT PRIMARY KEY, full_at INTEGER, failed_at INTEGER, error TEXT, signature TEXT, cheap_at INTEGER, body TEXT)`;
 
 const snapshotBodySchema = z.object({
   rows: z.array(z.object({ n: z.number().int().positive(), target: z.string() }).strict()),
@@ -77,6 +81,50 @@ export function createEffortRosterStore(db: RosterDb, efforts: Pick<EffortStore,
       if (!row) return null;
       return { id, effortId: row.effortId, createdAt: row.createdAt, ...snapshotBodySchema.parse(JSON.parse(row.body)),
         stale: efforts.get(row.effortId)?.id !== row.effortId };
+    },
+  };
+}
+
+/** A hash of the cheap fields that show a PR changed; null means the cheap read found it no longer open. */
+export function cheapSignature(pr: Pick<Pr, "state" | "headRefOid" | "isDraft" | "reviewDecision" | "reviewRequests" | "mergeStateStatus" | "checkConclusions" | "unresolvedReviewThreads"> | null): string {
+  return createHash("sha256").update(JSON.stringify(pr === null ? ["not-open"] : [pr.state, pr.headRefOid ?? null, pr.isDraft, pr.reviewDecision,
+    pr.reviewRequests, pr.mergeStateStatus, pr.checkConclusions, pr.unresolvedReviewThreads])).digest("hex");
+}
+
+export type StoredPrFacts = { facts: AdvanceFacts | null; fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null };
+
+/**
+ * The last full read of each roster PR and the signature of the cheap read beside
+ * it. The board's stores keep the cheap facts; this keeps only what a full read adds.
+ */
+export function createPrFactsStore(db: RunDb) {
+  // A read-only copy of a database from before pr_facts has no full reads yet.
+  const present = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pr_facts'`).get() !== undefined;
+  const key = (prUrl: string) => canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
+  return {
+    get(prUrl: string): StoredPrFacts | null {
+      const row = present ? db.prepare(`SELECT full_at AS fullAt, failed_at AS failedAt, error, signature, body FROM pr_facts WHERE pr_url = ?`).get(key(prUrl)) as
+        { fullAt: number | null; failedAt: number | null; error: string | null; signature: string | null; body: string | null } | undefined : undefined;
+      if (!row) return null;
+      const { body, ...rest } = row;
+      return { ...rest, facts: body === null ? null : advanceFactsSchema.safeParse(JSON.parse(body)).data ?? null };
+    },
+    /** Every kept full read. Its title and branch still place a PR the board no longer lists, the way the board's own reads do. */
+    reads(): AdvanceFacts[] {
+      if (!present) return [];
+      return (db.prepare(`SELECT body FROM pr_facts WHERE body IS NOT NULL`).all() as { body: string }[])
+        .flatMap(({ body }) => advanceFactsSchema.safeParse(JSON.parse(body)).data ?? []);
+    },
+    /** A full read, with the signature of the cheap read taken just before it: a later cheap read that differs supersedes it. */
+    full(prUrl: string, read: { facts: AdvanceFacts; fullAt: number; signature: string | null; cheapAt: number | null }): void {
+      db.prepare(`INSERT INTO pr_facts (pr_url, body, full_at, signature, cheap_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(pr_url) DO UPDATE SET body = excluded.body, full_at = excluded.full_at, signature = excluded.signature,
+        cheap_at = excluded.cheap_at, failed_at = NULL, error = NULL`).run(key(prUrl), JSON.stringify(read.facts), read.fullAt, read.signature, read.cheapAt);
+    },
+    /** A failed read keeps the last success beside the failure. */
+    failed(prUrl: string, error: string, at: number): void {
+      db.prepare(`INSERT INTO pr_facts (pr_url, error, failed_at) VALUES (?, ?, ?)
+        ON CONFLICT(pr_url) DO UPDATE SET error = excluded.error, failed_at = excluded.failed_at`).run(key(prUrl), error.slice(0, 800), at);
     },
   };
 }

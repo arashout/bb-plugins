@@ -26,7 +26,7 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers } from "./effort-store.js";
-import { createEffortRosterStore, EFFORT_ROSTER_MIGRATIONS } from "./effort-roster-store.js";
+import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortV2, effortV2Contract } from "./effort-v2-server.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
@@ -50,7 +50,7 @@ import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
 import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATIONS_MIGRATION } from "./inventory-store.js";
-import type { InventoryResult } from "./inventory.js";
+import type { InventoryInspection, InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
   LENSES,
@@ -726,6 +726,7 @@ export default async function plugin(bb: BbPluginApi) {
     ...WORK_CONVERSATION_MIGRATIONS,
     `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
     ...EFFORT_ROSTER_MIGRATIONS,
+    PR_FACTS_MIGRATION,
   ]);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
@@ -887,6 +888,18 @@ export default async function plugin(bb: BbPluginApi) {
 
   let inventoryRefreshing = false;
   let inventoryTargeting = false;
+  /**
+   * A roster Refresh skips the scan lock, so a scan read that began before it
+   * can land after it. Reads are numbered as they begin, and a scan's older read
+   * never overwrites the inventory facts a later Refresh saw: the PR open as that
+   * Refresh read it (null once it left the open list).
+   */
+  let githubReads = 0;
+  const refreshes = new Map<string, { began: number; pr: Pr | null }>();
+  function refreshedAfter(url: string, began: number): Pr | null | undefined {
+    const refresh = refreshes.get(canonicalPrUrl(url) ?? url);
+    return refresh && refresh.began > began ? refresh.pr : undefined;
+  }
   function inventoryOwners(): string[] {
     return [...new Set(readUnits().flatMap((unit) => {
       const repo = unit.githubRepo ?? (unit.pr === null ? null : prTarget(unit.pr.url)?.slug ?? null);
@@ -960,7 +973,12 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       if (hostId === null) throw new Error("No primary BB host is available to read authored PRs.");
-      const result = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+      const began = ++githubReads;
+      const listed = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+      const result = { ...listed, entries: listed.entries.flatMap((entry) => {
+        const pr = refreshedAfter(entry.pr.url, began);
+        return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
+      }) };
       const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
       const carried: string[] = [];
       for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
@@ -990,6 +1008,39 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** Write one targeted GitHub read through the board's stores: inventory, checkout PRs, and Advance jobs. */
+  async function applyInspection(result: InventoryInspection, hostId: string): Promise<void> {
+    const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
+    const carried: string[] = [];
+    for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
+    inventory.inspect(result);
+    intentEvidenceVersion++;
+    advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
+    await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
+    const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
+    const closed = new Set(result.closed.map((url) => url.toLowerCase()));
+    // The inventory reports closed URLs without distinguishing merged from
+    // closed. Re-read only those saved jobs; never infer state from absence.
+    const completed = pendingAdvanceJobs().filter(({ job }) => closed.has(job.prUrl.toLowerCase()));
+    for (let index = 0; index < completed.length; index += 4) {
+      await Promise.all(completed.slice(index, index + 4).map(async ({ batchId, job }) => {
+        try { await advance.recheck(batchId, job.id); }
+        catch (error) { bb.log.warn(`Advance terminal refresh: ${String(error).slice(0, 300)}`); }
+      }));
+    }
+    const insert = db.prepare(`INSERT OR REPLACE INTO units (path, unit) VALUES (?, ?)`);
+    for (const unit of readUnits()) {
+      if (unit.pr === null) continue;
+      const url = unit.pr.url.toLowerCase();
+      const pr = fresh.get(url);
+      if (pr !== undefined) insert.run(unit.path, JSON.stringify({ ...unit, pr }));
+      else if (closed.has(url)) {
+        // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
+        rescans.add(unit.path);
+      }
+    }
+  }
+
   /** Native BB events invalidate these URLs; GitHub remains the facts source. */
   async function refreshInventoryUrls(prUrls: string[]): Promise<boolean> {
     if (inventoryRefreshing || inventoryTargeting || disposal.signal.aborted) return false;
@@ -1002,35 +1053,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (hostId === null) return true;
       for (let offset = 0; offset < urls.length; offset += 100) {
         const result = await host.call("inspectPrs", { prUrls: urls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: SCAN_TIMEOUT_MS });
-        const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
-        const carried: string[] = [];
-        for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
-        inventory.inspect(result);
-        intentEvidenceVersion++;
-        advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
-        await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
-        const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
-        const closed = new Set(result.closed.map((url) => url.toLowerCase()));
-        // The inventory reports closed URLs without distinguishing merged from
-        // closed. Re-read only those saved jobs; never infer state from absence.
-        const completed = pendingAdvanceJobs().filter(({ job }) => closed.has(job.prUrl.toLowerCase()));
-        for (let index = 0; index < completed.length; index += 4) {
-          await Promise.all(completed.slice(index, index + 4).map(async ({ batchId, job }) => {
-            try { await advance.recheck(batchId, job.id); }
-            catch (error) { bb.log.warn(`Advance terminal refresh: ${String(error).slice(0, 300)}`); }
-          }));
-        }
-        const insert = db.prepare(`INSERT OR REPLACE INTO units (path, unit) VALUES (?, ?)`);
-        for (const unit of readUnits()) {
-          if (unit.pr === null) continue;
-          const url = unit.pr.url.toLowerCase();
-          const pr = fresh.get(url);
-          if (pr !== undefined) insert.run(unit.path, JSON.stringify({ ...unit, pr }));
-          else if (closed.has(url)) {
-            // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
-            rescans.add(unit.path);
-          }
-        }
+        await applyInspection(result, hostId);
       }
       recordTransitions(readUnits());
       return true;
@@ -1161,6 +1184,7 @@ export default async function plugin(bb: BbPluginApi) {
         ]);
         return false;
       }
+      const began = ++githubReads;
       const result = await host.call(
         "scan",
         { roots },
@@ -1168,7 +1192,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
       writeUnits(result.units);
       recordTransitions(result.units);
-      const observedPrs = result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]);
+      const observedPrs = result.units.flatMap((unit) => unit.pr === null || refreshedAfter(unit.pr.url, began) !== undefined ? [] : [unit.pr]);
       const previous = previousAdvanceObservations(observedPrs);
       inventory.observe(observedPrs);
       advance.invalidate(observedPrs.map(withApprovalFeedback));
@@ -1709,10 +1733,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Canonical PR, checkout, ownership, and thread evidence for board and context readers. */
-  function readWorkContext(current: { groups: Board["groups"]; prInventory: { entries: Board["prInventory"]["entries"] } }, pattern: RegExp, includeRaw = false) {
+  function readWorkContext(current: { groups: Board["groups"]; prInventory: { entries: Board["prInventory"]["entries"] } }, pattern: RegExp, includeRaw = false,
+    /** Kept full reads, which place a PR the board no longer lists by the title and branch GitHub last showed. */
+    reads: readonly { prUrl: string; title: string; headRefName: string }[] = []) {
     const units = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units));
-    const remotes = current.prInventory.entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale,
-      tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.title }));
+    const remotes = [...current.prInventory.entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale,
+      tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: entry.pr.title })),
+      ...reads.map((facts) => ({ url: facts.prUrl, stale: true, tickets: ticketsIn(`${facts.title}\n${facts.headRefName}`, pattern), value: facts.title }))];
     const locals = [...units.flatMap((unit) => unit.pr ? [{ url: unit.pr.url, path: unit.path,
       tickets: [...ticketsIn(`${unit.pr.title}\n${unit.pr.headRefName ?? ""}`, pattern), ...(unit.ticket ? [unit.ticket] : [])],
       value: unit.pr.title }] : []), ...(includeRaw ? readUnits().flatMap((unit) => unit.pr ? [{ url: unit.pr.url,
@@ -4374,16 +4401,64 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const prFacts = createPrFactsStore(db);
+  /**
+   * Refresh one roster PR now, without waiting for the scan lock: rescan its
+   * checkouts, re-read the threads working in them, then read GitHub. The cheap
+   * read goes through the board's own stores when the board tracks the PR; the
+   * full read, which alone tells merged from closed, is kept in pr_facts. A
+   * failed read keeps the last success.
+   */
+  async function observePr(prUrl: string, paths: readonly string[]): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
+    const failed = (error: string) => {
+      prFacts.failed(prUrl, error, Date.now());
+      return { status: "failed" as const, error };
+    };
+    const hostId = (await bb.sdk.system.config()).primaryHostId;
+    if (hostId === null) return failed("No primary BB host is available to read GitHub.");
+    // During a full scan this does nothing; the scan rescans every checkout itself.
+    if (paths.length > 0) await rescanPaths([...paths]);
+    const checkouts = new Set(paths.map((path) => path.replace(/\/+$/u, "")));
+    for (const thread of [...threadFacts.values()]) if (thread.environmentPath !== null && checkouts.has(thread.environmentPath.replace(/\/+$/u, ""))) {
+      try { await onThreadChanged(await bb.sdk.threads.get({ threadId: thread.id }), false); }
+      catch (error) { bb.log.warn(`thread ${thread.id}: refresh failed: ${String(error).slice(0, 200)}`); }
+    }
+    try {
+      const began = ++githubReads;
+      const cheapAt = Date.now();
+      const cheap = await host.call("inspectPrs", { prUrls: [prUrl] }, { hostId, signal: disposal.signal, timeoutMs: 60_000 });
+      const read = cheap.entries[0]?.pr ?? (cheap.closed.length > 0 ? null : undefined);
+      if (read !== undefined) refreshes.set(prUrl, { began, pr: read });
+      if (knownPrUrl(prUrl) !== null) {
+        await applyInspection(cheap, hostId);
+        recordTransitions(readUnits());
+        bb.realtime.publish(BOARD_CHANGED, { scanning });
+      }
+      const full = await host.call("advanceInspect", { prUrl }, { hostId, signal: disposal.signal, timeoutMs: 60_000 });
+      if (!full.ok) return failed(full.error);
+      if (full.facts.approvalFeedback.status === "present" && full.facts.headOid) {
+        await carryEquivalentFeedback({ url: prUrl, headRefOid: full.facts.headOid, approvalFeedback: full.facts.approvalFeedback }, hostId);
+      }
+      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: read === undefined ? null : cheapSignature(read), cheapAt: read === undefined ? null : cheapAt });
+      return { status: "checked" };
+    } catch (error) {
+      return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
+    }
+  }
+
   const effortV2 = createEffortV2({
     efforts: effortStore,
     numbers: createEffortRosterStore(db, effortStore).numbers,
+    observe: observePr,
+    realtime: bb.realtime,
     async sources() {
       const current = await board();
-      const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
+      const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
       const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
       return {
         now: Date.now(), work,
         facts: (prUrl) => inventory.get(prUrl)?.pr ?? scanned.get(prUrl) ?? null,
+        full: prFacts.get,
         observation: (prUrl) => inventory.observation(prUrl),
         feedback: (prUrl) => approvalFeedback.get(prUrl),
         holds: prHolds.list(),

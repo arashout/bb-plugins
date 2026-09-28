@@ -1,17 +1,19 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
+import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
-import type { EffortRoster } from "./effort-roster.js";
+import type { EffortRoster, RosterRow } from "./effort-roster.js";
+import { cheapSignature } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { INKWELL_ROSTER } from "./inkwell-fixtures.js";
 import { createLinearSync } from "./linearsync.js";
 import { createRunStore } from "./runstore.js";
 import { dryRun, openReadOnly } from "./scripts/roster-dry-run.js";
-import plugin from "./server.js";
+import plugin, { type Board } from "./server.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
@@ -21,14 +23,21 @@ const temporary = () => {
   return directory;
 };
 
-async function setup(state: { units: RawUnit[]; inventory: typeof INKWELL_ROSTER.inventory } = INKWELL_ROSTER) {
+type HostCall = (method: string, input: any) => unknown;
+async function setup(state: { units: RawUnit[]; inventory: typeof INKWELL_ROSTER.inventory; threads?: ReturnType<typeof makeThreadResponse>[] } = INKWELL_ROSTER,
+  /** Answers a host call, or returns undefined for the default. */
+  host: { call?: HostCall } = {}) {
+  const threads = new Map((state.threads ?? []).map((thread) => [thread.id, thread]));
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/Users/reader/src" }, sdk: {
     system: { config: async () => ({ primaryHostId: "host-inkwell" }) as never },
     projects: { list: async () => [{ id: "project", name: "Inkwell", sources: [{ hostId: "host-inkwell", path: "/Users/reader/src" }] }] as never },
-    threads: { list: async () => [] as never, getPluginMetadata: async () => ({}) as never, events: { list: async () => [] },
-      interactions: { list: async () => [] as never } },
-  }, experimental_callHostRpc: ({ method }) => {
-    if (method === "scan" || method === "inspectPaths") return { units: state.units, warnings: [] };
+    threads: { list: async () => [...threads.values()] as never, get: async ({ threadId }: { threadId: string }) => threads.get(threadId) as never,
+      getPluginMetadata: async () => ({}) as never, events: { list: async () => [] }, interactions: { list: async () => [] as never } },
+  }, experimental_callHostRpc: ({ method, input }) => {
+    const answer = host.call?.(method, input);
+    if (answer !== undefined) return answer as never;
+    if (method === "scan") return { units: state.units, warnings: [] };
+    if (method === "inspectPaths") return { units: state.units.filter((unit) => (input as { paths: string[] }).paths.includes(unit.path)), warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: state.inventory, discoveryComplete: true, complete: true,
       repositories: [...new Set(state.inventory.map((entry) => entry.repo))].map((repo) => ({ repo, complete: true })), warnings: [] };
     if (method === "linkbacks") return { found: [], warnings: [] };
@@ -45,7 +54,9 @@ async function setup(state: { units: RawUnit[]; inventory: typeof INKWELL_ROSTER
     .store(INKWELL_ROSTER.linear.map(({ ticket, title, url }) => ({ ticket, detail: { identifier: ticket, title, url, description: null, state: null,
       project: null, parent: null, labels: [], updatedAt: null, source: "key" } })), "key");
   const roster = async (effortId: string) => await harness.callRpc("effort_roster_get", { effortId }) as EffortRoster;
-  return { bb, harness, db, store, efforts, roster };
+  const reconcile = async (effortId: string, prUrl: string) =>
+    await harness.callRpc("effort_reconcile", { effortId, prUrl }) as { status: "checked" | "failed"; error?: string; row: RosterRow };
+  return { bb, harness, db, store, efforts, roster, reconcile, threads };
 }
 const counts = (roster: EffortRoster) => {
   const open = roster.rows.filter((row) => row.state !== "done");
@@ -207,6 +218,21 @@ describe("roster dry-run script", () => {
     expect(run.out.join("")).toMatch(/prs=31 done=0 tickets=21 checkouts=30 ticketsWithoutPrs=1/u);
   });
 
+  it("reads a copy of the installed database, which predates roster numbers and full reads", async () => {
+    const { served, directory, path } = await copy();
+    const installed = new Database(path);
+    installed.exec(`DROP TABLE pr_facts; DROP TABLE effort_roster_snapshots; DROP TABLE effort_roster_numbers`);
+    installed.close();
+    const out = join(directory, "installed.json");
+    expect(await dryRun(["--db", path, "--out", out], io().io)).toBe(0);
+    const written = JSON.parse(readFileSync(out, "utf8")) as { rosters: (EffortRoster & { counts: Record<string, number> })[] };
+    for (const roster of served) {
+      const offline = written.rosters.find((item) => item.effort.id === roster.effort.id)!;
+      expect(offline.rows.every((row) => row.provisional)).toBe(true);
+      expect(offline.counts).toMatchObject(counts(roster));
+    }
+  });
+
   it("refuses an --out inside a git worktree before reading anything", async () => {
     const directory = temporary();
     mkdirSync(join(directory, "repository", ".git"), { recursive: true });
@@ -249,5 +275,173 @@ describe("roster dry-run script", () => {
     const row = seen.rosters.flatMap((roster: EffortRoster) => roster.rows).find((item: { target: string }) => item.target === catalog.target);
     expect(row).toMatchObject({ state: "doing", owner: "thread" });
     expect(row).not.toHaveProperty("threadStatus");
+  });
+});
+
+describe("roster refresh", () => {
+  const catalog96 = "https://github.com/inkwell/catalog/pull/96";
+  const tracked = INKWELL_ROSTER.inventory.find((entry) => entry.pr.url === catalog96)!;
+  const head = "c".repeat(40);
+  /** GitHub after the PR was approved on a new head with green checks. */
+  const approved = { ...tracked.pr, headRefOid: head, reviewDecision: "APPROVED", checkConclusions: ["SUCCESS"],
+    latestReviews: [{ login: "folio-editor", state: "APPROVED" }], unresolvedReviewThreads: 0, resolvedReviewThreads: 2 };
+  const full = (pr: typeof approved, patch: Record<string, unknown> = {}) => ({ ok: true, facts: { prUrl: pr.url, number: pr.number, title: pr.title,
+    repo: "inkwell/catalog", headRefName: pr.headRefName!, baseRefName: "main", headOid: pr.headRefOid!, baseOid: "b".repeat(40), state: "OPEN",
+    isDraft: false, isCrossRepository: false, reviewDecision: pr.reviewDecision, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE",
+    needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, ...patch } });
+  const github = (answers: { cheap?: () => unknown; full?: () => unknown }): { call: HostCall } => ({ call: (method) =>
+    method === "inspectPrs" ? answers.cheap?.() : method === "advanceInspect" ? answers.full?.() : undefined });
+  const approvedGithub = github({ cheap: () => ({ entries: [{ repo: tracked.repo, pr: approved }], closed: [], failed: [], warnings: [] }), full: () => full(approved) });
+  const mergedGithub = github({ cheap: () => ({ entries: [], closed: [catalog96], failed: [], warnings: [] }),
+    full: () => full(approved, { state: "MERGED", headOid: "", baseOid: "", readiness: "merged" }) });
+  /** What the refresh finds, and what every GitHub read that begins after it sees. */
+  const outcomes = {
+    approved: { github: approvedGithub, row: { state: "not-in-instruction", head, checks: "passed", reviewDecision: "APPROVED", cause: "merge-candidate" },
+      inventory: INKWELL_ROSTER.inventory.map((entry) => entry.pr.url === catalog96 ? { ...entry, pr: approved } : entry), boardHead: head },
+    merged: { github: mergedGithub, row: { state: "done", cause: "merged" }, inventory: INKWELL_ROSTER.inventory.filter((entry) => entry.pr.url !== catalog96),
+      boardHead: undefined },
+  };
+
+  it.each([["authoredPrs", "approved"], ["authoredPrs", "merged"], ["scan", "approved"], ["scan", "merged"]] as const)(
+    "returns fresh facts while a full scan's %s read is in flight, and that older read never overwrites them (%s)", async (blocked, outcome) => {
+      const { github: answers, row, inventory, boardHead } = outcomes[outcome];
+      let release = () => {};
+      let scanning = false;
+      let refreshed = false;
+      const env = await setup(INKWELL_ROSTER, { call: (method, input) => {
+        // The blocked read began before the refresh, so it returns GitHub as it was.
+        if (method === blocked && scanning && !refreshed) return new Promise((resolve) => { release = () => resolve(method === "scan" ? { units: INKWELL_ROSTER.units, warnings: [] }
+          : { owners: ["inkwell"], entries: INKWELL_ROSTER.inventory, discoveryComplete: true, complete: true, repositories: [], warnings: [] }); });
+        if (method === "authoredPrs" && refreshed) return { owners: ["inkwell"], entries: inventory, discoveryComplete: true, complete: true, repositories: [], warnings: [] };
+        return answers.call(method, input);
+      } });
+      scanning = true;
+      const scan = env.harness.runCli(["refresh"]);
+      await vi.waitFor(() => expect(env.harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === blocked)).toHaveLength(2));
+      const catalog = env.efforts["Catalog follow-ups"]!.id;
+      expect(await env.reconcile(catalog, catalog96)).toMatchObject({ status: "checked", row });
+      refreshed = true;
+      release();
+      await scan;
+      // The scan landed after the refresh; the roster and the board keep what the refresh read.
+      expect((await env.roster(catalog)).rows.find((item) => item.target === catalog96)).toMatchObject(row);
+      expect((await env.harness.callRpc("board_get", null) as Board).prInventory.entries.find((entry) => entry.pr.url === catalog96)?.pr.headRefOid).toBe(boardHead);
+    });
+
+  it("leaves the board's inventory and the roster row on the same head, checks, and review state", async () => {
+    const env = await setup(INKWELL_ROSTER, approvedGithub);
+    const { row } = await env.reconcile(env.efforts["Catalog follow-ups"]!.id, catalog96);
+    const entry = (await env.harness.callRpc("board_get", null) as Board).prInventory.entries.find((item) => item.pr.url === catalog96)!;
+    expect([row.head, row.reviewDecision, row.checks]).toEqual([entry.pr.headRefOid, entry.pr.reviewDecision, "passed"]);
+    expect(entry.pr.checkConclusions).toEqual(["SUCCESS"]);
+    // Only the full read proves every review thread and the stack parent, so it alone can name a merge candidate.
+    expect(row).toMatchObject({ cause: "merge-candidate", gates: { "threads-resolved": true, "parent-merged": true } });
+  });
+
+  it("refreshes a teammate's PR that no board store tracks, keeping only its full facts and signature", async () => {
+    const teammate = { ...approved, number: 950, url: "https://github.com/inkwell/quill/pull/950", title: "ABC-950 Reserve reading nooks",
+      headRefName: "abc-950-reading-nooks" };
+    const env = await setup(INKWELL_ROSTER, github({ cheap: () => ({ entries: [{ repo: "inkwell/quill", pr: teammate }], closed: [], failed: [], warnings: [] }),
+      full: () => full(teammate, { repo: "inkwell/quill" }) }));
+    const nooks = env.store.establish({ sourceKey: "nooks", name: "Reading nooks", goal: "", projectId: "project", coordinatorState: "none",
+      members: { tickets: [], prUrls: [teammate.url] } });
+    expect((await env.roster(nooks.id)).rows[0]).toMatchObject({ cause: "source-unavailable", label: "Not observed yet", head: null });
+    expect((await env.reconcile(nooks.id, teammate.url)).row).toMatchObject({ head, reviewDecision: "APPROVED", cause: "merge-candidate" });
+    const stored = env.db.prepare(`SELECT body, signature, full_at AS fullAt FROM pr_facts WHERE pr_url = ?`).get(teammate.url) as
+      { body: string; signature: string; fullAt: number };
+    expect(JSON.parse(stored.body)).toEqual(full(teammate, { repo: "inkwell/quill" }).facts);
+    expect(stored.signature).toBe(cheapSignature(teammate));
+    for (const table of ["authored_prs", "pr_observations"]) expect(env.db.prepare(`SELECT count(*) AS count FROM ${table} WHERE url = ?`).get(teammate.url)).toEqual({ count: 0 });
+  });
+
+  it("resolves a merged PR through the full read, where the cheap read only says it left the open list", async () => {
+    const env = await setup(INKWELL_ROSTER, mergedGithub);
+    const { row } = await env.reconcile(env.efforts["Catalog follow-ups"]!.id, catalog96);
+    expect(row).toMatchObject({ state: "done", cause: "merged" });
+    expect((await env.harness.callRpc("board_get", null) as Board).prInventory.entries.map((entry) => entry.pr.url)).not.toContain(catalog96);
+  });
+
+  it("keeps a member without a checkout numbered and linked once a refresh finds it merged, whether a ticket or the effort lists it", async () => {
+    // Vault owns its described PR through the title's ticket; Catalog lists catalog/530 itself. Neither has a checkout,
+    // so once GitHub says merged no board store holds either one.
+    const members = [["Vault audits", INKWELL_ROSTER.described[0]!], ["Catalog follow-ups", "https://github.com/inkwell/catalog/pull/530"]] as const;
+    const pulls = new Map(INKWELL_ROSTER.inventory.map(({ pr }) => [pr.url, pr]));
+    const env = await setup(INKWELL_ROSTER, { call: (method, input) => {
+      if (method === "inspectPrs") return { entries: [], closed: input.prUrls, failed: [], warnings: [] };
+      const pr = method === "advanceInspect" ? pulls.get(input.prUrl)! : undefined;
+      return pr && full({ ...approved, url: pr.url, number: pr.number, title: pr.title, headRefName: pr.headRefName }, { state: "MERGED", readiness: "merged" });
+    } });
+    for (const [name, url] of members) {
+      const effort = env.efforts[name]!.id;
+      const before = (await env.roster(effort)).rows;
+      const row = before.find((item) => item.target === url)!;
+      expect((await env.reconcile(effort, url)).row).toMatchObject({ n: row.n, state: "done", cause: "merged", tickets: row.tickets });
+      expect((await env.roster(effort)).rows.map((item) => [item.n, item.target])).toEqual(before.map((item) => [item.n, item.target]));
+    }
+    // The dry run places them from a copy the same way.
+    const directory = temporary();
+    await env.db.backup(join(directory, "data.db"));
+    const out = join(directory, "rosters.json");
+    expect(await dryRun(["--db", join(directory, "data.db"), "--effort", env.efforts["Vault audits"]!.id, "--out", out], { stdout: () => {}, stderr: () => {} })).toBe(0);
+    expect((JSON.parse(readFileSync(out, "utf8")) as { rosters: EffortRoster[] }).rosters[0]!.rows.find((item) => item.target === members[0][1]))
+      .toMatchObject({ state: "done", cause: "merged" });
+  });
+
+  it("says why a refreshed PR left the roster instead of failing the reply's own schema", async () => {
+    // The ticket-owned PR left the open list and the full read failed, so nothing places it any more.
+    const described = INKWELL_ROSTER.described[0]!;
+    const env = await setup(INKWELL_ROSTER, github({ cheap: () => ({ entries: [], closed: [described], failed: [], warnings: [] }),
+      full: () => ({ ok: false, error: "GitHub is unavailable." }) }));
+    await expect(env.reconcile(env.efforts["Vault audits"]!.id, described)).rejects.toThrow("That PR is no longer on this effort's roster: GitHub is unavailable.");
+  });
+
+  it("rejects a PR that is not on the effort's roster without reading GitHub", async () => {
+    const env = await setup(INKWELL_ROSTER, approvedGithub);
+    const catalog = env.efforts["Catalog follow-ups"]!.id;
+    await expect(env.reconcile(catalog, INKWELL_ROSTER.future)).rejects.toThrow("not on this effort's roster");
+    await expect(env.reconcile(catalog, INKWELL_ROSTER.efforts[2]!.prUrls[0]!)).rejects.toThrow("not on this effort's roster");
+    expect(env.harness.inspection.experimental_hostRpcCalls.filter((call) => ["inspectPrs", "advanceInspect"].includes(call.method))).toEqual([]);
+  });
+
+  it("keeps the last successful read and records the failure", async () => {
+    let down = false;
+    const env = await setup(INKWELL_ROSTER, { call: (method, input) => {
+      if (down && ["inspectPaths", "inspectPrs"].includes(method)) throw new Error("GitHub is unavailable");
+      return approvedGithub.call(method, input);
+    } });
+    const catalog = env.efforts["Catalog follow-ups"]!.id;
+    const first = await env.reconcile(catalog, catalog96);
+    down = true;
+    const second = await env.reconcile(catalog, catalog96);
+    expect(second).toMatchObject({ status: "failed", error: expect.stringContaining("GitHub is unavailable"),
+      row: { head, cause: "merge-candidate", failedAt: expect.any(Number) } });
+    expect(second.row.observedAt).toBe(first.row.observedAt);
+    expect(env.db.prepare(`SELECT error IS NOT NULL AS failed, full_at AS fullAt FROM pr_facts WHERE pr_url = ?`).get(catalog96))
+      .toEqual({ failed: 1, fullAt: first.row.observedAt });
+  });
+
+  it("reads only that PR, shares one read between concurrent refreshes, and republishes only its row", async () => {
+    const env = await setup(INKWELL_ROSTER, approvedGithub);
+    const catalog = env.efforts["Catalog follow-ups"]!.id;
+    const checkouts = (await env.roster(catalog)).rows.find((row) => row.target === catalog96)!.checkouts;
+    const calls = env.harness.inspection.experimental_hostRpcCalls;
+    const before = calls.length;
+    await Promise.all([env.reconcile(catalog, catalog96), env.reconcile(catalog, catalog96)]);
+    expect(calls.slice(before).map((call) => [call.method, call.input])).toEqual([
+      ["inspectPaths", { paths: checkouts }], ["inspectPrs", { prUrls: [catalog96] }], ["advanceInspect", { prUrl: catalog96 }]]);
+    expect(env.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "effort-roster-changed").map((signal) => signal.payload))
+      .toEqual([{ effortId: catalog, prUrl: catalog96 }, { effortId: catalog, prUrl: catalog96 }]);
+  });
+
+  it("re-reads the threads in the row's checkout, so a missed idle event cannot leave the row Doing", async () => {
+    const path = INKWELL_ROSTER.units.find((unit) => unit.pr?.url === catalog96)!.path;
+    const worker = { ...makeThreadResponse({ id: "thr_catalog_worker", status: "active" }), environmentPath: path };
+    const env = await setup({ ...INKWELL_ROSTER, threads: [worker] }, approvedGithub);
+    const catalog = env.efforts["Catalog follow-ups"]!.id;
+    expect((await env.roster(catalog)).rows.find((row) => row.target === catalog96)).toMatchObject({ state: "doing", owner: "thread" });
+    env.threads.set(worker.id, { ...worker, status: "idle" });
+    expect((await env.reconcile(catalog, catalog96)).row).toMatchObject({ state: "not-in-instruction", cause: "merge-candidate" });
+    for (const method of ["threads.spawn", "threads.send", "threads.update"]) expect(env.harness.inspection.sdk.callsTo(method)).toEqual([]);
   });
 });

@@ -13,7 +13,7 @@ import { advanceBatchSchema } from "../bulk-advance.js";
 import { rawUnitSchema } from "../contract.js";
 import { createDispatchStore } from "../dispatch.js";
 import { effortRoster, type RosterSources } from "../effort-roster.js";
-import { createEffortRosterStore } from "../effort-roster-store.js";
+import { createEffortRosterStore, createPrFactsStore } from "../effort-roster-store.js";
 import { createEffortStore, repoControllerSchema } from "../effort-store.js";
 import { createInventoryStore } from "../inventory-store.js";
 import { currentLegacyAttempts } from "../legacy-history.js";
@@ -103,8 +103,10 @@ export async function dryRun(argv: string[], io: Io): Promise<number> {
     // Ticket prefixes learned from Linear live in plugin storage, not data.db.
     const find = ticketFinder(pattern, units, { linkbacks });
     const entries = inventory.read().entries;
+    const prFacts = createPrFactsStore(db);
     const work = workContextIndex({ links: [], ownerOf: (kind, id) => efforts.owner(kind, id),
-      remotes: entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale, tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: null })),
+      remotes: [...entries.map((entry) => ({ url: entry.pr.url, stale: entry.stale, tickets: ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern), value: null })),
+        ...prFacts.reads().map((facts) => ({ url: facts.prUrl, stale: true, tickets: ticketsIn(`${facts.title}\n${facts.headRefName}`, pattern), value: null }))],
       locals: units.flatMap((unit) => {
         const ticket = find(unit)?.ticket;
         return unit.pr ? [{ url: unit.pr.url, path: unit.path, value: null,
@@ -117,6 +119,7 @@ export async function dryRun(argv: string[], io: Io): Promise<number> {
     const sources: RosterSources = {
       now: Date.now(), work,
       facts: (prUrl) => inventory.get(prUrl)?.pr ?? scanned.get(prUrl) ?? null,
+      full: prFacts.get,
       observation: (prUrl) => inventory.observation(prUrl),
       feedback: (prUrl) => feedback.get(prUrl),
       holds: createPrHoldStore(db).list(),

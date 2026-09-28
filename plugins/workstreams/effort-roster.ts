@@ -9,6 +9,7 @@ import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
 import type { DispatchAttempt } from "./dispatch.js";
+import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
 import type { EstablishedEffort } from "./effort-store.js";
 import { prTarget } from "./ghactions.js";
 import type { PrObservation } from "./inventory-store.js";
@@ -25,7 +26,7 @@ const ticketSchema = z.object({ id: z.string(), title: z.string().nullable(), ur
 export const rosterRowSchema = z.object({
   n: z.number(), provisional: z.boolean(), target: z.string(), repo: z.string(), number: z.number(), title: z.string(),
   state: z.enum(["doing", "issue", "done", "not-in-instruction"]), cause: z.string(), label: z.string(),
-  owner: z.enum(["you", "ci", "reviewer", "github", "legacy-job", "run", "dispatch", "thread"]).nullable(),
+  owner: z.enum(["you", "ci", "reviewer", "parent", "github", "legacy-job", "run", "dispatch", "thread"]).nullable(),
   hold: prHoldSchema.nullable(), reviewers: z.array(z.object({ login: z.string(), state: z.string() })), requested: z.array(z.string()),
   head: z.string().nullable(), checks: z.enum(["passed", "pending", "failed", "unknown"]).nullable(), reviewDecision: z.string().nullable(),
   gates: z.record(z.enum(GATE_IDS), z.boolean().nullable()).nullable(),
@@ -59,6 +60,8 @@ export type RosterSources = {
   work: { items: ReadonlyMap<string, { paths: readonly string[]; tickets: readonly string[] }>; ownerForPr(prUrl: string): { id: string } | null };
   /** The freshest cheap facts: the authored-PR inventory, else a scanned checkout. */
   facts(prUrl: string): Pr | null;
+  /** The last full read a refresh kept. */
+  full(prUrl: string): StoredPrFacts | null;
   observation(prUrl: string): PrObservation | null;
   feedback(prUrl: string): ApprovalFeedbackRecord | null;
   holds: PrHolds;
@@ -84,13 +87,9 @@ export function rosterTargets(effort: EstablishedEffort, work: RosterSources["wo
   return [...targets].sort(byRepoAndNumber);
 }
 
-/**
- * Gates from the board's cheap read. The cheap read never proves what only a
- * full read knows (fork, stack parent, every review-thread page), and it is never
- * fresh, so a cheap read alone can name a need but never a merge candidate.
- */
-function cheapGates(pr: Pr, held: boolean, feedback: ApprovalFeedbackRecord | null, now: number): Gates {
-  const facts: AdvanceFacts = {
+/** The board's cheap read in full-read shape. */
+function cheapFacts(pr: Pr): AdvanceFacts {
+  return {
     prUrl: pr.url, number: pr.number, title: pr.title, repo: prTarget(pr.url)?.slug ?? "",
     headRefName: pr.headRefName ?? "", baseRefName: pr.baseRefName ?? "", headOid: pr.headRefOid ?? "", baseOid: pr.baseRefOid ?? "",
     state: pr.state === "MERGED" || pr.state === "CLOSED" ? pr.state : "OPEN", isDraft: pr.isDraft, isCrossRepository: false,
@@ -101,6 +100,14 @@ function cheapGates(pr: Pr, held: boolean, feedback: ApprovalFeedbackRecord | nu
     basePrNumber: null, reviewFollowupPosted: pr.reviewFollowupPosted,
     approvalFeedback: pr.approvalFeedback ?? { status: "unknown", fingerprint: null, sourceIds: [] },
   };
+}
+
+/**
+ * Gates from the board's cheap read. It never proves what only a full read
+ * knows (fork, stack parent, every review-thread page), and it is never fresh,
+ * so a cheap read alone can name a need but never a merge candidate.
+ */
+function cheapGates(facts: AdvanceFacts, pr: Pr, held: boolean, feedback: ApprovalFeedbackRecord | null, now: number): Gates {
   const gates = prGates({ facts, observedAt: -Infinity, now, held, feedback, reviewers: pr });
   const openThreads = pr.unresolvedReviewThreads;
   return { ...gates, "not-fork": null, "parent-merged": null,
@@ -111,19 +118,20 @@ function cheapGates(pr: Pr, held: boolean, feedback: ApprovalFeedbackRecord | nu
 const CANDIDATE: GateId[] = ["checks-green", "threads-resolved", "feedback-verified", "changes-addressed", "approved", "not-draft", "parent-merged", "merge-clean"];
 
 /** What the observed gates ask for next, in decide()'s order: work before waits, waits before readiness. */
-function observedNeed(gates: Gates, pr: Pick<Pr, "mergeStateStatus" | "reviewRequests">): Omit<RosterNeed, "state"> {
+function observedNeed(gates: Gates, facts: Pick<AdvanceFacts, "mergeStateStatus" | "basePrNumber">, requested: readonly string[]): Omit<RosterNeed, "state"> {
   if (gates["no-conflict"] === false || gates["base-current"] === false) return { cause: "branch", label: "Branch needs updating", owner: "you" };
   if (gates["checks-settled"] === true && gates["checks-green"] === false) return { cause: "checks-failed", label: "Checks failed", owner: "you" };
   if (gates["threads-resolved"] === false || gates["feedback-verified"] === false || gates["changes-addressed"] === false)
     return { cause: "review-feedback", label: "Review feedback open", owner: "you" };
   if (gates["checks-settled"] === false) return { cause: "ci", label: "Checks running", owner: "ci" };
+  if (gates["parent-merged"] === false) return { cause: "parent", label: `Waiting for parent #${facts.basePrNumber}`, owner: "parent" };
   if (gates["not-draft"] === false) return { cause: "draft", label: "Draft", owner: "you" };
-  if (gates.approved === false) return pr.reviewRequests.length > 0
-    ? { cause: "review", label: `Waiting for review from ${pr.reviewRequests.map((login) => `@${login}`).join(", ")}`, owner: "reviewer" }
-    : gates["review-requested"] ? { cause: "review", label: "Waiting for approval", owner: "reviewer" }
-    : { cause: "review", label: "No review requested", owner: "you" };
+  if (gates.approved === false) return requested.length > 0
+    ? { cause: "review", label: `Waiting for review from ${requested.map((login) => `@${login}`).join(", ")}`, owner: "reviewer" }
+    : gates["review-requested"] === false ? { cause: "review", label: "No review requested", owner: "you" }
+    : { cause: "review", label: "Waiting for approval", owner: "reviewer" };
   if (gates["merge-clean"] === false) {
-    const cause = mergeWait(pr);
+    const cause = mergeWait(facts);
     return { cause, label: cause === "merge-blocked" ? "Merge blocked by branch protection" : "Waiting for merge requirements", owner: "github" };
   }
   const unknown = CANDIDATE.filter((gate) => gates[gate] === null);
@@ -132,6 +140,7 @@ function observedNeed(gates: Gates, pr: Pick<Pr, "mergeStateStatus" | "reviewReq
 }
 
 const normalizePath = (path: string) => path.replace(/\/+$/u, "");
+const latest = (...times: (number | null | undefined)[]) => times.reduce<number | null>((max, time) => time == null ? max : Math.max(max ?? time, time), null);
 
 /** The writer that makes a row Doing: a live legacy worker or verification, a running action, a dispatch, or an active thread in its checkout. */
 function writer(target: string, checkouts: readonly string[], legacy: LegacyAttempt | null, sources: RosterSources): Omit<RosterNeed, "state"> | null {
@@ -152,29 +161,36 @@ function rosterRow(target: string, number: { n: number; provisional: boolean }, 
   const hold = prHoldFor(target, sources.holds);
   const legacy = sources.legacy.get(target) ?? null;
   const observation = sources.observation(target);
-  const gates = pr ? cheapGates(pr, hold !== null, sources.feedback(target), sources.now) : null;
+  const cheapAt = observation?.checkedAt ? Date.parse(observation.checkedAt) : null;
+  const stored = sources.full(target);
+  // A full read stands until a later cheap read shows the PR changed; a PR gone from the board reads as no longer open.
+  const full = stored?.facts && stored.fullAt !== null && (cheapAt === null || stored.fullAt >= cheapAt || cheapSignature(pr) === stored.signature)
+    ? { facts: stored.facts, at: stored.fullAt } : null;
+  const facts = full?.facts ?? (pr && cheapFacts(pr));
+  const feedback = sources.feedback(target);
+  const gates = full ? prGates({ facts: full.facts, observedAt: full.at, now: sources.now, held: hold !== null, feedback, reviewers: pr })
+    : pr && facts ? cheapGates(facts, pr, hold !== null, feedback, sources.now) : null;
   const need = ((): RosterNeed => {
-    if (pr && pr.state !== "OPEN") return { state: "done", cause: pr.state === "MERGED" ? "merged" : "closed", label: pr.state === "MERGED" ? "Merged" : "Closed", owner: null };
+    if (facts && facts.state !== "OPEN") return { state: "done", cause: facts.state === "MERGED" ? "merged" : "closed", label: facts.state === "MERGED" ? "Merged" : "Closed", owner: null };
     const active = writer(target, checkouts, legacy, sources);
     if (active) return { state: "doing", ...active };
     if (legacy?.cause === "uncertain") return { state: "issue", cause: "legacy-uncertain", label: "Legacy launch outcome uncertain; recheck it", owner: "legacy-job" };
     const outside = (observed: Omit<RosterNeed, "state">): RosterNeed => ({ state: "not-in-instruction", ...observed });
     if (hold) return outside({ cause: "hold", label: hold.reason ? `On hold: ${hold.reason}` : "On hold", owner: "you" });
     if (legacy?.cause === "queued") return outside({ cause: "capacity", label: "Queued in legacy Advance", owner: "legacy-job" });
-    if (!pr || !gates) return outside(observation?.failedAt ? { cause: "source-unavailable", label: "GitHub read failed", owner: "github" }
+    if (!facts || !gates) return outside(observation?.failedAt || stored?.failedAt ? { cause: "source-unavailable", label: "GitHub read failed", owner: "github" }
       // The board read it and then dropped it: it merged or closed, or its only checkout went away.
       : observation?.checkedAt ? { cause: "observe", label: "No longer on the board; refresh to read it", owner: null }
       : { cause: "source-unavailable", label: "Not observed yet", owner: "github" });
-    return outside(observedNeed(gates, pr));
+    return outside(observedNeed(gates, facts, pr?.reviewRequests ?? []));
   })();
   const tickets = sources.tickets(item?.tickets ?? []);
   const parsed = prTarget(target);
   return {
     ...need, n: number.n, provisional: number.provisional, target, repo: parsed?.slug ?? "", number: parsed?.number ?? 0,
-    title: pr ? displayTitle(pr.title) : "", hold, reviewers: pr?.latestReviews ?? [], requested: pr?.reviewRequests ?? [],
-    head: pr?.headRefOid ?? null, checks: gates === null ? null : gates["checks-green"] ? "passed" : gates["checks-settled"] ? "failed" : "pending",
-    reviewDecision: pr?.reviewDecision ?? null, gates,
-    observedAt: observation?.checkedAt ? Date.parse(observation.checkedAt) : null, failedAt: observation?.failedAt ? Date.parse(observation.failedAt) : null,
+    title: facts ? displayTitle(facts.title) : "", hold, reviewers: pr?.latestReviews ?? [], requested: pr?.reviewRequests ?? [],
+    head: facts?.headOid || null, checks: facts?.checks ?? null, reviewDecision: facts?.reviewDecision ?? null, gates,
+    observedAt: latest(cheapAt, full?.at), failedAt: latest(observation?.failedAt ? Date.parse(observation.failedAt) : null, stored?.failedAt),
     tickets: (item?.tickets ?? []).map((id) => ({ id, title: tickets.get(id)?.title ?? null, url: tickets.get(id)?.url ?? null })),
     checkouts, legacy: legacy && { batchId: legacy.batchId, jobId: legacy.job.id, cause: legacy.cause, label: legacy.label, jobs: legacy.jobs },
   };
