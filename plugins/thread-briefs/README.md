@@ -9,6 +9,9 @@ every thread a short, durable **brief**, generated outside the working chat:
 - **nextStep** — the single most concrete next action, or empty only when
   nothing is outstanding anywhere: an open PR, a patch carried on a fork, or a
   workaround still in place all count as outstanding
+- **nextStepActor** — who has to take it: `me`, `agent`, or `other`. The one
+  judgement the status needs that the prose cannot supply, since "test it and
+  tell me" and "keep going" read alike
 - **blockedOn** — who or what it is waiting on
 - **constraints** — facts learned in the thread that would break a naive re-plan
 

@@ -259,6 +259,7 @@ export default async function plugin(bb: BbPluginApi) {
         goal: summary.goal,
         currentState: summary.currentState,
         nextStep: summary.nextStep,
+        nextStepActor: summary.nextStepActor,
         blockedOn: summary.blockedOn,
         constraints: summary.constraints,
       },

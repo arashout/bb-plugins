@@ -1,7 +1,9 @@
 import {
   BRIEF_STAGES,
+  nextStepActorSchema,
   summaryResultSchema,
   type BriefStage,
+  type NextStepActor,
   type SummaryResult,
 } from "./contract.js";
 
@@ -12,12 +14,15 @@ Return ONLY a JSON object with exactly these keys:
   "goal"          One line: what this thread is actually trying to achieve. Not the opening prompt restated — the underlying objective, as it stands now.
   "currentState"  What exists now, including half-finished work. Name the concrete artifacts (files, branches, PRs) where the transcript names them.
   "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan.
+  "nextStepActor" Who has to take that next step. One of: "me" if only the user can (try it and report back, decide between options, reply to someone, merge, grant access), "agent" if the agent could carry on unprompted, "other" if it depends on someone or something outside this thread (a review, a colleague, an upstream fix, a rollout).
   "blockedOn"     Who or what the thread is waiting on. Empty string if nothing is blocking it.
   "constraints"   Facts learned during the thread that would break a naive re-plan: API limits, rejected approaches, assumptions proven wrong. Empty string if none.
   "stage"         One of: "discovery", "planning", "implementation", "review".
 
 Rules:
-- Every field is a string. Keep each to one or two lines.
+- Every field is a string except "nextStepActor", which is one of the three words above. Keep each to one or two lines.
+- Omit "nextStepActor" entirely when "nextStep" is the empty string — there is no actor for a step that does not exist.
+- When "blockedOn" is non-empty, "nextStepActor" is "other".
 - NEVER invent a next step. If the work described is finished, "nextStep" MUST be the empty string. A brief that invents work is worse than one that says the thread is done.
 - Finished means nothing is left outstanding anywhere, not just in the chat. Work the transcript hands off and leaves pending is NOT finished: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround still in place, a build or rollout not yet done, a question put to someone outside the thread. In those cases "nextStep" is the follow-up that actually closes it out and "blockedOn" names who or what it is waiting on. This is not inventing work — the transcript already named it.
 - Use empty strings, not "none" / "N/A" / "nothing".
@@ -96,6 +101,24 @@ function normalizeField(value: unknown): string {
   return EMPTY_SYNONYMS.has(trimmed.toLowerCase()) ? "" : trimmed;
 }
 
+/**
+ * The actor, or `undefined` when there is no usable one: the model omitted it,
+ * sent a word we do not recognise, or named an actor for a next step that does
+ * not exist.
+ *
+ * Undefined is a first-class value rather than a failure — every brief written
+ * before this field existed has none either — so an unrecognised actor drops
+ * back to the actor-free derivation instead of costing the whole brief.
+ */
+function normalizeActor(
+  value: unknown,
+  nextStep: string,
+): NextStepActor | undefined {
+  if (nextStep === "" || typeof value !== "string") return undefined;
+  const parsed = nextStepActorSchema.safeParse(value.trim().toLowerCase());
+  return parsed.success ? parsed.data : undefined;
+}
+
 export function parseSummary(
   reply: string,
   fixedStage: BriefStage | null,
@@ -115,10 +138,13 @@ export function parseSummary(
         // implementation is the safest neutral guess.
         "implementation");
 
+  const nextStep = normalizeField(record.nextStep);
+
   return summaryResultSchema.parse({
     goal: normalizeField(record.goal),
     currentState: normalizeField(record.currentState),
-    nextStep: normalizeField(record.nextStep),
+    nextStep,
+    nextStepActor: normalizeActor(record.nextStepActor, nextStep),
     blockedOn: normalizeField(record.blockedOn),
     constraints: normalizeField(record.constraints),
     stage,

@@ -74,6 +74,37 @@ describe("parseSummary", () => {
     expect(parsed.currentState).toBe("");
     expect(parsed.nextStep).toBe("");
   });
+
+  it("keeps a recognised actor, case and spacing aside", () => {
+    expect(
+      parseSummary(reply({ ...full, nextStepActor: "  Other " }), null)
+        .nextStepActor,
+    ).toBe("other");
+    expect(
+      parseSummary(reply({ ...full, nextStepActor: "me" }), null).nextStepActor,
+    ).toBe("me");
+  });
+
+  it("drops an actor it does not recognise rather than failing the brief", () => {
+    // An unknown actor must fall back to the actor-free derivation, not cost
+    // the whole summary — the same bar as an unrecognised stage.
+    const parsed = parseSummary(reply({ ...full, nextStepActor: "dylan" }), null);
+    expect(parsed.nextStepActor).toBeUndefined();
+    expect(parsed.goal).toBe(full.goal);
+  });
+
+  it("drops an actor named for a next step that does not exist", () => {
+    expect(
+      parseSummary(
+        reply({ ...full, nextStep: "", nextStepActor: "agent" }),
+        null,
+      ).nextStepActor,
+    ).toBeUndefined();
+  });
+
+  it("leaves the actor absent when the model omits it", () => {
+    expect(parseSummary(reply(full), null).nextStepActor).toBeUndefined();
+  });
 });
 
 describe("chatCompletionsUrl", () => {

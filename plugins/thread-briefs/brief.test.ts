@@ -66,6 +66,62 @@ describe("deriveStatus", () => {
   });
 });
 
+describe("deriveStatus with an actor", () => {
+  it("treats an external actor as blocked even with no blockedOn text", () => {
+    expect(
+      deriveStatus({
+        nextStep: "Land the upstream PR",
+        blockedOn: "",
+        nextStepActor: "other",
+      }),
+    ).toBe("waiting-on-other");
+  });
+
+  it("reports waiting-on-me for a step only the user can take", () => {
+    expect(
+      deriveStatus({
+        nextStep: "Try it and say whether the glyph looks right",
+        blockedOn: "",
+        nextStepActor: "me",
+      }),
+    ).toBe("waiting-on-me");
+  });
+
+  it("reports waiting-on-me for a step the agent could take, since the nudge is ours", () => {
+    expect(
+      deriveStatus({
+        nextStep: "Keep porting the remaining call sites",
+        blockedOn: "",
+        nextStepActor: "agent",
+      }),
+    ).toBe("waiting-on-me");
+  });
+
+  it("lets done win over any actor, so a finished thread is never a prompt", () => {
+    expect(
+      deriveStatus({ nextStep: "", blockedOn: "", nextStepActor: "other" }),
+    ).toBe("done");
+  });
+
+  it("preserves the actor-free behaviour when the actor is absent", () => {
+    // Every brief written before this field existed lands here.
+    expect(deriveStatus({ nextStep: "Keep going", blockedOn: "" })).toBe(
+      deriveStatus({
+        nextStep: "Keep going",
+        blockedOn: "",
+        nextStepActor: undefined,
+      }),
+    );
+    expect(
+      deriveStatus({
+        nextStep: "Keep going",
+        blockedOn: "",
+        nextStepActor: undefined,
+      }),
+    ).toBe("waiting-on-me");
+  });
+});
+
 describe("isLiveWorking", () => {
   it("is true for a running or queued thread", () => {
     expect(isLiveWorking("active")).toBe(true);

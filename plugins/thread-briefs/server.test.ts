@@ -447,6 +447,47 @@ describe("stage override", () => {
   });
 });
 
+describe("stored rows written before nextStepActor", () => {
+  it("keeps reading a row that has no actor, rather than discarding it", async () => {
+    // `readBrief` deletes anything that fails the strict parse, and briefs are
+    // never backfilled, so a required new field would wipe every existing brief
+    // and leave dormant threads with nothing to regenerate from. This is the
+    // test that says `nextStepActor` stays optional.
+    const { bb, harness } = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(bb);
+
+    await bb.storage.kv.set("brief:thr_1", {
+      version: 1,
+      threadId: "thr_1",
+      fields: {
+        goal: "Ship the thread-briefs plugin",
+        currentState: "Server, app and tests written",
+        nextStep: "Push the branch",
+        blockedOn: "",
+        constraints: "",
+      },
+      modelStage: "review",
+      stageOverride: null,
+      stageOverrideSeq: null,
+      endedWithQuestion: false,
+      lastSummarizedAt: 1_000,
+      lastActivitySeen: 12,
+    });
+
+    const state = (await harness.behavior.callRpc("getBrief", {
+      threadId: "thr_1",
+    })) as BriefState;
+    expect(state.state).toBe("ready");
+    if (state.state !== "ready") throw new Error("unreachable");
+    // No actor, so the derivation falls back to the actor-free behaviour.
+    expect(state.brief.nextStepActor).toBeUndefined();
+    expect(state.brief.status).toBe("waiting-on-me");
+    expect(await bb.storage.kv.get("brief:thr_1")).not.toBeUndefined();
+
+    await harness.lifecycle.dispose();
+  });
+});
+
 describe("cleanup", () => {
   it("drops the brief when the thread is deleted", async () => {
     const { bb, harness } = host({ fetch: fakeCompletion(SUMMARY) });

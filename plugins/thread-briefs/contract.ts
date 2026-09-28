@@ -29,16 +29,36 @@ export type BriefStatus = z.infer<typeof briefStatusSchema>;
 export { BRIEF_STAGES };
 
 /**
- * The five prose fields, exactly as the summarizer is asked to return them.
- * Every field is a string; an empty string means "nothing to say", which is
- * meaningful for `nextStep` (the work is done) and `blockedOn` (nothing is
- * blocking). The display skips empty fields.
+ * Who has to take `nextStep`. The one part of the status the model has to judge
+ * rather than the code: "test it and tell me" and "keep going" are both concrete
+ * next actions, and nothing in the prose distinguishes them.
+ */
+export const NEXT_STEP_ACTORS = ["me", "agent", "other"] as const;
+export const nextStepActorSchema = z.enum(NEXT_STEP_ACTORS);
+export type NextStepActor = z.infer<typeof nextStepActorSchema>;
+
+/**
+ * The fields the summarizer is asked to return, exactly as it returns them.
+ *
+ * The five prose fields are strings, where an empty string means "nothing to
+ * say" — meaningful for `nextStep` (the work is done) and `blockedOn` (nothing
+ * is blocking). The display skips empty fields.
+ *
+ * `nextStepActor` is the odd one out: an enum rather than prose, and optional.
+ * Optional is load-bearing — see {@link storedBriefSchema}.
  */
 export const briefFieldsSchema = z
   .object({
     goal: z.string(),
     currentState: z.string(),
     nextStep: z.string(),
+    /**
+     * Who has to take `nextStep`, when the model offered a value we recognise.
+     * Absent means unknown, which is both a brief written before this field
+     * existed and one whose `nextStep` is empty; either way the status falls
+     * back to the actor-free derivation.
+     */
+    nextStepActor: nextStepActorSchema.optional(),
     blockedOn: z.string(),
     constraints: z.string(),
   })
@@ -55,9 +75,15 @@ export type SummaryResult = z.infer<typeof summaryResultSchema>;
  * The persisted row, one per thread, under kv key `brief:<threadId>`.
  *
  * `stage` and `status` are deliberately absent: `stage` is
- * `stageOverride ?? modelStage` and `status` is derived from `nextStep` and
- * `blockedOn`, both resolved on read so neither goes stale between summaries.
- * The live `working` override is applied later still, per row on the client.
+ * `stageOverride ?? modelStage` and `status` is derived from `nextStep`,
+ * `blockedOn` and `nextStepActor`, all resolved on read so none goes stale
+ * between summaries. The live `working` override is applied later still, per row
+ * on the client.
+ *
+ * New fields must be optional and `version` must stay at 1. `readBrief` deletes
+ * any row that fails this parse, and briefs are never backfilled, so a required
+ * field would silently drop every brief written before it and leave dormant
+ * threads with no glyph and nothing to regenerate from.
  */
 export const storedBriefSchema = z
   .object({

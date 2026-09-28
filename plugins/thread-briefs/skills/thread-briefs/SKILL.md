@@ -86,13 +86,31 @@ a live half and a stored half, and the live half wins:
   describes the last turn that finished.
 - otherwise, from the stored brief:
   - `nextStep` **and** `blockedOn` both empty → **done**
-  - `blockedOn` non-empty → **waiting-on-other**
+  - `blockedOn` non-empty, or `nextStepActor` is `other` → **waiting-on-other**
   - otherwise → **waiting-on-me**
 
 **done** needs both fields empty, so a blocked thread cannot read as done even
 if a summary comes back without a next step. And **waiting-on-me** is the
 fallback: an idle thread with work left needs a human look whether or not its
-last turn ended in a question.
+last turn ended in a question, and whether or not the actor is known.
+
+`nextStepActor` is the one input the model judges rather than the code: "try it
+and tell me if the glyph looks right" and "keep porting the call sites" are both
+concrete next actions, and nothing in the prose separates them. It is **optional**
+— absent means unknown, which covers both a brief written before the field
+existed and one whose `nextStep` is empty — and an actor the parser does not
+recognise is dropped rather than failing the brief, the same bar as an
+unrecognised stage. Either way the status falls back to the rules above with the
+actor clause skipped.
+
+An actor of `agent` — an idle thread the agent could carry on by itself — has no
+status of its own and currently reads **waiting-on-me**, because the nudge is
+yours to give. If that bucket turns out to be common it earns its own status
+then.
+
+Briefs are not re-summarized to pick the field up: old rows gain an actor on
+their next natural summary. To see how far that has spread, compare the rows
+that have one against the total.
 
 Beyond that guard, **done** is only as good as the summarizer's bar for
 "finished", and the

@@ -1,6 +1,7 @@
 import type {
   BriefStage,
   BriefStatus,
+  NextStepActor,
   ResolvedBrief,
   RowSignal,
   StoredBrief,
@@ -47,9 +48,14 @@ export function isStageOverrideStale(stored: StoredBrief): boolean {
  * code rather than of the prompt, so one wayward summary cannot put a green
  * tick on a thread that is waiting for a review.
  *
+ * `nextStepActor` is the one input the model has to judge: a next step only we
+ * can take ("test it", "decide X", "reply to Y") reads the same in prose as one
+ * the agent could take unprompted. An actor of `other` therefore means waiting
+ * on someone else even when the summarizer named no `blockedOn`.
+ *
  * `waiting-on-me` is the fallback because an idle thread with unfinished work
  * needs a human look by default — whether or not the agent's last turn happened
- * to end in a question.
+ * to end in a question, and whether or not we know the actor.
  *
  * `working` is deliberately absent: it is live thread state, not a property of
  * a brief, so it is applied per row by {@link rowDecoration}.
@@ -57,11 +63,18 @@ export function isStageOverrideStale(stored: StoredBrief): boolean {
 export function deriveStatus(args: {
   nextStep: string;
   blockedOn: string;
+  nextStepActor?: NextStepActor | undefined;
 }): BriefStatus {
   const nextStep = args.nextStep.trim();
   const blockedOn = args.blockedOn.trim();
   if (nextStep === "" && blockedOn === "") return "done";
-  if (blockedOn !== "") return "waiting-on-other";
+  if (blockedOn !== "" || args.nextStepActor === "other") {
+    return "waiting-on-other";
+  }
+  // `agent` — an idle thread the agent could carry on by itself — has no status
+  // of its own yet, and collapses into waiting-on-me because the nudge is ours
+  // to give. If that turns out to be a common bucket in practice it earns its
+  // own status then, rather than being guessed at now.
   return "waiting-on-me";
 }
 
@@ -73,6 +86,7 @@ export function resolveBrief(stored: StoredBrief): ResolvedBrief {
     status: deriveStatus({
       nextStep: stored.fields.nextStep,
       blockedOn: stored.fields.blockedOn,
+      nextStepActor: stored.fields.nextStepActor,
     }),
     // Report the override only while it is still in force, so the stage
     // control does not show a stale manual pick as active.
