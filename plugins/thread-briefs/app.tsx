@@ -18,6 +18,7 @@ import type {
 import {
   BRIEFS_CHANGED_CHANNEL,
   BRIEF_STAGES,
+  isLiveWorking,
   type BriefStage,
 } from "./shared.js";
 import { rowDecoration, STAGE_LABELS, STATUS_LABELS } from "./brief.js";
@@ -79,10 +80,12 @@ function BriefSync() {
   useEffect(load, [load]);
   useRealtime(BRIEFS_CHANGED_CHANNEL, load);
 
-  const pendingIds = useMemo(() => {
+  // The live half of the status: a thread whose agent is running or queued is
+  // `working`, which outranks whatever its last brief concluded.
+  const workingIds = useMemo(() => {
     const ids = new Set<string>();
     for (const thread of threads) {
-      if (thread.hasPendingInteraction) ids.add(thread.id);
+      if (isLiveWorking(thread.status)) ids.add(thread.id);
     }
     return ids;
   }, [threads]);
@@ -90,11 +93,11 @@ function BriefSync() {
   useEffect(() => {
     const next = new Map<string, Decoration>();
     for (const signal of signals) {
-      const decoration = rowDecoration(signal, pendingIds.has(signal.threadId));
+      const decoration = rowDecoration(signal, workingIds.has(signal.threadId));
       if (decoration !== null) next.set(signal.threadId, decoration);
     }
     publishDecorations(next);
-  }, [signals, pendingIds]);
+  }, [signals, workingIds]);
 
   return null;
 }

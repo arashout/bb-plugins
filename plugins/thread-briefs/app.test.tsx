@@ -32,6 +32,7 @@ const sidebarThread = (
 ): PluginSidebarThread =>
   ({
     id: "thr_1",
+    status: "idle",
     hasPendingInteraction: false,
     ...overrides,
   }) as PluginSidebarThread;
@@ -291,9 +292,11 @@ describe("sidebar row glyphs", () => {
     await scripts.lifecycle.dispose();
   });
 
-  it("leaves a merely working thread to bb's own indicator", async () => {
+  it("leaves a running thread to bb's own indicator", async () => {
+    // Live working outranks the brief, and working draws no glyph.
     const { scripts, slot } = await mountBoth({
-      signals: [signal({ status: "working", label: "Working — Review" })],
+      signals: [signal({ status: "waiting-on-other", label: "Blocked — Review" })],
+      threads: [sidebarThread({ id: "thr_1", status: "active" })],
     });
 
     await waitFor(() => expect(slot.inspection.rpcCalls.length).toBeGreaterThan(0));
@@ -303,10 +306,10 @@ describe("sidebar row glyphs", () => {
     await scripts.lifecycle.dispose();
   });
 
-  it("upgrades a working thread whose row has a pending interaction", async () => {
+  it("draws the brief's glyph once the thread is no longer running", async () => {
     const { scripts, slot } = await mountBoth({
-      signals: [signal({ status: "working", label: "Working — Review" })],
-      threads: [sidebarThread({ id: "thr_1", hasPendingInteraction: true })],
+      signals: [signal({ status: "waiting-on-me", label: "Waiting on you — Review" })],
+      threads: [sidebarThread({ id: "thr_1", status: "idle" })],
     });
 
     await waitFor(() =>

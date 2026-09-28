@@ -22,3 +22,18 @@ export type BriefStage = (typeof BRIEF_STAGES)[number];
 
 /** Realtime channel the server pokes when any brief changes. */
 export const BRIEFS_CHANGED_CHANNEL = "briefs-changed";
+
+/**
+ * The bb thread statuses that mean the agent is running or queued, and so that
+ * the thread is `working` whatever its stored brief says.
+ *
+ * Plain strings rather than the SDK's `ThreadStatus`, because this module is
+ * imported by both the server and the frontend bundle and deliberately has no
+ * imports. bb's own list treats an unknown status as idle; so does this.
+ */
+export const LIVE_WORKING_STATUSES = ["active", "starting", "pending"] as const;
+
+/** Whether a live bb thread status means the agent is running or queued. */
+export function isLiveWorking(threadStatus: string): boolean {
+  return (LIVE_WORKING_STATUSES as readonly string[]).includes(threadStatus);
+}

@@ -13,7 +13,8 @@ every thread a short, durable **brief**, generated outside the working chat:
 - **constraints** — facts learned in the thread that would break a naive re-plan
 
 Plus a derived **stage** (discovery / planning / implementation / review) and
-**status** (working / waiting-on-me / waiting-on-other / done).
+**status** (working / waiting-on-me / waiting-on-other / done) — where `working`
+comes from bb's live thread state and the other three from the brief.
 
 ## Install
 
@@ -29,9 +30,11 @@ setting, the regeneration triggers, and how to diagnose it.
 ## Where briefs show up
 
 **Sidebar row** — a single glyph for the three statuses that are news:
-waiting-on-you, blocked, and done. A thread that is merely being worked on keeps
-bb's own indicator, because bb draws a plugin row status in place of its
-unsent-draft pencil and displacing that everywhere would cost more than it says.
+waiting-on-you, blocked, and done. A thread whose agent is running or queued
+keeps bb's own indicator instead, because bb draws a plugin row status in place
+of its unsent-draft pencil and displacing that everywhere would cost more than
+it says. The live status is folded in per row on the client, off the sidebar view
+it already holds, so `listRowSignals` needs no per-thread lookups.
 
 **Thread header** — a **Brief** control opens the full five fields (empty ones
 are skipped), the derived status, a stage control for the manual override, and

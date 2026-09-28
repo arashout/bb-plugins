@@ -13,6 +13,10 @@ export type { BriefStage };
 /**
  * Who the thread is waiting on. Derived mechanically rather than asked of the
  * model, so it stays correct between summaries.
+ *
+ * Three of the four come from the stored brief; `working` is live thread state
+ * and is only ever applied on the client, so it never appears in a stored row
+ * or in a row signal off the wire.
  */
 export const briefStatusSchema = z.enum([
   "working",
@@ -51,9 +55,9 @@ export type SummaryResult = z.infer<typeof summaryResultSchema>;
  * The persisted row, one per thread, under kv key `brief:<threadId>`.
  *
  * `stage` and `status` are deliberately absent: `stage` is
- * `stageOverride ?? modelStage` and `status` is derived from `nextStep`,
- * `blockedOn` and live thread facts, both resolved on read so neither goes
- * stale between summaries.
+ * `stageOverride ?? modelStage` and `status` is derived from `nextStep` and
+ * `blockedOn`, both resolved on read so neither goes stale between summaries.
+ * The live `working` override is applied later still, per row on the client.
  */
 export const storedBriefSchema = z
   .object({
@@ -71,8 +75,13 @@ export const storedBriefSchema = z
      */
     stageOverrideSeq: z.number().nullable(),
     /**
-     * Whether the thread's last assistant turn read as a question. Combined
-     * with a live pending-interaction check to tell waiting-on-me from working.
+     * Whether the thread's last assistant turn read as a question.
+     *
+     * No longer an input to `status`: an idle thread that is neither done nor
+     * blocked is waiting on us whether or not it ended by asking something.
+     * Kept because it is cheap to write and the obvious raw material for a
+     * future "the agent asked *this*" line in the popover; nothing reads it
+     * today.
      */
     endedWithQuestion: z.boolean(),
     lastSummarizedAt: z.number(),

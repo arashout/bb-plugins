@@ -78,18 +78,24 @@ implementation, review. Pick a stage by hand in the header popover to override
 it; the override is anchored to the thread's activity cursor and retires itself
 on the next real turn. Clicking the active manual stage clears it.
 
-`status` is derived mechanically, so it stays correct between summaries:
+`status` is derived mechanically, so it stays correct between summaries. It has
+a live half and a stored half, and the live half wins:
 
-- `nextStep` empty → **done**
-- `blockedOn` non-empty → **waiting-on-other**
-- the agent's last message ended in a question, or a pending interaction is
-  live → **waiting-on-me**
-- otherwise → **working**
+- the thread is `active`, `starting` or `pending` → **working**, whatever the
+  brief says. A run in flight is newer information than the brief, which
+  describes the last turn that finished.
+- otherwise, from the stored brief:
+  - `nextStep` **and** `blockedOn` both empty → **done**
+  - `blockedOn` non-empty → **waiting-on-other**
+  - otherwise → **waiting-on-me**
 
-The order matters: a thread with nothing left to do reads as done even if its
+**done** needs both fields empty, so a blocked thread cannot read as done even
+if a summary comes back without a next step. And **waiting-on-me** is the
+fallback: an idle thread with work left needs a human look whether or not its
 last turn ended in a question.
 
-So **done** is only as good as the summarizer's bar for "finished", and the
+Beyond that guard, **done** is only as good as the summarizer's bar for
+"finished", and the
 prompt sets that bar past the end of the chat: work handed off and still pending
 — a PR open for review or merge, a patch carried on a fork until it lands
 upstream, a temporary workaround still in place, a rollout not yet done — earns
@@ -100,8 +106,8 @@ brief written before this bar existed: **Re-summarize** from the header popover.
 ## Sidebar glyphs
 
 bb paints a plugin row status **in place of** its own unsent-draft pencil, so
-only the three states that are news get a glyph — a merely `working` thread
-keeps bb's indicator:
+only the three states that are news get a glyph — a `working` thread keeps bb's
+own running indicator:
 
 | Status | Glyph |
 | --- | --- |
@@ -109,9 +115,15 @@ keeps bb's indicator:
 | waiting-on-other | `Pause` |
 | done | `CircleCheck`, success tone |
 
-The pending-interaction half of that decision is computed in the client from
+Because `working` draws nothing, the live override reads as a **suppression**: a
+thread that is running shows no brief glyph, and its stored glyph comes back the
+moment it goes idle. The live half is computed in the client from
 `experimental_useSidebarThreads()`, which is why no row needs a server round
-trip to stay current.
+trip to stay current, and why `listRowSignals` does no per-thread lookups.
+
+One consequence worth knowing: the header popover shows the **stored** status,
+so a running thread whose brief says "Waiting on you" will say that in the
+popover while its row shows no glyph. The row is live; the popover is the brief.
 
 ## Diagnosing
 

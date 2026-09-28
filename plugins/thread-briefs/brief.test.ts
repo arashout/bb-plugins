@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  awaitingUser,
   deriveStatus,
   effectiveStage,
   isStageOverrideStale,
@@ -8,6 +7,7 @@ import {
   rowDecoration,
   rowSignalFor,
 } from "./brief.js";
+import { isLiveWorking } from "./shared.js";
 import type { StoredBrief } from "./contract.js";
 
 const stored = (overrides: Partial<StoredBrief> = {}): StoredBrief => ({
@@ -30,58 +30,54 @@ const stored = (overrides: Partial<StoredBrief> = {}): StoredBrief => ({
 });
 
 describe("deriveStatus", () => {
-  it("reports done when there is no next step", () => {
-    expect(
-      deriveStatus({ nextStep: "   ", blockedOn: "", awaitingUser: false }),
-    ).toBe("done");
+  it("reports done only when nothing is outstanding and nothing blocking", () => {
+    expect(deriveStatus({ nextStep: "   ", blockedOn: "" })).toBe("done");
   });
 
-  it("prefers done over a question, so a finished thread is not a prompt", () => {
-    expect(
-      deriveStatus({ nextStep: "", blockedOn: "", awaitingUser: true }),
-    ).toBe("done");
+  it("does not call a blocked thread done, whatever the next step says", () => {
+    // The prompt promises a non-empty nextStep whenever anything is
+    // outstanding. This is the guard for when it does not deliver one.
+    expect(deriveStatus({ nextStep: "", blockedOn: "Review from Dylan" })).toBe(
+      "waiting-on-other",
+    );
+    expect(deriveStatus({ nextStep: "  ", blockedOn: "  Upstream fix " })).toBe(
+      "waiting-on-other",
+    );
   });
 
   it("reports waiting-on-other when something is blocking", () => {
     expect(
-      deriveStatus({
-        nextStep: "Merge it",
-        blockedOn: "Review from Dylan",
-        awaitingUser: true,
-      }),
+      deriveStatus({ nextStep: "Merge it", blockedOn: "Review from Dylan" }),
     ).toBe("waiting-on-other");
   });
 
-  it("reports waiting-on-me when the agent asked something", () => {
-    expect(
-      deriveStatus({ nextStep: "Pick an approach", blockedOn: "", awaitingUser: true }),
-    ).toBe("waiting-on-me");
+  it("falls back to waiting-on-me for unfinished, unblocked work", () => {
+    expect(deriveStatus({ nextStep: "Pick an approach", blockedOn: "" })).toBe(
+      "waiting-on-me",
+    );
   });
 
-  it("reports working otherwise", () => {
-    expect(
-      deriveStatus({ nextStep: "Keep going", blockedOn: "", awaitingUser: false }),
-    ).toBe("working");
+  it("does not need a trailing question to report waiting-on-me", () => {
+    // An idle thread with work left needs a human look either way, so the
+    // question signal no longer changes the outcome.
+    expect(deriveStatus({ nextStep: "Keep going", blockedOn: "" })).toBe(
+      "waiting-on-me",
+    );
   });
 });
 
-describe("awaitingUser", () => {
-  it("is true for a live pending interaction even without a question", () => {
-    expect(
-      awaitingUser({ endedWithQuestion: false, hasPendingInteraction: true }),
-    ).toBe(true);
+describe("isLiveWorking", () => {
+  it("is true for a running or queued thread", () => {
+    expect(isLiveWorking("active")).toBe(true);
+    expect(isLiveWorking("starting")).toBe(true);
+    expect(isLiveWorking("pending")).toBe(true);
   });
 
-  it("is true for a question with no pending interaction", () => {
-    expect(
-      awaitingUser({ endedWithQuestion: true, hasPendingInteraction: false }),
-    ).toBe(true);
-  });
-
-  it("is false when neither holds", () => {
-    expect(
-      awaitingUser({ endedWithQuestion: false, hasPendingInteraction: false }),
-    ).toBe(false);
+  it("is false for an idle thread, and for anything it does not know", () => {
+    expect(isLiveWorking("idle")).toBe(false);
+    expect(isLiveWorking("error")).toBe(false);
+    expect(isLiveWorking("stopping")).toBe(false);
+    expect(isLiveWorking("something-new")).toBe(false);
   });
 });
 
@@ -117,7 +113,6 @@ describe("stage overrides", () => {
         stageOverrideSeq: 50,
         lastActivitySeen: 51,
       }),
-      { hasPendingInteraction: false },
     );
     expect(resolved.stageOverride).toBeNull();
     expect(resolved.stage).toBe("implementation");
@@ -125,32 +120,40 @@ describe("stage overrides", () => {
 });
 
 describe("rowDecoration", () => {
-  const signalFor = (brief: StoredBrief) =>
-    rowSignalFor(resolveBrief(brief, { hasPendingInteraction: false }));
+  const signalFor = (brief: StoredBrief) => rowSignalFor(resolveBrief(brief));
 
-  it("draws nothing for a thread that is simply being worked on", () => {
-    expect(rowDecoration(signalFor(stored()), false)).toBeNull();
+  const blocked = stored({
+    fields: { ...stored().fields, blockedOn: "Waiting on CI" },
+  });
+  const done = stored({
+    fields: { ...stored().fields, nextStep: "", blockedOn: "" },
   });
 
-  it("upgrades a working thread to waiting-on-me on a pending interaction", () => {
-    const decoration = rowDecoration(signalFor(stored()), true);
+  it("draws the waiting-on-me glyph for an idle thread with work left", () => {
+    const decoration = rowDecoration(signalFor(stored()), false);
     expect(decoration?.icon).toBe("MessageQuestion");
     expect(decoration?.label).toBe("Waiting on you — Implementation");
   });
 
-  it("does not let a pending interaction override a stored done", () => {
-    const done = stored({
-      fields: { ...stored().fields, nextStep: "" },
-    });
-    const decoration = rowDecoration(signalFor(done), true);
+  it("draws the blocked glyph for a thread waiting on someone else", () => {
+    expect(rowDecoration(signalFor(blocked), false)?.icon).toBe("Pause");
+  });
+
+  it("draws the done glyph for a finished thread", () => {
+    const decoration = rowDecoration(signalFor(done), false);
     expect(decoration?.icon).toBe("CircleCheck");
     expect(decoration?.tone).toBe("success");
   });
 
-  it("draws the blocked glyph for a thread waiting on someone else", () => {
-    const blocked = stored({
-      fields: { ...stored().fields, blockedOn: "Waiting on CI" },
-    });
+  it("draws nothing while the agent is running, whatever the brief says", () => {
+    // Live working outranks the stored status, and working draws no glyph so
+    // bb's own running indicator keeps the row.
+    expect(rowDecoration(signalFor(blocked), true)).toBeNull();
+    expect(rowDecoration(signalFor(done), true)).toBeNull();
+    expect(rowDecoration(signalFor(stored()), true)).toBeNull();
+  });
+
+  it("restores the stored glyph once the thread goes idle again", () => {
     expect(rowDecoration(signalFor(blocked), false)?.icon).toBe("Pause");
   });
 });

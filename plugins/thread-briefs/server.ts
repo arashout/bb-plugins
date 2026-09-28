@@ -9,7 +9,6 @@ import {
   type StoredBrief,
 } from "./contract.js";
 import {
-  awaitingUser,
   briefKey,
   deriveStatus,
   isStageOverrideStale,
@@ -275,13 +274,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   // -------------------------------------------------------------- reading
 
-  const hasPendingInteraction = async (threadId: string): Promise<boolean> => {
-    const interactions = await bb.sdk.threads.interactions
-      .list({ threadId })
-      .catch(() => []);
-    return interactions.length > 0;
-  };
-
   const briefState = async (threadId: string): Promise<BriefState> => {
     const stored = await readBrief(threadId);
     if (stored === null) {
@@ -297,12 +289,7 @@ export default async function plugin(bb: BbPluginApi) {
       // at `absent` until someone asks for a brief.
       return isPending(threadId) ? { state: "summarizing" } : { state: "absent" };
     }
-    return {
-      state: "ready",
-      brief: resolveBrief(stored, {
-        hasPendingInteraction: await hasPendingInteraction(threadId),
-      }),
-    };
+    return { state: "ready", brief: resolveBrief(stored) };
   };
 
   // ------------------------------------------------------------------- rpc
@@ -316,12 +303,9 @@ export default async function plugin(bb: BbPluginApi) {
       for (const key of keys) {
         const stored = await readBrief(threadIdFromKey(key));
         if (stored === null) continue;
-        // No interaction lookups here: the client folds that in per row.
-        signals.push(
-          rowSignalFor(
-            resolveBrief(stored, { hasPendingInteraction: false }),
-          ),
-        );
+        // No live thread lookups here: the client folds the running/queued
+        // override in per row, off the sidebar view it already has.
+        signals.push(rowSignalFor(resolveBrief(stored)));
       }
       return { signals };
     },
@@ -427,5 +411,5 @@ export default async function plugin(bb: BbPluginApi) {
 }
 
 // Re-exported for tests that exercise the derivation without a server.
-export { awaitingUser, deriveStatus };
+export { deriveStatus };
 export type { BriefStage };
