@@ -28,9 +28,10 @@ import { endsWithQuestion, renderTranscript, type OutlineItem } from "./transcri
 import {
   manualSectionOrder,
   planAssignments,
+  planSections,
   sectionNameForStatus,
   storedStatus,
-  SECTION_NAMES,
+  OWNED_SECTION_NAMES,
   type SectionedThread,
 } from "./sections.js";
 
@@ -597,17 +598,30 @@ export default async function plugin(bb: BbPluginApi) {
       previous: null,
     };
 
-  /** Our sections in display order, creating any that are missing. */
+  /** Our sections in display order, creating, renaming and retiring as needed. */
   const ensureSections = async (): Promise<{ name: string; id: string }[]> => {
-    const existing = await bb.sdk.threadSections.list();
-    const byName = new Map(existing.map((section) => [section.name, section.id]));
+    const plan = planSections(await bb.sdk.threadSections.list());
     const sections: { name: string; id: string }[] = [];
     // Created in display order, so creation order — which is the order bb hands
     // sections to a sidebar — already agrees with `manualSectionOrder`.
-    for (const name of SECTION_NAMES) {
-      const id =
-        byName.get(name) ?? (await bb.sdk.threadSections.create({ name })).id;
-      sections.push({ name, id });
+    for (const step of plan.steps) {
+      if (step.id === null) {
+        const created = await bb.sdk.threadSections.create({ name: step.name });
+        sections.push({ name: step.name, id: created.id });
+        continue;
+      }
+      // Renamed in place, so the section keeps its id and every thread already
+      // filed in it stays where it is.
+      if (step.renameFrom !== null) {
+        await bb.sdk.threadSections.update({ id: step.id, name: step.name });
+        bb.log.info(
+          `sidebar grouping: renamed "${step.renameFrom}" to "${step.name}"`,
+        );
+      }
+      sections.push({ name: step.name, id: step.id });
+    }
+    for (const id of plan.retire) {
+      await bb.sdk.threadSections.delete({ id });
     }
     return sections;
   };
@@ -654,7 +668,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Collected before the first delete: never iterate a list while mutating
     // what produced it.
     const ours = (await bb.sdk.threadSections.list())
-      .filter((section) => SECTION_NAMES.includes(section.name))
+      .filter((section) => OWNED_SECTION_NAMES.includes(section.name))
       .map((section) => section.id);
     // Deleting a section removes its thread assignments, so the threads fall
     // back into bb's Threads group without a pass over them.

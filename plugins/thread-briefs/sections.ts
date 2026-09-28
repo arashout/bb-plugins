@@ -17,19 +17,101 @@ import type { BriefStatus, StoredBrief, StoredBriefStatus } from "./contract.js"
  * implies and keeps bb's own running indicator. Grouping running threads
  * separately would mean reacting to live state, which is what keeps the server
  * out of per-thread lookups.
+ *
+ * Each name carries a leading emoji because a section header is drawn as plain
+ * text: bb has no icon on a section, so the glyph has to live in the name. That
+ * is also why `formerNames` exists — a section is identified by its name, so
+ * changing one has to be a rename of the existing section rather than a new
+ * section beside it (see {@link planSections}).
  */
 export const STATUS_SECTIONS = [
-  { status: "waiting-on-me", name: "Waiting on you" },
-  { status: "waiting-on-other", name: "Blocked" },
-  { status: "done", name: "Done" },
+  { status: "waiting-on-me", name: "🙋 Waiting on you", formerNames: ["Waiting on you"] },
+  { status: "waiting-on-other", name: "⏸️ Blocked", formerNames: ["Blocked"] },
+  { status: "done", name: "✅ Done", formerNames: ["Done"] },
   // Typed against the stored statuses rather than all of them, so a section
   // cannot be keyed on `working` — which could never have members.
-] as const satisfies readonly { status: StoredBriefStatus; name: string }[];
+] as const satisfies readonly {
+  status: StoredBriefStatus;
+  name: string;
+  formerNames: readonly string[];
+}[];
 
 /** The section names this plugin owns, top to bottom. */
 export const SECTION_NAMES: readonly string[] = STATUS_SECTIONS.map(
   (entry) => entry.name,
 );
+
+/**
+ * Every name this plugin has ever given a section, current and former.
+ *
+ * Teardown filters on this rather than {@link SECTION_NAMES}: a section still
+ * under a former name is one we created, and leaving it behind because we had
+ * since renamed the constant would strand it in the sidebar for good.
+ */
+export const OWNED_SECTION_NAMES: readonly string[] = STATUS_SECTIONS.flatMap(
+  (entry) => [entry.name, ...entry.formerNames],
+);
+
+/** A section as bb hands it back: the shape {@link planSections} reads. */
+export interface ExistingSection {
+  id: string;
+  name: string;
+}
+
+export interface SectionStep {
+  name: string;
+  /** null when no section exists yet and one has to be created. */
+  id: string | null;
+  /** The former name to rename away from, or null when nothing to rename. */
+  renameFrom: string | null;
+}
+
+export interface SectionPlan {
+  /** Our sections in display order. */
+  steps: SectionStep[];
+  /** Ids of leftovers under a former name that a current-named section covers. */
+  retire: string[];
+}
+
+/**
+ * What it takes to get from the sections bb has to the ones we want.
+ *
+ * A section is keyed on its name, so renaming the constant would otherwise
+ * orphan the old section — with every thread still filed in it — and build a
+ * fresh empty one alongside. Renaming in place keeps the id, and with it every
+ * assignment, the sidebar's collapsed state and the user's own ordering.
+ *
+ * A leftover is retired rather than left alone: deleting it drops its
+ * assignments, so the threads in it land back in bb's Threads group and the
+ * same reconcile pass re-files them from their briefs.
+ */
+export function planSections(existing: readonly ExistingSection[]): SectionPlan {
+  const byName = new Map(existing.map((section) => [section.name, section.id]));
+  const steps: SectionStep[] = [];
+  const retire: string[] = [];
+  for (const entry of STATUS_SECTIONS) {
+    const former = entry.formerNames.flatMap((name) => {
+      const id = byName.get(name);
+      return id === undefined ? [] : [{ name, id }];
+    });
+    const current = byName.get(entry.name);
+    if (current !== undefined) {
+      // Already renamed, or the user got there first: anything still under a
+      // former name is a duplicate of a section we already have.
+      steps.push({ name: entry.name, id: current, renameFrom: null });
+      retire.push(...former.map((match) => match.id));
+      continue;
+    }
+    const [first, ...rest] = former;
+    steps.push({
+      name: entry.name,
+      id: first?.id ?? null,
+      renameFrom: first?.name ?? null,
+    });
+    retire.push(...rest.map((match) => match.id));
+  }
+  return { steps, retire };
+}
 
 /**
  * The status a stored brief resolves to, with no live input folded in.

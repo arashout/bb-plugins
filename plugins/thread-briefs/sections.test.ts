@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   manualSectionOrder,
   planAssignments,
+  planSections,
   sectionNameForStatus,
   storedStatus,
+  OWNED_SECTION_NAMES,
   SECTION_NAMES,
   STATUS_SECTIONS,
   type SectionedThread,
@@ -31,9 +33,9 @@ const stored = (fields: Partial<BriefFields> = {}): StoredBrief => ({
 
 /** Section ids, as `ensureSections` would hand them over. */
 const IDS = new Map([
-  ["Waiting on you", "sec_wait"],
-  ["Blocked", "sec_blocked"],
-  ["Done", "sec_done"],
+  ["🙋 Waiting on you", "sec_wait"],
+  ["⏸️ Blocked", "sec_blocked"],
+  ["✅ Done", "sec_done"],
 ]);
 const OWNED = new Set(IDS.values());
 
@@ -59,11 +61,24 @@ describe("the section table", () => {
   });
 
   it("lists its names in display order", () => {
-    expect(SECTION_NAMES).toEqual(["Waiting on you", "Blocked", "Done"]);
+    expect(SECTION_NAMES).toEqual(["🙋 Waiting on you", "⏸️ Blocked", "✅ Done"]);
     expect(STATUS_SECTIONS.map((entry) => entry.status)).toEqual([
       "waiting-on-me",
       "waiting-on-other",
       "done",
+    ]);
+  });
+
+  it("owns its former names as well as its current ones", () => {
+    // Teardown filters on this: a section still under a former name is ours,
+    // and skipping it would strand it in the sidebar for good.
+    expect(OWNED_SECTION_NAMES).toEqual([
+      "🙋 Waiting on you",
+      "Waiting on you",
+      "⏸️ Blocked",
+      "Blocked",
+      "✅ Done",
+      "Done",
     ]);
   });
 
@@ -78,23 +93,70 @@ describe("the section table", () => {
   });
 });
 
+describe("planSections", () => {
+  const existing = (...names: string[]) =>
+    names.map((name, index) => ({ id: `sec_${index + 1}`, name }));
+
+  it("creates all three when the sidebar has none of ours", () => {
+    const plan = planSections([{ id: "sec_theirs", name: "Reading" }]);
+    expect(plan.steps).toEqual(
+      SECTION_NAMES.map((name) => ({ name, id: null, renameFrom: null })),
+    );
+    expect(plan.retire).toEqual([]);
+  });
+
+  it("renames a section left under a former name, keeping its id", () => {
+    // The id is what threads are filed against, so a rename has to carry the
+    // members over rather than build an empty section beside the full one.
+    const plan = planSections(existing("Waiting on you", "Blocked", "Done"));
+    expect(plan.steps).toEqual([
+      { name: "🙋 Waiting on you", id: "sec_1", renameFrom: "Waiting on you" },
+      { name: "⏸️ Blocked", id: "sec_2", renameFrom: "Blocked" },
+      { name: "✅ Done", id: "sec_3", renameFrom: "Done" },
+    ]);
+    expect(plan.retire).toEqual([]);
+  });
+
+  it("does nothing once every section is already named right", () => {
+    const plan = planSections(existing(...SECTION_NAMES));
+    expect(plan.steps.map((step) => step.renameFrom)).toEqual([null, null, null]);
+    expect(plan.steps.map((step) => step.id)).toEqual(["sec_1", "sec_2", "sec_3"]);
+    expect(plan.retire).toEqual([]);
+  });
+
+  it("retires a former-named leftover when the current one already exists", () => {
+    // Half-migrated, or renamed by hand. Deleting the leftover drops its
+    // assignments, so the same reconcile pass re-files those threads.
+    const plan = planSections([
+      { id: "sec_new", name: "⏸️ Blocked" },
+      { id: "sec_old", name: "Blocked" },
+    ]);
+    expect(plan.steps[1]).toEqual({
+      name: "⏸️ Blocked",
+      id: "sec_new",
+      renameFrom: null,
+    });
+    expect(plan.retire).toEqual(["sec_old"]);
+  });
+});
+
 describe("storedStatus", () => {
   it("maps each kind of brief to its section", () => {
-    expect(sectionNameForStatus(storedStatus(stored()))).toBe("Waiting on you");
+    expect(sectionNameForStatus(storedStatus(stored()))).toBe("🙋 Waiting on you");
     expect(
       sectionNameForStatus(storedStatus(stored({ blockedOn: "Review" }))),
-    ).toBe("Blocked");
+    ).toBe("⏸️ Blocked");
     expect(
       sectionNameForStatus(
         storedStatus(stored({ nextStep: "", blockedOn: "" })),
       ),
-    ).toBe("Done");
+    ).toBe("✅ Done");
   });
 
   it("sends an external actor to Blocked even with no blockedOn text", () => {
     expect(
       sectionNameForStatus(storedStatus(stored({ nextStepActor: "other" }))),
-    ).toBe("Blocked");
+    ).toBe("⏸️ Blocked");
   });
 
   it("files a pinned thread where the pin says, not where its prose does", () => {
@@ -106,8 +168,8 @@ describe("storedStatus", () => {
       statusOverride: "done",
       statusOverrideSeq: 50,
     };
-    expect(sectionNameForStatus(storedStatus(stored()))).toBe("Waiting on you");
-    expect(sectionNameForStatus(storedStatus(pinned))).toBe("Done");
+    expect(sectionNameForStatus(storedStatus(stored()))).toBe("🙋 Waiting on you");
+    expect(sectionNameForStatus(storedStatus(pinned))).toBe("✅ Done");
   });
 
   it("stops honouring the pin once the thread has moved on", () => {
@@ -117,7 +179,7 @@ describe("storedStatus", () => {
       statusOverrideSeq: 50,
       lastActivitySeen: 51,
     };
-    expect(sectionNameForStatus(storedStatus(retired))).toBe("Waiting on you");
+    expect(sectionNameForStatus(storedStatus(retired))).toBe("🙋 Waiting on you");
   });
 });
 

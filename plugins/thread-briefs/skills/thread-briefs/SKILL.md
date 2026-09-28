@@ -380,9 +380,9 @@ sidebar's project grouping with three sections, top to bottom, and then bb's own
 
 | Section | Holds |
 | --- | --- |
-| Waiting on you | stored status `waiting-on-me` |
-| Blocked | stored status `waiting-on-other` |
-| Done | stored status `done` |
+| 🙋 Waiting on you | stored status `waiting-on-me` |
+| ⏸️ Blocked | stored status `waiting-on-other` |
+| ✅ Done | stored status `done` |
 | Threads (bb's own) | every thread with **no brief** |
 
 Threads last is the design, not an oversight. A thread with no brief is left

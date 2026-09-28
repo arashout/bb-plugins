@@ -796,6 +796,11 @@ describe("sidebar grouping by status", () => {
             sections.push(section);
             return { ...section, updatedThreadCount: 0 };
           },
+          update: async ({ id, name }) => {
+            const section = sections.find((entry) => entry.id === id);
+            if (section !== undefined) section.name = name;
+            return { id, name, updatedThreadCount: 0 };
+          },
           delete: async ({ id }) => {
             const index = sections.findIndex((section) => section.id === id);
             const [removed] = sections.splice(index, 1);
@@ -834,9 +839,9 @@ describe("sidebar grouping by status", () => {
 
     await settle(() => prefs.organizationMode === "chronological");
     expect(sections.map((section) => section.name)).toEqual([
-      "Waiting on you",
-      "Blocked",
-      "Done",
+      "🙋 Waiting on you",
+      "⏸️ Blocked",
+      "✅ Done",
     ]);
     expect(prefs.manualSectionOrder).toEqual([
       "pinned",
@@ -880,6 +885,59 @@ describe("sidebar grouping by status", () => {
     expect(sectionFor("thr_done")).toBe("sec_3");
     // No brief, so it stays unassigned and falls into bb's Threads group.
     expect(sectionFor("thr_nobrief")).toBeNull();
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("renames sections left under their old names instead of duplicating them", async () => {
+    // Sections are keyed on name, so adding the emoji has to be a rename: a
+    // fresh set beside the old one would leave every filed thread behind.
+    const threads = [groupedThread({ id: "thr_1", sectionId: "sec_old_wait" })];
+    const sections = [
+      { id: "sec_old_wait", name: "Waiting on you" },
+      { id: "sec_old_blocked", name: "Blocked" },
+      { id: "sec_old_done", name: "Done" },
+    ];
+    const { bb, harness, prefs } = groupingHost({ threads, sections });
+    await bb.storage.kv.set("brief:thr_1", storedBrief("thr_1", {}));
+    await plugin(bb);
+
+    await settle(() => sections[0]!.name.startsWith("🙋"));
+    expect(sections.map((section) => section.name)).toEqual([
+      "🙋 Waiting on you",
+      "⏸️ Blocked",
+      "✅ Done",
+    ]);
+    expect(harness.sdk.callsTo("threadSections.create")).toHaveLength(0);
+    expect(harness.sdk.callsTo("threadSections.delete")).toHaveLength(0);
+    // The ids are unchanged, so the thread already filed under the old name
+    // never had to move.
+    expect(threads[0]!.sectionId).toBe("sec_old_wait");
+    expect(prefs.manualSectionOrder).toEqual([
+      "pinned",
+      "section:sec_old_wait",
+      "section:sec_old_blocked",
+      "section:sec_old_done",
+      "threads",
+    ]);
+
+    await harness.lifecycle.dispose();
+  });
+
+  it("still removes a section left under its old name when turned off", async () => {
+    const threads = [groupedThread({ id: "thr_1", sectionId: null })];
+    const { bb, harness, sections } = groupingHost({ threads });
+    await plugin(bb);
+
+    await bb.storage.kv.set("brief:thr_1", storedBrief("thr_1", {}));
+    await harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    await settle(() => threads[0]!.sectionId !== null);
+    // A section we made under a former name, missed by the rename because the
+    // reconcile had already run. Teardown still has to take it with it.
+    sections.push({ id: "sec_stray", name: "Done" });
+
+    await harness.behavior.setSettings({ sidebarGrouping: "off" });
+    await settle(() => sections.length === 0);
 
     await harness.lifecycle.dispose();
   });

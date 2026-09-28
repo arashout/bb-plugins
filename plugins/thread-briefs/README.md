@@ -97,10 +97,18 @@ bb plugin config thread-briefs set sidebarGrouping status   # on
 bb plugin config thread-briefs set sidebarGrouping off      # off again
 ```
 
-**Waiting on you**, **Blocked**, **Done**, then bb's own **Threads** group,
-newest first inside each. Threads is last and holds every thread with no brief —
-including ones created since the last sync — which is why it must not be hidden:
-it is the "the summarizer hasn't reached this yet" bucket as much as a catch-all.
+**🙋 Waiting on you**, **⏸️ Blocked**, **✅ Done**, then bb's own **Threads**
+group, newest first inside each. Threads is last and holds every thread with no
+brief — including ones created since the last sync — which is why it must not be
+hidden: it is the "the summarizer hasn't reached this yet" bucket as much as a
+catch-all.
+
+The emoji *is* the header glyph. bb draws a section header as plain text and has
+no icon on a section, so the only way to tell the three apart at a glance is the
+name itself. A section is also keyed on its name, so changing one of these names
+is a **rename** of the existing section rather than a new one beside it — that is
+what `formerNames` in `sections.ts` is for, and it is why renaming a section by
+hand makes the next sync build its own alongside yours.
 
 Two things to know. There is **no section for running threads**: `working` is
 live state and never reaches a stored brief, so a thread whose agent is running
