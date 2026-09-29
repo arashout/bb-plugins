@@ -414,14 +414,17 @@ export const rpcContract = defineRpcContract({
   /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
   inventory_get: { input: z.object({ attention: z.enum(INVENTORY_QUESTIONS).optional() }).strict(), output: inventoryViewSchema },
   /**
-   * One click, one GitHub write, on facts read again first: refused under a hold, a v2 claim, or another writer, and when the facts it
-   * depends on changed since the row was shown. Each sends those facts back from its row: mark ready its `head`, a request its `reviewers`,
-   * a nudge the reviewers its attention reason names. Merge opens action_merge_preview instead.
+   * One click, one write, on facts read again first: refused under a hold, a v2 claim, or another writer, and when the facts it depends on
+   * changed since the row was shown. Each sends those facts back from its row: mark ready its `head`, a request its `reviewers`, a nudge
+   * the reviewers its attention reason names, and a confirmation its `head` and `feedbackFingerprint`. A confirmation writes nothing to
+   * GitHub: it records the approval's comments verified on that head, as yours. Merge opens action_merge_preview instead.
    */
   inventory_mark_ready: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(), output: writeResult },
   inventory_request_review: { input: prUrlInput.extend({ logins: z.array(z.string().max(140)).min(1).max(20), shown: inventoryRowSchema.shape.reviewers }).strict(),
     output: writeResult },
   inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
+  inventory_confirm_handled: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u), fingerprint: z.string().regex(/^[0-9a-f]{64}$/u) }).strict(),
+    output: writeResult },
   dispatch_set: {
     input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
     output: boardSchema.shape.dispatch,
@@ -5143,7 +5146,7 @@ export default async function plugin(bb: BbPluginApi) {
       warnings: current.prInventory.warnings }, only);
   }
 
-  const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge"]),
+  const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]),
     ok: z.boolean(), detail: z.string(), reviewers: z.array(z.string()) })).catch([]);
   /** What each inventory action did, newest first: the last 200 clicks, refusals included. */
   const actionRecords = async (): Promise<ActionRecord[]> => actionRecordsSchema.parse((await bb.storage.kv.get<unknown>("inventoryActions")) ?? []);
@@ -5188,6 +5191,11 @@ export default async function plugin(bb: BbPluginApi) {
     write: async (request) => {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       return hostId === null ? { ok: false, error: "No primary BB host is available to write to GitHub." } : writeOf(hostId)(request);
+    },
+    // The board and the roster panes, which read on board-changed, gate on this record.
+    confirm: (prUrl, headOid, feedback) => {
+      approvalFeedback.confirm(prUrl, feedback, headOid, Date.now());
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
     },
     record: (entry) => {
       const next = recording.then(async () => {
@@ -5524,6 +5532,7 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
+    inventory_confirm_handled: ({ prUrl, headOid, fingerprint }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };
       void refreshInventory();

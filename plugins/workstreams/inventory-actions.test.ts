@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Pr, PrWrite } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { createInventoryActions, suggestReviewers, type ActionRecord, type InventoryActionDeps } from "./inventory-actions.js";
-import type { AttentionReason } from "./pr-attention.js";
+import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
 
 const URL = "https://github.com/inkwell/folio/pull/42";
@@ -12,11 +12,20 @@ const pr = (extra: Record<string, unknown> = {}): Pr => parsePrList(JSON.stringi
 const waiting = (reviewers: string[]): AttentionReason => ({ question: "needs-nudge", kind: "review-waiting", action: "nudge", nextStep: "Nudge", owner: "reviewers",
   reviewers, since: 0, ageMs: 0, basis: "github" });
 
+// Approval comments on the head the row showed, not yet verified there, on a PR otherwise ready: approved, green, clean, threads resolved.
+const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
+const commented = (extra: Partial<Pr> = {}): Pr => ({ ...pr({ reviewDecision: "APPROVED" }), checkConclusions: ["SUCCESS"], mergeable: "MERGEABLE",
+  mergeStateStatus: "CLEAN", unresolvedReviewThreads: 0, resolvedReviewThreads: 1, approvalFeedback: FEEDBACK, approvalFeedbackVerified: false, ...extra });
+/** The inventory's own rule, so a confirmation is re-checked on the facts that earned its row's reason. */
+const earned: InventoryActionDeps["attention"] = async (facts) => attentionReasons(facts, {}, { now: 1_000, thresholds: DEFAULT_ATTENTION_THRESHOLDS,
+  utcOffsetMinutes: 0 });
+
 /** Doubles for every dependency, each overridable; `log` records the order reads and writes happen in. */
 function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<InventoryActionDeps> } = {}) {
   const log: string[] = [];
   const records: ActionRecord[] = [];
   const writes: PrWrite[] = [];
+  const confirmed: unknown[][] = [];
   let hold: PrHold | null = null, writer: string | null = null, locked = false;
   const { listed = true, fresh = pr() } = options;
   const deps: InventoryActionDeps = {
@@ -28,10 +37,11 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<In
     read: vi.fn(async () => { log.push("read"); return { ok: true as const, pr: fresh }; }),
     attention: async (facts) => facts.reviewRequests.length ? [waiting([...facts.reviewRequests])] : [],
     write: vi.fn(async (request: PrWrite) => { log.push("write"); writes.push(request); return { ok: true as const, detail: "Done." }; }),
+    confirm: (...args) => { log.push("confirm"); confirmed.push(args); },
     record: async (entry) => { records.push(entry); },
     ...options.deps,
   };
-  return { actions: createInventoryActions(deps), deps, log, records, writes,
+  return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed,
     hold: (value: PrHold | null) => { hold = value; }, writer: (value: string | null) => { writer = value; }, lock: () => { locked = true; } };
 }
 
@@ -114,6 +124,49 @@ describe("inventory actions", () => {
     const answered = setup({ fresh: pr() });
     expect(await answered.actions.nudge(URL, ["mira"])).toEqual({ ok: false, error: "No reviewer needs a nudge now; nothing was written." });
     expect([...moved.writes, ...answered.writes]).toEqual([]);
+  });
+
+  // Confirming clears the merge gate, so it must bind to exactly what the row showed and never stand in for a newer push or comment.
+  it("confirms an approval's comments on the head and comments the row showed, as yours, writing nothing to GitHub", async () => {
+    const env = setup({ fresh: commented(), deps: { attention: earned } });
+    expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: true, detail: "Confirmed the approval's comments handled on aaaaaaa." });
+    expect(env.log).toEqual(["read", "confirm"]);
+    expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK]]);
+    expect(env.writes).toEqual([]);
+    expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "confirm-handled", ok: true, detail: "Confirmed the approval's comments handled on aaaaaaa.",
+      reviewers: [] }]);
+  });
+
+  it("refuses to confirm under a hold or a v2 claim, or once the head, the comments, their verification, or what else the row showed moved", async () => {
+    const held = setup({ fresh: commented() });
+    held.hold({ reason: "Store layout first", heldAt: 0 });
+    expect(await held.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: false,
+      error: "On hold: Store layout first. Release the hold first; nothing was written." });
+    const claimed = setup({ fresh: commented() });
+    claimed.writer("A worker from the Shelf order roster is writing this PR or checkout. Nothing was written.");
+    expect(await claimed.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
+    for (const env of [held, claimed]) expect(env.log).toEqual([]);
+    const moved: [Pr, string][] = [
+      [commented({ headRefOid: "b".repeat(40) }), "New commits landed since the row was shown. Review them and try again; nothing was written."],
+      [commented({ approvalFeedback: { ...FEEDBACK, fingerprint: "e".repeat(64), sourceIds: ["review-1", "review-2"] } }),
+        "The approval's comments changed since the row was shown. Read them and try again; nothing was written."],
+      [commented({ approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true }),
+        "The approval has no comments to confirm now; nothing was written."],
+      [commented({ approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } }),
+        "GitHub didn't return the approval's comments in full. Refresh and try again; nothing was written."],
+      // A worker's evidence for this head already clears it; your confirmation would overwrite that evidence.
+      [commented({ approvalFeedbackVerified: true }), "These comments are already verified on this head; nothing was written."],
+      // The same comments, but the approver reopened a thread or asked for changes, or the PR went red or conflicting: they aren't handled.
+      ...[{ unresolvedReviewThreads: 1 }, { reviewDecision: "CHANGES_REQUESTED" }, { checkConclusions: ["FAILURE"] }, { mergeStateStatus: "DIRTY" as const }]
+        .map((extra): [Pr, string] => [commented(extra),
+          "Its approval, checks, merge state, or review threads changed since the row was shown. Review it and try again; nothing was written."]),
+    ];
+    for (const [fresh, error] of moved) {
+      const env = setup({ fresh, deps: { attention: earned } });
+      expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: false, error });
+      expect(env.log).toEqual(["read"]);
+      expect(env.records).toMatchObject([{ action: "confirm-handled", ok: false, detail: error }]);
+    }
   });
 
   it("records a write GitHub refused, and doesn't read back what didn't change", async () => {

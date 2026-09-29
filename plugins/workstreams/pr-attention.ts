@@ -52,8 +52,9 @@ export function businessMsBetween(from: number, to: number, utcOffsetMinutes: nu
 
 export const attentionReasonSchema = z.object({
   question: z.enum(["forgotten-draft", "missing-reviewer", "needs-nudge"]),
-  kind: z.enum(["draft-ready", "draft-idle", "missing-reviewer", "review-waiting", "rereview-needed", "merge-waiting", "ci-red", "conflicting"]),
-  action: z.enum(["mark-ready", "request-review", "nudge", "rerequest", "merge", "open-thread"]),
+  kind: z.enum(["draft-ready", "draft-idle", "missing-reviewer", "review-waiting", "rereview-needed", "approval-comments", "merge-waiting", "ci-red",
+    "conflicting"]),
+  action: z.enum(["mark-ready", "request-review", "nudge", "rerequest", "confirm-handled", "merge", "open-thread"]),
   nextStep: z.string(),
   /** Who acts: you, the PR's author, or the reviewers it names. */
   owner: z.enum(["you", "reviewers"]),
@@ -75,7 +76,7 @@ export type PrAttention = z.infer<typeof prAttentionSchema>;
 
 /** The PR facts attention reads. A missing timestamp never ages a reason. */
 export type AttentionFacts = Pick<Pr, "url" | "state" | "isDraft" | "reviewDecision" | "checkConclusions" | "mergeable" | "mergeStateStatus" |
-  "reviewRequests" | "unresolvedReviewThreads" | "resolvedReviewThreads" | "createdAt" | "reviewFollowupPosted" | "approvalFeedbackVerified"> & {
+  "reviewRequests" | "unresolvedReviewThreads" | "resolvedReviewThreads" | "createdAt" | "reviewFollowupPosted" | "approvalFeedback" | "approvalFeedbackVerified"> & {
   latestReviews: readonly { login: string; state: string; submittedAt?: string }[];
   /** The head commit's date: the last push, as near as GitHub dates it. */
   headCommittedAt?: string;
@@ -142,13 +143,20 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
     }
   }
 
-  // Only what the merge gates pass: every review thread read and resolved, approval feedback verified, and no open parent to merge first.
+  // Approved, green, merge-clean, and every review thread read and resolved: what the merge gates read from GitHub.
   const threadsResolved = pr.unresolvedReviewThreads === 0 && pr.resolvedReviewThreads !== null;
-  if (!pr.isDraft && pr.reviewDecision === "APPROVED" && green && mergeClean(pr) === true && threadsResolved && pr.approvalFeedbackVerified === true &&
-      pr.stackedOn == null) {
-    const approvals = submitted.filter((review) => review.state === "APPROVED").map((review) => time(review.submittedAt));
-    // Mergeable since the newest approval, or the push after it; an undated approval leaves the wait undated.
-    const approved = approvals.length > 0 && approvals.every((at) => at !== null) ? Math.max(...(approvals as number[])) : null;
+  const approvedClean = !pr.isDraft && pr.reviewDecision === "APPROVED" && green && mergeClean(pr) === true && threadsResolved;
+  const approvals = submitted.filter((review) => review.state === "APPROVED").map((review) => time(review.submittedAt));
+  // The newest approval; an undated one leaves the wait undated.
+  const approved = approvals.length > 0 && approvals.every((at) => at !== null) ? Math.max(...(approvals as number[])) : null;
+  // Approval comments not yet verified on this head hold the merge, and you can confirm them yourself, so this asks at once, not after a day.
+  if (approvedClean && pr.approvalFeedback?.status === "present" && pr.approvalFeedbackVerified !== true) {
+    add({ question: "needs-nudge", kind: "approval-comments", action: "confirm-handled", nextStep: "Confirm the approval's comments are handled", owner: "you",
+      since: approved });
+  }
+  // Only what the merge gates pass: the above, approval feedback verified, and no open parent to merge first.
+  if (approvedClean && pr.approvalFeedbackVerified === true && pr.stackedOn == null) {
+    // Mergeable since the newest approval, or the push after it.
     const from = approved === null ? null : Math.max(approved, pushed ?? approved);
     if (aged(from, thresholds.stuckAfterDays)) add({ question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", since: from });
   }

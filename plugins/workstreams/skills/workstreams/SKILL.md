@@ -687,16 +687,22 @@ question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
 action.
 
-Three RPCs act on one of your PRs, each one GitHub write per click, and each
-sends back what its row showed: `inventory_mark_ready` the row's `head`,
+Four RPCs act on one of your PRs, one write per click, and each sends back
+what its row showed: `inventory_mark_ready` the row's `head`,
 `inventory_request_review` the row's `reviewers` and the logins to ask
 (suggested per row as `suggestedReviewers`: the PR's past reviewers, then its
-repository's most recent ones), and `inventory_nudge` the reviewers its
-attention reason names, whom it re-requests. Each reads the PR again first. It
-refuses under a hold, a v2 claim, or another writer, and when the facts the
-step depends on differ from what the row showed. The row's `lastAction`
-records each outcome, refusals included. **Merge** opens
-`action_merge_preview`, and nothing merges outside it.
+repository's most recent ones), `inventory_nudge` the reviewers its attention
+reason names, whom it re-requests, and `inventory_confirm_handled` the row's
+`head` and `feedbackFingerprint`. The first three each write to GitHub.
+`inventory_confirm_handled` writes nothing to GitHub. It answers an
+`approval-comments` reason (approved, green, merge-clean, every review thread
+resolved, and the approval's comments unverified on this head) by recording
+your verification of those comments on that head, which the merge gate accepts
+as it accepts a worker's evidence. Each reads the PR again first. It refuses
+under a hold, a v2 claim, or another writer, and when the facts the step
+depends on differ from what the row showed. The row's `lastAction` records
+each outcome, refusals included. **Merge** opens `action_merge_preview`, and
+nothing merges outside it.
 
 ## Effort rosters (v2)
 

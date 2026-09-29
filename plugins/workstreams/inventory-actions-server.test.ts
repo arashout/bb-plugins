@@ -23,10 +23,13 @@ const BATCH = "00000000-0000-4000-8000-000000000091", JOB = "00000000-0000-4000-
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
+// mira's approval of #319 left comments; every review thread on it is resolved.
+const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-319"] };
+
 /**
- * You author a green draft (#313), a PR no one was asked to review (#314), a PR mira was asked to review ten days ago (#315), and a PR
- * whose change request from otto a push yesterday answered (#318). mira and otto reviewed #316 and #317. #313 carries a legacy Advance
- * job that never launched.
+ * You author a green draft (#313), a PR no one was asked to review (#314), a PR mira was asked to review ten days ago (#315), a PR
+ * whose change request from otto a push yesterday answered (#318), and a PR mira approved with comments two days ago (#319). mira and
+ * otto reviewed #316 and #317. #313 carries a legacy Advance job that never launched.
  */
 async function setup() {
   const calls: { method: string; input: unknown }[] = [];
@@ -37,6 +40,8 @@ async function setup() {
     [317, pr(317, { latestReviews: [{ author: { login: "otto" }, state: "COMMENTED", submittedAt: daysAgo(3) }] })],
     [318, { ...pr(318, { reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ author: { login: "otto" }, state: "CHANGES_REQUESTED", submittedAt: daysAgo(3) }] }),
       reviewFollowupPosted: true, unresolvedReviewThreads: 0, resolvedReviewThreads: 1, headCommittedAt: daysAgo(1) }],
+    [319, { ...pr(319, { reviewDecision: "APPROVED", latestReviews: [{ author: { login: "mira" }, state: "APPROVED", submittedAt: daysAgo(2) }] }),
+      approvalFeedback: FEEDBACK, unresolvedReviewThreads: 0, resolvedReviewThreads: 2, headCommittedAt: daysAgo(3) }],
   ]);
   const spawn = vi.fn(async () => { throw new Error("An inventory action starts no thread."); });
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
@@ -56,6 +61,12 @@ async function setup() {
       return { ok: true, detail: `Wrote ${request.kind}.` };
     }
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
+    if (method === "prLive") {
+      const live = current.get(Number((input as { prUrl: string }).prUrl.split("/").pop()))!;
+      return { ok: true, live: { state: live.state, isDraft: live.isDraft, reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus,
+        headRefOid: live.headRefOid, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0,
+        approvalNotesComplete: true, approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] } } };
+    }
     throw new Error(`Unexpected host method ${method}`);
   } });
   const facts: AdvanceFacts = { prUrl: url(313), number: 313, title: "ABC-313 Keep shelf order", repo: "inkwell/folio", headRefName: "branch-313", baseRefName: "main",
@@ -164,5 +175,43 @@ describe("inventory actions on the server", () => {
       .toMatchObject({ ok: false, error: expect.stringContaining("A worker from the effort-shelf roster is writing this PR") });
     expect(claimed()).toEqual([]);
     expect(await env.row(314)).toMatchObject({ lastAction: { action: "request-review", ok: false } });
+  });
+
+  // A confirmation clears the merge gate, so it binds to what the row showed, refused under a hold or after a push or a new comment, and
+  // once recorded, the row asks to merge through the same fresh preview, which accepts it.
+  it("confirms an approval's comments from its row, as yours and on its head, after which the row and the fresh preview offer the merge", async () => {
+    const env = await setup();
+    const shown = await env.row(319);
+    expect(shown).toMatchObject({ head: HEAD, feedbackFingerprint: FEEDBACK.fingerprint, attention: [{ kind: "approval-comments", action: "confirm-handled",
+      nextStep: "Confirm the approval's comments are handled", owner: "you" }] });
+    const preview = () => env.rpc("action_merge_preview", { prUrl: url(319) }) as Promise<{ ok: true; refusals: string[] }>;
+    expect((await preview()).refusals).toEqual(["Approval feedback needs verified follow-up on the current head."]);
+    const confirm = () => env.rpc("inventory_confirm_handled", { prUrl: url(319), headOid: shown.head, fingerprint: shown.feedbackFingerprint });
+    const stored = () => env.db.prepare("SELECT body FROM approval_feedback_verifications").all();
+
+    await env.rpc("pr_hold_set", { prUrl: url(319), held: true, reason: "Store layout first" });
+    const held = env.since();
+    expect(await confirm()).toEqual({ ok: false, error: "On hold: Store layout first. Release the hold first; nothing was written." });
+    expect(held()).toEqual([]);
+    await env.rpc("pr_hold_set", { prUrl: url(319), held: false });
+    // mira adds a comment to her approval, then a push lands, after the row was shown.
+    const original = env.current.get(319)!;
+    env.current.set(319, { ...original, approvalFeedback: { ...FEEDBACK, fingerprint: "e".repeat(64), sourceIds: ["review-319", "review-320"] } });
+    expect(await confirm()).toMatchObject({ ok: false, error: expect.stringContaining("The approval's comments changed since the row was shown") });
+    env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
+    expect(await confirm()).toMatchObject({ ok: false, error: expect.stringContaining("New commits landed") });
+    expect(stored()).toEqual([]);
+
+    env.current.set(319, original);
+    const after = env.since();
+    const signals = env.harness.inspection.realtimeSignals.length;
+    expect(await confirm()).toEqual({ ok: true, detail: `Confirmed the approval's comments handled on ${HEAD.slice(0, 7)}.` });
+    expect(after().map((call) => call.method)).toEqual(["inspectPrs"]);
+    // The board and roster panes gate on the record, so they're told after it's saved, not only by the read before it.
+    expect(env.harness.inspection.realtimeSignals.slice(signals).map((signal) => signal.channel).slice(-2)).toEqual(["board-changed", "inventory-changed"]);
+    expect(stored().map((row) => JSON.parse((row as { body: string }).body))).toMatchObject([{ prUrl: url(319), headOid: HEAD,
+      fingerprint: FEEDBACK.fingerprint, provenance: { kind: "user" } }]);
+    expect(await env.row(319)).toMatchObject({ attention: [{ kind: "merge-waiting", action: "merge" }], lastAction: { action: "confirm-handled", ok: true } });
+    expect((await preview()).refusals).toEqual([]);
   });
 });

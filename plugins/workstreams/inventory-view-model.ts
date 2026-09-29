@@ -41,7 +41,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
 /** A GitHub login or org/team slug, as ghactions.ts's REVIEWER reads one; a test keeps the two equal. */
 export const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99})?$/u;
 
-export type ActionId = "mark-ready" | "request-review" | "nudge" | "merge" | "refresh" | "thread";
+export type ActionId = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "merge" | "refresh" | "thread";
 /** Who acts next: you, the reviewers a step names, or the PR this one is stacked on. */
 export type Owner = { kind: "you" | "reviewers" | "parent"; label: string };
 export type Step = { text: string; owner: Owner; age: string | null; ageTitle: string | null };
@@ -95,12 +95,12 @@ export type Pending = ReadonlyMap<string, ActionId>;
 /** What this visit's clicks got back, by PR URL: a refresh's read, or an action's result or refusal. */
 export type Outcome = { at: number; action: ActionId; ok: boolean; text: string };
 
-const WORD: Record<ActionId, string> = { "mark-ready": "Mark ready", "request-review": "Request review", nudge: "Nudge", merge: "Merge",
-  refresh: "Refresh", thread: "Open thread" };
-const RUNNING: Record<ActionId, string> = { "mark-ready": "Marking ready…", "request-review": "Requesting…", nudge: "Nudging…", merge: "Merge…",
-  refresh: "Reading…", thread: "Open thread" };
+const WORD: Record<ActionId, string> = { "mark-ready": "Mark ready", "request-review": "Request review", nudge: "Nudge", "confirm-handled": "Confirm handled",
+  merge: "Merge", refresh: "Refresh", thread: "Open thread" };
+const RUNNING: Record<ActionId, string> = { "mark-ready": "Marking ready…", "request-review": "Requesting…", nudge: "Nudging…", "confirm-handled": "Confirming…",
+  merge: "Merge…", refresh: "Reading…", thread: "Open thread" };
 const STEP_ACTION: Record<AttentionReason["action"], ActionId> = { "mark-ready": "mark-ready", "request-review": "request-review", nudge: "nudge",
-  rerequest: "nudge", merge: "merge", "open-thread": "thread" };
+  rerequest: "nudge", "confirm-handled": "confirm-handled", merge: "merge", "open-thread": "thread" };
 const REVIEW_STATE: Record<string, ReviewerChip["state"]> = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested", COMMENTED: "commented",
   DISMISSED: "dismissed" };
 /** Code work the state word names, for a row the three questions don't ask about yet: you do it in the PR's thread. */

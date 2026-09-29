@@ -4,7 +4,8 @@ import {
   type AttentionClock, type AttentionFacts, type AttentionReason, type StateSince,
 } from "./pr-attention.js";
 
-const HOUR = 3_600_000;
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 // A Wednesday afternoon, so "a day ago" never crosses a weekend unless a row says so.
 const now = Date.UTC(2026, 8, 30, 15);
@@ -22,6 +23,9 @@ const quiet: AttentionFacts = {
 const approved: Partial<AttentionFacts> = { reviewDecision: "APPROVED", reviewRequests: [], reviewRequestedAt: [],
   headCommittedAt: iso(now - 3 * DAY), latestReviews: [{ login: "mira", state: "APPROVED", submittedAt: iso(now - DAY) }],
   unresolvedReviewThreads: 0, resolvedReviewThreads: 0, approvalFeedbackVerified: true };
+// Approved as above, but the approval left comments no one has verified on this head.
+const commented: Partial<AttentionFacts> = { ...approved, approvalFeedbackVerified: false,
+  approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] } };
 const changes = (submittedAt: number, state = "CHANGES_REQUESTED"): Partial<AttentionFacts> => ({
   reviewDecision: state === "DISMISSED" ? "REVIEW_REQUIRED" : "CHANGES_REQUESTED",
   reviewRequests: [], reviewRequestedAt: [], latestReviews: [{ login: "otto", state, submittedAt: iso(submittedAt) }] });
@@ -82,6 +86,21 @@ describe("PR attention", () => {
     ["approved with a review thread still open", { ...approved, unresolvedReviewThreads: 3 }, {}, []],
     ["approved with review thread pages left unread", { ...approved, resolvedReviewThreads: null }, {}, []],
     ["approved with its approval feedback unverified", { ...approved, approvalFeedbackVerified: false }, {}, []],
+    ["approved with feedback GitHub couldn't fully read", { ...approved, approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
+      approvalFeedbackVerified: false }, {}, []],
+    // Comments on an approval nobody has verified on this head: you confirm them, at once, whatever else merging still waits on.
+    ["approved with comments not yet confirmed", commented, {}, ["approval-comments"]],
+    ["approved with comments a minute ago", { ...commented, latestReviews: [{ login: "mira", state: "APPROVED", submittedAt: iso(now - MINUTE) }] }, {}, ["approval-comments"]],
+    ["approved with comments, stacked on an open PR", { ...commented, stackedOn: 41 }, {}, ["approval-comments"]],
+    ["approved with comments and a review thread still open", { ...commented, unresolvedReviewThreads: 1 }, {}, []],
+    ["approved with comments and review thread pages left unread", { ...commented, resolvedReviewThreads: null }, {}, []],
+    ["approved with comments and checks running", { ...commented, checkConclusions: ["PENDING"] }, {}, []],
+    ["approved with comments and red checks", { ...commented, checkConclusions: ["FAILURE"] }, {}, []],
+    ["approved with comments but blocked by branch protection", { ...commented, mergeStateStatus: "BLOCKED" }, {}, []],
+    ["approved with comments, conflicting", { ...commented, mergeable: "CONFLICTING" }, {}, []],
+    // Green, so only its being a draft keeps it from asking for the confirmation: marking it ready comes first.
+    ["a green draft approved with comments", { ...commented, isDraft: true }, {}, ["draft-ready"]],
+    ["approved with comments you confirmed on this head", { ...commented, approvalFeedbackVerified: true }, {}, ["merge-waiting"]],
     ["approved but stacked on an open PR", { ...approved, stackedOn: 41 }, {}, []],
     ["approved over an older change request", { ...approved, latestReviews: [...approved.latestReviews!, { login: "otto", state: "CHANGES_REQUESTED", submittedAt: iso(now - 4 * DAY) }] }, {}, ["merge-waiting"]],
     ["red for exactly a day", { checkConclusions: ["FAILURE"] }, { "ci-red": now - DAY }, ["ci-red"]],
@@ -111,6 +130,11 @@ describe("PR attention", () => {
       nextStep: "Re-request review from @otto", owner: "you", reviewers: ["otto"], since: now - 2 * HOUR, ageMs: 2 * HOUR, basis: "github" }]);
     expect(reasons(approved)).toEqual([{ question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you",
       reviewers: [], since: now - DAY, ageMs: DAY, basis: "github" }]);
+    // Aged from the newest approval, not the push, since the comments came with it.
+    expect(reasons({ ...commented, latestReviews: [{ login: "mira", state: "APPROVED", submittedAt: iso(now - 2 * DAY) },
+      { login: "otto", state: "APPROVED", submittedAt: iso(now - 4 * HOUR) }] })).toEqual([{ question: "needs-nudge", kind: "approval-comments",
+      action: "confirm-handled", nextStep: "Confirm the approval's comments are handled", owner: "you", reviewers: [], since: now - 4 * HOUR, ageMs: 4 * HOUR,
+      basis: "github" }]);
     expect(reasons({ checkConclusions: ["FAILURE"], mergeable: "CONFLICTING" }, { "ci-red": now - 2 * DAY, conflicting: now - 3 * DAY })).toEqual([
       { question: "needs-nudge", kind: "ci-red", action: "open-thread", nextStep: "Fix the failing checks", owner: "you", reviewers: [],
         since: now - 2 * DAY, ageMs: 2 * DAY, basis: "observed" },

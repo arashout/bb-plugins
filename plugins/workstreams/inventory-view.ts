@@ -28,6 +28,8 @@ export const inventoryRowSchema = z.object({
   /** Your open PR in its repository that this one of yours is stacked on, by number: file this row under that one, which merges first. */
   stackedOn: z.number().nullable(),
   draft: z.boolean().nullable(), head: z.string().nullable(),
+  /** The approval comments' fingerprint, when approving reviews left any: Confirm handled sends it back with `head`. */
+  feedbackFingerprint: z.string().nullable(),
   attention: z.array(attentionReasonSchema),
   /** The last read GitHub answered, and the last it didn't, with why, while no read since has succeeded. */
   checkedAt: z.string().nullable(), failure: z.object({ at: z.string(), error: z.string().nullable() }).strict().nullable(),
@@ -40,7 +42,7 @@ export const inventoryRowSchema = z.object({
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
   suggestedReviewers: z.array(z.string()),
   /** What the last inventory action on the PR did, or why it was refused. */
-  lastAction: z.object({ at: z.number(), action: z.enum(["mark-ready", "request-review", "nudge"]), ok: z.boolean(), detail: z.string(),
+  lastAction: z.object({ at: z.number(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]), ok: z.boolean(), detail: z.string(),
     reviewers: z.array(z.string()) }).strict().nullable(),
 }).strict();
 export type InventoryRow = z.infer<typeof inventoryRowSchema>;
@@ -99,6 +101,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
       : input.read ? "Not polled; read by its roster" : "Not read yet",
     stackedOn,
     draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
+    feedbackFingerprint: pr?.approvalFeedback?.fingerprint ?? null,
     attention: [...input.reasons],
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
