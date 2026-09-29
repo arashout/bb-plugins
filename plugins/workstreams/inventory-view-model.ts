@@ -43,6 +43,8 @@ export type InventoryLine = {
   /** False for a teammate's PR an effort names: it asks nothing of you. */
   authored: boolean;
   reviewers: ReviewerChip[];
+  /** Whom the reviewer picker suggests: this PR's past reviewers, then its repository's recent ones. */
+  suggested: string[];
   /** The server's state word; "Clear" on an approved PR reads "Ready to merge". */
   status: string;
   hold: { reason: string | null; age: string } | null;
@@ -206,7 +208,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   const started = row.threads.origin && row.threads.origin.id !== working?.id ? row.threads.origin : null;
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
-    authored: row.authored, reviewers: reviewerChips(row),
+    authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
     status: row.status === "Clear" && row.stage === "ready" ? "Ready to merge" : row.status,
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) },
     steps, primary,
