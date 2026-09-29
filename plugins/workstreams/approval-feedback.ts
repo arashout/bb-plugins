@@ -37,6 +37,9 @@ export const approvalFeedbackProvenanceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("worker") }).strict(),
   z.object({ kind: z.literal("legacy-reconciliation"), auditThreadId: z.string().trim().min(1).max(200),
     evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100) }).strict(),
+  // You confirmed the feedback handled from the inventory: your word, not a worker's evidence. The gates, the merge preview, and the
+  // roster's evidence read it as verified all the same, as they read every variant: provenance is the record's audit trail, not a gate.
+  z.object({ kind: z.literal("user") }).strict(),
 ]);
 export type ApprovalFeedbackProvenance = z.infer<typeof approvalFeedbackProvenanceSchema>;
 const recordSchema = feedbackReportSchema.extend({
@@ -96,7 +99,7 @@ export function feedbackVerificationState(snapshot: ApprovalFeedbackSnapshot | u
 }
 
 export function createApprovalFeedbackStore(db: RunDb) {
-  return {
+  const store = {
     get(prUrl: string): ApprovalFeedbackRecord | null {
       const key = canonicalPrUrl(prUrl);
       if (key === null) return null;
@@ -133,5 +136,19 @@ export function createApprovalFeedbackStore(db: RunDb) {
       const written = db.prepare("SELECT changes() AS count").get() as { count: number };
       return written.count === 1 ? next : null;
     },
+    /**
+     * Your confirmation that approval feedback is handled, bound to exactly this head and feedback: one finding per source that says it
+     * is your word and that no check ran. No thread or attempt did the work, so those fields name the inventory and when you confirmed.
+     */
+    confirm(prUrl: string, snapshot: ApprovalFeedbackSnapshot, headOid: string, at: number): ApprovalFeedbackRecord {
+      if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) {
+        throw new Error("Only approval feedback read on a known head can be confirmed");
+      }
+      return store.save(prUrl, "inventory", { attemptId: `confirmed-${at}`, headOid, fingerprint: snapshot.fingerprint, blockers: [],
+        findings: snapshot.sourceIds.map((sourceId) => ({ sourceId, resolution: "already-satisfied" as const,
+          evidence: "You confirmed in the PR inventory that this approval feedback is handled.",
+          validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user" });
+    },
   };
+  return store;
 }

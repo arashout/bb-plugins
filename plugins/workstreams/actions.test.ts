@@ -1,6 +1,7 @@
 // Row actions: availability, thread routing, prompts, merge refusals and the
 // nudge comment. Fixtures are the invented Inkwell bookstore: repos quill,
 // folio, margin, colophon and spine; tickets ABC-/OPS-/WEB-/SHOP-; PRs 42–99.
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
   AGENT_ACTIONS,
@@ -16,6 +17,7 @@ import {
   type ThreadCandidate,
   type ThreadCapabilities,
 } from "./actions.js";
+import { APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore } from "./approval-feedback.js";
 import { RESULT_INSTRUCTION } from "./runs.js";
 import { inboxSection, inboxVerb, type InboxUnitFacts } from "./workstreams.js";
 import type { MergeStateStatus } from "./contract.js";
@@ -292,6 +294,19 @@ describe("mergeVerdict", () => {
     expect(mergeVerdict(live({ ...pending, approvalFeedback: { ...approvalFeedback, fingerprint: "a".repeat(64) } }), record).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
     expect(mergeVerdict(pending, { ...record, findings: [{ ...record.findings[0]!, validation: { outcome: "failed", detail: "Focused test failed." } }] }).refusals)
       .toContain("Approval feedback needs verified follow-up on the current head.");
+  });
+  // The inventory's Confirm handled leads to this preview, so the preview must take your confirmation, and only for what you confirmed.
+  it("accepts your confirmation of approval feedback on the head and feedback you confirmed, as it accepts worker evidence", () => {
+    const approvalFeedback = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1", "review-2"] };
+    const pending = live({ approvalFeedback });
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const confirmed = createApprovalFeedbackStore(db).confirm("https://github.com/example/widget/pull/42", approvalFeedback, pending.headRefOid!, 1_000);
+    expect(confirmed.provenance).toEqual({ kind: "user" });
+    expect(mergeVerdict(pending, confirmed)).toEqual({ refusals: [], warnings: [] });
+    expect(mergeVerdict(live({ ...pending, headRefOid: "b".repeat(40) }), confirmed).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
+    expect(mergeVerdict(live({ ...pending, approvalFeedback: { ...approvalFeedback, fingerprint: "a".repeat(64), sourceIds: ["review-1", "review-2", "review-3"] } }),
+      confirmed).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
+    db.close();
   });
   it("allows an open, approved, clean PR", () => {
     expect(mergeVerdict(live())).toEqual({ refusals: [], warnings: [] });

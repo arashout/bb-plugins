@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, parseFeedbackReport } from "./approval-feedback.js";
+import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, parseFeedbackReport,
+  type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { readReviewThreads, type GhRunner } from "./ghactions.js";
 
 const url = "https://github.com/example/widget/pull/42";
@@ -72,6 +73,28 @@ describe("approval feedback verification", () => {
       { ...provenance, evidenceRefs: ["  "] },
     ]) expect(() => store.save(url, "old-thread", parsed, 3_000, invalid)).toThrow();
     expect(store.get(url)?.verifiedAt).toBe(2_000);
+    db.close();
+  });
+
+  // Your confirmation clears the merge gate the way worker evidence does, so it must say it's yours and bind to exactly what you read.
+  it("records your confirmation as yours, bound to the head and feedback you confirmed, and never for feedback it can't name", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const confirmed = store.confirm(url, snapshot, head, 5_000);
+    expect(store.get(url)).toEqual(confirmed);
+    expect(confirmed).toMatchObject({ provenance: { kind: "user" }, threadId: "inventory", headOid: head, fingerprint: snapshot.fingerprint, verifiedAt: 5_000,
+      findings: [{ sourceId: review.id, validation: { outcome: "not-needed", detail: "Your confirmation; no check ran." } }] });
+    expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
+    expect(feedbackVerificationState(snapshot, "b".repeat(40), store.get(url))).toBe("head-changed");
+    expect(feedbackVerificationState({ ...snapshot, fingerprint: "c".repeat(64), sourceIds: [...snapshot.sourceIds, "review-43"] }, head, store.get(url)))
+      .toBe("feedback-changed");
+    const unnamed: [ApprovalFeedbackSnapshot, string][] = [[{ status: "unknown", fingerprint: null, sourceIds: [] }, head],
+      [{ status: "none", fingerprint: null, sourceIds: [] }, head], [snapshot, "not-a-head"]];
+    for (const [feedback, at] of unnamed) expect(() => store.confirm(url, feedback, at, 6_000)).toThrow();
+    expect(store.get(url)).toEqual(confirmed);
     db.close();
   });
 
