@@ -22,6 +22,14 @@ Plus a derived **stage** (discovery / planning / implementation / review) and
 **status** (working / waiting-on-me / waiting-on-other / done) — where `working`
 comes from bb's live thread state and the other three from the brief.
 
+The two are orthogonal — stage says how far the work has got, status says who
+owes the next move — but they are answered by one model call over one transcript,
+and nothing in that call holds them to agreeing. So the parser reconciles them:
+an empty `nextStep` means nobody owes the thread an action, which is only true
+once the work is made, so a `stage` of `implementation` beside one is read as
+`review`. Without it an agent's closing summary of what it built lands as
+"Implementation — Done". A pinned stage is exempt; a pin is returned as given.
+
 Either can be pinned by hand in the Brief panel, anchored to the thread's
 activity cursor so the pin retires on the next real turn. The status pin is what
 closes a thread whose next step was carried out somewhere the transcript cannot

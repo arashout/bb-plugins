@@ -22,7 +22,7 @@ Return ONLY a JSON object with exactly these keys:
   "nextStepActor" Who has to take that next step. One of: "me" if only the user can (try it and report back, decide between options, reply to someone, merge, grant access), "agent" if the agent could carry on unprompted, "other" if it depends on someone or something outside this thread (a review, a colleague, an upstream fix, a rollout).
   "blockedOn"     The party or artifact the thread is waiting on, when someone could go chase it. Empty string otherwise.
   "constraints"   Facts learned during the thread that would break a naive re-plan: API limits, rejected approaches, assumptions proven wrong. Empty string if none.
-  "stage"         One of: "discovery", "planning", "implementation", "review".
+  "stage"         How far round the arc the work itself has got. One of: "discovery" (still establishing what is true or what is wanted), "planning" (the shape is agreed, the making has not started), "implementation" (the work is being made), "review" (the work is made, and is being checked, tried, or waited on for a verdict). Judge the work, not the conversation: a thread whose agent has finished building and described what it built is at "review", whether or not anyone has looked at it yet.
   "refresherShort" One or two sentences of plain prose, addressed to the user as "you", for someone reopening this thread after a few hours: what they were doing, how far it got, what to do next.
   "refresherFull"  The same thing for someone who has been away for days: two or three sentences, with enough named detail to stand on its own.
 
@@ -39,6 +39,7 @@ Rules:
 - A thread is finished when nobody owes it an action. For any candidate next step, ask: must a person or team actually do this, will it not happen on its own, and would it be dropped if this brief did not record it? Yes to all three — that is "nextStep", and the thread is not done. Otherwise "nextStep" is the empty string. Never invent one; a brief that manufactures work devalues every real item next to it.
 - An action can be owed outside the chat, and those are the ones that get silently dropped: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround to undo, a build or rollout to finish and confirm, a question put to someone who has not answered. Recording these is not inventing work — the transcript already named them.
 - Nothing is owed to the passage of time. Open-ended watching has no owner and no definite outcome — "check back in a few days", "keep an eye on it", "confirm it behaves in real use" — and does NOT keep a thread open. Nor does work the transcript puts out of scope, nor an idea raised and not adopted. Judge the state of the work, not the tone of the sign-off: agents habitually hedge when they finish ("worth a glance", "I'd flag this as open"), and an item nobody must act on does not block done however the transcript labels it. Keep anything worth remembering in "currentState" or "constraints".
+- "stage" and "nextStep" describe the same thread and must agree. An empty "nextStep" means nothing is owed, which is only true once the work is made — so the stage is "review". Never return "implementation" alongside an empty "nextStep".
 - "blockedOn" is held to a higher bar than "nextStep": name a party or artifact someone could go chase — a specific review, a person, an upstream fix, a running build, an access grant. Never a duration, never "real usage" or "more data". If you cannot say who would be chased, leave it empty.
 - Use empty strings, not "none" / "N/A" / "nothing".
 - Write plainly and specifically. No preamble, no hedging, no restating these instructions.
@@ -256,6 +257,34 @@ export function normalizeRefresher(record: {
   return short === "" && full === "" ? null : { short, full };
 }
 
+/**
+ * The stage a summary lands on once it is reconciled with its own `nextStep`.
+ *
+ * Stage and `nextStep` come back in one JSON object from one call, and nothing
+ * holds the model to answering both consistently. The commonest way a good
+ * brief comes back wrong is `"implementation"` beside an empty `nextStep` — an
+ * agent whose last turn narrated what it built, deployed and handed over.
+ * `deriveStatus` reads that empty `nextStep` as `done`, so the pair renders as
+ * "Implementation — Done", and dragging the card out of the board's Done column
+ * puts it back into Implementation rather than Review.
+ *
+ * An empty `nextStep` means nobody owes the thread an action, which is only
+ * true once the work is made — so the stage is `review`. The prompt asks for
+ * exactly this; doing it here as well is what makes it a guarantee of this code
+ * rather than of the prompt, in the same spirit as `deriveStatus` testing
+ * `blockedOn` for itself.
+ *
+ * Only from `implementation`. A `discovery` or `planning` thread with nothing
+ * owed was concluded or abandoned before any work existed, and calling that
+ * `review` would claim there is something to review.
+ */
+export function reconcileStage(
+  stage: BriefStage,
+  nextStep: string,
+): BriefStage {
+  return stage === "implementation" && nextStep === "" ? "review" : stage;
+}
+
 export function parseSummary(
   reply: string,
   fixedStage: BriefStage | null,
@@ -266,16 +295,22 @@ export function parseSummary(
   }
   const record = raw as Record<string, unknown>;
 
+  const nextStep = normalizeField(record.nextStep);
+
+  // A pinned stage short-circuits both the fallback and the reconciliation: the
+  // prompt promises the user's pick is returned whatever the transcript says,
+  // and a pin overruled here would be a pin that silently did not hold.
   const rawStage = typeof record.stage === "string" ? record.stage.trim() : "";
   const stage: BriefStage =
     fixedStage ??
-    (BRIEF_STAGES.includes(rawStage as BriefStage)
-      ? (rawStage as BriefStage)
-      : // An unrecognized stage is not worth failing the whole brief over;
-        // implementation is the safest neutral guess.
-        "implementation");
-
-  const nextStep = normalizeField(record.nextStep);
+    reconcileStage(
+      BRIEF_STAGES.includes(rawStage as BriefStage)
+        ? (rawStage as BriefStage)
+        : // An unrecognized stage is not worth failing the whole brief over;
+          // implementation is the safest neutral guess.
+          "implementation",
+      nextStep,
+    );
 
   return summaryResultSchema.parse({
     title: normalizeTitle(record.title),

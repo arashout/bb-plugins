@@ -7,6 +7,7 @@ import {
   normalizeRefresher,
   normalizeTitle,
   parseSummary,
+  reconcileStage,
 } from "./summarize.js";
 import { MAX_REFRESHER_LENGTH, MAX_TITLE_LENGTH } from "./contract.js";
 import {
@@ -254,6 +255,64 @@ describe("normalizeRefresher", () => {
     expect(prose!.short.length).toBeLessThanOrEqual(MAX_REFRESHER_LENGTH.short);
     expect(prose!.full.length).toBeLessThanOrEqual(MAX_REFRESHER_LENGTH.full);
     expect(prose!.full.length).toBeGreaterThan(prose!.short.length);
+  });
+});
+
+describe("reconcileStage", () => {
+  it("promotes implementation to review when nothing is owed", () => {
+    expect(reconcileStage("implementation", "")).toBe("review");
+  });
+
+  it("leaves implementation alone while a next step stands", () => {
+    expect(reconcileStage("implementation", "Run the tests")).toBe("implementation");
+  });
+
+  it("never promotes a stage with no work behind it", () => {
+    // A discovery or planning thread with nothing owed was dropped before any
+    // work existed; calling it review would claim there is something to review.
+    expect(reconcileStage("discovery", "")).toBe("discovery");
+    expect(reconcileStage("planning", "")).toBe("planning");
+  });
+
+  it("leaves review where it is", () => {
+    expect(reconcileStage("review", "")).toBe("review");
+  });
+});
+
+describe("parseSummary stage reconciliation", () => {
+  it("reads a completion narrative as review, not implementation", () => {
+    // The bug this exists for: one call returns both keys, and an agent signing
+    // off with what it built gets an empty nextStep beside an unmoved stage.
+    const parsed = parseSummary(
+      reply({ ...full, nextStep: "", stage: "implementation" }),
+      null,
+    );
+    expect(parsed.stage).toBe("review");
+  });
+
+  it("promotes the fallback stage too", () => {
+    // An unusable stage falls back to implementation, and a thread owing
+    // nothing is better guessed as review than as mid-build.
+    expect(
+      parseSummary(reply({ ...full, nextStep: "", stage: "vibes" }), null).stage,
+    ).toBe("review");
+  });
+
+  it("treats an empty synonym as nothing owed", () => {
+    expect(
+      parseSummary(reply({ ...full, nextStep: "N/A", stage: "implementation" }), null)
+        .stage,
+    ).toBe("review");
+  });
+
+  it("leaves a pinned stage pinned", () => {
+    // The pin's promise is that it is returned whatever the transcript says.
+    expect(
+      parseSummary(
+        reply({ ...full, nextStep: "", stage: "review" }),
+        "implementation",
+      ).stage,
+    ).toBe("implementation");
   });
 });
 

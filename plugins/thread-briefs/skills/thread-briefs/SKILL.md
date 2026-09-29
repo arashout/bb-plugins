@@ -134,6 +134,17 @@ override it; the override is anchored to the thread's activity cursor and retire
 itself on the next real turn. Clicking the active manual stage clears it. The
 override moves the row's ring too, immediately.
 
+Stage and `nextStep` come back from one model call, and nothing in that call
+makes the model answer both consistently — the usual failure is a stage left at
+`implementation` beside an empty `nextStep`, on a thread whose agent has just
+narrated what it built and deployed. Since an empty `nextStep` derives `done`,
+that pair renders as "Implementation — Done" and drags out of the board's Done
+column back into Implementation. `reconcileStage` in `summarize.ts` promotes it:
+nothing owed means the work is made, so the stage is `review`. Only from
+`implementation` — a `discovery` or `planning` thread with nothing owed was
+dropped before any work existed, and there is nothing there to review. A pinned
+stage short-circuits it, since a pin promises to come back as given.
+
 Both overrides share that anchor rule, and "the next real turn" means a summary
 whose conversation cursor has moved past where the pin was set — so
 **Re-summarize** on an unchanged thread keeps your pin, and a summary after an
