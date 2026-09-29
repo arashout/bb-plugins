@@ -226,7 +226,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       if (!claim(id, "scheduled", "cancelled")) {
         const state = get(id)?.state;
         return { ok: false, error: state === "cancelled" ? "This batch is already undone." : state === "planned" ? "This batch hasn't started."
-          : state ? "It already sent. Nothing was undone." : "That batch is gone." };
+          : state === "dispatching" ? "It's already sending. Nothing was undone." : state ? "It already sent. Nothing was undone." : "That batch is gone." };
       }
       clearTimeout(timers.get(id));
       timers.delete(id);
@@ -257,13 +257,17 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       pickUp();
       again = setTimeout(pickUp, 2 * SEND_DELAY_MS);
     },
-    /** The newest deck write on each PR in the last day: waiting, sending, or settled. An undone batch leaves no mark. */
+    /**
+     * The newest deck write on each PR in the last day: waiting, sending, or settled. An undone batch leaves no mark. Once a batch starts
+     * sending, Undo can't stop it, so a PR still waiting its turn reads as sending, not queued.
+     */
     acted(): Map<string, RowActed> {
       const out = new Map<string, RowActed>();
       const rows = db.prepare(`SELECT id, created_at, state, dispatch_at, body FROM deck_batches WHERE state IN ('scheduled', 'dispatching', 'done') AND created_at >= ?`)
         .all(deps.now() - ACTED_MS);
       for (const batch of rows.map(parse)) for (const item of batch!.items) {
-        const acted: RowActed = { kind: item.kind, state: item.state === "pending" ? "queued" : item.state, at: item.at ?? batch!.dispatchAt! - SEND_DELAY_MS,
+        const acted: RowActed = { kind: item.kind, state: item.state !== "pending" ? item.state : batch!.state === "scheduled" ? "queued" : "sending",
+          at: item.at ?? batch!.dispatchAt! - SEND_DELAY_MS,
           batchId: batch!.id };
         if ((out.get(item.prUrl)?.at ?? -1) <= acted.at) out.set(item.prUrl, acted);
       }

@@ -186,6 +186,20 @@ describe("deck batches on the server", () => {
     expect(await env.rpc("deck_batch_plan", { kind: "advance", effortId: env.effort.id })).toEqual({ ok: false, error: "Resume or reopen this effort first." });
   });
 
+  it("stops offering a row's Undo once its batch starts sending, though that PR still waits its turn", async () => {
+    const env = await setup();
+    env.hang.prUrl = url(503);
+    const planned = await plan(env, { kind: "advance" });
+    await env.rpc("deck_batch_start", { batchId: planned.batchId });
+    await vi.advanceTimersByTimeAsync(8_000);
+    // #503's nudge is out and GitHub hasn't answered; #502's request hasn't gone yet, and Undo can no longer stop it.
+    await vi.waitFor(() => expect(env.writes).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    const rows = (await env.card()).sections.flatMap((section) => section.rows);
+    expect(rows.find((row) => row.prUrl === url(502))?.acted).toEqual({ kind: "request", state: "sending", at: expect.any(Number), batchId: planned.batchId });
+    expect(await env.rpc("deck_batch_undo", { batchId: planned.batchId })).toEqual({ ok: false, error: "It's already sending. Nothing was undone." });
+  });
+
   it("keeps a batch through a restart: it sends once after the rest of its window, stays undone if you undid it, and never resends a write cut off mid-send", async () => {
     const env = await setup();
     const waiting = await plan(env, { kind: "ready" });
