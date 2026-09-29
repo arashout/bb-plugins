@@ -98,6 +98,35 @@ describe("the effort deck's markup", () => {
     expect(text(pane(inkwellDeck(), "effort-store-pickup"))).toContain("Linear no Linear data People");
   });
 
+  // The card behind the top one is the one ] flips to, so its name on the visible edge says where the next flip lands, and clicking it goes there.
+  it("stacks the next efforts behind the card, each lower, smaller, and to the right, with the next one's name on its edge", () => {
+    const html = pane(inkwellDeck(), SHELF);
+    const layers = [...html.matchAll(/data-deck-layer="(\d)"([^>]*)>/gu)].map((match) => `${match[1]}${/aria-hidden="true"/u.test(match[2]!) ? " hidden" : ""} ${
+      /transform:([^;"]+)/u.exec(match[2]!)![1]}`);
+    expect(layers).toEqual(["1 translate(3px, 16px) scale(0.98)", "2 hidden translate(6px, 22px) scale(0.96)", "3 hidden translate(9px, 27px) scale(0.94)"]);
+    expect(html).toMatch(/<button type="button" tabindex="-1" data-deck-peek="effort-store-pickup" title="Next: Store pickup \(\] or →\)" aria-label="Next effort: Store pickup"/u);
+    // The deepest edge's room is kept below the stack, so the sections start after it and nothing overlaps them.
+    expect(html).toMatch(/<div class="mb-2.5" style="padding-bottom:27px"><div data-deck-stack="true"/u);
+    expect(html.indexOf("data-deck-top")).toBeLessThan(html.indexOf('data-deck-card="effort-shelf-order"'));
+    // The last effort's next card is Unclassified; Unclassified's wraps to the first effort; a pile of two has one card behind.
+    expect(html.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("effort-store-pickup");
+    expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("unc");
+    expect(pane(inkwellDeck(), "unc").match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(SHELF);
+    const view = inkwellDeck();
+    const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
+    const two = pane(view, SHELF, { chips: stripChips([SHELF], cards, { toSort: 4, changed: 0 }, SHELF) });
+    expect(two.match(/data-deck-layer=/gu)).toHaveLength(1);
+    expect(two).toMatch(/style="padding-bottom:16px"/u);
+  });
+
+  it("draws each pile as a tiny stack of cards, and an empty pile as an outline", () => {
+    const html = pane(inkwellDeck(), SHELF, { held: [] });
+    const piles = [...html.matchAll(/data-deck-pile="(\w+)"[^>]*><span aria-hidden="true" data-deck-pile-cards="(\w+)"[^>]*>(.*?)<\/span>/gu)]
+      .map((match) => `${match[1]} ${match[2]} ${match[3]!.match(/<i /gu)!.length}`);
+    expect(piles).toEqual(["hold empty 1", "done stacked 3"]);
+    expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
+  });
+
   it("draws the Unclassified deck: coverage, rules, and each suggestion's reason once with its one button and each PR's signals", () => {
     const html = pane(inkwellDeck(), "unc");
     expect(text(html)).toContain("Effort coverage 59% of 17 open PRs are in a real effort");

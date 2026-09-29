@@ -129,7 +129,8 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     const focused = document.activeElement?.closest?.("[data-deck-row]");
     const row = [prefer, focused].find((element) => element && view.contains(element) && inView(element));
     if (row) return { row: (row as HTMLElement).dataset.deckRow!, at: row.getBoundingClientRect().top - box.top };
-    const card = view.querySelector("[data-deck-card], section");
+    // The stack's box: the card on top, without the edges of the cards behind it.
+    const card = view.querySelector("[data-deck-stack]");
     const cardBox = card?.getBoundingClientRect();
     if (cardBox && cardBox.bottom > box.top + 40) return { card: true, at: cardBox.top - box.top };
     for (const element of Array.from(view.querySelectorAll<HTMLElement>("[data-deck-row]"))) {
@@ -143,7 +144,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     const scroller = scrollerRef.current;
     const view = viewRef.current;
     if (!anchor || !scroller || !view) return;
-    const element = "card" in anchor ? view.querySelector("[data-deck-card], section") : view.querySelector(`[data-deck-row="${CSS.escape(anchor.row)}"]`);
+    const element = "card" in anchor ? view.querySelector("[data-deck-stack]") : view.querySelector(`[data-deck-row="${CSS.escape(anchor.row)}"]`);
     if (!element) return;
     const next = anchorScroll({ scrollTop: scroller.scrollTop, slack: slack.current, at: element.getBoundingClientRect().top - scroller.getBoundingClientRect().top, want: anchor.at });
     setSlack(next.slack);
@@ -403,8 +404,8 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     const { key: effortKey, name } = effort;
     setBusy(true);
     const leaving = move === "hold" || move === "complete";
-    // Light card motion: the card drops toward its pile, which then bumps.
-    const cardElement = viewRef.current?.querySelector<HTMLElement>("[data-deck-card]");
+    // Light card motion: the card on top drops toward its pile, which then bumps, and shows the stack behind it.
+    const cardElement = viewRef.current?.querySelector<HTMLElement>("[data-deck-top]");
     const pileElement = rootRef.current?.querySelector<HTMLElement>(`[data-deck-pile="${move === "hold" ? "hold" : "done"}"]`);
     if (leaving && cardElement && pileElement && !reduced()) {
       const from = cardElement.getBoundingClientRect(), to = pileElement.getBoundingClientRect();

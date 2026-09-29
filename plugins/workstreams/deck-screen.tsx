@@ -12,6 +12,7 @@ import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
 import type { Availability, CardScreen, Chip, DeckLine, PaletteItem, SectionScreen, Tone, UncGroup, UncScreen } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
+import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 
@@ -108,8 +109,7 @@ function PilePopover({ pile, items, open, run }: { pile: "hold" | "done"; items:
     <PopoverPrimitive.Trigger asChild>
       <button type="button" data-deck-focus={`pile-${pile}`} data-deck-pile={pile} title={`The ${label} pile`}
         className={cn("flex h-[30px] items-center gap-1.5 rounded-lg px-1.5 text-[12px] text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground", RING)}>
-        <span aria-hidden className="relative inline-block h-4 w-3"><i className="absolute inset-0 translate-x-0.5 -translate-y-0.5 rotate-6 rounded-sm border border-border bg-background" />
-          <i className="absolute inset-0 rounded-sm border border-border bg-background" /></span>
+        <PileCards empty={!items.length} />
         {pile === "hold" ? "Hold" : "Done"} <b className="font-semibold text-foreground/80">{items.length}</b>
       </button>
     </PopoverPrimitive.Trigger>
@@ -127,6 +127,41 @@ function PilePopover({ pile, items, open, run }: { pile: "hold" | "done"; items:
       </PopoverPrimitive.Content>
     </PopoverPrimitive.Portal>
   </PopoverPrimitive.Root>;
+}
+
+/** A pile's tiny stack, drawn like the deck's: three cards, each one behind a little lower and to the right. An empty pile is an outline. */
+function PileCards({ empty }: { empty: boolean }) {
+  return <span aria-hidden data-deck-pile-cards={empty ? "empty" : "stacked"} className="relative inline-block h-[17px] w-3 shrink-0">
+    {empty ? <i className="absolute left-0 top-0 h-[13px] w-2.5 rounded-[2.5px] border border-dashed border-border" />
+      : [2, 1, 0].map((depth) => <i key={depth} className="absolute left-0 top-0 h-[13px] w-2.5 rounded-[2.5px] border"
+        style={{ transform: `translate(${depth}px, ${depth * 2}px)`, background: `color-mix(in srgb, var(--background) ${100 - 6 * depth}%, #000)`,
+          borderColor: `color-mix(in srgb, var(--foreground) ${34 - 9 * depth}%, transparent)` }} />)}
+  </span>;
+}
+
+// ---------------------------------------------------------------------------
+// The stack: the card shown on top, and the next few in the ring peeking out below it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The deck as a stack of cards: the one shown on top, over the next few a flip forward reaches, each lower, to the right, smaller, and darker,
+ * with the next one's name on its edge, which flips to it.
+ */
+function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; children: ReactNode }) {
+  return <div className="mb-2.5" style={{ paddingBottom: LAYERS[behind.length]!.y }}>
+    <div data-deck-stack className="relative isolate">
+      {behind.map((chip, index) => { const depth = index + 1; return <div key={chip.id} data-deck-layer={depth} aria-hidden={depth > 1 || undefined}
+        className="absolute inset-0 origin-bottom rounded-[14px] border shadow-[0_1px_2px_rgb(0_0_0/0.08),0_4px_12px_-8px_rgb(0_0_0/0.35)]"
+        style={{ zIndex: 4 - depth, transform: layerTransform(depth), background: `color-mix(in srgb, var(--background) ${100 - 4 * depth}%, #000)`,
+          borderColor: `color-mix(in srgb, var(--foreground) ${14 - 3 * depth}%, transparent)` }}>
+        {depth === 1 ? <button type="button" tabIndex={-1} data-deck-peek={chip.id} onClick={() => run({ kind: "action", id: "next" })} title={`Next: ${chip.name} (] or →)`}
+          aria-label={`Next effort: ${chip.name}`} style={{ height: LAYERS[1].y }}
+          className="absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 rounded-b-[14px] px-4 text-[11px] leading-none text-muted-foreground hover:text-foreground">
+          <Dot color={chip.color} hollow={chip.unc} /><span className="truncate">{chip.name}</span></button> : null}
+      </div>; })}
+      <div data-deck-top className="relative z-[5] rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
+    </div>
+  </div>;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +303,7 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
   const { linear } = screen;
   const linearLine = linear.chips.length > 0 || linear.bar.length > 0;
   const ticketStates = `Tickets: ${linear.bar.map((state) => `${state.count} ${state.name}`).join(" · ")}`;
-  return <section data-deck-card={card.id} aria-label={card.name} className="@container relative mb-2.5 rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
+  return <section data-deck-card={card.id} aria-label={card.name} className="@container relative rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
     style={{ backgroundImage: `linear-gradient(180deg, color-mix(in srgb, ${screen.color} 6%, transparent) 0, transparent 110px)` }}>
     <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-0.5">
@@ -407,11 +442,12 @@ function Group({ group, state, run, stuck }: { group: UncGroup; state: RowState;
   </section>;
 }
 
-export function Unclassified({ screen, rules, state, run, stuck }: { screen: UncScreen; rules: readonly RuleItem[]; state: RowState; run: Run; stuck: boolean }) {
+export function Unclassified({ screen, rules, state, run, stuck, behind }: { screen: UncScreen; rules: readonly RuleItem[]; state: RowState; run: Run; stuck: boolean;
+  behind: readonly Chip[] }) {
   const { coverage } = screen;
   const bar: [number, string][] = [[coverage.efforts, "bg-emerald-500/55"], [coverage.oneOffs, "bg-muted-foreground/40"], [coverage.toSort, "bg-amber-500/55"]];
   return <>
-    <section aria-label="Unclassified" className="relative mb-2.5 rounded-[14px] border border-border/70 p-3">
+    <Stack behind={behind} run={run}><section aria-label="Unclassified" className="relative rounded-[14px] border border-border/70 p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-0.5">
         <div className="min-w-0 flex-[1_1_300px]">
           <h1 tabIndex={-1} data-deck-focus="heading" className="flex items-center gap-2 text-[17px] font-semibold leading-6 tracking-tight outline-none">
@@ -441,7 +477,7 @@ export function Unclassified({ screen, rules, state, run, stuck }: { screen: Unc
               className={cn("rounded text-muted-foreground hover:text-foreground", RING)}>×</button></span>)}
         </div> : null}
       </div>
-    </section>
+    </section></Stack>
     {screen.groups.map((group) => <Group key={group.key} group={group} state={state} run={run} stuck={stuck} />)}
     {screen.groups.length ? null : <p className="py-8 text-center text-[12px] text-muted-foreground">Nothing to sort. New PRs land here only when no rule or signal places them.</p>}
   </>;
@@ -761,6 +797,7 @@ export type DeckPaneProps = {
 export function DeckPane(props: DeckPaneProps) {
   const { card, unc, stuck } = props;
   const name = card ? card.card.name : "Unclassified";
+  const behind = cardsBehind(props.chips, props.cur);
   return <div ref={props.rootRef} role="region" aria-label="Effort deck" className={cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS)}>
     <TopBar view="deck" read={props.read} seen={props.seen} run={props.run} onPalette={props.onPalette} onHelp={props.onHelp} />
     <Strip chips={props.chips} cur={props.cur} deck held={props.held} done={props.done} pile={props.pile} run={props.run} chipsRef={props.chipsRef} />
@@ -769,9 +806,9 @@ export function DeckPane(props: DeckPaneProps) {
         advance={card && card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-[1260px] px-2 pb-10 pt-3 @min-[720px]:px-4">
-        {card ? <><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} />
+        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} /></Stack>
           <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></>
-          : unc ? <Unclassified screen={unc} rules={props.rules} state={props.state} run={props.run} stuck={stuck} />
+          : unc ? <Unclassified screen={unc} rules={props.rules} state={props.state} run={props.run} stuck={stuck} behind={behind} />
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>
