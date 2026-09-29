@@ -718,6 +718,19 @@ Archiving and merging work as before.
 
 ## Classifying PRs
 
+`classify_get` suggests where each open PR of the user's that no effort owns
+belongs, and moves nothing. PRs that share a ticket, stack on each other, or
+sit in one board group are suggested together. Signals from owned work point
+them at an effort: a ticket in the title or branch, in any case (3), the PR it
+is stacked on (3), a linked thread (2), a board group (2), a ticket prefix (1),
+and a code area (1). A thread linked only through a shared checkout, or linking
+more than four PRs, counts nothing. The winning effort's margin over the next
+sets the confidence: high at 3 or more, medium at 2, and low at 1. A tie
+suggests nothing. Two or more PRs with no effort signal are proposed as a new
+effort, and a lone PR whose ticket nothing else carries as a one-off. Done
+efforts and One-offs are never suggested. Groups are split by effort and
+confidence for accepting together.
+
 Only the user classifies PRs. Each action takes open PRs of theirs that no
 effort owns (the inventory's "No effort" rows) and refuses the whole action if
 any of them has an owner now. `classify_one_off` puts PRs in **One-offs**, the

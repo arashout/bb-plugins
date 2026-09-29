@@ -27,6 +27,7 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
+import { prTickets, suggestEfforts, type ClassifyPr } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, ONE_OFFS, ONE_OFFS_SOURCE, type AssignmentSource } from "./effort-assignments.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
@@ -78,6 +79,7 @@ import {
   freshest,
   stalenessOf,
   outsideGrouping,
+  codeArea,
   parseTeamNames,
   rollOneOffs,
   buildEfforts,
@@ -3782,6 +3784,42 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
   }
 
+  /** Suggestions for your open PRs no effort owns, from what the board already read: nothing is read again, and nothing moves. */
+  async function classifyGet() {
+    const current = await board();
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const work = readWorkContext(current, pattern, false, prFacts.reads());
+    const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
+    const units = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units));
+    const areas = new Map(units.flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), [...new Set(unit.changedPaths
+      .flatMap((path) => codeArea(unit.githubRepo ?? unit.repo ?? unit.dirName, path) ?? []))]] as const] : []));
+    // Your open PRs, each to sort or owned, and the checked-out PRs efforts own, whose signals point at their efforts.
+    const prs = new Map<string, ClassifyPr>();
+    for (const { repo, pr, authored } of [...current.prInventory.entries.map((entry) => ({ ...entry, authored: true })),
+      ...units.flatMap((unit) => unit.pr ? [{ repo: unit.githubRepo ?? "", pr: unit.pr, authored: false }] : [])]) {
+      const url = prWorkItemKey(pr.url);
+      const effortId = work.ownerForPr(url)?.id ?? null;
+      if (pr.state !== "OPEN" || prs.has(url) || (!authored && effortId === null)) continue;
+      prs.set(url, { url, repo: prTarget(url)?.slug ?? repo.toLowerCase(), number: pr.number, title: pr.title, headRefName: pr.headRefName, baseRefName: pr.baseRefName, effortId,
+        areas: areas.get(url) ?? [] });
+    }
+    // A link only through a checkout the thread shares with other branches says nothing about the PR checked out there now.
+    const linked = new Map<string, Set<string>>();
+    for (const url of prs.keys()) for (const link of work.linksForPr(url, false))
+      if (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket") linked.set(link.threadId, (linked.get(link.threadId) ?? new Set()).add(url));
+    const tickets = [...prs.values()].flatMap((pr) => prTickets(pr, pattern));
+    return {
+      groups: suggestEfforts({ prs: [...prs.values()], pattern,
+        efforts: current.efforts.filter((effort) => !effort.archivedAt && effort.id !== oneOffs?.id && piles.get(effort).pile !== "done")
+          .map((effort) => ({ id: effort.id, name: effort.name, tickets: effort.members.tickets })),
+        groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !group.key.startsWith("ticket:") && !effortStore.get(group.key))
+          .map((group) => ({ key: group.key, name: group.name, prUrls: group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [prWorkItemKey(unit.pr.url)] : [])) })),
+        threads: [...linked].map(([id, urls]) => { const facts = threadFacts.get(id); return { id, title: (facts?.title ?? facts?.titleFallback ?? id).slice(0, 200), prUrls: [...urls] }; }),
+        ticketTitles: new Map([...linear.read(tickets)].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : [])) }),
+      oneOffsId: oneOffs?.id ?? null,
+    };
+  }
+
   async function adminThreads(source: NonNullable<ReturnType<typeof adminRecord>>,
     destination: NonNullable<ReturnType<typeof adminRecord>>) {
     const known = new Map<string, { effortId: string; role: string }>();
@@ -5419,6 +5457,7 @@ export default async function plugin(bb: BbPluginApi) {
         threads: [...threads].map(([id, title]) => ({ id, title })) } };
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
+    classify_get: () => classifyGet(),
     classify_one_off: ({ prUrls }) => classifyInto(() => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
       projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "one-off", prUrls),
     classify_undo: async ({ actionId }) => {

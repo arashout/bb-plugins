@@ -4,6 +4,7 @@
 // exactly what the action added, and only while that effort still owns all of it.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { suggestionGroupSchema } from "./effort-classify.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
 import type { RunDb } from "./runstore.js";
 
@@ -24,6 +25,8 @@ export const classifyActionResultSchema = z.discriminatedUnion("ok", [failure, z
   /** PRs the action put in the effort; tickets it added don't count. */
   added: z.number() }).strict()]);
 export const classifyContract = {
+  /** Read-only: a suggestion for each open PR of yours that no effort owns, grouped for accepting together. */
+  classify_get: { input: z.null(), output: z.object({ groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable() }).strict() },
   /** Put open PRs of yours that no effort owns into One-offs, which the first use creates. */
   classify_one_off: { input: z.object({ prUrls }).strict(), output: classifyActionResultSchema },
   /** Reverse one classification action while its effort still owns everything the action added. */
