@@ -15,13 +15,12 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
   type Seen, type ViewPlace } from "./deck-place";
-import { availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
+import { availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
   uncScreen, uncSnapshot, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type UncGroup } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, type DeckCommand, type RuleDraft, type RuleItem }
   from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 import { MergePreviewDialog } from "./roster-merge-dialog";
-import { age } from "./roster-view-model";
 
 type OtherView = "prs" | "map" | "pipeline" | "work" | "efforts";
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -657,7 +656,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
 
   return <>
     <DeckPane chips={chips} cur={cur} card={card} unc={card ? null : unc} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile}
-      read={{ text: view ? `${view.refreshing ? "Reading now · " : ""}Read ${view.checkedAt ? `${age(Date.parse(view.checkedAt), now)} ago` : "never"}` : "Reading…", error }}
+      read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus }} tiles={new Set(here.tiles)} open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}

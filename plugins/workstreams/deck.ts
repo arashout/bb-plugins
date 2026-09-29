@@ -44,8 +44,8 @@ export const deckRowSchema = z.object({
   hold: z.object({ reason: z.string(), since: z.number() }).strict().nullable(),
   /** The v2 roster that manages it. */
   managed: z.string().nullable(),
-  /** When GitHub last answered for it; `failed` when its last read didn't. */
-  checkedAt: z.string().nullable(), failed: z.boolean(),
+  /** When GitHub last answered for it; `failed` when its last read didn't, and `stale` when the last full read didn't list it or couldn't read it. */
+  checkedAt: z.string().nullable(), failed: z.boolean(), stale: z.boolean(),
   acted: z.object({ kind: z.enum(BATCH_KINDS), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number(), batchId: z.string().nullable() })
     .strict().nullable(),
 }).strict();
@@ -94,6 +94,8 @@ export const deckViewSchema = z.object({
   unclassified: z.object({ rows: z.array(deckRowSchema), groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable() }).strict(),
   counts: z.object({ needsYou: z.number(), toSort: z.number(), held: z.number(), done: z.number() }).strict(),
   checkedAt: z.string().nullable(), refreshing: z.boolean(),
+  /** GitHub's rate limit holds reads until then. */
+  limitedUntil: z.number().nullable(),
 }).strict();
 export type DeckView = z.infer<typeof deckViewSchema>;
 /** When you last marked each PR's row seen, by PR URL, as the view keeps it. */
@@ -128,7 +130,7 @@ export type DeckInput = {
   linear: ReadonlyMap<string, LinearDetail>;
   threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
   unclassified: { groups: SuggestionGroup[]; oneOffsId: string | null };
-  read: { checkedAt: string | null; refreshing: boolean };
+  read: { checkedAt: string | null; refreshing: boolean; limitedUntil: number | null };
   /** When you last marked each PR's row seen; see counted(). */
   seen: ReadonlyMap<string, number>;
 };
@@ -175,7 +177,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
-    managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
+    managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };
 }
 
@@ -297,5 +299,5 @@ export function deckView(input: DeckInput): DeckView {
   const unsorted = of(null).map(({ row }) => row);
   return { active, held, done, unclassified: { rows: unsorted, groups: input.unclassified.groups, oneOffsId: input.unclassified.oneOffsId },
     counts: { needsYou: active.reduce((sum, item) => sum + item.needsYou, 0), toSort: unsorted.length, held: held.length, done: done.length },
-    checkedAt: input.read.checkedAt, refreshing: input.read.refreshing };
+    checkedAt: input.read.checkedAt, refreshing: input.read.refreshing, limitedUntil: input.read.limitedUntil };
 }

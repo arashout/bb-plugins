@@ -73,6 +73,12 @@ describe("the effort deck's markup", () => {
     expect(nudge).toMatch(/data-deck-focus="sec-nudge" aria-disabled="true"/u);
   });
 
+  it("says on the row when its last read failed", () => {
+    const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } } : {});
+    const row = section(pane(view, SHELF), "merge").split("data-deck-row=").find((part) => part.includes("folio/pull/340"))!;
+    expect(text(row)).toContain("read failed");
+  });
+
   it("draws every tile with its summary and a More only where there's more", () => {
     const html = pane(inkwellDeck(), SHELF);
     const tiles = [...html.matchAll(/data-deck-tile="([a-z]+)"/gu)].map((match) => match[1]);

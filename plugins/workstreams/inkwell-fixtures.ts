@@ -477,5 +477,5 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
           pr("catalog", 97, "Merge duplicate author records", [{ kind: "group", text: "board group “Checkout”" }], null)] },
       { key: "none", target: null, confidence: null, reason: "No clear signal. Pick an effort for each PR.", tickets: [],
         prs: [pr("folio", 305, "Load cover images lazily", [], null)] }] },
-    read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false }, seen: new Map(), ...patch });
+    read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false, limitedUntil: null }, seen: new Map(), ...patch });
 }

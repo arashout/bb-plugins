@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, stripChips, targets, uncScreen, uncSnapshot, type CardScreen, type KeyContext }
-  from "./deck-view-model.js";
+import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, uncScreen, uncSnapshot, type CardScreen,
+  type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -82,6 +82,17 @@ describe("an effort card", () => {
     expect(nudge(refused).lines[0]).toMatchObject({ needs: true, dim: false, trail: { text: "Not sent", failed: true, title: "@mira-l already reviewed it." } });
     // A refusal never dimmed the row, so Mark seen has nothing to settle.
     expect(refused.settleable).toBe(false);
+  });
+
+  it("marks a row whose last read failed, always, and one the last full read didn't list, so a stale row never reads as fresh", () => {
+    const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } }
+      : row.number === 341 ? { stale: true, checkedAt: new Date(NOW - 11 * 60_000).toISOString() } : {});
+    const [fail, stale, fresh] = card(view, SHELF).sections[0]!.lines;
+    expect([fail!.checked, stale!.checked?.text, fresh!.checked]).toEqual([{ text: "read failed", failed: true,
+      title: "GitHub didn't answer its last read; its last good read was 25s ago. Refresh reads it again." }, "stale 11m", null]);
+    // GitHub's rate limit shows in the top bar while it holds reads, and not after.
+    expect(readText({ ...view, limitedUntil: NOW + 10 * 60_000 }, NOW)).toMatch(/^Rate-limited until .+ · Read 25s ago$/u);
+    expect(readText({ ...view, limitedUntil: NOW - 1 }, NOW)).toBe("Read 25s ago");
   });
 
   it("gives Advance only the safe moves drawn as needing you: never a merge, a thread's work, or a row dimmed until Mark seen", () => {

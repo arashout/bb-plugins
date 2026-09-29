@@ -155,6 +155,8 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
       <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
         className={cn("min-w-0 flex-1 cursor-pointer truncate", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
         {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
+      {line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
+        line.checked.failed ? "text-destructive" : "hidden text-muted-foreground @min-[720px]:inline")}>{line.checked.text}</span> : null}
       {line.signals.map((signal) => <span key={signal} className={cn("hidden shrink-0 rounded px-1.5 text-[11px] @min-[720px]:inline", TONE.gray.chip)}>{signal}</span>)}
       {line.info ? <span className={cn("shrink-0 whitespace-nowrap text-[11.5px]", OPTIONAL_INFO.has(line.section) && "hidden @min-[720px]:inline",
         line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)

@@ -5371,7 +5371,7 @@ export default async function plugin(bb: BbPluginApi) {
       linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
         updatedAt: facts.updatedAt }])),
-      read: { checkedAt: view.checkedAt, refreshing: view.refreshing }, seen: new Map(Object.entries(seen)) };
+      read: { checkedAt: view.checkedAt, refreshing: view.refreshing, limitedUntil: view.rateLimitedUntil }, seen: new Map(Object.entries(seen)) };
   }
   const deckGet = async (seen?: Readonly<Record<string, number>>): Promise<DeckView> => deckView(await deckInput(seen));
   /** What a deck batch would do per PR, from the rows the deck shows; see deck-batch.ts. A request's reviewers must be GitHub logins. */

@@ -11,7 +11,7 @@ import { counted, DECK_SECTIONS, needsYou, type BatchKind, type DeckPile, type D
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
-import { age } from "./roster-view-model";
+import { age, clock } from "./roster-view-model";
 
 const DAY = 86_400_000;
 /** Color only where the move is yours; gray waits on others, runs itself, or is to sort. */
@@ -62,6 +62,8 @@ export type DeckLine = {
   info: { text: string; tone: Tone | null } | null;
   signals: string[];
   age: string | null; hot: boolean;
+  /** Its read, only when it isn't current: the last one failed, or the last full read didn't list it. */
+  checked: { text: string; title: string; failed: boolean } | null;
   trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "change" | "ghost"; text: string }
     | { kind: "thread"; text: string; threadId: string } | null;
   row: DeckRow | null;
@@ -84,6 +86,13 @@ function info(row: DeckRow, section: string, unsorted: boolean): DeckLine["info"
     case "blocked": return { text: row.waitsOn?.what ?? row.status, tone: "gray" };
     default: return { text: row.status, tone: "gray" };
   }
+}
+
+function checked(row: DeckRow, now: number): DeckLine["checked"] {
+  const good = row.checkedAt ? `; its last good read was ${age(Date.parse(row.checkedAt), now)} ago` : "";
+  if (row.failed) return { text: "read failed", failed: true, title: `GitHub didn't answer its last read${good}. Refresh reads it again.` };
+  return row.stale ? { text: `stale${row.checkedAt ? ` ${age(Date.parse(row.checkedAt), now)}` : ""}`, failed: false,
+    title: `The last full read didn't list it${good}.` } : null;
 }
 
 /** One settled row as a line: a ghost keeps what you last saw; a changed row stays in its old section with what it is now. */
@@ -112,7 +121,7 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
     stacked: row?.stackedOn != null ? `${short(row.repo)} #${row.stackedOn}` : null, section, tone, needs, dim, ghost: item.ghost,
     dot: item.ghost ? `${context.merged?.has(item.prUrl) ? "Merged" : "Left"} since you looked. Clears on Mark seen.` : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
       : item.arrived ? "New since you looked" : null,
-    info: row ? info(row, section, unsorted) : null, signals, age: shownAge,
+    info: row ? info(row, section, unsorted) : null, signals, age: shownAge, checked: row ? checked(row, context.now) : null,
     hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
   };
 }
@@ -275,6 +284,12 @@ export function uncSnapshot(view: DeckView): SettledRow[] {
   const groupOf = new Map(view.unclassified.groups.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group.key] as const)));
   return view.unclassified.rows.map((row) => settledOf(row, groupOf.get(row.prUrl) ?? "none"))
     .sort((a, b) => (keys.indexOf(a.section) + 1 || Infinity) - (keys.indexOf(b.section) + 1 || Infinity));
+}
+
+/** The top bar's read status: when the deck last read GitHub, and GitHub's rate limit while it holds reads. */
+export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limitedUntil">, now: number): string {
+  const limited = view.limitedUntil !== null && view.limitedUntil > now ? `Rate-limited until ${clock(view.limitedUntil, now)} · ` : "";
+  return `${limited}${view.refreshing ? "Reading now · " : ""}Read ${view.checkedAt ? `${age(Date.parse(view.checkedAt), now)} ago` : "never"}`;
 }
 
 /** One strip chip: the active pile in session order, then Unclassified. */

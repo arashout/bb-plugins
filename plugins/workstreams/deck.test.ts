@@ -24,7 +24,7 @@ function input(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Parti
     return { ...base, ...row(base) };
   }));
   return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), threads: new Map(),
-    unclassified: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false }, seen: new Map(), ...patch };
+    unclassified: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false, limitedUntil: null }, seen: new Map(), ...patch };
 }
 const sections = (card: ReturnType<typeof deckView>["active"][number]) =>
   Object.fromEntries(card.sections.map((section) => [section.key, section.rows.map((row) => `${row.repo.split("/")[1]} #${row.number}`)]));
