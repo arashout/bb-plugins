@@ -2,11 +2,16 @@
 //   npx vite-node scripts/roster-dry-run.ts -- --db <copy> [--effort <id>|all] [--threads <dir>] [--out <file>]
 //   npx vite-node scripts/roster-dry-run.ts -- --db <copy> --print-thread-ids
 //   npx vite-node scripts/roster-dry-run.ts -- --db <copy> --replay-advance [--unowned-into <effort>] [--out <file>]
+//   npx vite-node scripts/roster-dry-run.ts -- --db <copy> --migrate-copy <new file> [--out <file>]
 // The database opens read-only, so any write throws. The JSON names real PRs and
 // tickets, so --out must sit outside every git worktree; stdout carries counts only.
 // Facts that live only in BB or plugin storage are reported as unknown-offline.
+// --migrate-copy writes only a new copy, never under ~/.bb or in a git worktree,
+// and gives it every migration it hasn't recorded, as the host would on install.
 import Database from "better-sqlite3";
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createApprovalFeedbackStore } from "../approval-feedback.js";
@@ -26,6 +31,7 @@ import { createLinearSync } from "../linearsync.js";
 import { createPrHoldStore } from "../pr-hold-store.js";
 import { prHoldFor } from "../pr-holds.js";
 import { createRunStore } from "../runstore.js";
+import { MIGRATIONS } from "../server.js";
 import { ticketsIn } from "../threads.js";
 import { ticketFinder } from "../tickets.js";
 import { workContextIndex } from "../work-context.js";
@@ -45,6 +51,66 @@ export function gitWorktreeOf(path: string): string | null {
   for (current = realpathSync(current); ; current = dirname(current)) {
     if (existsSync(join(current, ".git"))) return current;
     if (dirname(current) === current) return null;
+  }
+}
+
+/** Why `path` is refused for --migrate-copy: it is under BB's own data (~/.bb), which the live plugin owns, or inside a git worktree. */
+function refusal(path: string): string | null {
+  // Directories compare by identity, not by name: another letter case or macOS's /System/Volumes/Data firmlink names ~/.bb too.
+  // Links resolve first, so a link into ~/.bb is followed to its real ancestors.
+  const bbHome = join(homedir(), ".bb");
+  const bb = existsSync(bbHome) ? statSync(bbHome) : null;
+  let at = resolve(path);
+  while (!existsSync(at)) at = dirname(at);
+  for (at = realpathSync(at); bb; at = dirname(at)) {
+    const { dev, ino } = statSync(at);
+    if (dev === bb.dev && ino === bb.ino) return `${path} is under ${bbHome}`;
+    if (dirname(at) === at) break;
+  }
+  const worktree = gitWorktreeOf(path);
+  return worktree ? `${path} is inside the git worktree ${worktree}` : null;
+}
+
+/**
+ * Copy the database to `target` and migrate the copy as the host would on install: check that every statement the copy
+ * recorded is still the plugin's, then apply each one it hasn't. Then read every effort, Advance batch, approval feedback
+ * record, and hold again with the current schemas; each that fails to read is named, since it would stop the install.
+ */
+async function migrateCopy(source: string, target: string) {
+  const original = openReadOnly(source);
+  try { await original.backup(target); } finally { original.close(); }
+  const db = new Database(target, { fileMustExist: true });
+  try {
+    const hash = (statement: string) => createHash("sha256").update(statement).digest("hex");
+    const recorded = db.prepare(`SELECT id, statement_hash AS hash FROM _bb_migrations ORDER BY id`).all() as { id: number; hash: string | null }[];
+    const changed = recorded.filter((row) => row.hash !== null && row.hash !== (row.id < MIGRATIONS.length ? hash(MIGRATIONS[row.id]!) : null)).map((row) => row.id);
+    if (changed.length > 0) return { recorded: recorded.length, changed, applied: [], counts: null, failures: [] };
+    const done = new Set(recorded.map((row) => row.id));
+    const applied = MIGRATIONS.flatMap((statement, id) => done.has(id) ? [] : [{ id, hash: hash(statement) }]);
+    const record = db.prepare(`INSERT INTO _bb_migrations (id, applied_at, statement_hash) VALUES (?, ?, ?)`);
+    db.transaction(() => { for (const { id, hash } of applied) { db.exec(MIGRATIONS[id]!); record.run(id, Date.now(), hash); } })();
+    const failures: { table: string; id: string; error: string }[] = [];
+    const reread = (table: string, key: string, read: (id: string) => unknown) => {
+      const ids = (db.prepare(`SELECT ${key} AS id FROM ${table}`).all() as { id: string }[]).map((row) => row.id);
+      for (const id of ids) {
+        try { if (read(id) === null) failures.push({ table, id, error: "It no longer reads with the current schema." }); }
+        catch (error) { failures.push({ table, id, error: String(error).slice(0, 500) }); }
+      }
+      return ids.length;
+    };
+    const efforts = createEffortStore(db);
+    const feedback = createApprovalFeedbackStore(db);
+    const holds = createPrHoldStore(db);
+    const batch = db.prepare(`SELECT body FROM advance_batches WHERE id = ?`);
+    const counts = {
+      efforts: reread("established_efforts", "id", (id) => efforts.getRecord(id)),
+      batches: reread("advance_batches", "id", (id) => advanceBatchSchema.parse(JSON.parse((batch.get(id) as { body: string }).body))),
+      feedback: reread("approval_feedback_verifications", "pr_url", (id) => feedback.get(id)),
+      holds: reread("pr_holds", "pr_url", (id) => holds.get(id)),
+    };
+    return { recorded: recorded.length, changed, applied, counts, failures };
+  } finally {
+    db.close();
   }
 }
 
@@ -146,11 +212,25 @@ export async function dryRun(argv: string[], io: Io): Promise<number> {
   const { values } = parseArgs({ args: argv[0] === "--" ? argv.slice(1) : argv, strict: true, options: {
     db: { type: "string" }, effort: { type: "string", default: "all" }, threads: { type: "string" }, out: { type: "string" },
     "print-thread-ids": { type: "boolean", default: false }, "ticket-pattern": { type: "string", default: DEFAULT_TICKET_PATTERN },
-    "replay-advance": { type: "boolean", default: false }, "unowned-into": { type: "string" },
+    "replay-advance": { type: "boolean", default: false }, "unowned-into": { type: "string" }, "migrate-copy": { type: "string" },
   } });
   if (!values.db) { io.stderr("--db <copy of data.db> is required.\n"); return 2; }
   const worktree = values.out ? gitWorktreeOf(values.out) : null;
   if (worktree) { io.stderr(`Refusing --out inside the git worktree ${worktree}: the roster JSON names real PRs and tickets.\n`); return 2; }
+  const copy = values["migrate-copy"];
+  if (copy !== undefined) {
+    const refused = [values.db, copy].map(refusal).find((reason) => reason !== null) ?? (existsSync(copy) ? `${copy} already exists` : null);
+    if (refused) { io.stderr(`Refusing --migrate-copy: ${refused}. Snapshot the database to $TMPDIR and migrate a new file there.\n`); return 2; }
+    const result = await migrateCopy(values.db, copy);
+    io.stdout(result.counts === null ? `migrate recorded=${result.recorded} changed=${result.changed.join(",")}\n`
+      : `migrate recorded=${result.recorded} applied=${result.applied.length} ${Object.entries(result.counts).map(([key, value]) => `${key}=${value}`).join(" ")} failures=${result.failures.length}\n`);
+    if (result.counts === null) io.stderr(`Migrations ${result.changed.join(", ")} in the copy don't match this build's statements, so the host would refuse to load it.\n`);
+    if (values.out) {
+      writeFileSync(values.out, `${JSON.stringify({ database: basename(values.db), copy: basename(copy), ...result }, null, 2)}\n`);
+      io.stderr(`Wrote the migration rehearsal to ${values.out}\n`);
+    }
+    return result.counts === null || result.failures.length > 0 ? 1 : 0;
+  }
   const db = openReadOnly(values.db);
   try {
     const threadIds = referencedThreadIds(db);

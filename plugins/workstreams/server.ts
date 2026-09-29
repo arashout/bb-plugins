@@ -590,6 +590,74 @@ const DEFAULT_PREFS: Prefs = {
   approvedOnly: false,
 };
 
+/**
+ * Every storage statement, in the order the host records them. Append only: the host refuses to load over a changed or
+ * reused index. The first 35 are deployed; see server-migration-upgrade.test.ts.
+ */
+export const MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS units (path TEXT PRIMARY KEY, unit TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS linear_tickets (ticket TEXT PRIMARY KEY, project TEXT, fetched_at INTEGER NOT NULL)`,
+  // Keyed by the cluster's SEMANTIC hash, so a lifecycle or count change on
+  // the next scan reuses the row instead of paying for it again.
+  `CREATE TABLE IF NOT EXISTS cluster_decisions (hash TEXT PRIMARY KEY, summary TEXT, label TEXT, fit REAL, updated_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS effort_names (member_hash TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+  // Append-only. The three statements below widen the effort-name cache into
+  // a group-name cache for every level, WITHOUT dropping it: the effort
+  // level's member hash is computed exactly as it was in v3, so every name
+  // already paid for still hits on the first scan after this migration.
+  `ALTER TABLE effort_names ADD COLUMN level TEXT NOT NULL DEFAULT 'effort'`,
+  `ALTER TABLE effort_names ADD COLUMN cohesion TEXT`,
+  `ALTER TABLE effort_names ADD COLUMN cohesion_reason TEXT`,
+  // Which effort/program a child was assigned to, keyed on the child's own
+  // member hash. Same contract as cluster_decisions, one rung up: a level
+  // whose membership did not change costs nothing on a rescan.
+  `CREATE TABLE IF NOT EXISTS group_assignments (level TEXT NOT NULL, member_hash TEXT NOT NULL, label TEXT NOT NULL, fit REAL NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (level, member_hash))`,
+  // The absolute paths a thread's recent events worked in, keyed on the
+  // thread's `updatedAt` at read time: an unchanged thread is never re-read.
+  `CREATE TABLE IF NOT EXISTS thread_paths (thread_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, paths TEXT NOT NULL)`,
+  // When each checkout was SEEN to enter its current lifecycle. entered_at is
+  // null until a change is observed: the first scan cannot know how long a
+  // PR had already been red. See `trackTransitions`.
+  `CREATE TABLE IF NOT EXISTS unit_transitions (path TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, entered_at INTEGER)`,
+  // One row per agent or direct row action; bounded, pruned on write. See runstore.ts.
+  RUNS_MIGRATION,
+  // Full Linear detail per ticket, from a key or the agent fallback. Supersedes
+  // linear_tickets (left in place: migrations are append-only).
+  LINEAR_DETAIL_MIGRATION,
+  // Per cluster key: the semantic hash last seen, and the label-vanished damper's streak. See asks.ts.
+  `CREATE TABLE IF NOT EXISTS cluster_asks (ticket TEXT PRIMARY KEY, hash TEXT NOT NULL, streak INTEGER NOT NULL, pinned INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  // Per PR URL: the ticket its Linear linkback comment names (null: none), and
+  // when it was read. `final` marks a PR that was merged or closed when read:
+  // never read again. Comment text is never stored.
+  `CREATE TABLE IF NOT EXISTS pr_linkbacks (url TEXT PRIMARY KEY, ticket TEXT, checked_at INTEGER NOT NULL, final INTEGER NOT NULL)`,
+  ...DISPATCH_MIGRATIONS,
+  ...INVENTORY_MIGRATIONS,
+  ...EFFORT_MIGRATIONS,
+  `CREATE TABLE IF NOT EXISTS grouping_repairs (ticket TEXT PRIMARY KEY, label TEXT NOT NULL, hash TEXT NOT NULL, evidence TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS grouping_legacy_labels (hash TEXT PRIMARY KEY, label TEXT NOT NULL)`,
+  ...ADVANCE_MIGRATIONS,
+  ...PR_HOLD_MIGRATIONS,
+  // Index only: the thread's plugin metadata is the sole source of effort intent.
+  `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
+  REPO_CONTROLLER_MIGRATION,
+  `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
+  APPROVAL_FEEDBACK_MIGRATION,
+  UNASSIGNED_PLACEMENT_MIGRATION,
+  PR_OBSERVATIONS_MIGRATION,
+  ...WORK_CONVERSATION_MIGRATIONS,
+  `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
+  ...EFFORT_ROSTER_MIGRATIONS,
+  PR_FACTS_MIGRATION,
+  ...EFFORT_EXECUTION_MIGRATIONS,
+  ...EFFORT_INSTRUCTION_MIGRATIONS,
+  ...EFFORT_DECISION_MIGRATIONS,
+  ...EFFORT_ATTEMPT_MIGRATIONS,
+  ...EFFORT_JOURNAL_MIGRATIONS,
+  PR_STATE_SINCE_MIGRATION,
+  PR_OBSERVATION_ERROR_MIGRATION,
+  PR_OBSERVATION_CLOSED_MIGRATION,
+];
+
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     scanRoots: {
@@ -750,69 +818,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
 
   const db = bb.storage.database();
-  bb.storage.migrate(db, [
-    `CREATE TABLE IF NOT EXISTS units (path TEXT PRIMARY KEY, unit TEXT NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS linear_tickets (ticket TEXT PRIMARY KEY, project TEXT, fetched_at INTEGER NOT NULL)`,
-    // Keyed by the cluster's SEMANTIC hash, so a lifecycle or count change on
-    // the next scan reuses the row instead of paying for it again.
-    `CREATE TABLE IF NOT EXISTS cluster_decisions (hash TEXT PRIMARY KEY, summary TEXT, label TEXT, fit REAL, updated_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS effort_names (member_hash TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
-    // Append-only. The three statements below widen the effort-name cache into
-    // a group-name cache for every level, WITHOUT dropping it: the effort
-    // level's member hash is computed exactly as it was in v3, so every name
-    // already paid for still hits on the first scan after this migration.
-    `ALTER TABLE effort_names ADD COLUMN level TEXT NOT NULL DEFAULT 'effort'`,
-    `ALTER TABLE effort_names ADD COLUMN cohesion TEXT`,
-    `ALTER TABLE effort_names ADD COLUMN cohesion_reason TEXT`,
-    // Which effort/program a child was assigned to, keyed on the child's own
-    // member hash. Same contract as cluster_decisions, one rung up: a level
-    // whose membership did not change costs nothing on a rescan.
-    `CREATE TABLE IF NOT EXISTS group_assignments (level TEXT NOT NULL, member_hash TEXT NOT NULL, label TEXT NOT NULL, fit REAL NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (level, member_hash))`,
-    // The absolute paths a thread's recent events worked in, keyed on the
-    // thread's `updatedAt` at read time: an unchanged thread is never re-read.
-    `CREATE TABLE IF NOT EXISTS thread_paths (thread_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, paths TEXT NOT NULL)`,
-    // When each checkout was SEEN to enter its current lifecycle. entered_at is
-    // null until a change is observed: the first scan cannot know how long a
-    // PR had already been red. See `trackTransitions`.
-    `CREATE TABLE IF NOT EXISTS unit_transitions (path TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, entered_at INTEGER)`,
-    // One row per agent or direct row action; bounded, pruned on write. See runstore.ts.
-    RUNS_MIGRATION,
-    // Full Linear detail per ticket, from a key or the agent fallback. Supersedes
-    // linear_tickets (left in place: migrations are append-only).
-    LINEAR_DETAIL_MIGRATION,
-    // Per cluster key: the semantic hash last seen, and the label-vanished damper's streak. See asks.ts.
-    `CREATE TABLE IF NOT EXISTS cluster_asks (ticket TEXT PRIMARY KEY, hash TEXT NOT NULL, streak INTEGER NOT NULL, pinned INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-    // Per PR URL: the ticket its Linear linkback comment names (null: none), and
-    // when it was read. `final` marks a PR that was merged or closed when read:
-    // never read again. Comment text is never stored.
-    `CREATE TABLE IF NOT EXISTS pr_linkbacks (url TEXT PRIMARY KEY, ticket TEXT, checked_at INTEGER NOT NULL, final INTEGER NOT NULL)`,
-    ...DISPATCH_MIGRATIONS,
-    ...INVENTORY_MIGRATIONS,
-    ...EFFORT_MIGRATIONS,
-    `CREATE TABLE IF NOT EXISTS grouping_repairs (ticket TEXT PRIMARY KEY, label TEXT NOT NULL, hash TEXT NOT NULL, evidence TEXT NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS grouping_legacy_labels (hash TEXT PRIMARY KEY, label TEXT NOT NULL)`,
-    ...ADVANCE_MIGRATIONS,
-    ...PR_HOLD_MIGRATIONS,
-    // Index only: the thread's plugin metadata is the sole source of effort intent.
-    `CREATE TABLE IF NOT EXISTS thread_work_intent_ids (thread_id TEXT PRIMARY KEY)`,
-    REPO_CONTROLLER_MIGRATION,
-    `CREATE TABLE IF NOT EXISTS thread_pr_link_ids (thread_id TEXT PRIMARY KEY)`,
-    APPROVAL_FEEDBACK_MIGRATION,
-    UNASSIGNED_PLACEMENT_MIGRATION,
-    PR_OBSERVATIONS_MIGRATION,
-    ...WORK_CONVERSATION_MIGRATIONS,
-    `CREATE TABLE IF NOT EXISTS effort_admin_sync (source_id TEXT PRIMARY KEY, destination_id TEXT NOT NULL, actions TEXT NOT NULL)`,
-    ...EFFORT_ROSTER_MIGRATIONS,
-    PR_FACTS_MIGRATION,
-    ...EFFORT_EXECUTION_MIGRATIONS,
-    ...EFFORT_INSTRUCTION_MIGRATIONS,
-    ...EFFORT_DECISION_MIGRATIONS,
-    ...EFFORT_ATTEMPT_MIGRATIONS,
-    ...EFFORT_JOURNAL_MIGRATIONS,
-    PR_STATE_SINCE_MIGRATION,
-    PR_OBSERVATION_ERROR_MIGRATION,
-    PR_OBSERVATION_CLOSED_MIGRATION,
-  ]);
+  bb.storage.migrate(db, MIGRATIONS);
   const conversations = createWorkConversationStore(db);
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);

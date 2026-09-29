@@ -1,10 +1,11 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApprovalFeedbackStore } from "./approval-feedback.js";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
 import { decisionCard, syncDecisions, type EffortCommandResult } from "./effort-v2-server.js";
@@ -15,9 +16,10 @@ import { RECIPES } from "./effort-recipes.js";
 import { createEffortStore } from "./effort-store.js";
 import { INKWELL_ADVANCE_BATCHES, INKWELL_ADVANCE_EFFORTS, INKWELL_ROSTER } from "./inkwell-fixtures.js";
 import { createLinearSync } from "./linearsync.js";
+import { createPrHoldStore } from "./pr-hold-store.js";
 import { createRunStore } from "./runstore.js";
 import { dryRun, openReadOnly } from "./scripts/roster-dry-run.js";
-import plugin, { type Board } from "./server.js";
+import plugin, { MIGRATIONS, type Board } from "./server.js";
 import { prWorkItemKey } from "./work-item-index.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -398,6 +400,117 @@ describe("roster dry-run script", () => {
     const row = seen.rosters.flatMap((roster: EffortRoster) => roster.rows).find((item: { target: string }) => item.target === catalog.target);
     expect(row).toMatchObject({ state: "doing", owner: "thread", label: "Thread thr_catalog_writer is active in its checkout" });
     expect(row).not.toHaveProperty("threadStatus");
+  });
+
+  describe("--migrate-copy", () => {
+    const held = "https://github.com/inkwell/folio/pull/7";
+    const hashes = (db: Database.Database) => db.prepare(`SELECT id, statement_hash AS hash FROM _bb_migrations ORDER BY id`).all();
+    const schema = (db: Database.Database) => db.prepare(`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`).all();
+    /** A database as the installed build left it: its 35 deployed migrations, recorded by the SDK, and one of each record an install reads again. */
+    function installed(deployed = MIGRATIONS.slice(0, 35)) {
+      const directory = temporary();
+      const path = join(directory, "data.db");
+      const db = new Database(path);
+      createFakePluginHost({ pluginId: "workstreams" }).bb.storage.migrate(db, deployed);
+      createEffortStore(db).establish({ sourceKey: "ticket:ABC-101", name: "Gift cards", goal: "Sell gift cards at checkout", projectId: "proj-inkwell",
+        members: { tickets: ["ABC-101"], prUrls: [held] } });
+      db.prepare(`INSERT INTO advance_batches (id, body) VALUES (?, ?)`).run(INKWELL_ADVANCE_BATCHES[0]!.id, JSON.stringify(INKWELL_ADVANCE_BATCHES[0]));
+      createPrHoldStore(db).set(held, true, "Waiting on the print run");
+      createApprovalFeedbackStore(db).save(held, "thr_folio_worker", { attemptId: "A-7", headOid: "a".repeat(40), fingerprint: "e".repeat(64), blockers: [],
+        findings: [{ sourceId: "review:7", resolution: "fixed", evidence: "Gift card totals round to the cent", validation: { outcome: "passed", detail: "npm test -- cards" } }] }, 1);
+      return { directory, path, db };
+    }
+
+    it("migrates a new copy as the host would on install and reads every effort, batch, feedback record, and hold again, leaving the source as it was", async () => {
+      const { directory, path, db } = installed();
+      db.close();
+      const before = digest(path);
+      const copy = join(directory, "migrated.db");
+      const out = join(directory, "migration.json");
+      const run = io();
+      expect(await dryRun(["--db", path, "--migrate-copy", copy, "--out", out], run.io)).toBe(0);
+      expect(digest(path)).toBe(before);
+      expect(run.out.join("")).toBe(`migrate recorded=35 applied=${MIGRATIONS.length - 35} efforts=1 batches=1 feedback=1 holds=1 failures=0\n`);
+      // The copy has the schema and records the statements the SDK's migrator gives a new install of this build, so a real install
+      // over it would find nothing left to apply.
+      const fresh = new Database(":memory:");
+      createFakePluginHost({ pluginId: "workstreams" }).bb.storage.migrate(fresh, MIGRATIONS);
+      const migrated = openReadOnly(copy);
+      expect([hashes(migrated), schema(migrated)]).toEqual([hashes(fresh), schema(fresh)]);
+      migrated.close();
+      expect(JSON.parse(readFileSync(out, "utf8"))).toMatchObject({ recorded: 35, changed: [], applied: expect.arrayContaining([expect.objectContaining({ id: 35 })]), failures: [] });
+    });
+
+    it("fails the rehearsal and names each record the current schemas can't read, since the install would stop on it", async () => {
+      const { directory, path, db } = installed();
+      db.prepare(`INSERT INTO established_efforts (id, source_key, value) VALUES ('gift-wrap', 'ticket:ABC-102', '{"name":"Gift wrap"}')`).run();
+      db.prepare(`UPDATE approval_feedback_verifications SET body = '{"attemptId":"A-7"}'`).run();
+      db.close();
+      const out = join(directory, "migration.json");
+      const run = io();
+      expect(await dryRun(["--db", path, "--migrate-copy", join(directory, "migrated.db"), "--out", out], run.io)).toBe(1);
+      expect(run.out.join("")).toMatch(/efforts=2 batches=1 feedback=1 holds=1 failures=2\n$/u);
+      expect(JSON.parse(readFileSync(out, "utf8")).failures).toEqual([{ table: "established_efforts", id: "gift-wrap", error: expect.any(String) },
+        { table: "approval_feedback_verifications", id: held, error: expect.any(String) }]);
+    });
+
+    it("applies nothing to a copy whose recorded statements this build changed, as the host would refuse to load it", async () => {
+      const deployed = MIGRATIONS.slice(0, 35);
+      deployed[3] = `${deployed[3]} -- edited`;
+      const { directory, path, db } = installed(deployed);
+      db.close();
+      const copy = join(directory, "migrated.db");
+      const run = io();
+      expect(await dryRun(["--db", path, "--migrate-copy", copy], run.io)).toBe(1);
+      expect(run.out.join("")).toBe("migrate recorded=35 changed=3\n");
+      const migrated = openReadOnly(copy);
+      expect(hashes(migrated)).toHaveLength(35);
+      migrated.close();
+    });
+
+    it("refuses a path under ~/.bb, even through a link, or in a git worktree, and an existing file, before reading anything", async () => {
+      const home = temporary();
+      vi.stubEnv("HOME", home);
+      cleanups.push(() => { vi.unstubAllEnvs(); });
+      mkdirSync(join(home, "bb-data"));
+      symlinkSync(join(home, "bb-data"), join(home, ".bb"));
+      mkdirSync(join(home, "repository", ".git"), { recursive: true });
+      const existing = join(home, "migrated.db");
+      writeFileSync(existing, "");
+      // None of these databases exists: each refusal comes before any read.
+      const missing = join(home, "missing.db");
+      for (const [db, copy, reason] of [
+        [missing, join(home, ".bb", "plugins", "workstreams", "data.db"), "is under"],
+        [join(home, ".bb", "plugins", "workstreams", "data.db"), join(home, "fresh.db"), "is under"],
+        [missing, join(home, "bb-data", "migrated.db"), "is under"],
+        [missing, join(home, "repository", "migrated.db"), "is inside the git worktree"],
+        [missing, existing, "already exists"],
+      ] as const) {
+        const run = io();
+        expect(await dryRun(["--db", db, "--migrate-copy", copy], run.io)).toBe(2);
+        expect(run.err.join("")).toContain(reason);
+      }
+      expect([existsSync(join(home, "bb-data", "plugins")), existsSync(join(home, "fresh.db")), readFileSync(existing, "utf8")]).toEqual([false, false, ""]);
+    });
+
+    it("refuses ~/.bb by any other name for the same directory, since the live plugin's data is there whatever the path says", async () => {
+      const { path, db } = installed();
+      db.close();
+      const home = temporary();
+      vi.stubEnv("HOME", home);
+      cleanups.push(() => { vi.unstubAllEnvs(); });
+      const live = join(home, ".bb", "plugins", "workstreams");
+      mkdirSync(live, { recursive: true });
+      symlinkSync(join(home, ".bb", "plugins"), join(home, "plugins"));
+      // A link into ~/.bb anywhere; where the file system has them, another letter case (macOS folds case) and the /System/Volumes/Data firmlink.
+      const names = [join(home, "plugins"), join(home, ".BB", "plugins"), `/System/Volumes/Data${realpathSync(home)}/.bb/plugins`].filter((name) => existsSync(name));
+      for (const name of names) {
+        const run = io();
+        expect(await dryRun(["--db", path, "--migrate-copy", join(name, "workstreams", "migrated.db")], run.io)).toBe(2);
+        expect(run.err.join("")).toContain("is under");
+      }
+      expect(readdirSync(live)).toEqual([]);
+    });
   });
 });
 
