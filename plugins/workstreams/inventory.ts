@@ -16,7 +16,9 @@ export type InventoryResult = {
   complete: boolean;
   warnings: string[];
 };
-export type InventoryInspection = { entries: InventoryEntry[]; closed: string[]; failed: string[]; warnings: string[] };
+/** A PR a read found merged, with GitHub's merge time, and the title and branch that still place it in an effort once it leaves the inventory. */
+export type MergeSighting = { url: string; at: string; title: string; headRefName: string | null };
+export type InventoryInspection = { entries: InventoryEntry[]; closed: string[]; failed: string[]; warnings: string[]; merged?: MergeSighting[] };
 
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u;
 export const INVENTORY_LIMIT = 1_000;
@@ -138,6 +140,8 @@ export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[])
     }
     if (parsed.pr.state !== "OPEN") {
       result.closed.push(url);
+      if (parsed.pr.state === "MERGED" && parsed.pr.mergedAt) (result.merged ??= []).push({ url, at: parsed.pr.mergedAt, title: parsed.pr.title,
+        headRefName: parsed.pr.headRefName });
       return;
     }
     const entry = { repo: target.slug, pr: parsed.pr };
@@ -148,6 +152,7 @@ export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[])
   result.entries.sort((a, b) => a.repo.localeCompare(b.repo) || a.pr.number - b.pr.number);
   result.closed.sort();
   result.failed.sort();
+  result.merged?.sort((a, b) => a.url.localeCompare(b.url));
   return result;
 }
 

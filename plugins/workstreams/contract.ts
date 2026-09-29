@@ -166,6 +166,9 @@ export const inventoryInspectionSchema = z.object({
   closed: z.array(z.string().max(500)).max(100),
   failed: z.array(z.string().max(500)).max(100),
   warnings: z.array(z.string().max(500)).max(50),
+  /** The closed PRs that merged. */
+  merged: z.array(z.object({ url: z.string().max(500), at: z.string().max(40), title: z.string().max(300), headRefName: z.string().max(300).nullable() }).strict())
+    .max(100).optional(),
 }).strict();
 export const inventoryBoardSchema = z.object({
   owners: z.array(z.string()),

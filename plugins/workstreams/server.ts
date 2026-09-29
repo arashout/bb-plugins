@@ -64,8 +64,8 @@ import { canonicalConversationScope, conversationExclusionSchema, conversationSc
 import { prWorkItemKey, workItemIndex } from "./work-item-index.js";
 import { workContextIndex, type WorkThreadLink } from "./work-context.js";
 import { createPrHoldStore, PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
-import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION,
-  PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, EMPTY_INVENTORY, INVENTORY_MIGRATIONS, PR_MERGES_MIGRATION, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION,
+  PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { carryReviewFacts, type InventoryEntry, type InventoryInspection, type InventoryResult } from "./inventory.js";
 import {
   DEFAULT_SURFACE_RULES,
@@ -669,6 +669,7 @@ export const MIGRATIONS = [
   EFFORT_PILE_MIGRATION,
   ...EFFORT_ASSIGNMENT_MIGRATIONS,
   EFFORT_RULE_MIGRATION,
+  PR_MERGES_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1256,7 +1257,7 @@ export default async function plugin(bb: BbPluginApi) {
         const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
         oweAdvanceRechecks(result.entries.map((entry) => entry.pr), previous, await writeAuthored(result, hostId));
         // A closed PR leaves even a repository whose membership this read left partial.
-        if (read?.closed.length) inventory.inspect({ entries: [], closed: read.closed, failed: [], warnings: [] });
+        if (read?.closed.length) inventory.inspect({ entries: [], closed: read.closed, failed: [], warnings: [], merged: read.merged });
         writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
         recordTransitions(readUnits());
         effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...vanished.map((entry) => entry.pr.url)]);

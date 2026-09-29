@@ -10,7 +10,8 @@ import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from 
 import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS } from "./effort-work-store.js";
 import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
-import { PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { PR_MERGES_MIGRATION, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION }
+  from "./inventory-store.js";
 import { LINEAR_DETAIL_MIGRATION } from "./linearsync.js";
 import { PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
 import { RUNS_MIGRATION } from "./runstore.js";
@@ -210,8 +211,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends standing rules after the classification audit", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 61 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 61 ORDER BY id").all())
       .toEqual([{ id: 61, hash: statementHash(EFFORT_RULE_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends PR merge sightings after standing rules", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 62 ORDER BY id").all())
+      .toEqual([{ id: 62, hash: statementHash(PR_MERGES_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

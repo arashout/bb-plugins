@@ -2,13 +2,13 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePrList } from "./gh.js";
 import type { Pr } from "./contract.js";
-import { createInventoryStore, INVENTORY_MIGRATIONS, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION,
-  PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
+import { createInventoryStore, INVENTORY_MIGRATIONS, PR_MERGES_MIGRATION, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION,
+  PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION } from "./inventory-store.js";
 import { INVENTORY_LIMIT, type InventoryEntry, type InventoryResult } from "./inventory.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => databases.splice(0).forEach((db) => db.close()));
-function setup(datesStates = false, keepsErrors = false, keepsClosed = false) {
+function setup(datesStates = false, keepsErrors = false, keepsClosed = false, keepsMerges = false) {
   const db = new Database(":memory:");
   databases.push(db);
   for (const migration of INVENTORY_MIGRATIONS) db.exec(migration);
@@ -16,6 +16,7 @@ function setup(datesStates = false, keepsErrors = false, keepsClosed = false) {
   if (datesStates) db.exec(PR_STATE_SINCE_MIGRATION);
   if (keepsErrors) db.exec(PR_OBSERVATION_ERROR_MIGRATION);
   if (keepsClosed) db.exec(PR_OBSERVATION_CLOSED_MIGRATION);
+  if (keepsMerges) db.exec(PR_MERGES_MIGRATION);
   let clock = 1_000;
   return { db, store: createInventoryStore(db, () => clock), tick: () => { clock += 1_000; } };
 }
@@ -144,6 +145,27 @@ describe("authored PR cache coverage", () => {
     const old = setup(false, true).store;
     old.inspect({ entries: [], closed: [first.pr.url], failed: [], warnings: [] });
     expect([old.observation(first.pr.url)?.checkedAt, old.closed(first.pr.url)]).toEqual([expect.any(String), false]);
+  });
+
+  it("keeps each merge a read saw, at GitHub's merge time, after the PR leaves the inventory, so an effort still counts it", () => {
+    const { store } = setup(false, false, false, true);
+    const first = entry(1), second = entry(2, "inkwell/quill"), third = entry(3);
+    store.apply(result([first, second, third]));
+    // A read of #1 found it merged; a checkout scan found quill #2 merged and #3 closed without merging.
+    store.inspect({ entries: [], closed: [first.pr.url], failed: [], warnings: [],
+      merged: [{ url: first.pr.url, at: "2026-09-27T10:00:00Z", title: "ABC-11 Keep shelf order", headRefName: "abc-11-shelf" }] });
+    store.observe([{ ...second.pr, state: "MERGED", mergedAt: "2026-09-28T10:00:00Z" }, { ...third.pr, state: "CLOSED" }]);
+    expect(store.read().entries).toEqual([]);
+    expect(store.merges()).toEqual([
+      { url: second.pr.url.toLowerCase(), at: Date.parse("2026-09-28T10:00:00Z"), title: second.pr.title, headRefName: null },
+      { url: first.pr.url.toLowerCase(), at: Date.parse("2026-09-27T10:00:00Z"), title: "ABC-11 Keep shelf order", headRefName: "abc-11-shelf" }]);
+    // A later sighting of the same merge changes nothing, and a window leaves older merges out.
+    store.observe([{ ...first.pr, state: "MERGED", mergedAt: "2026-09-29T10:00:00Z" }]);
+    expect(store.merges(Date.parse("2026-09-28T00:00:00Z")).map((merge) => merge.url)).toEqual([second.pr.url.toLowerCase()]);
+    // A copy of a database from before the table records and reads none.
+    const old = setup().store;
+    old.observe([{ ...second.pr, state: "MERGED", mergedAt: "2026-09-28T10:00:00Z" }]);
+    expect(old.merges()).toEqual([]);
   });
 
   it("reflects fresh checkout observations without adding unauthored PRs", () => {

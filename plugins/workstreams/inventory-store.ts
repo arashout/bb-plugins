@@ -1,5 +1,5 @@
 import { inventoryEntrySchema, type Pr } from "./contract.js";
-import type { InventoryEntry, InventoryInspection, InventoryResult } from "./inventory.js";
+import type { InventoryEntry, InventoryInspection, InventoryResult, MergeSighting } from "./inventory.js";
 import type { RunDb } from "./runstore.js";
 import { INVENTORY_LIMIT } from "./inventory.js";
 import { prTarget } from "./ghactions.js";
@@ -17,6 +17,12 @@ export const PR_OBSERVATION_ERROR_MIGRATION = `ALTER TABLE pr_observations ADD C
 export const PR_OBSERVATION_CLOSED_MIGRATION = `ALTER TABLE pr_observations ADD COLUMN closed INTEGER NOT NULL DEFAULT 0`;
 /** When a read first saw a PR in a state GitHub doesn't date (red checks, a conflict); the row goes when a read sees the state end. */
 export const PR_STATE_SINCE_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_state_since (url TEXT NOT NULL, state TEXT NOT NULL, since TEXT NOT NULL, PRIMARY KEY (url, state))`;
+/**
+ * Append-only: server.ts adds this after standing rules (id 62). When a read saw each PR merge, at GitHub's merge time, with the title and
+ * branch that still place it in an effort once it leaves the inventory. The first sighting stays.
+ */
+export const PR_MERGES_MIGRATION = `CREATE TABLE IF NOT EXISTS pr_merges (url TEXT PRIMARY KEY, merged_at INTEGER NOT NULL, title TEXT NOT NULL, head_ref TEXT)`;
+export type PrMerge = { url: string; at: number; title: string; headRefName: string | null };
 export type PrObservation = { checkedAt: string | null; failedAt: string | null; error?: string | null };
 export type InventoryMeta = { owners: string[]; complete: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; warnings: string[] };
 export const EMPTY_INVENTORY = { owners: [], entries: [], complete: false, lastSuccessAt: null, lastAttemptAt: null, refreshing: false, warnings: [] };
@@ -55,6 +61,13 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       if (holds === true) db.prepare(`INSERT OR IGNORE INTO pr_state_since (url, state, since) VALUES (?, ?, ?)`).run(pr.url.toLowerCase(), state, at);
       else if (holds === false) db.prepare(`DELETE FROM pr_state_since WHERE url = ? AND state = ?`).run(pr.url.toLowerCase(), state);
     }
+  };
+  // A read-only copy of a database from before pr_merges records no merges.
+  const keepsMerges = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pr_merges'`).get() !== undefined;
+  const recordMerge = (merge: MergeSighting) => {
+    const at = Date.parse(merge.at);
+    if (keepsMerges && !Number.isNaN(at)) db.prepare(`INSERT OR IGNORE INTO pr_merges (url, merged_at, title, head_ref) VALUES (?, ?, ?, ?)`)
+      .run(merge.url.toLowerCase(), at, merge.title, merge.headRefName);
   };
   /** After each write, so a refresh that rewrites a PR keeps its dates and a PR that leaves the inventory takes its dates along. */
   const pruneStates = () => { if (datesStates) db.prepare(`DELETE FROM pr_state_since WHERE url NOT IN (SELECT url FROM authored_prs)`).run(); };
@@ -101,6 +114,11 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
     /** The last successful read found this PR merged, closed, or gone from your open PRs. */
     closed(url: string): boolean {
       return keepsClosed && (db.prepare(`SELECT closed FROM pr_observations WHERE url = ?`).get(url.toLowerCase()) as { closed: number } | undefined)?.closed === 1;
+    },
+    /** PRs a read saw merge at or after `since`, newest first. */
+    merges(since = 0): PrMerge[] {
+      if (!keepsMerges) return [];
+      return db.prepare(`SELECT url, merged_at AS at, title, head_ref AS headRefName FROM pr_merges WHERE merged_at >= ? ORDER BY merged_at DESC, url`).all(since) as PrMerge[];
     },
     lastCheckedAt(): string | null {
       const row = db.prepare(`SELECT MAX(checked_at) AS checked_at FROM pr_observations`).get() as { checked_at: string | null };
@@ -160,6 +178,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       db.transaction(() => {
         const known = new Map(entries().map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
         for (const url of result.closed) { remove.run(url.toLowerCase()); recordClosed(url, at); }
+        for (const merge of result.merged ?? []) recordMerge(merge);
         for (const url of result.failed) {
           db.prepare(`UPDATE authored_prs SET stale = 1 WHERE url = ?`).run(url.toLowerCase());
           recordFailure(url, at, failureOf(url, result.warnings, "GitHub could not read this PR."));
@@ -182,6 +201,7 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       db.transaction(() => {
         for (const pr of prs) {
           (pr.state === "OPEN" ? recordSuccess : recordClosed)(pr.url, at);
+          if (pr.state === "MERGED" && pr.mergedAt) recordMerge({ url: pr.url, at: pr.mergedAt, title: pr.title, headRefName: pr.headRefName });
           const entry = known.get(pr.url.toLowerCase());
           if (entry === undefined) continue;
           if (pr.state !== "OPEN") remove.run(pr.url.toLowerCase());

@@ -135,6 +135,14 @@ describe("inventory invalidation reads", () => {
     expect(gh.calls.some((args) => args[0] === "search" || args[1] === "list")).toBe(false);
   });
 
+  it("names the closed PRs that merged, with GitHub's merge time, title, and branch, so a merge still counts once the PR leaves", async () => {
+    const gh = fake((args) => args[2] === "1" ? ok(pr(1, { state: "MERGED", mergedAt: "2026-09-28T10:00:00Z", headRefName: "abc-1-shelf" }))
+      : ok(pr(2, { state: "CLOSED" })));
+    const result = await readInventoryPrs(gh.run, [url(1), url(2)]);
+    expect(result.closed).toEqual([url(1), url(2)]);
+    expect(result.merged).toEqual([{ url: url(1), at: "2026-09-28T10:00:00Z", title: "Improve manuscript review", headRefName: "abc-1-shelf" }]);
+  });
+
   it("refuses mismatched PR identities and malformed data rather than overwriting the requested row", async () => {
     const gh = fake((args) => args[2] === "1" ? ok(pr(2)) : { ok: true, stdout: "bad json" });
     expect(await readInventoryPrs(gh.run, [url(1), url(2)])).toMatchObject({ entries: [], closed: [], failed: [url(1), url(2)] });
