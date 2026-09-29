@@ -32,6 +32,7 @@ import { POINTER_CURSORS, cn } from "@/lib/utils";
 import { readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
 import { RosterNavView, RosterPanelTab } from "./roster-view";
+import { InventoryNavView } from "./inventory-screen";
 import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
 import { rosterPanelOpen, rosterParents } from "./roster-parents";
 
@@ -236,6 +237,7 @@ function Warnings({ warnings }: { warnings: string[] }) {
  * back and forward. The panel root redirects to the last view opened here.
  */
 const VIEWS = [
+  { id: "inventory", title: "Inventory", icon: "List" },
   { id: "map", title: "Map", icon: "GridView" },
   { id: "pipeline", title: "Pipeline", icon: "Columns2" },
   { id: "work", title: "Work", icon: "List" },
@@ -341,7 +343,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.clearTimeout(timer);
   }, [view]);
 
-  // `V` cycles Map, Pipeline, Work, and Efforts from anywhere on the page. The Map's own keys are
+  // `V` cycles Inventory, Map, Pipeline, Work, and Efforts from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
   // `?` opens How this works from any view. A roster owns its keys, `?` included.
   useEffect(() => {
@@ -351,7 +353,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
       event.preventDefault();
       if (event.key === "?") openHow();
-      else navigate.toPluginPanel("board", { subPath: view === "map" ? "pipeline" : view === "pipeline" ? "work" : view === "work" ? "efforts" : "map" });
+      else navigate.toPluginPanel("board", { subPath: VIEWS[(VIEWS.findIndex((entry) => entry.id === view) + 1) % VIEWS.length]!.id });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -362,7 +364,9 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
   if (view === "roster") rosterPath.current = subPath;
 
   const render = (id: ViewId) =>
-    id === "roster" ? (
+    id === "inventory" ? (
+      <InventoryNavView onView={(next) => navigate.toPluginPanel("board", { subPath: next })} onHow={openHow} />
+    ) : id === "roster" ? (
       <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} />
     ) : id === "pipeline" ? (
       board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
@@ -400,8 +404,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   return (
     <div className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
-      {view === "pipeline" || view === "work" || view === "efforts" || view === "roster" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
-        {/* Map, Pipeline, Work, Efforts, and the legacy Board share this panel. */}
+      {view === "inventory" || view === "pipeline" || view === "work" || view === "efforts" || view === "roster" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
+        {/* Inventory, Map, Pipeline, Work, Efforts, and the legacy Board share this panel. */}
         <div role="tablist" aria-label="Workstreams views" className="flex shrink-0 items-center gap-3">
           {VIEWS.map((entry) => (
             <button
@@ -409,7 +413,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
               type="button"
               role="tab"
               aria-selected={view === entry.id}
-              title={`${entry.title} (V cycles Map, Pipeline, Work, and Efforts)`}
+              title={`${entry.title} (V cycles Inventory, Map, Pipeline, Work, and Efforts)`}
               onClick={() => navigate.toPluginPanel("board", { subPath: entry.id })}
               className={cn(
                 "text-xs transition-colors duration-150",
@@ -474,7 +478,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(["map", "pipeline", "work", "efforts", "board", "roster"] as const).map((id) =>
+        {(["inventory", "map", "pipeline", "work", "efforts", "board", "roster"] as const).map((id) =>
           id === view || id === leaving ? (
             <ViewLayer key={id} leaving={id !== view}>
               {render(id)}

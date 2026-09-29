@@ -18,6 +18,26 @@ export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: 
   { key: "needs-nudge", label: "Needs a nudge", none: "Nothing needs a nudge." },
 ];
 
+/**
+ * How this works, for the inventory: what it lists, what each question asks at pr-attention.ts's default thresholds (a test keeps the
+ * two equal; settings change them), and how to read a row, including why Needs a nudge counts more rows than offer Nudge.
+ */
+export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
+  intro: "The inventory lists every open PR you author, and every open PR an effort names, by effort, with No effort last. Each count " +
+    "answers one question; press it to show only those PRs, and press it again to show every PR. Settings change the thresholds.",
+  rows: [
+    ["Forgotten in draft", "A draft with green checks and no conflict, ready for Mark ready, or a draft with no push for 3 days."],
+    ["Missing a reviewer", "Open, not a draft, not approved, with no one asked and no review yet."],
+    ["Needs a nudge", "A requested review with no answer after 1 business day, addressed changes whose reviewer isn't asked again, or a PR " +
+      "stuck for 1 day: approved and mergeable but unmerged, failing checks, or a conflict. Nudge asks reviewers again on the first two; " +
+      "merging and fixing the rest are yours."],
+    ["Next · owner · age", "The step, who takes it (you, the reviewers, or #N, the PR it's stacked on, which merges first), and how long it has waited."],
+    ["2d+", "At least this long. GitHub keeps no time for failing checks or conflicts, so their age starts at the first read that saw them."],
+    ["checked 25s ago", "When GitHub last answered for the row. Read failed, in red, says it didn't; an amber dot says the last full read didn't list it."],
+    ["Refresh", "Reads one PR from GitHub now. A teammate's PR the board doesn't read refreshes from its effort's roster."],
+  ],
+};
+
 /** A GitHub login or org/team slug, as ghactions.ts's REVIEWER reads one; a test keeps the two equal. */
 export const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99})?$/u;
 
@@ -189,6 +209,17 @@ function checked(row: InventoryRow, now: number): InventoryLine["checked"] {
     title: `GitHub didn't answer${row.failure.error ? `: ${row.failure.error}` : ""}. ${good[0]!.toUpperCase()}${good.slice(1)}${stale}.` };
   if (row.checkedAt) return { text: `checked ${since(row.checkedAt)}`, failed: false, stale: row.stale, title: `Read from GitHub ${since(row.checkedAt)}${stale}` };
   return { text: "not checked yet", failed: false, stale: row.stale, title: `GitHub hasn't been read for this PR${stale}` };
+}
+
+/**
+ * This visit's outcomes after a click: what it got back, or, when a read succeeds, no earlier failed read, which would otherwise show
+ * beside the row's new age. A good read leaves a refused write's reason, which the read doesn't answer.
+ */
+export function withOutcome(outcomes: ReadonlyMap<string, Outcome>, prUrl: string, outcome: Outcome | null): ReadonlyMap<string, Outcome> {
+  const next = new Map(outcomes);
+  if (outcome) next.set(prUrl, outcome);
+  else if (outcomes.get(prUrl)?.action === "refresh") next.delete(prUrl);
+  return next;
 }
 
 /** The newer of the server's record of the last action and this visit's own click. */

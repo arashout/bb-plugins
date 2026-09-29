@@ -1,8 +1,8 @@
 // "How this works": the secondary information the header used to carry, in
 // one quiet panel. It is a fixed tab in BB's own right panel, so it can stay
 // open beside the Map or Board. Short sections, in the order a reader
-// asks: how the groups are made, what the rows mean, the keys, the Map's
-// marks, and whether the board is healthy.
+// asks: the PR inventory, how the groups are made, what the rows mean, the
+// keys, the Map's marks, and whether the board is healthy.
 import type { ReactNode } from "react";
 import type { Board, BoardMode } from "./server";
 import { relativeTime } from "./workstreams";
@@ -11,6 +11,7 @@ import { THREAD_TIERS } from "./threads";
 import { runLabel } from "./runs";
 import { LinearFetchAction } from "./linearfetch";
 import { ROSTER_KEYS } from "./roster-view-model";
+import { INVENTORY_HOW } from "./inventory-view-model";
 
 /** The fixed tab's stable reference: the owning nav panel, and this tab. */
 export const HOW_TAB = { panelId: "board", id: "how" } as const;
@@ -52,7 +53,7 @@ const MAP_KEYS: [string, string][] = [
 ];
 
 const BOTH_KEYS: [string, string][] = [
-  ["v", "Cycle through Map, Pipeline, Work, and Efforts"],
+  ["v", "Cycle through Inventory, Map, Pipeline, Work, and Efforts"],
   ["?", "Open this panel"],
 ];
 
@@ -104,6 +105,11 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
   const enrichment = board?.health.enrichment ?? null;
   return (
     <div className="text-[12px]">
+      <Section title="The PR inventory">
+        <p>{INVENTORY_HOW.intro}</p>
+        <Pairs rows={INVENTORY_HOW.rows} />
+      </Section>
+
       <Section title="How grouping works">
         <p>
           Checkouts with the same ticket form a cluster. Related clusters can form efforts, programs, and domains;

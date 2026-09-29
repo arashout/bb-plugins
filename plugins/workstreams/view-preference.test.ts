@@ -5,6 +5,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Workstreams view preference", () => {
   it("keeps explicit view links independent of the remembered view", () => {
+    expect(viewFromSubPath("inventory")).toBe("inventory");
     expect(viewFromSubPath("map")).toBe("map");
     expect(viewFromSubPath("pipeline/details")).toBe("pipeline");
     expect(viewFromSubPath("work/details")).toBe("work");
@@ -15,8 +16,9 @@ describe("Workstreams view preference", () => {
     expect(viewFromSubPath("unknown")).toBeNull();
   });
 
-  it("defaults to Map and remembers the last explicit view", () => {
-    const values = new Map<string, string>();
+  it("opens the PR inventory first, even over a view remembered before it existed, then remembers the last explicit view", () => {
+    // The inventory is the front door (plan amendment A13): Map, Pipeline, or Work remembered under the old key doesn't hide it.
+    const values = new Map<string, string>([["bb-workstreams:last-view", "pipeline"]]);
     vi.stubGlobal("window", {
       localStorage: {
         getItem: (key: string) => values.get(key) ?? null,
@@ -24,7 +26,11 @@ describe("Workstreams view preference", () => {
       },
     });
 
+    expect(readLastView()).toBe("inventory");
+    storeLastView("map");
     expect(readLastView()).toBe("map");
+    storeLastView("inventory");
+    expect(readLastView()).toBe("inventory");
     storeLastView("board");
     expect(values.get(VIEW_STORAGE_KEY)).toBe("board");
     expect(readLastView()).toBe("board");
@@ -39,7 +45,7 @@ describe("Workstreams view preference", () => {
     storeLastView("map");
     expect(readLastView()).toBe("map");
     values.set(VIEW_STORAGE_KEY, "unexpected");
-    expect(readLastView()).toBe("map");
+    expect(readLastView()).toBe("inventory");
   });
 
   it("routes to an effort's roster and focused row, and never reopens a roster from the panel root", () => {
@@ -56,7 +62,7 @@ describe("Workstreams view preference", () => {
     storeLastView("roster");
     expect(readLastView()).toBe("pipeline");
     values.set(VIEW_STORAGE_KEY, "roster");
-    expect(readLastView()).toBe("map");
+    expect(readLastView()).toBe("inventory");
   });
 
   it("keeps every view usable when browser storage is unavailable", () => {
@@ -65,7 +71,7 @@ describe("Workstreams view preference", () => {
         throw new Error("Storage disabled");
       },
     });
-    expect(readLastView()).toBe("map");
+    expect(readLastView()).toBe("inventory");
     expect(() => storeLastView("board")).not.toThrow();
   });
 });

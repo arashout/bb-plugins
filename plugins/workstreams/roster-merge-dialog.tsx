@@ -133,7 +133,8 @@ export function MergePreviewBody({ items, selected, busy, notice, onToggle, onMe
 
 /** The dialog: reads every PR's preview in parallel when it opens, picks each one nothing refuses, and merges only on a click or ⌘↵. */
 export function MergePreviewDialog({ targets, rows, onClose, onMerged, onOpenUrl }: { targets: readonly { target: string; n: number | null }[] | null;
-  rows: readonly RosterRow[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void }) {
+  /** What names each PR: the roster's rows, or the inventory's. */
+  rows: readonly Pick<RosterRow, "target" | "repo" | "number" | "title">[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void }) {
   const rpc = useRpc<typeof rpcContract>();
   const [items, setItems] = useState<MergeItem[]>([]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());

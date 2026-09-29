@@ -148,6 +148,17 @@ implemented.
 
 ## Use the views
 
+- **Inventory:** Workstreams opens here. It lists every open PR you author,
+  and every open PR an effort names, by effort, with **No effort** last. Three
+  counts filter it: **Forgotten in draft**, **Missing a reviewer**, and **Needs
+  a nudge**. Each row shows the PR, its reviewers, its state, the next step
+  with who owns it and how long it has waited, and when GitHub last answered
+  for it. Stacked PRs appear under their parent, and a hold shows as a pin.
+  Each action is one click, checked again on fresh facts: **Mark ready**,
+  **Request review…**, **Nudge**, **Refresh**, and **Open thread**. **Merge…**
+  opens the fresh merge preview, which merges only on a click or ⌘↵. A
+  refused action shows the reason on its row. Each effort's name opens its
+  roster.
 - **Efforts:** Administer explicitly saved efforts from one list. Create an
   effort without starting a thread, edit its name and goal, archive it, or
   restore it. Archived efforts retain their work and history. **Merge into…**
@@ -354,8 +365,8 @@ PR row menus include **Put on hold** with an optional reason; held PRs keep thei
 
 The scanner and Anthropic naming call live in `host.ts`. `server.ts` handles
 settings, local storage, refresh, enrichment, actions, and the CLI. The grouping
-and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts Map, Pipeline,
-and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
+and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts the PR inventory, Map,
+Pipeline, and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
 scanned facts.
 `contract.ts` defines the host RPC schema, `work-conversation.ts` stores exact
 conversation scopes, and `skills/workstreams/SKILL.md`

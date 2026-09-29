@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { REVIEWER } from "./ghactions.js";
 import { inkwellInventory, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
-import type { AttentionReason } from "./pr-attention.js";
-import { actionCall, INVENTORY_CHANGED, inventoryScreen, LOGIN, parseLogins, type InventoryLine, type Outcome, type Pending } from "./inventory-view-model.js";
+import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
+import { actionCall, INVENTORY_CHANGED, INVENTORY_HOW, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+  type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
 const screen = (view: InventoryView = VIEW, options: { filter?: Parameters<typeof inventoryScreen>[1]["filter"]; now?: number; pending?: Pending;
@@ -263,6 +264,30 @@ describe("the PR inventory screen view model", () => {
     const outcomes = new Map([["https://github.com/inkwell/catalog/pull/96", { at: NOW - 5_000, action: "refresh" as const, ok: false, text: "HTTP 502" }]]);
     expect(screen(recorded, { outcomes }).groups.flatMap((group) => group.lines).find((line) => line.number === 96)!.last)
       .toEqual({ ok: false, text: "Refresh failed 5s ago: HTTP 502" });
+  });
+
+  it("drops this visit's failed read once a read succeeds, but keeps a refused write's reason, which a read doesn't answer", () => {
+    const url = "https://github.com/inkwell/catalog/pull/96";
+    const failed = new Map([[url, { at: NOW - 5_000, action: "refresh" as const, ok: false, text: "HTTP 502" }]]);
+    expect(withOutcome(failed, url, null).has(url)).toBe(false);
+    expect(screen(VIEW, { outcomes: failed }).groups.flatMap((group) => group.lines).find((line) => line.number === 96)!.last).not.toBeNull();
+    expect(screen(VIEW, { outcomes: withOutcome(failed, url, null) }).groups.flatMap((group) => group.lines).find((line) => line.number === 96)!.last).toBeNull();
+    const refused = new Map([[url, { at: NOW - 5_000, action: "nudge" as const, ok: false, text: "Who needs a nudge changed" }]]);
+    expect(withOutcome(refused, url, null).get(url)).toEqual(refused.get(url));
+    const next: Outcome = { at: NOW, action: "refresh", ok: false, text: "GitHub is still checking this PR." };
+    expect(withOutcome(refused, url, next).get(url)).toEqual(next);
+  });
+
+  it("explains the inventory in How this works at the thresholds attention uses by default, with a row for each question", () => {
+    const words = new Map(INVENTORY_HOW.rows);
+    expect(QUESTIONS.map((question) => words.has(question.label))).toEqual([true, true, true]);
+    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = DEFAULT_ATTENTION_THRESHOLDS;
+    expect(words.get("Forgotten in draft")).toContain(`no push for ${draftIdleDays} days`);
+    expect(words.get("Needs a nudge")).toContain(`no answer after ${nudgeAfterBusinessDays} business day,`);
+    expect(words.get("Needs a nudge")).toContain(`stuck for ${stuckAfterDays} day:`);
+    // Needs a nudge counts merges and code work too, so it says why most of its rows offer no Nudge.
+    expect(words.get("Needs a nudge")).toMatch(/Nudge asks reviewers again on the first two; merging and fixing the rest are yours\.$/u);
+    expect(words.get("2d+")).toMatch(/^At least this long\./u);
   });
 
   it("names the roster a v2 effort runs a row from, and each effort's group, with No effort last", () => {

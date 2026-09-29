@@ -198,10 +198,10 @@ function GroupHeader({ group, onOpenRoster }: { group: InventoryGroup } & Pick<R
 
 const rowAttrs = (line: InventoryLine) => ({ "data-inventory-row": `${line.slug}#${line.number}`, "data-depth": line.depth });
 
-/**
- * The dense table: PR, title, reviewers, state, next step with owner and age, when GitHub last answered, and the row's actions. Its fixed
- * columns take 690px, so it needs a pane of 1100px for Title and Next · owner · age to show a step whole.
- */
+/** The narrowest pane the dense table fits: its fixed columns take 690px, and Title and Next · owner · age share the rest. */
+export const TABLE_MIN_WIDTH = 1100;
+
+/** The dense table, in a pane TABLE_MIN_WIDTH or wider: PR, title, reviewers, state, next step with owner and age, when GitHub last answered, and actions. */
 export function InventoryTable(props: InventoryRowsProps) {
   return <table className="w-full table-fixed border-collapse text-[12px]">
     <colgroup>

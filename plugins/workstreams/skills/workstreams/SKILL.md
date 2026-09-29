@@ -669,6 +669,9 @@ authored PRs every `inventoryPollSeconds`. PRs you don't author show their
 checkout's facts or their roster's last read, until the board's latest read
 finds them merged or closed.
 
+The Workstreams panel opens on this inventory. Map, Pipeline, Work, Efforts,
+and each effort's roster stay one tab or link away.
+
 ```
 bb workstreams inventory [--attention draft|reviewer|nudge] [--json]
 ```

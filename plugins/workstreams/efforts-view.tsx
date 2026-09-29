@@ -240,7 +240,7 @@ export function EffortsView({ board }: { board: Board | null }) {
   return <div ref={rootRef} className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
     <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/70 px-4 py-2.5">
       <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
-        {(["Map", "Pipeline", "Work"] as const).map((label) => <button key={label} type="button" role="tab" aria-selected={false}
+        {(["Inventory", "Map", "Pipeline", "Work"] as const).map((label) => <button key={label} type="button" role="tab" aria-selected={false}
           onClick={() => navigate.toPluginPanel("board", { subPath: label.toLowerCase() })}
           className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">{label}</button>)}
         <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">Efforts</button>

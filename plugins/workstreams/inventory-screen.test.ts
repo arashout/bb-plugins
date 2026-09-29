@@ -3,9 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryQuestion, InventoryView } from "./inventory-view.js";
-import { inventoryScreen, type InventoryLine } from "./inventory-view-model.js";
-import { ReviewerPickerBody } from "./inventory-rows.js";
-import { InventoryPane } from "./inventory-screen.js";
+import { actionCall, inventoryScreen, type InventoryLine } from "./inventory-view-model.js";
+import { ReviewerPickerBody, TABLE_MIN_WIDTH } from "./inventory-rows.js";
+import { InventoryPane, InventoryPending } from "./inventory-screen.js";
+import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
 
 const VIEW = inkwellInventory();
 const noop = () => {};
@@ -28,6 +29,17 @@ describe("the PR inventory screen's markup", () => {
     const narrow = pane(false);
     expect(narrow).not.toContain("<table");
     expect(narrow).toContain('role="list" aria-label="Open PRs"');
+  });
+
+  // At 900px the fixed columns left Title and Next · owner · age about 95px each, too narrow for a step with its owner and age.
+  it("draws the table only in a pane wide enough for Title and Next · owner · age to show a step whole", () => {
+    const cols = [...pane(true).matchAll(/<col(?: style="width:([\d.]+)(px|%)")?\/>/gu)].map((match) => match[1] ? { size: Number(match[1]), unit: match[2] } : null);
+    expect(cols).toHaveLength(7);
+    const fixed = cols.reduce((sum, col) => sum + (col?.unit === "px" ? col.size : 0), 0);
+    const next = cols[4]!.unit === "%" ? TABLE_MIN_WIDTH * cols[4]!.size / 100 : cols[4]!.size;
+    expect(cols[1]).toBeNull();
+    expect(next).toBeGreaterThanOrEqual(240);
+    expect(TABLE_MIN_WIDTH - fixed - next).toBeGreaterThanOrEqual(150);
   });
 
   it("files stacked children under their parent in stack order, in both layouts", () => {
@@ -177,5 +189,41 @@ describe("the reviewer picker", () => {
     expect(html).toMatch(/<button[^>]*data-inventory-request="true" aria-disabled="true"[^>]*title="Pick or type a reviewer first"/u);
     const none = renderToStaticMarkup(createElement(ReviewerPickerBody, { line: line("atlas #410"), onRequest: noop, onCancel: noop }));
     expect(text(none)).toContain("No past reviewers to suggest; type a login.");
+  });
+});
+
+describe("the inventory before its first read", () => {
+  it("keeps the view tabs while it reads or when the read failed, so every other view stays one click away", () => {
+    const pending = (error: string | null) => renderToStaticMarkup(createElement(InventoryPending, { error, onRetry: noop, onView: noop, onHow: noop }));
+    for (const html of [pending(null), pending("HTTP 500")]) {
+      expect([...html.matchAll(/role="tab"[^>]*>([^<]+)</gu)].map((match) => match[1])).toEqual(["Inventory", "Map", "Pipeline", "Work", "Efforts"]);
+      expect(text(html)).toContain("How it works");
+    }
+    expect(text(pending(null))).toContain("Reading your open PRs…");
+    const failed = pending("HTTP 500");
+    expect(failed).toContain('role="alert"');
+    expect(failed).toMatch(/<button type="button" class="[^"]*focus-visible:ring-2[^"]*">Retry<\/button>/u);
+    expect(text(failed)).toContain("Couldn't read the inventory: HTTP 500 Retry");
+  });
+});
+
+describe("keyboard safety", () => {
+  it("never merges on Enter: Enter on a row's Merge… only opens the fresh preview, whose Merge button refuses Enter and Space", () => {
+    const url = "https://github.com/inkwell/folio/pull/301";
+    const row = VIEW.groups.flatMap((group) => group.rows).find((item) => item.prUrl === url)!;
+    // Enter or Space on a focused row button is a click, and a row's Merge… click only opens the preview: it carries no head to merge.
+    expect(actionCall(row, line("folio #301").actions.find((item) => item.id === "merge")!)).toEqual({ kind: "preview", target: url });
+    // In the preview, Enter or Space on Merge arrives as a click with detail 0 and is refused; only a pointer click or ⌘↵ merges.
+    expect(mergeTrigger({ kind: "click", detail: 0 })).toBe("refuse");
+    expect(mergeTrigger({ kind: "key", key: "Enter", metaKey: false, ctrlKey: false })).toBeNull();
+    expect(mergeTrigger({ kind: "key", key: "Enter", metaKey: true, ctrlKey: false })).toBe("merge");
+    // The preview names the inventory's unnumbered PR by repository and number, pinned to the head it read.
+    const preview: MergePreview = { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", headRefOid: row.head,
+      stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true },
+      refusals: [], warnings: [], method: "squash", deleteBranch: true };
+    const html = renderToStaticMarkup(createElement(MergePreviewBody, { items: [{ n: null, target: url, repo: "folio", number: 301, title: row.title, preview, result: null }],
+      selected: new Set([url]), busy: false, notice: null, onToggle: noop, onMerge: noop, onCancel: noop, onOpenUrl: noop }));
+    expect(text(html)).toContain(`folio #301 ${row.title} head ${row.head!.slice(0, 7)}`);
+    expect(html).toMatch(/data-merge-go="true" title="Click, or press ⌘↵\. Merging needs ⌘↵ or a click; Enter alone doesn&#x27;t merge\."/u);
   });
 });
