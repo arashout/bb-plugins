@@ -1,0 +1,276 @@
+# Multi-repo workspaces — design
+
+A standalone BB plugin that gives a project **a set of git repos** and every thread **one workspace containing a checkout of each**.
+
+## Scope
+
+**In scope.** Provisioning multi-repo thread workspaces, configuring the repo set, a per-machine object cache, agent-facing tools and instructions, and a plugin-owned diff/PR panel.
+
+**Explicitly out of scope — this plugin is standalone:**
+
+- **No fork of bb.** Nothing here requires a core change. One possible core improvement is noted in [Out of scope](#out-of-scope) purely so the option is recorded; the design does not depend on it and must not be built assuming it.
+- **No bb-internal packages.** `bb-environment-provider-host` (which exposes `runGit`, `detectGitRepo`, `readDefaultBranchRefs`, and the git ref mutation lock) is `"private": true` and reachable only from plugins bundled inside the bb repo. This plugin ships its own git process wrapper.
+- **No dependency on other plugins in this repo.** No shared code with `kubernetes-provider`, `thread-briefs`, or `workstreams`. It must work on a stock bb install with only the bundled plugins present.
+
+Core references below were verified against bb at commit `611e34892` (2026-09-24). They are the evidence that this design works without core changes; re-check them when upgrading bb.
+
+---
+
+## 1. Concepts
+
+A **project's source is a `.bb` git repo** — the workspace definition, not the code. It contains:
+
+```
+repos.json      the repo set
+AGENTS.md       cross-repo guidance (read natively by bb)
+skills/         project skills (read natively by bb)
+```
+
+A **thread workspace** is a plain directory holding one clone per repo, plus `.bb` itself. Every repo is equal; there is no privileged primary repo.
+
+```
+<plugin host-data>/
+  repos/<key>.git            bare, self-contained object cache (per machine)
+  workspaces/<pathKey>/      ← environment.path (plain dir, isGitRepo: false)
+    bb-dylan/                clone, origin = real remote
+    bb-plugins/              clone, origin = real remote
+    .bb/                     clone of the project-source checkout
+```
+
+`<pathKey>` is the provider's per-thread path key. Repo directory names come from `repos.json`, not derived from URLs, so two repos sharing a basename are unambiguous.
+
+## 2. Configuration
+
+### `repos.json`
+
+```jsonc
+{
+  "version": 1,
+  "repos": [
+    { "dir": "bb-dylan",   "url": "git@github.com:you/bb-dylan.git" },
+    { "dir": "bb-plugins", "url": "git@github.com:you/bb-plugins.git", "branch": "main" }
+  ]
+}
+```
+
+- `dir` — directory name inside the workspace. Required, explicit, must be a safe single path segment.
+- `url` — anything git can clone, including a local path. A local path makes "base this on my local checkout" a first-class option.
+- `branch` — optional base branch. Defaults to that repo's default branch.
+
+**Branches float; never pin SHAs.** This is a dev workspace, not a release manifest. Pinning buys reproducibility nobody asked for and creates staleness someone has to manage.
+
+Keep it strict JSON. Documentation lives in the seeded `AGENTS.md` and the plugin UI, not in comments.
+
+`repos.json` is the single source of truth. The plugin UI *edits and commits* it; it never shadows it with a separate store. Plugin storage holds derived state only: cache freshness, workspace manifests, precomputed layout text.
+
+### Where `.bb` lives
+
+`project_sources.path` is the canonical `.bb` checkout, per `(projectId, hostId)` — one per machine (`packages/db/src/schema.ts:496`).
+
+Two ways in, same code path afterwards:
+
+- **Shared** — the `.bb` repo has a remote. Clone it, create the project pointing at it. A teammate gets the whole workspace definition from one URL.
+- **Local, from scratch** — create the project pointing at a fresh directory. The plugin initializes `.bb` on first use. No remote, no setup.
+
+The local variant upgrades to shared with `git remote add` and a push. Nothing else in the design changes and there is no migration.
+
+## 3. Why a plain-directory workspace root
+
+The root is not a git repo. Verified consequences:
+
+- **It's a supported shape.** `environment-personal-workspace` already ships a non-git workspace.
+- **Nothing errors.** `getAdditionalWorkspaceWriteRoots()` returns `[]` when the root isn't a git worktree (`packages/host-workspace/src/provision.ts:136-139`).
+- **Everything is writable.** All repos sit under `cwd`, so they're writable under `accept-edits`/`auto` — no `full` permission mode needed. Permission scopes are only `workspace` and `full` (`packages/domain/src/shared-types.ts:495`), and `workspace` grants `cwd` plus additional roots (`packages/provider-bridge-acp/src/session-params.ts:313`).
+- **`.bb` lands exactly where bb looks.** `<workspacePath>/.bb/AGENTS.md` (`apps/server/src/services/threads/workspace-agent-instructions.ts:13`) and `<workspacePath>/.bb/skills` (`apps/server/src/services/skills/workspace-skills.ts:83`) are plain path joins with no git requirement.
+
+**Hazard: never create `<root>/.git`.** `packages/host-watcher/src/workspace-status-watcher.ts:324-332` promotes the environment to git mode the moment it appears, which would switch on a misleading native diff tab mid-session. The check is root-relative (`:157-160`), so nested repo `.git` directories are safe.
+
+## 4. Why clones, not worktrees
+
+`git worktree add` leaves the object store in the source repo, outside `cwd`. The agent could edit files but every `git commit` would fail on a sandboxed write to `objects`/`refs`.
+
+A clone puts `.git` **inside** `cwd`. Use `--shared` (or `--reference`) so objects resolve from the per-machine cache: the alternates pointer is only ever read, and reads are unrestricted.
+
+Two independent confirmations that a `.git` under `cwd` is writable:
+
+1. `environment-project-checkout` ships a plain non-worktree repo as the workspace, receives `[]` additional write roots, and commits fine.
+2. `packages/host-workspace/src/workspace-write-roots.ts:57-60` filters out candidate roots *nested under* the workspace — only coherent if nested git dirs are already writable.
+
+Secondary benefit: two threads cannot both check out `main` as worktrees of one repo, but independent clones can. `.bb` tracks its default branch in every workspace, so this matters.
+
+## 5. Pull-through object cache
+
+Per repo, in order:
+
+1. **Cache hit** — the internal bare clone exists. Fetch if stale.
+2. **Local mirror** — a checkout on this machine has a matching `origin`: `git clone --bare <that-path>` hardlinks objects (instant, no network), then `git remote set-url origin <real-url>` and fetch the delta.
+3. **Network** — `git clone --bare <real-url>`.
+
+Discovery for step 2 uses bb's own registry of local checkouts: `bb.sdk.projects.list()` returns every project with its `sources[]` (path per host), so the plugin can enumerate every checkout bb knows about on this machine and read each one's `origin`. Add the project-source directory's siblings and one configurable extra search root.
+
+Two rules:
+
+- **The cache must be self-contained.** Never seed it with `--shared`/`--reference` from a user's checkout — deleting or gc'ing that checkout would corrupt every workspace chained off it. A plain bare clone still hardlinks, so it stays cheap and stands alone. Alternates belong only on the workspace→cache hop, where the plugin owns both ends.
+- **Always fetch from the real remote after mirroring.** A local checkout carries stale refs and local-only branches.
+
+Cache repos are alternates targets, so set `gc.auto=0` and `gc.pruneExpire=never` on them; repack with `git gc --no-prune`.
+
+Freshness: fetch-if-stale with a short TTL at `create()`, plus a background refresh on a `bb.background` cron. Never fetch synchronously on every thread start.
+
+## 6. Provider lifecycle
+
+Declares `requires: { projectCheckout: true }`, which guarantees a non-null `context.projectCheckout.path` with **no** git availability gating — that only fires for `requires.gitCheckout` (`apps/server/src/services/threads/thread-environment-placement.ts:320,327`).
+
+### `create()`
+
+1. **Bootstrap `.bb`** if `projectCheckout.path` has no `.git`: `git init`, seed `AGENTS.md` and `repos.json`, commit.
+2. **Refresh** the project-source checkout (fetch-if-stale), then parse and validate `repos.json`.
+3. **Seed by discovery** if the repo set is empty — propose repos found on this machine rather than producing an empty workspace.
+4. **Populate the cache** per repo (§5), under a file lock. Concurrent thread creation against one cache entry is normal, not an edge case.
+5. **Materialize the workspace**: create the root; clone each repo plus `.bb`; rewrite each work repo's `origin` to its real remote; create the shared thread branch in each work repo. `.bb` stays on its default branch.
+6. **Precompute the layout** table and write it to plugin storage keyed by environment (see §8).
+7. Return `{ status: "created", path: <root>, ownsPath: true, resource: { workspaces: [...] } }`.
+
+Report progress with `report.step` / `report.log` throughout. A cold start is a full network clone per repo and will read as hung otherwise.
+
+### `remove()`
+
+Enumerate every directory under the workspace root and remove each. Write a `<dir>.completed` marker per repo during `create()` so a partially provisioned workspace is recoverable per repo rather than all-or-nothing.
+
+### Branching
+
+Generate the thread branch name once and use it in **every** work repo, so PRs across repos correlate by head ref. Fall back per repo on collision; the symmetry is a convenience, not an invariant.
+
+### Failure policy
+
+A repo that fails to materialize should not fail the whole environment. Record per-repo status and surface it in the panel; the thread is still useful with three of four repos present.
+
+## 7. Sandbox boundaries
+
+| Path | Agent can write |
+|---|---|
+| Anything under the workspace root, including every repo's `.git` | yes |
+| `host-data/` cache, canonical `.bb` checkout | no |
+
+Work repos push to their real remotes over the network — unaffected.
+
+**`.bb` write-back inverts direction** and runs host-side in a plugin tool:
+
+```bash
+git -C <canonical-.bb> fetch <workspace>/.bb HEAD:refs/heads/guidance-<threadId>
+```
+
+Every write happens in the canonical repo, initiated by the plugin's host entry, which runs outside the agent's sandbox. This avoids the sandbox *and* `receive.denyCurrentBranch`, since the target ref isn't the checked-out branch. Merge it in the canonical checkout like any branch.
+
+## 8. Agent-facing surface
+
+### Generated facts
+
+`bb.agents.contributeInstructions` supplies a dynamic instruction block. Two constraints to design around (`packages/plugin-sdk/src/backend-contract.ts:1656-1671`): the provider is **synchronous** and sits on the thread-start path, and output is truncated at 4096 characters. It therefore cannot shell out to git.
+
+Precompute the layout at `create()` — a compact table of `dir → path → branch → remote` — store it, and have the callback read and format it. Always accurate, never stale.
+
+### Human intent
+
+The seeded `.bb/AGENTS.md`, read natively by bb. This is where cross-repo reasoning lives: which repo depends on which, what has to be rebuilt or redeployed when a given repo changes, what belongs in which repo.
+
+**Keep the split clean: the plugin generates facts, the file holds intent.** Paths written into `AGENTS.md` drift. Intent written into the generated block can't be edited.
+
+The seed must also explain `.bb/` itself — that it is shared across every thread in the project, versioned, and the right place to record durable cross-repo knowledge. Otherwise agents won't use it.
+
+### Tools
+
+Registered with `bb.agents.registerTool`:
+
+- `workspace_add_repo({ url, dir?, branch? })` — append to `repos.json` in the canonical `.bb` and commit; populate the cache; clone into the **live** workspace so the repo appears without restarting the thread. All three writes run host-side, so this works under `accept-edits`.
+- `workspace_list_repos` — the current set with per-repo branch and status.
+- `workspace_remove_repo({ dir })` — remove from `repos.json`; leave existing workspaces alone.
+
+Plus a manifest skill (`bb.skills`) documenting when to reach for them, and a `bb repos` CLI command via `bb.cli.register` — worth having because the repo list lives in a plugin destination rather than bb's Project settings page.
+
+## 9. Diff and PR
+
+The workspace root isn't a git repo, so bb's native diff tab and PR state are unavailable (see [Known limits](#known-limits)). The plugin owns both surfaces.
+
+### Reused, not rebuilt
+
+`experimental_Diff` (`packages/plugin-sdk/src/app.ts:144`, props at `packages/plugin-sdk/src/app-contract.ts:561-584`) is a host-owned diff viewer available to plugins. It owns patch normalization, syntax highlighting, unified/split presentation, gutters, line-selection, optional full-file context expansion, and the live bb code theme. Pass `{ patch, path }` — a unified patch for one file.
+
+This is the expensive part of a diff UI and it comes free.
+
+### To build
+
+| Component | Rough size |
+|---|---|
+| Git process wrapper + repo/branch detectors | 150–200 |
+| Diff data layer — merge base, name-status/numstat, per-file patch, untracked files | 400–500 |
+| PR layer — `gh` field parsing and normalizers, actions, polling and caching | ~400 |
+| Panel UI — repo grouping, file list, selection, per-repo header | 500–700 |
+
+Reference material in bb (read, don't import): the `gh --json` field list and the checks/review/mergeability normalizers at `packages/host-workspace/src/git-host.ts:35-38,235-282`; the bundled `github` plugin's batched polling into a plugin SQLite table at `plugins/github/server.ts:670-695`.
+
+Defer bb's hardening until it's needed: diff tiering and pagination, list virtualization, byte budgeting, patch-section splitting. Cap file count and per-file bytes instead.
+
+Surfaces: `ui.threadPanelAction` for the panel, `ui.fileOpener` to claim workspace file-open targets so timeline file links route in rather than dead-ending.
+
+**Estimate: ~1,700–2,200 LOC.**
+
+## 10. Packaging
+
+One plugin, one package — `plugins/multi-repo/`:
+
+```json
+{
+  "name": "bb-plugin-multi-repo",
+  "type": "module",
+  "engines": { "bb": ">=0.43", "bbPluginSdk": ">=0.5.24" },
+  "bb": {
+    "name": "Multi-repo workspace",
+    "description": "Give a project a set of git repos and every thread a checkout of each.",
+    "branding": { "icon": "FolderGit" },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "app": "./app.tsx",
+    "skills": ["skills"]
+  },
+  "dependencies": { "zod": "^4.3.6" },
+  "devDependencies": { "@get-bb/plugin-sdk": "0.5.24" }
+}
+```
+
+Three entry points in one package, because `bb.storage` and RPC routes are namespaced per plugin and the panel needs the provider's layout records. Splitting provisioning from UI would mean cross-plugin state access.
+
+The published `@get-bb/plugin-sdk` exports everything required: `./environment-provider`, `./host`, `./app`, `./testing`. UI primitives (React, Radix, clsx, and similar) are ordinary dev dependencies bundled at build time.
+
+**Install:** `bb plugin install <path-or-git-source>`. No other plugin needs to be present and no bb fork is involved.
+
+*Environment-specific note, not a dependency:* a deployment that bakes plugins into a server image can add this directory to the image's plugin checkout list and its plugin-dirs environment variable; nothing in the plugin assumes that packaging.
+
+## 11. Build order
+
+1. **Provider cold start** — bootstrap `.bb`, discovery seed, cache population, workspace materialization, progress reporting, layout precompute, `contributeInstructions`. Proves the sandbox and commit story end to end, with no UI.
+2. **Tools and skill** — including live `workspace_add_repo`.
+3. **Nav panel** — repo list, per-repo and cache status, `repos.json` editing with loud validation. Plus `bb repos`.
+4. **Diff panel.**
+5. **PR panel.**
+
+Milestone 1 is the load-bearing one. Everything after it is additive and independently shippable.
+
+## Known limits
+
+Accepted consequences, not bugs:
+
+- **No native diff tab, PR badge, sidebar PR attention, or AI commit message.** PR state isn't persisted anywhere — there is no pull-request table in `packages/db/src/schema.ts`; `threadPullRequest` is computed live from `environment.path`. There is no row for a plugin to populate. Diff and PR live in the plugin panel.
+- **Not in bb's Project settings page.** No project-settings slot exists among the plugin app slots, so the repo list lives in a plugin nav panel beside bb's project settings. Someone looking in the obvious place won't find it — hence the CLI command.
+- **A local-only `.bb` is single-machine**, enforced by core: setting a project up on a new machine requires a git remote (`apps/server/src/services/projects/project-source-setup.ts:188-192`). Give `.bb` a remote when it needs to travel.
+- **Cold start is a full network clone per repo**, once per machine. Mitigated by the cache and local mirroring, not eliminated.
+- **`bb project show` displays the `.bb` remote** as the project's git remote, since core probes it from the project source. Defensible — the project *is* the workspace definition — but it reads oddly at first.
+- **`repos.json` sits on the critical path** for every thread creation in the project. Validate with a schema and fail naming the offending entry.
+- **The repo set is fixed at `create()`.** Existing workspaces don't gain repos added later except via `workspace_add_repo`. Deliberate: a workspace shouldn't mutate under a running thread.
+
+## Out of scope
+
+Recorded for completeness only. **The design does not depend on either and neither should be built as part of it.**
+
+- **True worktrees instead of clones.** Would need core to grant write access to nested repos' git directories — dropping the `isWorktree` guard at `packages/host-workspace/src/provision.ts:137` and having `workspace-write-roots.ts` scan subdirectories for worktrees. Small and a strict generalization, but it is a core change. Clones with a shared object cache are cheap enough that this is a disk optimization, not a capability.
+- **Native multi-repo git and PR state in bb.** Would need per-workspace rows on the environment (replacing the flattened `path`/`branchName`/`baseBranch`/`mergeBaseBranch` columns) and `threadPullRequest` becoming a list. This plugin's per-repo model is deliberately shaped so it could migrate onto that if it ever lands.
