@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
+import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
 import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS } from "./effort-work-store.js";
@@ -187,8 +188,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends PR read closures after PR read failure reasons", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 57 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 57 ORDER BY id").all())
       .toEqual([{ id: 57, hash: statementHash(PR_OBSERVATION_CLOSED_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends effort piles after PR read closures, the last statement the live store applied", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 58 ORDER BY id").all())
+      .toEqual([{ id: 58, hash: statementHash(EFFORT_PILE_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

@@ -704,6 +704,18 @@ depends on differ from what the row showed. The row's `lastAction` records
 each outcome, refusals included. **Merge** opens `action_merge_preview`, and
 nothing merges outside it.
 
+## Effort piles
+
+Every unarchived effort sits on one pile: active, on hold, or done.
+`effort_piles_get` lists them. `effort_hold` (with an optional `reason`),
+`effort_complete`, `effort_resume`, and `effort_reopen` move one effort, and
+only when the user asks. A move never changes members, threads, or the effort
+itself. `effort_complete` returns the effort's open PRs and active threads. A
+resumed or reopened effort joins the end of the active pile (`since`). A v2
+effort returns to legacy, and automatic dispatch for an effort turns off,
+before it is held or completed; dispatch turns on only for an active effort.
+Archiving and merging work as before.
+
 ## Effort rosters (v2)
 
 An effort can move to its v2 roster: one permanently numbered row per PR the

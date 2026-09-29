@@ -26,6 +26,7 @@ import {
   type Pr,
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
+import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
@@ -571,6 +572,7 @@ export const rpcContract = defineRpcContract({
     output: z.object({ lastLine: z.string().max(280).nullable() }),
   },
   ...effortV2Contract,
+  ...effortPilesContract,
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -659,6 +661,7 @@ export const MIGRATIONS = [
   PR_STATE_SINCE_MIGRATION,
   PR_OBSERVATION_ERROR_MIGRATION,
   PR_OBSERVATION_CLOSED_MIGRATION,
+  EFFORT_PILE_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -834,6 +837,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const effortStore = createEffortStore(db);
   const effortWork = createEffortWorkStore(db);
+  const piles = createEffortPileStore(db);
   /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
   const v2Pointer = (effortId: string | null | undefined): string | null => {
     const effort = effortId ? effortStore.get(effortId) : null;
@@ -3731,6 +3735,22 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
 
+  /** A pile move never touches the effort's record. A v2 roster or automatic dispatch would keep working a held or done effort, so each stops first. */
+  function movePile(effortKey: string, move: PileMove, reason?: string) {
+    const effort = adminRecord(effortKey);
+    if (!effort || effort.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+    if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
+    if ((move === "hold" || move === "complete") && effortWork.execution(effort.id).mode === "v2")
+      return { ok: false as const, error: "Its roster runs v2 work. Switch it back to legacy before you hold or complete it." };
+    if ((move === "hold" || move === "complete") && dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
+      return { ok: false as const, error: "Turn off automatic dispatch for this effort before you hold or complete it." };
+    try {
+      const pile = piles.move(effort, move, reason);
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return { ok: true as const, pile };
+    } catch (error) { return { ok: false as const, error: (error as Error).message }; }
+  }
+
   async function adminThreads(source: NonNullable<ReturnType<typeof adminRecord>>,
     destination: NonNullable<ReturnType<typeof adminRecord>>) {
     const known = new Map<string, { effortId: string; role: string }>();
@@ -5353,6 +5373,22 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: true as const, effort, pendingThreadSync: pending, notice };
       } catch (error) { return { ok: false as const, error: `Effort merge could not finish: ${String(error).slice(0, 300)}. Reopen the preview or retry the merge.` }; }
     },
+    effort_piles_get: () => effortStore.list().filter((effort) => !effort.archivedAt).map((effort) => piles.get(effort)),
+    effort_hold: ({ effortKey, reason }) => movePile(effortKey, "hold", reason),
+    effort_complete: async ({ effortKey }) => {
+      const moved = movePile(effortKey, "complete");
+      if (!moved.ok) return moved;
+      const effort = effortStore.get(moved.pile.effortId)!;
+      const rows = (await inventoryGet()).groups.find((group) => group.effort?.id === effort.id)?.rows ?? [];
+      const threads = new Map<string, string>();
+      for (const row of rows) for (const thread of [row.threads.origin, row.threads.executor]) if (thread?.active) threads.set(thread.id, thread.title);
+      const coordinator = effort.coordinatorThreadId ? threadFacts.get(effort.coordinatorThreadId) : undefined;
+      if (coordinator?.status === "active") threads.set(coordinator.id, coordinator.title ?? coordinator.titleFallback ?? coordinator.id);
+      return { ...moved, open: { prs: rows.map(({ prUrl, repo, number, title }) => ({ prUrl, repo, number, title })),
+        threads: [...threads].map(([id, title]) => ({ id, title })) } };
+    },
+    effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
+    effort_reopen: ({ effortKey }) => movePile(effortKey, "reopen"),
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
     thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {
       intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
@@ -5543,6 +5579,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (mode === "auto" && effortKey === null) throw new Error("Choose an effort before enabling automatic dispatch.");
       if (mode === "auto" && effortKey && effortStore.source(effortKey)?.archivedAt)
         throw new Error("Restore this effort before enabling automatic dispatch.");
+      const target = mode === "auto" && effortKey ? effortStore.source(effortKey) : null;
+      if (target && piles.get(target).pile !== "active") throw new Error("Resume or reopen this effort before enabling automatic dispatch.");
       const managed = mode === "auto" && effortKey ? v2Pointer(effortStore.source(effortKey)?.id) : null;
       if (managed) throw new Error(managed);
       if (effortKey !== null && !current.groups.some((group) => group.key === effortKey && !current.groups.some((child) => child.parentKey === group.key))) {
