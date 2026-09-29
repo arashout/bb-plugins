@@ -25,13 +25,19 @@ export const refresherSeenKey = (threadId: string) =>
  *
  * Derived from the threshold rather than configured beside it, so tuning the
  * one setting moves both boundaries together and they cannot be set into a
- * contradiction. Three, so the default eight-hour threshold puts the boundary
- * at a day: a thread you left this morning gets the short version, a thread you
- * left before yesterday gets the long one. That is also the span the
- * summarizer's own prompt is written around ("someone returning after a day
- * away"), so the two agree about what "cold" means.
+ * contradiction. Twelve, so the default one-hour threshold puts the boundary at
+ * half a day: a thread you stepped away from after lunch gets the short
+ * version, a thread you left last night gets the long one — close enough to the
+ * span the summarizer's own prompt is written around ("someone returning after
+ * a day away") that the two still agree about what "cold" means.
+ *
+ * Large rather than the three it was when the trigger itself was eight hours,
+ * because the two boundaries answer different questions. "Have you been away
+ * long enough to want reorienting at all?" is a matter of an hour; "have you
+ * forgotten the detail?" is still a matter of a night. Tying them at 3x only
+ * looked right while the first answer was wrong.
  */
-export const REFRESHER_COLD_MULTIPLE = 3;
+export const REFRESHER_COLD_MULTIPLE = 12;
 
 export interface RefresherDecision {
   /**

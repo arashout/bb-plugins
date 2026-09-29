@@ -1611,7 +1611,7 @@ describe("re-entry refresher", () => {
         model: "test-model",
         jsonMode: true,
         quietSeconds: 120,
-        refresherIdleHours: options.refresherIdleHours ?? 8,
+        refresherIdleHours: options.refresherIdleHours ?? 1,
       },
       sdk: {
         threads: {
@@ -1685,8 +1685,8 @@ describe("re-entry refresher", () => {
     expect(refresher?.text).toBe(PROSE.refresherShort);
   });
 
-  it("says nothing on a thread you were in an hour ago", async () => {
-    current = refresherHost({ idleMs: 1 * HOUR });
+  it("says nothing on a thread you were in ten minutes ago", async () => {
+    current = refresherHost({ idleMs: 10 * 60_000 });
     await plugin(current.bb);
     await summarized(current);
 

@@ -8,7 +8,7 @@ import {
 
 const HOUR = 3_600_000;
 const NOW = 1_700_000_000_000;
-const THRESHOLD = 8 * HOUR;
+const THRESHOLD = 1 * HOUR;
 
 /** Idle for two days, never dismissed, nothing pinned: the case that shows. */
 const decision = (overrides: Partial<RefresherDecision> = {}): RefresherDecision => ({
@@ -52,9 +52,9 @@ describe("chooseRefresher", () => {
   });
 
   describe("the two trigger conditions", () => {
-    it("says nothing on a thread you were in an hour ago", () => {
+    it("says nothing on a thread you were in ten minutes ago", () => {
       expect(
-        chooseRefresher(decision({ latestAttentionAt: NOW - 1 * HOUR })),
+        chooseRefresher(decision({ latestAttentionAt: NOW - 10 * 60_000 })),
       ).toBeNull();
     });
 

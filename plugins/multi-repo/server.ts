@@ -877,6 +877,17 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
   /* ------------------------------------------------------------ the RPC */
 
   bb.rpc.register(rpcContract, {
+    async projects() {
+      const all = await bb.sdk.projects.list();
+      return {
+        projects: all.map((project) => ({
+          id: project.id,
+          name: project.name,
+          hasSource: project.sources.some((source) => source.type === "local_path"),
+        })),
+      };
+    },
+
     async repoSet({ projectId }) {
       const location = await projectSource(projectId);
       if (location === null) {

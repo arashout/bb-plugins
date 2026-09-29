@@ -151,12 +151,17 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Show the re-entry refresher after this many idle hours",
       description:
         "Opening a thread that has sat idle this long, and whose last activity you have not already dismissed, shows a two-line reorientation above the composer. Threads idle for three times this long get the fuller version. Set to 0 to turn the refresher off.",
-      // Long enough to have lost the thread — a night, or a day spent on
-      // something else — and short enough to catch the morning you come back to
-      // it. Anything much shorter fires on the coffee break, where the banner
-      // is something to close rather than something to read, and a banner you
-      // learn to close is one you stop reading on the day it matters.
-      default: 8,
+      // An hour: long enough that you have genuinely context-switched away,
+      // short enough to catch the ordinary return — after a meeting, after
+      // lunch, after an afternoon on another thread. Eight was the first guess
+      // and it was too conservative by far. It fired only on threads left
+      // overnight, which is a small enough slice of returns that the feature
+      // read as broken rather than as quiet. The worry it was guarding against
+      // — a banner you learn to close is one you stop reading on the day it
+      // matters — turns out to be the dismissal record's job, not the
+      // threshold's: a dismissed banner stays gone until the thread does
+      // something new, however low this is set.
+      default: 1,
     },
     renameThreads: {
       type: "boolean",

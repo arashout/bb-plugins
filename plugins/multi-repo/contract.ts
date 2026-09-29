@@ -449,6 +449,32 @@ export const workspaceViewSchema = z
 export type WorkspaceView = z.infer<typeof workspaceViewSchema>;
 
 export const rpcContract = defineRpcContract({
+  /**
+   * Every project, for the Repos panel's own picker.
+   *
+   * A nav panel owns a top-level route with no project in it, so the page
+   * cannot read one from the route the way a thread surface can — it has to
+   * offer the choice itself.
+   */
+  projects: {
+    input: z.null(),
+    output: z
+      .object({
+        projects: z
+          .array(
+            z
+              .object({
+                id: z.string().max(100),
+                name: z.string().max(300),
+                /** False when the project has no checkout on any machine. */
+                hasSource: z.boolean(),
+              })
+              .strict(),
+          )
+          .max(500),
+      })
+      .strict(),
+  },
   /** The repo set for a project, plus per-repo object-cache state. */
   repoSet: {
     input: z.object({ projectId: z.string().min(1).max(100) }).strict(),

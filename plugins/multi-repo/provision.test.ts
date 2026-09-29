@@ -6,7 +6,7 @@
  * those can be checked by parsing strings. These build actual repos on disk
  * and assert the properties the design depends on.
  */
-import { access, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -608,5 +608,58 @@ describe("the per-repo failure contract", () => {
       message: "clone failed",
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+describe("the cache is keyed by repo, not by project", () => {
+  it("shares one bare repo between two projects on the same machine", async () => {
+    // The point of the cache: adding the same repo to a second project costs
+    // a delta fetch, not another full clone.
+    const shared = await makeRemote("shared");
+    const projectA = path.join(scratch, "project-a");
+    const projectB = path.join(scratch, "project-b");
+    for (const dir of [projectA, projectB]) {
+      await mkdir(dir, { recursive: true });
+      await bootstrapProjectSource(dir, EMPTY_REPOS);
+    }
+
+    const a = await provisionWorkspace({
+      dataDir,
+      pathKey: "threadA",
+      projectSourcePath: projectA,
+      repos: [{ dir: "shared", url: shared, branch: null }],
+      branchName: "a/work",
+      fetchTtlMs: 60_000,
+      mirrors: [],
+    });
+    const b = await provisionWorkspace({
+      dataDir,
+      // A different project, a different thread, a different directory name.
+      pathKey: "threadB",
+      projectSourcePath: projectB,
+      repos: [{ dir: "renamed-in-b", url: shared, branch: null }],
+      branchName: "b/work",
+      fetchTtlMs: 60_000,
+      mirrors: [],
+    });
+
+    expect(a.repos.find((r) => r.dir === "shared")?.status).toBe("ready");
+    expect(b.repos.find((r) => r.dir === "renamed-in-b")?.status).toBe("ready");
+
+    // One cache entry, and both workspaces borrow from it.
+    const cacheDir = cachePathFor(dataDir, shared).path;
+    const entries = (await readdir(path.join(dataDir, "repos"))).filter((e) => e.endsWith(".git"));
+    expect(entries).toEqual([path.basename(cacheDir)]);
+    for (const repo of [a.repos.find((r) => r.dir === "shared")!, b.repos.find((r) => r.dir === "renamed-in-b")!]) {
+      const alternates = await readFile(path.join(repo.path, ".git", "objects", "info", "alternates"), "utf8");
+      expect(alternates.trim()).toBe(path.join(cacheDir, "objects"));
+    }
+  });
+
+  it("does not fork the cache when two projects spell the remote differently", () => {
+    // One project uses ssh, another https. Same repo, so the same entry.
+    expect(cachePathFor("/data", "git@github.com:you/repo.git").key).toBe(
+      cachePathFor("/data", "https://github.com/you/repo").key,
+    );
   });
 });
