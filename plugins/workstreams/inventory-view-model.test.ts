@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore } from "./approval-feedback.js";
 import { REVIEWER } from "./ghactions.js";
-import { inkwellInventory, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
 import { actionCall, INVENTORY_CHANGED, INVENTORY_HOW, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
@@ -47,11 +50,42 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
       ["No effort", "catalog #96", "Awaiting review", "Nudge @mira-l, @theo-k", "reviewers", "nudge", true],
       // The one code-work row with no thread can't open one.
       ["No effort", "catalog #97", "Conflicts", "Resolve the conflicts", "you", "thread", false],
-      ["No effort", "folio #301", "Ready to merge", "Merge", "you", "merge", true],
+      // Approved, green, and clean, but the approvals left comments that only you can confirm handled before either merges.
+      ["No effort", "folio #301", "Approved with comments", "Confirm the approval's comments are handled", "you", "confirm-handled", true],
       ["No effort", "folio #305", "CI failing", "Request a review + Fix the failing checks", "you", "request-review", true],
-      ["No effort", "folio #318", "Ready to merge", "Merge", "you", "merge", true],
+      ["No effort", "folio #318", "Approved with comments", "Confirm the approval's comments are handled", "you", "confirm-handled", true],
       ["No effort", "folio #325", "Conflicts", "Request a review + Resolve the conflicts", "you", "request-review", true],
     ]);
+  });
+
+  // Confirm handled is the one step between these two approvals and a merge. Through the action, store, and attention the server
+  // composes, your confirmation of each moves it to Ready to merge with Merge…, and moves nothing else.
+  it("moves folio #301 and #318 from Approved with comments to Ready to merge once you confirm each handled", async () => {
+    const approvedWithComments = ["folio #301", "folio #318"];
+    for (const pr of approvedWithComments) expect(action(find(pr), "merge")).toBeUndefined();
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const actions = createInventoryActions({ now: () => NOW, listed: () => true, hold: () => null, writer: () => null, lock: () => () => {},
+      read: async (prUrl) => ({ ok: true, pr: inkwellInventoryPrs(store.get).find((pr) => pr.url === prUrl) ?? null }),
+      attention: async (fresh) => inkwellInventory(store.get).groups.flatMap((group) => group.rows).find((row) => row.prUrl === fresh.url)!.attention,
+      write: async () => { throw new Error("Confirming writes nothing to GitHub"); },
+      confirm: (prUrl, headOid, feedback) => { store.confirm(prUrl, feedback, headOid, NOW); }, record: async () => {} });
+    for (const pr of approvedWithComments) {
+      const call = actionCall(rowOf(pr), action(find(pr), "confirm-handled")!);
+      if (call.kind !== "rpc" || call.method !== "inventory_confirm_handled") throw new Error(`${pr} offers no confirmation`);
+      expect(await actions.confirmHandled(call.input.prUrl, call.input.headOid, call.input.fingerprint)).toMatchObject({ ok: true });
+    }
+    const confirmed = inkwellInventory(store.get);
+    for (const pr of approvedWithComments) {
+      const line = find(pr, confirmed);
+      expect([line.status, line.steps.map((step) => step.text), line.steps[0]!.owner.kind, line.primary]).toEqual(["Ready to merge", ["Merge"], "you", "merge"]);
+      expect(line.actions.map((item) => [item.id, item.enabled])).toEqual([["merge", true], ["refresh", true], ["thread", false]]);
+    }
+    const others = (view: InventoryView) => lines(view).filter(({ line }) => !approvedWithComments.includes(`${line.repo} #${line.number}`))
+      .map(({ group, line }) => [group, line.number, line.status, line.primary]);
+    expect(others(confirmed)).toEqual(others(VIEW));
+    expect(screen(confirmed).counts).toEqual(screen().counts);
+    db.close();
   });
 
   it("counts 3 PRs missing a reviewer, each offering Request review with the repository's recent reviewers", () => {
@@ -192,6 +226,27 @@ describe("the PR inventory screen view model", () => {
     expect(parseLogins("@mira-l, theo-k  bad!name inkwell/shelf-team")).toEqual({ logins: ["mira-l", "theo-k", "inkwell/shelf-team"], invalid: ["bad!name"] });
   });
 
+  it("offers Confirm handled on an approval with comments, bound to the head and comments its row shows, and says why when it can't", () => {
+    const line = find("folio #301");
+    expect(line).toMatchObject({ status: "Approved with comments", steps: [{ text: "Confirm the approval's comments are handled", owner: { kind: "you" }, age: "2d" }] });
+    expect(action(line, "confirm-handled")).toMatchObject({ enabled: true, label: "Confirm handled" });
+    expect(actionCall(rowOf("folio #301"), action(line, "confirm-handled")!)).toEqual({ kind: "rpc", method: "inventory_confirm_handled",
+      input: { prUrl: "https://github.com/inkwell/folio/pull/301", headOid: rowOf("folio #301").head, fingerprint: rowOf("folio #301").feedbackFingerprint } });
+    for (const patch of [{ head: null }, { feedbackFingerprint: null }]) {
+      expect(action(find("folio #301", withRow("folio #301", patch)), "confirm-handled"))
+        .toMatchObject({ enabled: false, why: "No head or approval comments read yet; Refresh first" });
+    }
+    // It reads GitHub first, so it waits for another action on the PR and for the rate limit, like every write.
+    const running = screen(VIEW, { pending: new Map([["https://github.com/inkwell/folio/pull/301", "confirm-handled"]]) }).groups
+      .flatMap((group) => group.lines).find((item) => item.number === 301)!;
+    expect(action(running, "confirm-handled")).toMatchObject({ label: "Confirming…", enabled: false, why: "Another action on this PR is running" });
+    expect(action(screen({ ...VIEW, rateLimitedUntil: NOW + 60_000 }).groups.flatMap((group) => group.lines).find((item) => item.number === 301)!,
+      "confirm-handled")).toMatchObject({ enabled: false, why: expect.stringMatching(/^GitHub's rate limit holds reads until/u) });
+    const refused = "The approval's comments changed since the row was shown. Read them and try again; nothing was written.";
+    expect(find("folio #301", withRow("folio #301", { lastAction: { at: NOW - 60_000, action: "confirm-handled", ok: false, detail: refused, reviewers: [] } })).last)
+      .toEqual({ ok: false, text: `Confirm handled refused 1m ago: ${refused}` });
+  });
+
   it("re-requests the reviewers an answered change request names, with the same Nudge", () => {
     const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v", owner: "you", reviewers: ["otto-v"] });
     const line = find("quill #211", withRow("quill #211", { attention: [rerequest] }));
@@ -200,9 +255,9 @@ describe("the PR inventory screen view model", () => {
   });
 
   it("never merges from a row: Merge… only opens the fresh preview, and nothing a row sends carries a head to merge", () => {
-    const merge = action(find("folio #301"), "merge")!;
+    const merge = action(find("folio #340"), "merge")!;
     expect(merge).toMatchObject({ label: "Merge…", enabled: true });
-    expect(actionCall(rowOf("folio #301"), merge)).toEqual({ kind: "preview", target: "https://github.com/inkwell/folio/pull/301" });
+    expect(actionCall(rowOf("folio #340"), merge)).toEqual({ kind: "preview", target: "https://github.com/inkwell/folio/pull/340" });
     for (const { line } of lines()) for (const item of line.actions) {
       const call = actionCall(rowOf(`${line.repo} #${line.number}`), item, ["mira-l"]);
       expect(call.kind === "rpc" ? call.method : call.kind).not.toMatch(/merge(?!_preview)/u);
@@ -286,7 +341,8 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Needs a nudge")).toContain(`no answer after ${nudgeAfterBusinessDays} business day,`);
     expect(words.get("Needs a nudge")).toContain(`stuck for ${stuckAfterDays} day:`);
     // Needs a nudge counts merges and code work too, so it says why most of its rows offer no Nudge.
-    expect(words.get("Needs a nudge")).toMatch(/Nudge asks reviewers again on the first two; merging and fixing the rest are yours\.$/u);
+    expect(words.get("Needs a nudge")).toContain("an approval whose comments no one has confirmed handled");
+    expect(words.get("Needs a nudge")).toMatch(/Nudge asks reviewers again on the first two; confirming, merging, and fixing the rest are yours\.$/u);
     expect(words.get("2d+")).toMatch(/^At least this long\./u);
   });
 

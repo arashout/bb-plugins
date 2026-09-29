@@ -28,9 +28,9 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   rows: [
     ["Forgotten in draft", "A draft with green checks and no conflict, ready for Mark ready, or a draft with no push for 3 days."],
     ["Missing a reviewer", "Open, not a draft, not approved, with no one asked and no review yet."],
-    ["Needs a nudge", "A requested review with no answer after 1 business day, addressed changes whose reviewer isn't asked again, or a PR " +
-      "stuck for 1 day: approved and mergeable but unmerged, failing checks, or a conflict. Nudge asks reviewers again on the first two; " +
-      "merging and fixing the rest are yours."],
+    ["Needs a nudge", "A requested review with no answer after 1 business day, addressed changes whose reviewer isn't asked again, an " +
+      "approval whose comments no one has confirmed handled, or a PR stuck for 1 day: approved and mergeable but unmerged, failing checks, " +
+      "or a conflict. Nudge asks reviewers again on the first two; confirming, merging, and fixing the rest are yours."],
     ["Next · owner · age", "The step, who takes it (you, the reviewers, or #N, the PR it's stacked on, which merges first), and how long it has waited."],
     ["2d+", "At least this long. GitHub keeps no time for failing checks or conflicts, so their age starts at the first read that saw them."],
     ["checked 25s ago", "When GitHub last answered for the row. Read failed, in red, says it didn't; an amber dot says the last full read didn't list it."],
@@ -65,7 +65,7 @@ export type InventoryLine = {
   reviewers: ReviewerChip[];
   /** Whom the reviewer picker suggests: this PR's past reviewers, then its repository's recent ones. */
   suggested: string[];
-  /** The server's state word; "Clear" on an approved PR reads "Ready to merge". */
+  /** The server's state word; "Clear" on an approved PR reads "Ready to merge", and approval comments to confirm "Approved with comments". */
   status: string;
   hold: { reason: string | null; age: string } | null;
   steps: Step[];
@@ -109,6 +109,8 @@ const CODE_WORK: Record<string, string> = { "CI failing": "Fix the failing check
 /** An approval whose written notes no one has confirmed handled doesn't merge yet: you read them on GitHub. */
 const APPROVAL_NOTES: Record<string, string> = { "Feedback verification needed": "Read the approval's notes and confirm they're handled",
   "New review feedback": "Read the new review feedback", "Verification needs recheck": "Recheck the approval's notes against the new head" };
+/** Why Confirm handled can't bind to what the row shows. */
+const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 /** A read that left the PR's state open: Refresh reads it again. */
 const UNREAD = new Set(["Status unknown", "Review history unknown"]);
 const YOU: Owner = { kind: "you", label: "you" };
@@ -182,6 +184,8 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
   const nudged = nudgees(row);
   if (nudged.length) actions.push(action("nudge", `Ask ${mentions(nudged)} again to review ${target}`, blocked, { reviewers: nudged }));
+  if (asks("confirm-handled")) actions.push(action("confirm-handled", `Record that you've handled the approval's comments on ${target}, ` +
+    "for the head and comments this row shows; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
   if (mergeable(row)) actions.push(action("merge", `Open a fresh merge preview of ${target}; only a click or ⌘↵ there merges`, null));
   else if (inOrder(row, parents)) actions.push(action("merge", `Merges after #${row.stackedOn}`, `Merge #${row.stackedOn} first; this one follows it`));
   // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither has only its roster's reads.
@@ -240,7 +244,8 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
-    status: row.status === "Clear" && row.stage === "ready" ? "Ready to merge" : row.status,
+    status: row.attention.some((reason) => reason.kind === "approval-comments") ? "Approved with comments"
+      : row.status === "Clear" && row.stage === "ready" ? "Ready to merge" : row.status,
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) },
     steps, primary,
     actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null }),
@@ -319,6 +324,7 @@ export type ActionCall =
   | { kind: "rpc"; method: "inventory_mark_ready"; input: { prUrl: string; headOid: string } }
   | { kind: "rpc"; method: "inventory_request_review"; input: { prUrl: string; logins: string[]; shown: InventoryRow["reviewers"] } }
   | { kind: "rpc"; method: "inventory_nudge"; input: { prUrl: string; reviewers: string[] } }
+  | { kind: "rpc"; method: "inventory_confirm_handled"; input: { prUrl: string; headOid: string; fingerprint: string } }
   | { kind: "preview"; target: string }
   | { kind: "refresh"; prUrl: string }
   | { kind: "thread"; threadId: string }
@@ -332,6 +338,8 @@ export function actionCall(row: InventoryRow, action: LineAction, logins: readon
   if (action.id === "request-review") return logins.length ? { kind: "rpc", method: "inventory_request_review",
     input: { prUrl: row.prUrl, logins: [...logins], shown: row.reviewers } } : { kind: "refuse", why: "Pick or type a reviewer first" };
   if (action.id === "nudge") return { kind: "rpc", method: "inventory_nudge", input: { prUrl: row.prUrl, reviewers: action.reviewers } };
+  if (action.id === "confirm-handled") return row.head && row.feedbackFingerprint ? { kind: "rpc", method: "inventory_confirm_handled",
+    input: { prUrl: row.prUrl, headOid: row.head, fingerprint: row.feedbackFingerprint } } : { kind: "refuse", why: UNCONFIRMABLE };
   if (action.id === "merge") return { kind: "preview", target: row.prUrl };
   if (action.id === "refresh") return { kind: "refresh", prUrl: row.prUrl };
   return action.threadId ? { kind: "thread", threadId: action.threadId } : { kind: "refuse", why: "No thread is linked to this PR yet" };

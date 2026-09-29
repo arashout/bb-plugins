@@ -67,6 +67,15 @@ describe("the PR inventory screen's markup", () => {
     expect(words).toContain("atlas #410 ABC-210 Show delivery windows at checkout no reviewer Conflicts Request a review · you · 6d Resolve the conflicts · you · 2d+");
   });
 
+  it("shows an approval with comments to confirm as its state, with a Confirm handled button and no Merge… yet, in both layouts", () => {
+    for (const html of [pane(true), pane(false)]) {
+      const row = html.slice(html.indexOf('data-inventory-row="inkwell/folio#301"'), html.indexOf('data-inventory-row="inkwell/folio#305"'));
+      expect(text(row)).toContain("Approved with comments Confirm the approval's comments are handled · you · 2d");
+      expect(row).toMatch(/<button[^>]*data-inventory-action="confirm-handled" aria-label="Confirm handled folio #301"[^>]*>Confirm handled<\/button>/u);
+      expect(row).not.toContain('data-inventory-action="merge"');
+    }
+  });
+
   it("keeps a two-line row to its first step, with how many more outside the step's truncation", () => {
     const html = pane(false);
     const atlas = html.slice(html.indexOf('data-inventory-row="inkwell/atlas#410"'), html.indexOf('data-inventory-row="inkwell/catalog#96"'));
@@ -132,7 +141,8 @@ describe("the PR inventory screen's markup", () => {
       }
       // A button's name starts with the words it shows, so saying "click Nudge" finds it (WCAG 2.5.3, label in name).
       const shown = [...html.matchAll(/<button[^>]*data-inventory-action="[^"]+"[^>]*aria-label="([^"]+)"[^>]*>([^<]+)<\/button>/gu)];
-      // The fixture's worded buttons: 3 Request review…, 1 Nudge, and 6 Merge…; Refresh and Open thread are icons named the same way.
+      // The fixture's worded buttons: 3 Request review…, 1 Nudge, 2 Confirm handled, and 4 Merge…; Refresh and Open thread are icons named
+      // the same way.
       expect(shown).toHaveLength(10);
       for (const [, name, label] of shown) expect(text(name!).startsWith(text(label!))).toBe(true);
     }
@@ -147,8 +157,8 @@ describe("the PR inventory screen's markup", () => {
   it("never merges from the inventory: Merge… opens the fresh preview dialog, and no control here merges on its own", () => {
     for (const html of [pane(true), pane(false)]) {
       const merges = [...html.matchAll(/<button[^>]*data-inventory-action="merge"[^>]*>/gu)].map((match) => match[0]);
-      // The two ready PRs, and the stack's parent and its three children, which say which PR merges first.
-      expect(merges).toHaveLength(6);
+      // The stack's parent and its three children, which say which PR merges first; the two approved with comments wait for your confirmation.
+      expect(merges).toHaveLength(4);
       for (const tag of merges) expect(tag).toContain('aria-haspopup="dialog"');
       expect(html).not.toContain("data-merge-go");
     }
@@ -209,10 +219,10 @@ describe("the inventory before its first read", () => {
 
 describe("keyboard safety", () => {
   it("never merges on Enter: Enter on a row's Merge… only opens the fresh preview, whose Merge button refuses Enter and Space", () => {
-    const url = "https://github.com/inkwell/folio/pull/301";
+    const url = "https://github.com/inkwell/folio/pull/340";
     const row = VIEW.groups.flatMap((group) => group.rows).find((item) => item.prUrl === url)!;
     // Enter or Space on a focused row button is a click, and a row's Merge… click only opens the preview: it carries no head to merge.
-    expect(actionCall(row, line("folio #301").actions.find((item) => item.id === "merge")!)).toEqual({ kind: "preview", target: url });
+    expect(actionCall(row, line("folio #340").actions.find((item) => item.id === "merge")!)).toEqual({ kind: "preview", target: url });
     // In the preview, Enter or Space on Merge arrives as a click with detail 0 and is refused; only a pointer click or ⌘↵ merges.
     expect(mergeTrigger({ kind: "click", detail: 0 })).toBe("refuse");
     expect(mergeTrigger({ kind: "key", key: "Enter", metaKey: false, ctrlKey: false })).toBeNull();
@@ -221,9 +231,9 @@ describe("keyboard safety", () => {
     const preview: MergePreview = { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", headRefOid: row.head,
       stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true },
       refusals: [], warnings: [], method: "squash", deleteBranch: true };
-    const html = renderToStaticMarkup(createElement(MergePreviewBody, { items: [{ n: null, target: url, repo: "folio", number: 301, title: row.title, preview, result: null }],
+    const html = renderToStaticMarkup(createElement(MergePreviewBody, { items: [{ n: null, target: url, repo: "folio", number: 340, title: row.title, preview, result: null }],
       selected: new Set([url]), busy: false, notice: null, onToggle: noop, onMerge: noop, onCancel: noop, onOpenUrl: noop }));
-    expect(text(html)).toContain(`folio #301 ${row.title} head ${row.head!.slice(0, 7)}`);
+    expect(text(html)).toContain(`folio #340 ${row.title} head ${row.head!.slice(0, 7)}`);
     expect(html).toMatch(/data-merge-go="true" title="Click, or press ⌘↵\. Merging needs ⌘↵ or a click; Enter alone doesn&#x27;t merge\."/u);
   });
 });

@@ -155,10 +155,12 @@ implemented.
   with who owns it and how long it has waited, and when GitHub last answered
   for it. Stacked PRs appear under their parent, and a hold shows as a pin.
   Each action is one click, checked again on fresh facts: **Mark ready**,
-  **Request review…**, **Nudge**, **Refresh**, and **Open thread**. **Merge…**
-  opens the fresh merge preview, which merges only on a click or ⌘↵. A
-  refused action shows the reason on its row. Each effort's name opens its
-  roster.
+  **Request review…**, **Nudge**, **Confirm handled**, **Refresh**, and
+  **Open thread**. **Confirm handled** records that you handled an
+  approval's comments on the head the row shows, which lets the PR merge; it
+  writes nothing to GitHub. **Merge…** opens the fresh merge preview, which
+  merges only on a click or ⌘↵. A refused action shows the reason on its row.
+  Each effort's name opens its roster.
 - **Efforts:** Administer explicitly saved efforts from one list. Create an
   effort without starting a thread, edit its name and goal, archive it, or
   restore it. Archived efforts retain their work and history. **Merge into…**
