@@ -264,6 +264,9 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
   const blocked = open("blocked") ? screen.blocked : screen.blocked.slice(0, 3);
   const threads = open("threads") ? screen.threads : screen.threads.slice(0, 3);
   const total = screen.stats.bar.reduce((sum, item) => sum + item.count, 0) || 1;
+  const { linear } = screen;
+  const linearLine = linear.chips.length > 0 || linear.bar.length > 0;
+  const ticketStates = `Tickets: ${linear.bar.map((state) => `${state.count} ${state.name}`).join(" · ")}`;
   return <section data-deck-card={card.id} aria-label={card.name} className="@container relative mb-2.5 rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
     style={{ backgroundImage: `linear-gradient(180deg, color-mix(in srgb, ${screen.color} 6%, transparent) 0, transparent 110px)` }}>
     <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
@@ -325,10 +328,27 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
           <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
         </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>}
       </Tile>
-      {([["linear", "Linear", screen.linear.summary, screen.linear.lines], ["people", "People", screen.people.summary, [
+      {/* On a card 700 px or wider, the chips, state bar, and target sit on one line in place of the summary; opened, the fields follow. */}
+      <Tile id="linear" title="Linear" note={open("linear") ? undefined : <span className={cn(linearLine && "@min-[700px]:hidden")}>{linear.summary}</span>}
+        open={open("linear")} more={linear.lines.length > 0} run={run} className="col-span-2 @min-[700px]:col-span-6">
+        {linearLine ? <div data-deck-linear-line className={cn("flex-wrap items-center gap-1", open("linear") ? "mb-1.5 flex" : "hidden @min-[700px]:flex")}>
+          {linear.chips.map((chip) => <span key={`${chip.kind}-${chip.text}`}
+            title={chip.kind === "label" ? "Linear label" : `Linear ${chip.kind}`} className={cn("inline-flex max-w-[230px] items-center gap-1 truncate rounded-md px-1.5 text-[11.5px] leading-5",
+              chip.kind === "label" ? "text-muted-foreground" : "border border-border")}>
+            {chip.kind === "label" ? "#" : <span aria-hidden className="text-[10.5px] text-muted-foreground">{chip.kind === "project" ? "▣" : "◇"}</span>}{chip.text}</span>)}
+          {linear.bar.length ? <span role="img" aria-label={ticketStates} title={ticketStates}
+            className="mx-1 inline-flex h-1.5 w-[70px] gap-px overflow-hidden rounded-full bg-foreground/[0.06]">
+            {linear.bar.map((state) => <i key={state.name} className={cn("block h-full", TONE[state.tone].bar)} style={{ flex: state.count }} />)}</span> : null}
+          {linear.target ? <span title="Project target date" className="text-[11px] text-muted-foreground">{linear.target}</span> : null}
+        </div> : null}
+        {open("linear") ? <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-2.5 gap-y-0.5 text-[12px]">{linear.lines.map(([label, value]) => <div key={label} className="contents">
+          <dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="break-words">{value}</dd></div>)}</dl> : null}
+      </Tile>
+      {([["people", "People", screen.people.summary, [
         ...screen.people.waitOnYou.map((person) => `@${person.login} waits on you: ${person.title}`), ...screen.people.youWaitOn.map((person) => `You wait on @${person.login}: ${person.title}`)]],
       ["recent", "Recent", screen.recent.summary, screen.recent.items.map((item) => `${item.text} · ${item.age}`)]] as const).map(([id, title, summary, lines]) =>
-        <Tile key={id} id={id} title={title} note={open(id) ? undefined : summary} open={open(id)} more={lines.length > 0} run={run} className="col-span-2 @min-[900px]:col-span-6">
+        <Tile key={id} id={id} title={title} note={open(id) ? undefined : summary} open={open(id)} more={lines.length > 0} run={run}
+          className="col-span-2 @min-[700px]:col-span-3 @min-[900px]:col-span-6">
           {open(id) ? <ul className="grid gap-0.5 text-[12px]">{lines.map((line) => <li key={line} className="break-words">{line}</li>)}</ul> : null}
         </Tile>)}
     </div>

@@ -14,6 +14,8 @@ import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
 
 const DAY = 86_400_000;
+/** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
+const calendarDay = (value: string) => new Date(Date.parse(value)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 /** Color only where the move is yours; gray waits on others, runs itself, or is to sort. */
 export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
 export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
@@ -145,7 +147,12 @@ export type CardScreen = {
   blocked: { prUrl: string; ref: string; on: string; what: string; age: string | null; dot: boolean }[];
   stats: { open: number; mergedWeek: number; median: string; oldest: { text: string; title: string } | null; bar: { key: string; label: string; count: number; tone: Tone }[] };
   threads: { id: string; title: string; ref: string; status: string; age: string | null; dot: boolean }[];
-  linear: { summary: string; lines: string[] };
+  /**
+   * Chips for its projects (▣), initiatives (◇), and labels (#), a bar of its tickets' states, and its top project's target, all on one line
+   * on a wide card; then one [label, value] line per field Linear gave.
+   */
+  linear: { summary: string; chips: { kind: "project" | "initiative" | "label"; text: string }[]; bar: { name: string; count: number; tone: Tone }[];
+    target: string | null; lines: [string, string][] };
   people: { summary: string; waitOnYou: { login: string; count: number; title: string }[]; youWaitOn: { login: string; count: number; title: string }[] };
   recent: { summary: string; items: { text: string; age: string }[] };
   sections: SectionScreen[];
@@ -185,8 +192,13 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     title: person.prs.map((pr) => `${pr.ref}${pr.since === null ? "" : `, ${age(pr.since, now)}`}`).join("; ") }));
   const { linear } = card;
   const tallies = (list: readonly { name: string; count: number }[]) => list.map((item) => `${item.name}${item.count > 1 ? ` ${item.count}` : ""}`).join(" · ");
-  const linearLines = [linear.projects.length ? `Project ${tallies(linear.projects)}` : "", linear.parents.length ? `Parent ${tallies(linear.parents)}` : "",
-    linear.states.length ? `States ${tallies(linear.states)}` : "", linear.labels.length ? `Labels ${linear.labels.map((label) => `#${label.name}`).join(" ")}` : ""].filter(Boolean);
+  const top = linear.projects[0];
+  const target = top?.targetDate ? `target ${calendarDay(top.targetDate)}` : null;
+  const linearLines = ([["States", linear.states.map((state) => `${state.count} ${state.name.toLowerCase()}`).join(" · ")],
+    ["Cycle", linear.cycles.map((cycle) => `${cycle.name ?? `Cycle ${cycle.number}`}${cycle.endsAt ? ` → ${calendarDay(cycle.endsAt)}` : ""}`).join(" · ")],
+    ["Assignees", linear.assignees.map((person) => person.name).join(", ")],
+    ["Target", linear.projects.flatMap((project) => project.targetDate ? [`${calendarDay(project.targetDate)} ${project.name}`] : []).join(" · ")],
+    ["Parent", tallies(linear.parents)], ["Read", `${linear.known} of ${plural(linear.tickets, "ticket")}`]] as [string, string][]).filter(([, value]) => value);
   const waitOnYou = people(card.people.waitOnYou), youWaitOn = people(card.people.youWaitOn);
   const first = card.activity[0];
   const needsYou = shown.filter((line) => line.needs).length;
@@ -212,8 +224,13 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
       oldest: card.stats.oldestWait && { text: age(card.stats.oldestWait.since, now), title: `${card.stats.oldestWait.ref}: ${card.stats.oldestWait.text}` },
       bar: BAR.map((segment) => ({ key: segment.key, label: segment.label, tone: segment.tone, count: counts(segment.of) })).filter((segment) => segment.count) },
     threads,
-    linear: { summary: linear.known === 0 ? (linear.tickets ? "no details stored" : "no tickets") : linear.projects[0]?.name ?? `${linear.known} of ${linear.tickets} tickets`,
-      lines: linear.known ? [`${linear.known} of ${plural(linear.tickets, "ticket")} have stored details`, ...linearLines] : [] },
+    linear: { summary: linear.known === 0 ? "no Linear data" : [top?.name, target].filter(Boolean).join(" · ") || `${linear.known} of ${linear.tickets} tickets`,
+      chips: linear.known ? [...linear.projects.map((project) => ({ kind: "project" as const, text: project.name })),
+        ...linear.initiatives.map((initiative) => ({ kind: "initiative" as const, text: initiative.name })),
+        ...linear.labels.map((label) => ({ kind: "label" as const, text: label.name }))] : [],
+      bar: linear.states.map((state) => ({ name: state.name, count: state.count,
+        tone: state.type === "completed" ? "green" as const : state.type === "started" ? "blue" as const : "gray" as const })),
+      target, lines: linear.known ? linearLines : [] },
     people: { waitOnYou, youWaitOn, summary: waitOnYou.length ? `@${waitOnYou[0]!.login} waits on you` : youWaitOn.length ? `you wait on ${youWaitOn.length}` : "nobody" },
     recent: { summary: first ? `${ACTIVITY[first.kind]} ${first.ref} ${age(first.at, now)} ago` : "quiet",
       items: card.activity.map((item) => ({ text: `${ACTIVITY[item.kind]} ${item.ref}${item.who ? ` · @${item.who}` : ""}`, age: age(item.at, now) })) },

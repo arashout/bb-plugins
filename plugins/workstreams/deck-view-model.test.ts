@@ -108,13 +108,31 @@ describe("an effort card", () => {
   it("words each tile from the card: next steps, blocked, stats, threads, stored Linear details, people, and recent activity", () => {
     const shelf = card(inkwellDeck(), SHELF);
     expect(shelf.stats).toMatchObject({ open: 5, mergedWeek: 1, median: "6d", bar: [{ key: "ready", count: 4 }, { key: "fix", count: 1 }] });
-    expect(shelf.linear).toEqual({ summary: "Shelf redesign", lines: ["1 of 5 tickets have stored details", "Project Shelf redesign", "States In Review", "Labels #shelves"] });
+    expect(shelf.linear).toEqual({ summary: "Shelf redesign", chips: [{ kind: "project", text: "Shelf redesign" }, { kind: "label", text: "shelves" }],
+      bar: [{ name: "In Review", count: 1, tone: "blue" }], target: null, lines: [["States", "1 in review"], ["Read", "1 of 5 tickets"]] });
     expect(shelf.next.items[0]).toMatchObject({ ref: "folio #340" });
     const pickup = card(inkwellDeck(), PICKUP);
     expect(pickup.threads[0]).toMatchObject({ title: "Store pickup", ref: "parent", age: "2h", dot: false });
     expect(pickup.blocked.map((item) => [item.ref, item.on, item.age])).toEqual([["quill #212", "quill #210", "3d"], ["spine #156", "spine #155", "3d"]]);
     expect(pickup.people.summary).toBe("@otto-v waits on you");
-    expect(card(inkwellDeck(), PICKUP).linear.summary).toBe("no details stored");
+    expect(card(inkwellDeck(), PICKUP).linear).toEqual({ summary: "no Linear data", chips: [], bar: [], target: null, lines: [] });
+  });
+
+  it("words the Linear tile from what Linear gave: project and initiative chips, label tags, states, cycle, assignees, and target date", () => {
+    const detail = (identifier: string, patch: object) => ({ identifier, title: null, description: null, state: { name: "In Progress", type: "started" },
+      project: { id: "p1", name: "Shelf redesign", targetDate: "2026-10-17", initiatives: [{ id: "i1", name: "Reading rooms" }] }, parent: null, labels: ["shelves"],
+      cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" }, url: null, updatedAt: null, source: "key" as const, ...patch });
+    const view = inkwellDeck({ linear: new Map([["ABC-360", detail("ABC-360", { assignee: "dana" })], ["ABC-361", detail("ABC-361", { assignee: "kai",
+      state: { name: "Done", type: "completed" } })]]) });
+    expect(card(view, SHELF).linear).toEqual({ summary: "Shelf redesign · target Oct 17",
+      chips: [{ kind: "project", text: "Shelf redesign" }, { kind: "initiative", text: "Reading rooms" }, { kind: "label", text: "shelves" }],
+      bar: [{ name: "Done", count: 1, tone: "green" }, { name: "In Progress", count: 1, tone: "blue" }], target: "target Oct 17",
+      lines: [["States", "1 done · 1 in progress"], ["Cycle", "Cycle 42 → Oct 3"], ["Assignees", "dana, kai"], ["Target", "Oct 17 Shelf redesign"], ["Read", "2 of 5 tickets"]] });
+    // The target named beside the top project is that project's: a smaller project's date would read as the top one's.
+    const two = inkwellDeck({ linear: new Map([["ABC-360", detail("ABC-360", { project: { id: "p1", name: "Shelf redesign", targetDate: null, initiatives: [] } })],
+      ["ABC-361", detail("ABC-361", { project: { id: "p1", name: "Shelf redesign", targetDate: null, initiatives: [] } })],
+      ["ABC-362", detail("ABC-362", { project: { id: "p2", name: "Store hours", targetDate: "2026-12-01", initiatives: [] } })]]) });
+    expect(card(two, SHELF).linear).toMatchObject({ summary: "Shelf redesign", target: null, lines: expect.arrayContaining([["Target", "Dec 1 Store hours"]]) });
   });
 });
 

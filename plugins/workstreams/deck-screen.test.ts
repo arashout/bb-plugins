@@ -83,8 +83,18 @@ describe("the effort deck's markup", () => {
     const html = pane(inkwellDeck(), SHELF);
     const tiles = [...html.matchAll(/data-deck-tile="([a-z]+)"/gu)].map((match) => match[1]);
     expect(tiles).toEqual(["next", "blocked", "stats", "threads", "linear", "people", "recent"]);
-    expect(text(html)).toContain("Linear Shelf redesign More");
     expect(text(html)).toContain("Blocked Nothing waits on others.");
+    // Closed, the Linear tile summarizes itself on a narrow card and lays its chips and state bar out on one line on a wide one, as the mock does.
+    const tile = (from: string) => from.slice(from.indexOf('data-deck-tile="linear"'), from.indexOf('data-deck-tile="people"'));
+    expect(text(tile(html))).toContain("Linear Shelf redesign More ▣ Shelf redesign #shelves");
+    expect(tile(html)).toContain('class="@min-[700px]:hidden">Shelf redesign<');
+    expect(tile(html)).toMatch(/data-deck-linear-line="true" class="[^"]*hidden @min-\[700px\]:flex"/u);
+    expect(tile(html)).toContain('aria-label="Tickets: 1 In Review"');
+    // Opened, it keeps that line at any width and adds one line per field Linear gave; a card with none says so rather than looking empty.
+    const linear = tile(pane(inkwellDeck(), SHELF, { tiles: new Set(["linear"]) }));
+    expect(text(linear)).toContain("Linear Less ▣ Shelf redesign #shelves States 1 in review Read 1 of 5 tickets");
+    expect(linear).toMatch(/data-deck-linear-line="true" class="[^"]*mb-1.5 flex"/u);
+    expect(text(pane(inkwellDeck(), "effort-store-pickup"))).toContain("Linear no Linear data People");
   });
 
   it("draws the Unclassified deck: coverage, rules, and each suggestion's reason once with its one button and each PR's signals", () => {

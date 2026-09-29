@@ -69,9 +69,14 @@ export const deckCardSchema = z.object({
   next: z.array(nextSchema),
   /** Every row waiting on someone or something else, oldest first. */
   blocked: z.array(waitSchema.extend({ prUrl: z.string(), ref: z.string() }).strict()),
-  /** What the stored Linear details say about its tickets; `known` 0 means no Linear data. */
-  linear: z.object({ tickets: z.number(), known: z.number(), projects: tally, parents: tally,
-    states: z.array(z.object({ name: z.string(), type: z.string().nullable(), count: z.number() }).strict()), labels: tally }).strict(),
+  /** What the stored Linear details say about its tickets; `known` 0 means no Linear data. Each tally counts tickets, most first. */
+  linear: z.object({ tickets: z.number(), known: z.number(),
+    /** With the project's target date, when Linear has one. */
+    projects: z.array(z.object({ name: z.string(), count: z.number(), targetDate: z.string().nullable() }).strict()),
+    initiatives: tally, parents: tally,
+    states: z.array(z.object({ name: z.string(), type: z.string().nullable(), count: z.number() }).strict()), labels: tally,
+    cycles: z.array(z.object({ number: z.number(), name: z.string().nullable(), endsAt: z.string().nullable(), count: z.number() }).strict()),
+    assignees: tally }).strict(),
   /** Reviewers you wait on, and reviewers whose requested changes wait on you. */
   people: z.object({ youWaitOn: z.array(personSchema), waitOnYou: z.array(personSchema) }).strict(),
   /** Its parent thread, then each PR's threads, most recent first. Read-only. */
@@ -259,11 +264,19 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     progress: { merged: merges.length, open: rows.length,
       criteria: criteria.length ? { validated: criteria.filter((item) => item.status === "satisfied").length, needed: criteria.length } : null },
     next, blocked,
-    linear: { tickets: tickets.length, known: details.length, projects: tallies(details.flatMap((detail) => detail.project ? [detail.project.name] : [])),
+    linear: { tickets: tickets.length, known: details.length,
+      projects: tallies(details.flatMap((detail) => detail.project ? [detail.project.name] : [])).map((item) => ({ ...item,
+        targetDate: details.find((detail) => detail.project?.name === item.name && detail.project.targetDate)?.project?.targetDate ?? null })),
+      initiatives: tallies(details.flatMap((detail) => (detail.project?.initiatives ?? []).map((initiative) => initiative.name))),
       parents: tallies(details.flatMap((detail) => detail.parent?.identifier ? [`${detail.parent.identifier}${detail.parent.title ? ` ${detail.parent.title}` : ""}`] : [])),
       states: tallies(details.flatMap((detail) => detail.state ? [detail.state.name] : []))
         .map(({ name, count }) => ({ name, type: details.find((detail) => detail.state?.name === name)!.state!.type, count })),
-      labels: tallies(details.flatMap((detail) => detail.labels)) },
+      labels: tallies(details.flatMap((detail) => detail.labels)),
+      cycles: tallies(details.flatMap((detail) => detail.cycle ? [String(detail.cycle.number)] : [])).map(({ name, count }) => {
+        const cycle = details.find((detail) => String(detail.cycle?.number) === name)!.cycle!;
+        return { number: cycle.number, name: cycle.name, endsAt: cycle.endsAt, count };
+      }),
+      assignees: tallies(details.flatMap((detail) => detail.assignee ? [detail.assignee] : [])) },
     people: people(rows),
     threads: [...threads.values()].sort((a, b) => Number(b.role === "parent") - Number(a.role === "parent") || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)),
     activity,

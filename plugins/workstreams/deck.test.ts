@@ -147,15 +147,20 @@ describe("the effort deck", () => {
   it("rolls up only the Linear details the board stores, and says so when it stores none", () => {
     const detail = (identifier: string, state: string, patch: Partial<LinearDetail> = {}): LinearDetail => ({ identifier, title: null, description: null,
       state: { name: state, type: state === "Done" ? "completed" : "started" }, project: null, parent: null, labels: [], url: null, updatedAt: null, source: "agent", ...patch });
-    const project = { id: "p1", name: "Shelf order" };
+    // A key read carries the project's target date and initiatives on each ticket; an agent answer or an older cached row has none of them.
+    const project = { id: "p1", name: "Shelf order", targetDate: "2026-10-17", initiatives: [{ id: "i1", name: "Reading rooms" }] };
+    const cycle = { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" };
     const view = deckView(input({ efforts: [effort("shelf", { tickets: ["ABC-300"] }), effort("pickup")], linear: new Map([
-      ["ABC-300", detail("ABC-300", "Done", { project })], ["ABC-360", detail("ABC-360", "In Review", { project, labels: ["shelves"] })],
-      ["ABC-361", detail("ABC-361", "In Review", { parent: { identifier: "ABC-300", title: "Shelf order" }, labels: ["shelves"] })]]) }));
+      ["ABC-300", detail("ABC-300", "Done", { project, assignee: "dana", cycle })],
+      ["ABC-360", detail("ABC-360", "In Review", { project, labels: ["shelves"], assignee: "kai", cycle })],
+      ["ABC-361", detail("ABC-361", "In Review", { parent: { identifier: "ABC-300", title: "Shelf order" }, labels: ["shelves"], assignee: "dana" })]]) }));
     // The effort's own ticket counts beside its PRs' tickets.
-    expect(cardOf(view, INVENTORY_EFFORTS.shelf.id).linear).toEqual({ tickets: 6, known: 3, projects: [{ name: "Shelf order", count: 2 }],
-      parents: [{ name: "ABC-300 Shelf order", count: 1 }], states: [{ name: "In Review", type: "started", count: 2 }, { name: "Done", type: "completed", count: 1 }],
-      labels: [{ name: "shelves", count: 2 }] });
-    expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).linear).toEqual({ tickets: 5, known: 0, projects: [], parents: [], states: [], labels: [] });
+    expect(cardOf(view, INVENTORY_EFFORTS.shelf.id).linear).toEqual({ tickets: 6, known: 3, projects: [{ name: "Shelf order", count: 2, targetDate: "2026-10-17" }],
+      initiatives: [{ name: "Reading rooms", count: 2 }], parents: [{ name: "ABC-300 Shelf order", count: 1 }],
+      states: [{ name: "In Review", type: "started", count: 2 }, { name: "Done", type: "completed", count: 1 }], labels: [{ name: "shelves", count: 2 }],
+      cycles: [{ number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z", count: 2 }], assignees: [{ name: "dana", count: 2 }, { name: "kai", count: 1 }] });
+    expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).linear).toEqual({ tickets: 5, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [],
+      cycles: [], assignees: [] });
   });
 
   it("lists a done effort by name with what it merged and what is still open, without drawing its card", () => {
