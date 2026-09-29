@@ -545,7 +545,12 @@ A **Briefs** item in the sidebar (bb's own nav-panel list, beside Plugins and
 Skills) opens a page with one card per thread in a column per stage:
 
 ```
-No brief   Discovery   Planning   Implementation   Review   Done
+┌─┬───────────┬──────────┬────────────────┬────────┬─┐
+│N│ Discovery │ Planning │ Implementation │ Review │D│
+│o│           │          │                │        │o│
+│ │           │          │                │        │n│
+│s│           │          │                │        │e│
+└─┴───────────┴──────────┴────────────────┴────────┴─┘
 ```
 
 Columns are **stage**; the filters are **status** and **project**. That split is
@@ -553,19 +558,39 @@ the design: status is the question you arrive with, stage is the one you arrive
 unable to answer, so filtering on the first and laying out the second answers both
 at once.
 
-Two columns are not stages:
+Two columns are not stages, and both collapse to a rail so the four stages hold
+the width:
 
 - **Done** is a status. It gets the terminal column anyway, because otherwise
   Review holds both "needs my review" and "finished, archiving tomorrow". A done
   card still draws the closed ring, so its stage stays readable.
-- **No brief** holds every thread with no brief at all. Briefs are never
-  backfilled, so this bucket is real and permanent for old threads; each card
-  offers **Summarize**. Same role as bb's **Threads** group under
-  [status grouping](#sidebar-sections).
+- **No stage** holds every thread with no stored brief — never summarized, or a
+  first summary still in flight. Briefs are never backfilled, so this bucket is
+  real and permanent for old threads; each card offers **Summarize**. Same role as
+  bb's **Threads** group under [status grouping](#sidebar-sections). The label
+  names the axis; the card face names the cause.
+
+### Collapsed columns
+
+| Column | Collapsed |
+| --- | --- |
+| **Done** | always, on every load, unless `expand:done` is in the path |
+| **No stage** | while it is empty — it opens itself as soon as it holds a thread |
+| any stage | never |
+| the only column on the board | never (filtering to `status:done` leaves Done alone, and one closed strip is not a board) |
+
+A rail keeps its label, its count and its drop target, so it can never read as
+empty and dropping a card on Done still finishes it by hand; the rail widens while
+a card is in the air. Clicking a rail expands it and writes `expand:<column>` into
+the path, so an expansion is linkable and survives back and forward. A rail with a
+count of zero is not a button — there is nothing behind it to show.
 
 A column a filter can only leave empty is **hidden**, not drawn empty. Filtering
-to Done leaves one column; filtering to any other status drops Done *and* No brief
-— a briefless thread has no status to match.
+to Done leaves one column; filtering to any other status drops Done *and* No stage
+— a thread with no brief has no status to match. A status filter that merely
+*includes* `done` does not force Done open: the filter and the rails are separate
+readings of the board, so the path stays the single source of truth for which
+rails are open.
 
 ### The card
 
@@ -596,7 +621,7 @@ is what the `pinned` marker on the card is warning about.
 | to the stage the summarizer already chose | `setStageOverride(null)` — clears the pin |
 | to **Done** | `setStatusOverride("done")` |
 | out of **Done** | `setStatusOverride("waiting-on-me")`, then the stage if it also changed |
-| to or from **No brief** | nothing |
+| to or from **No stage** | nothing |
 
 Dragging out of Done *pins* rather than clears because a done reading can come
 from the derivation as well as a pin; clearing would hand the card back to a
@@ -606,20 +631,24 @@ Drag-and-drop does not work on touch, so the **expanded card carries the panel's
 own stage and status controls**. On a compact viewport the columns stack into one
 scrolling list with their headers as section headings.
 
-### Filters and the URL
+### The view and the URL
 
-Filters live in the panel's sub-path, so a view is a link:
+The filters *and* which rails are open live in the panel's sub-path, so a view is
+a link:
 
 ```
-/plugins/thread-briefs/board                           # everything
+/plugins/thread-briefs/board                           # everything, Done collapsed
 /plugins/thread-briefs/board/status:waiting-on-me      # what needs you
 /plugins/thread-briefs/board/project:prj_a/status:done # one project, finished
+/plugins/thread-briefs/board/expand:done               # everything, Done open
 ```
 
-Browser back and forward walk between views. The last filter is remembered in
+Browser back and forward walk between views. The last view is remembered in
 `localStorage` (keyed by plugin id) and restored when you arrive at the bare
-`/board`; a path that already carries a filter is left alone. Unrecognised keys
-and values are ignored rather than fatal.
+`/board`; a path that already carries one is left alone. Unrecognised keys and
+values are ignored rather than fatal, which is what makes `expand:` additive — a
+link saved before it existed still parses, and one saved after still parses in a
+build without it. Changing a filter leaves the rails as they were.
 
 The project chips only list projects that have a thread on the board, and appear
 only when there is more than one.
@@ -734,9 +763,9 @@ no preference writes.
 - A thread missing from the board entirely: the board is driven by the sidebar's
   thread list, so an archived or hidden thread has no card even if it has a brief.
   Check whether the [archive sweep](#stale-done-threads) took it.
-- The board's **No brief** column is huge on a fresh install: expected. Briefs are
+- The board's **No stage** column is huge on a fresh install: expected. Briefs are
   never backfilled; the column empties as threads are worked, or card by card with
-  **Summarize**.
+  **Summarize**, and collapses to a rail once it is empty.
 - A card that moved back to where it was a turn later: that is the pin retiring,
   not a failed write. Pins are anchored to the thread's activity cursor by design;
   the `pinned` marker on the card says one is in force.

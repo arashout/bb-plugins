@@ -236,10 +236,16 @@ a stage layout answer both in one glance; two stacked statuses would answer
 neither.
 
 ```
-No brief   Discovery   Planning   Implementation   Review   Done
+┌─┬───────────┬──────────┬────────────────┬────────┬─┐
+│N│ Discovery │ Planning │ Implementation │ Review │D│
+│o│           │          │                │        │o│
+│ │           │          │                │        │n│
+│s│           │          │                │        │e│
+└─┴───────────┴──────────┴────────────────┴────────┴─┘
 ```
 
-Six columns, in flow order. Two of them are not stages, and each is a deliberate
+Six columns, in flow order — and the four stages hold the width, because the two
+columns that are not stages collapse to a rail. Each of those two is a deliberate
 exception:
 
 - **Done** is a *status*. It gets a terminal column anyway because the whole
@@ -249,18 +255,41 @@ exception:
   cost is that column position stops meaning stage for that one column, and it is
   paid back on the card: a done card still draws the closed ring, so its stage is
   still legible.
-- **No brief** holds every thread this plugin has never summarized. Briefs are
-  never backfilled, so on any real install that is a real set — and a board that
-  quietly omitted them could not be read as "everything I have open", because a
-  missing thread would be indistinguishable from a finished one. Each card offers
+- **No stage** holds every thread with no stored brief. Briefs are never
+  backfilled, so on any real install that is a real set — and a board that quietly
+  omitted them could not be read as "everything I have open", because a missing
+  thread would be indistinguishable from a finished one. Each card offers
   **Summarize**. It is the same job bb's own catch-all **Threads** group does for
-  the [status sections](#sidebar-sections).
+  the [status sections](#sidebar-sections). Named for the axis rather than the
+  cause: every card resolves a stage, so this column is both the threads never
+  summarized *and* the ones whose first summary is still in flight, and "no stage"
+  is the one label true of both. The card face still says which.
+
+**The bookends collapse; the stages spread.** Six equal columns meant the four
+that answer "what should I pick up" were the ones pushed off the side of the
+viewport, for two that do not: **No stage** is empty whenever the summarizer has
+caught up, and **Done** fills with cards whose whole point is that you are
+finished with them. So both give their width up and the stages take it. Three
+rules:
+
+- **Done starts collapsed** on every load. Expanding is one click and it sticks in
+  the URL, so "show me what I finished" is a link rather than a preference.
+- **No stage collapses only while it is empty** — which is most of the time, and
+  is exactly when it is worth nothing. When it does hold threads, the Summarize
+  button on those cards is the point, so it opens itself.
+- **The only column on the board never collapses.** Filtering to Done leaves Done
+  alone, and a board consisting of one closed strip is not a board.
+
+A collapsed column is a rail, not an absence: it keeps its label and its count,
+so it can never be misread as empty, and it stays a drop target — dropping a card
+on Done is how you finish one by hand, and the rail widens while a card is in the
+air rather than asking you to aim at 2.5rem.
 
 A column that a filter can only ever leave empty is hidden rather than drawn
 empty, since an empty bucket reads as "nothing here" when the filter is what
 emptied it. So filtering to **Done** leaves one column; filtering to anything else
-drops Done and No brief — a briefless thread has no status, and asking for one is
-asking a question only a brief can answer.
+drops Done and No stage — a thread with no brief has no status, and asking for one
+is asking a question only a brief can answer.
 
 **The card** leads with `nextStep`, not `goal`. Goal is what you need when you
 have forgotten a thread; nextStep is what you need when choosing between threads,
@@ -290,19 +319,24 @@ obvious:
   pin, because a done reading can come from the derivation as well as from a pin —
   and clearing in that case would hand the card straight back to a derivation
   that still says done, snapping it into the column you just dragged it out of.
-- **No brief** is not a drop target in either direction.
+- **No stage** is not a drop target in either direction.
 
 Drag-and-drop is a pointer affordance, so the expanded card carries the panel's
 own stage and status controls. That is the whole mobile story: on a compact
 viewport the columns stack into one scrolling list with their headers as section
-headings, same cards, same data path, and the pins are taps.
+headings, same cards, same data path, and the pins are taps. A collapsed column
+stacks as a full-width strip with its label the right way up, since a vertical
+rail is only worth it where the columns are side by side.
 
-**Filters live in the URL.** `/plugins/thread-briefs/board/status:waiting-on-me`
-is a link you can send or bookmark, and browser back and forward walk between
-views for free. The last one is remembered, so opening the page from the sidebar
-lands where you left it; arriving with a filter already in the path leaves it
-alone. Anything unrecognised in the path is ignored rather than fatal, because
-that path outlives this version of the plugin.
+**The whole view lives in the URL.**
+`/plugins/thread-briefs/board/status:waiting-on-me/expand:done` is a link you can
+send or bookmark, and browser back and forward walk between views for free. The
+last one is remembered, so opening the page from the sidebar lands where you left
+it; arriving with a view already in the path leaves it alone. Filters and rails
+are independent — clearing a filter is not a request to close Done again — and
+anything unrecognised in the path is ignored rather than fatal, because that path
+outlives this version of the plugin: `expand:` is additive, so a link saved before
+it existed still parses, and one saved after still parses in a build without it.
 
 **Where the data comes from** is the same split as the row glyphs. One
 `listBriefCards` call — a single kv scan, no per-thread lookups — carries the

@@ -32,7 +32,7 @@ import {
 // ----------------------------------------------------------------- the columns
 
 /**
- * The column for a thread this plugin has never summarized.
+ * The column for a thread with nothing to sort by on this axis.
  *
  * Briefs are never backfilled, so on any real install a number of threads have
  * no stage to sort by. Giving them a column rather than dropping them is what
@@ -40,8 +40,16 @@ import {
  * board that claims completeness is indistinguishable from a thread that is
  * finished, which is the one reading this surface cannot afford. It is the same
  * job bb's own catch-all "Threads" group does for the status sections.
+ *
+ * Named for the *axis* and not the cause. Every card resolves a stage — see
+ * `briefCardFor` — so this column is exactly the threads with no stored brief,
+ * which is two different situations: one never summarized, and one whose first
+ * summary is still in flight (`listBriefCards` maps stored rows only). "No
+ * stage" is the one label true of both, and it is the label that says why the
+ * column is on a board whose other columns are stages. The card face still says
+ * "never summarized", because that is the cause and the thing you can act on.
  */
-export const NO_BRIEF_COLUMN = "none";
+export const NO_STAGE_COLUMN = "none";
 
 /**
  * The terminal column, which holds a *status* rather than a stage.
@@ -58,19 +66,19 @@ export const NO_BRIEF_COLUMN = "none";
 export const DONE_COLUMN = "done";
 
 export type BoardColumn =
-  | typeof NO_BRIEF_COLUMN
+  | typeof NO_STAGE_COLUMN
   | BriefStage
   | typeof DONE_COLUMN;
 
-/** Left to right: briefless, then the four stages in order, then done. */
+/** Left to right: stageless, then the four stages in order, then done. */
 export const BOARD_COLUMNS: readonly BoardColumn[] = [
-  NO_BRIEF_COLUMN,
+  NO_STAGE_COLUMN,
   ...BRIEF_STAGES,
   DONE_COLUMN,
 ];
 
 export const BOARD_COLUMN_LABELS: Record<BoardColumn, string> = {
-  [NO_BRIEF_COLUMN]: "No brief",
+  [NO_STAGE_COLUMN]: "No stage",
   ...STAGE_LABELS,
   [DONE_COLUMN]: "Done",
 };
@@ -137,7 +145,7 @@ export function columnFor(
   card: BriefCard | null,
   status: BriefStatus | null,
 ): BoardColumn {
-  if (card === null) return NO_BRIEF_COLUMN;
+  if (card === null) return NO_STAGE_COLUMN;
   if (status === "done") return DONE_COLUMN;
   return card.stage;
 }
@@ -149,7 +157,7 @@ export function columnFor(
  * thread this window is not showing — archived, or in a lifecycle the hook was
  * not asked for — and drawing a card for it would put something on the board
  * that clicking cannot reach. A thread with no brief still gets a row, in
- * {@link NO_BRIEF_COLUMN}.
+ * {@link NO_STAGE_COLUMN}.
  */
 export function buildRows(args: {
   threads: readonly BoardRowThread[];
@@ -427,6 +435,140 @@ export function toggleFilterValue<Value extends string>(
     : [...values, value];
 }
 
+// ------------------------------------------------------------------- the layout
+
+/**
+ * The two columns that collapse to a rail rather than holding a column's width.
+ *
+ * Both are the bookends, and both earn it for the same reason from opposite
+ * directions: **No stage** is empty on any install where the summarizer has
+ * caught up, and **Done** fills with cards whose whole point is that you are
+ * finished with them. Six equal columns means the four that answer "what should
+ * I pick up" are the ones pushed off the side of the viewport, so the two that
+ * do not answer it give their width up and the stages spread into it.
+ *
+ * Collapsed is a rail, not an absence. A card that vanished off the board would
+ * make the board unreadable as "everything I have open" — the same argument that
+ * gives {@link NO_STAGE_COLUMN} a column at all — and Done has to stay on screen
+ * regardless because dropping a card there is how you finish it by hand.
+ */
+export const COLLAPSIBLE_COLUMNS: readonly BoardColumn[] = [
+  NO_STAGE_COLUMN,
+  DONE_COLUMN,
+];
+
+export function isCollapsibleColumn(column: BoardColumn): boolean {
+  return COLLAPSIBLE_COLUMNS.includes(column);
+}
+
+/** One column as the page draws it: its cards, and how much room it takes. */
+export type ColumnLayout = {
+  column: BoardColumn;
+  rows: BoardRow[];
+  /** Drawn as a rail: the label and the count, no cards. */
+  isCollapsed: boolean;
+  /** Whether the header offers a control to change that. */
+  canToggle: boolean;
+};
+
+/**
+ * Which columns to draw, what is in them, and which of them are rails.
+ *
+ * The collapse rules, each of which is a choice:
+ *
+ * - **Done starts collapsed**, every time the board loads. It is the only column
+ *   whose cards are, by definition, not work — and a default that had to be
+ *   re-applied by hand each session would be no default at all. Expanding is one
+ *   click and it sticks in the URL, so the reading "show me what I finished" is
+ *   a link rather than a preference.
+ * - **No stage collapses only when it is empty**, which is most of the time and
+ *   is exactly when it is worth nothing. When it does hold threads they are ones
+ *   the summarizer has not reached and the Summarize button is the point, so the
+ *   column opens itself rather than hiding them behind a rail.
+ * - **The only column on the board never collapses.** Filter to `status:done`
+ *   and {@link visibleColumns} returns Done alone; collapsing it would leave a
+ *   board consisting of one closed strip and no way to read what you asked for.
+ *
+ * Note what is deliberately *not* a rule: a status filter that merely includes
+ * `done` alongside others does not force Done open. It would conflict with the
+ * expansion in the URL — the filter would say open, the URL would say closed,
+ * and the collapse control would then be a button that does nothing. One click
+ * is the cheaper answer than two sources of truth.
+ */
+export function layOutColumns(args: {
+  rows: readonly BoardRow[];
+  filters: BoardFilters;
+  expanded: readonly BoardColumn[];
+}): ColumnLayout[] {
+  const columns = visibleColumns(args.filters);
+  return groupByColumn(args.rows, columns).map(({ column, rows }) => {
+    const isCollapsed =
+      isCollapsibleColumn(column) &&
+      columns.length > 1 &&
+      !args.expanded.includes(column) &&
+      (column === DONE_COLUMN || rows.length === 0);
+    return {
+      column,
+      rows,
+      isCollapsed,
+      canToggle:
+        isCollapsibleColumn(column) &&
+        columns.length > 1 &&
+        // A rail with nothing behind it is not a button: pressing it would open
+        // an empty column, and the count on the rail already said so.
+        (isCollapsed ? rows.length > 0 : true),
+    };
+  });
+}
+
+/**
+ * A whole board view: what is filtered out, and which rails are open.
+ *
+ * Both travel in the URL for the same reason — a view worth arriving at is worth
+ * linking to, and the browser's own back button then walks between views for no
+ * code here. The expansion rides in the same path remainder as the filters
+ * because {@link filtersFromSubPath} ignores segments it does not recognise,
+ * which makes `expand:` additive: a bookmark saved before this existed still
+ * parses, and one saved after still parses in a build without it.
+ */
+export type BoardView = {
+  filters: BoardFilters;
+  expanded: readonly BoardColumn[];
+};
+
+export const EMPTY_VIEW: BoardView = { filters: NO_FILTERS, expanded: [] };
+
+/** Filters first, then the expansion, so one view is always one string. */
+export function subPathFromView(view: BoardView): string {
+  const segments: string[] = [];
+  const filters = subPathFromFilters(view.filters);
+  if (filters !== "") segments.push(filters);
+  const ordered = COLLAPSIBLE_COLUMNS.filter((column) =>
+    view.expanded.includes(column),
+  );
+  if (ordered.length > 0) segments.push(`expand:${encodeList(ordered)}`);
+  return segments.join("/");
+}
+
+/**
+ * A view back out of a path remainder. Total, like the filter parse it wraps:
+ * an unrecognised column in `expand:` is one that cannot collapse anyway, so
+ * dropping it silently is the same answer as honouring it.
+ */
+export function viewFromSubPath(subPath: string): BoardView {
+  const expanded: BoardColumn[] = [];
+  for (const segment of subPath.split("/")) {
+    if (!segment.startsWith("expand:")) continue;
+    for (const value of decodeList(segment.slice("expand:".length))) {
+      const column = value as BoardColumn;
+      if (isCollapsibleColumn(column) && !expanded.includes(column)) {
+        expanded.push(column);
+      }
+    }
+  }
+  return { filters: filtersFromSubPath(subPath), expanded };
+}
+
 // -------------------------------------------------------------------- the drags
 
 /**
@@ -463,7 +605,7 @@ export type BoardDrop =
 export function planDrop(row: BoardRow, target: BoardColumn): BoardDrop[] {
   const card = row.card;
   if (card === null) return [];
-  if (target === NO_BRIEF_COLUMN) return [];
+  if (target === NO_STAGE_COLUMN) return [];
 
   if (target === DONE_COLUMN) {
     return row.column === DONE_COLUMN

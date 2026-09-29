@@ -17,6 +17,14 @@
  * Filtering on the first and laying out the second is what makes a single glance
  * answer both.
  *
+ * **Why two of the six columns are rails.** Six equal columns spent a third of
+ * the width on the two that do not answer "what should I pick up" — No stage,
+ * empty whenever the summarizer has caught up, and Done, which fills with cards
+ * whose point is that you are finished with them — and the four that do answer it
+ * were the ones scrolled off the side. So those two collapse to a rail and the
+ * stages flex into the width. See `layOutColumns` for when each one collapses; a
+ * rail keeps its count and its drop target, so nothing has left the board.
+ *
  * **Where the data comes from.** Two sources, joined on the client. The briefs
  * arrive in one `listBriefCards` call — one kv scan, no per-thread lookups — and
  * everything else (title, project, pin, live run status, attention cursor) is
@@ -55,23 +63,22 @@ import {
   BOARD_COLUMN_LABELS,
   DONE_COLUMN,
   FILTERABLE_STATUSES,
-  NO_BRIEF_COLUMN,
+  NO_STAGE_COLUMN,
   NO_FILTERS,
   COLUMN_CAP,
   actorHint,
   buildRows,
   cardRingIcon,
-  filtersFromSubPath,
-  groupByColumn,
   isFiltered,
   isPinnedByHand,
   isStageColumn,
+  layOutColumns,
   matchesFilters,
   planDrop,
   statusLabel,
-  subPathFromFilters,
+  subPathFromView,
   toggleFilterValue,
-  visibleColumns,
+  viewFromSubPath,
   type BoardColumn,
   type BoardDrop,
   type BoardFilters,
@@ -592,10 +599,74 @@ function Card({
 
 // ----------------------------------------------------------------- the columns
 
+/**
+ * A collapsed column: the label and the count, turned on its side.
+ *
+ * Vertical only from `sm` up, where the board is columns side by side and a rail
+ * has to be narrow to be worth collapsing. On a phone the board is already
+ * stacked sections down the page, so the rail is a full-width strip with the
+ * label the right way up — the same element and the same handlers, one utility
+ * apart, rather than a second layout to keep in step.
+ */
+function CollapsedRail({
+  column,
+  count,
+  canToggle,
+  onToggle,
+}: {
+  column: BoardColumn;
+  count: number;
+  canToggle: boolean;
+  onToggle: () => void;
+}) {
+  const label = BOARD_COLUMN_LABELS[column];
+  const body = (
+    <>
+      <span className="text-[11px] font-semibold uppercase tracking-wide sm:[writing-mode:vertical-rl]">
+        {label}
+      </span>
+      <span className="text-[11px] tabular-nums opacity-70">{count}</span>
+    </>
+  );
+  const shape =
+    "flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-muted-foreground sm:h-full sm:w-full sm:flex-col sm:justify-start sm:py-2";
+
+  return canToggle ? (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={false}
+      aria-label={`Show the ${label} column`}
+      className={`${shape} hover:bg-card hover:text-foreground`}
+    >
+      {body}
+      <Icon
+        name="ChevronRight"
+        className="ml-auto h-3.5 w-3.5 shrink-0 sm:ml-0 sm:mt-1"
+        aria-hidden
+      />
+    </button>
+  ) : (
+    <div
+      className={shape}
+      title={
+        column === NO_STAGE_COLUMN
+          ? "Every thread here has a stage."
+          : `${label} · ${count}`
+      }
+    >
+      {body}
+    </div>
+  );
+}
+
 function Column({
   column,
   rows,
   now,
+  isCollapsed,
+  canToggle,
+  onToggleCollapsed,
   isDropTarget,
   isOver,
   expandedId,
@@ -612,6 +683,9 @@ function Column({
   column: BoardColumn;
   rows: readonly BoardRow[];
   now: number;
+  isCollapsed: boolean;
+  canToggle: boolean;
+  onToggleCollapsed: () => void;
   isDropTarget: boolean;
   isOver: boolean;
   expandedId: string | null;
@@ -644,10 +718,28 @@ function Column({
         event.preventDefault();
         onDrop();
       }}
-      className={`flex shrink-0 flex-col rounded-lg sm:w-72 ${
-        isOver ? "bg-foreground/[0.06]" : ""
-      }`}
+      className={`flex flex-col rounded-lg ${
+        isCollapsed
+          ? // A rail wide enough to read, and wider while a card is in the air:
+            // 2.5rem is a poor target to aim a drop at, and Done is the one
+            // column you drag to on purpose.
+            `sm:shrink-0 ${isDropTarget ? "border border-dashed border-border sm:w-20" : "sm:w-10"}`
+          : isStageColumn(column)
+            ? // The stages take the width the rails gave up, rather than the
+              // fixed 18rem that used to push them off the side of the viewport.
+              "sm:min-w-60 sm:max-w-88 sm:flex-1"
+            : "sm:w-72 sm:shrink-0"
+      } ${isOver ? "bg-foreground/[0.06]" : ""}`}
     >
+      {isCollapsed ? (
+        <CollapsedRail
+          column={column}
+          count={rows.length}
+          canToggle={canToggle}
+          onToggle={onToggleCollapsed}
+        />
+      ) : (
+        <>
       <header className="sticky top-0 z-10 flex items-baseline gap-1.5 bg-background/95 px-1 pb-1.5 pt-0.5 backdrop-blur">
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground">
           {BOARD_COLUMN_LABELS[column]}
@@ -655,12 +747,23 @@ function Column({
         <span className="text-[11px] tabular-nums text-muted-foreground">
           {rows.length}
         </span>
+        {canToggle ? (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            aria-expanded
+            aria-label={`Hide the ${BOARD_COLUMN_LABELS[column]} column`}
+            className="ml-auto rounded p-0.5 text-muted-foreground hover:text-foreground"
+          >
+            <Icon name="ChevronLeft" className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        ) : null}
       </header>
       <div className="flex flex-col gap-1.5 px-1 pb-2">
         {rows.length === 0 ? (
           <p className="px-1 py-2 text-[11px] text-muted-foreground">
-            {column === NO_BRIEF_COLUMN
-              ? "Every thread here has a brief."
+            {column === NO_STAGE_COLUMN
+              ? "Every thread here has a stage."
               : "Nothing here."}
           </p>
         ) : null}
@@ -689,6 +792,8 @@ function Column({
           </button>
         ) : null}
       </div>
+        </>
+      )}
     </section>
   );
 }
@@ -702,15 +807,33 @@ export function BoardPage({ subPath }: { subPath: string }) {
   const now = useNow(TICK_MS);
   const { rows, projects, isLoading, reload } = useBoardRows(now);
 
-  const filters = useMemo(() => filtersFromSubPath(subPath), [subPath]);
+  const view = useMemo(() => viewFromSubPath(subPath), [subPath]);
+  const { filters } = view;
 
-  const setFilters = useCallback(
-    (next: BoardFilters) => {
-      const nextSubPath = subPathFromFilters(next);
+  const setView = useCallback(
+    (next: { filters: BoardFilters; expanded: readonly BoardColumn[] }) => {
+      const nextSubPath = subPathFromView(next);
       storeSubPath(pluginId, nextSubPath);
       navigate.toPluginPanel(BOARD_PATH, { subPath: nextSubPath });
     },
     [navigate, pluginId],
+  );
+
+  // Changing a filter leaves the rails where they were: the two are independent
+  // readings of the same board, and clearing a filter is not a request to close
+  // Done again.
+  const setFilters = useCallback(
+    (next: BoardFilters) => setView({ filters: next, expanded: view.expanded }),
+    [setView, view.expanded],
+  );
+
+  const toggleCollapsed = useCallback(
+    (column: BoardColumn) =>
+      setView({
+        filters: view.filters,
+        expanded: toggleFilterValue(view.expanded, column),
+      }),
+    [setView, view.expanded, view.filters],
   );
 
   // Arriving at the panel root restores the last filter, once, as a replace so
@@ -736,8 +859,8 @@ export function BoardPage({ subPath }: { subPath: string }) {
     [filters, rows],
   );
   const columns = useMemo(
-    () => groupByColumn(visible, visibleColumns(filters)),
-    [filters, visible],
+    () => layOutColumns({ rows: visible, filters, expanded: view.expanded }),
+    [filters, view.expanded, visible],
   );
 
   /**
@@ -828,12 +951,15 @@ export function BoardPage({ subPath }: { subPath: string }) {
       */}
       <div className="min-h-0 flex-1 overflow-auto p-2">
         <div className="flex min-h-full flex-col gap-3 sm:flex-row sm:gap-2">
-          {columns.map(({ column, rows: columnRows }) => (
+          {columns.map(({ column, rows: columnRows, isCollapsed, canToggle }) => (
             <Column
               key={column}
               column={column}
               rows={columnRows}
               now={now}
+              isCollapsed={isCollapsed}
+              canToggle={canToggle}
+              onToggleCollapsed={() => toggleCollapsed(column)}
               isDropTarget={
                 dragging !== null &&
                 planDrop(dragging, column).length > 0 &&

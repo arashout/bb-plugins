@@ -143,7 +143,7 @@ describe("the board", () => {
       expect(column(slot, "Implementation").getByText("Board thread")).toBeTruthy(),
     );
     for (const name of [
-      "No brief",
+      "No stage",
       "Discovery",
       "Planning",
       "Implementation",
@@ -177,6 +177,7 @@ describe("the board", () => {
 
   it("puts a done thread in the terminal column", async () => {
     const slot = await renderBoard({
+      subPath: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
     });
     await waitFor(() =>
@@ -186,14 +187,50 @@ describe("the board", () => {
     slot.lifecycle.unmount();
   });
 
-  it("puts a briefless thread in its own column and offers to summarize it", async () => {
+  it("collapses Done to a rail by default, and opens it on a click", async () => {
+    // Done is the one column whose cards are, by definition, not work, and it
+    // used to hold a sixth of the width for them.
+    const slot = await renderBoard({
+      cards: [card({ status: "done", nextStep: "" })],
+    });
+    const rail = await waitFor(() =>
+      slot.getByRole("button", { name: "Show the Done column" }),
+    );
+    expect(column(slot, "Done").queryByText("Board thread")).toBeNull();
+    // The count is on the rail, so a collapsed column never reads as empty.
+    expect(column(slot, "Done").getByText("1")).toBeTruthy();
+    fireEvent.click(rail);
+    // Expansion rides in the URL beside the filters, so the view is linkable.
+    expect(slot.inspection.navigateCalls).toEqual([
+      {
+        method: "toPluginPanel",
+        path: "board",
+        options: { subPath: "expand:done" },
+      },
+    ]);
+    slot.lifecycle.unmount();
+  });
+
+  it("collapses an empty No stage column, with no control to open it", async () => {
+    // Almost always empty, and a rail with nothing behind it is not a button.
+    const slot = await renderBoard();
+    await waitFor(() => expect(slot.getByText("Board thread")).toBeTruthy());
+    expect(slot.getByRole("region", { name: "No stage" })).toBeTruthy();
+    expect(
+      slot.queryByRole("button", { name: "Show the No stage column" }),
+    ).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("opens the No stage column as soon as it holds a thread, and offers to summarize it", async () => {
     // Briefs are never backfilled, so the board has to account for these or it
-    // cannot be read as "everything I have open".
+    // cannot be read as "everything I have open" — and the Summarize button on
+    // those cards is the whole point of showing them.
     const slot = await renderBoard({ cards: [] });
     await waitFor(() =>
-      expect(column(slot, "No brief").getByText("Board thread")).toBeTruthy(),
+      expect(column(slot, "No stage").getByText("Board thread")).toBeTruthy(),
     );
-    fireEvent.click(column(slot, "No brief").getByRole("button", { name: "Summarize" }));
+    fireEvent.click(column(slot, "No stage").getByRole("button", { name: "Summarize" }));
     await waitFor(() =>
       expect(
         slot.inspection.rpcCalls.some((entry) => entry.method === "refresh"),
@@ -218,6 +255,7 @@ describe("the board", () => {
 
   it("warns that a cold done thread is on its way out", async () => {
     const slot = await renderBoard({
+      subPath: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
       threads: [thread({ latestAttentionAt: NOW - 30 * 60 * 60 * 1000 })],
     });
@@ -227,6 +265,7 @@ describe("the board", () => {
 
   it("folds a running thread out of Done into its stage column", async () => {
     const slot = await renderBoard({
+      subPath: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
       threads: [thread({ status: "active" })],
     });
@@ -240,6 +279,7 @@ describe("the board", () => {
   it("redraws on a briefs-changed event", async () => {
     let status: BriefCard["status"] = "waiting-on-me";
     const slot = await renderBoard({
+      subPath: "expand:done",
       rpc: {
         listBriefCards: () => ({
           cards: [card({ status, nextStep: status === "done" ? "" : "Push" })],
@@ -281,7 +321,12 @@ describe("the filters", () => {
     // Only the columns a done filter can ever fill: an empty column under a
     // filter reads as "nothing here" when the filter is what emptied it.
     expect(slot.queryByRole("region", { name: "Implementation" })).toBeNull();
-    expect(slot.queryByRole("region", { name: "No brief" })).toBeNull();
+    expect(slot.queryByRole("region", { name: "No stage" })).toBeNull();
+    // The only column on the board is never a rail: there would be nothing left
+    // to read of the filter you just asked for.
+    expect(
+      slot.queryByRole("button", { name: "Show the Done column" }),
+    ).toBeNull();
     slot.lifecycle.unmount();
   });
 
@@ -338,6 +383,18 @@ describe("the filters", () => {
     slot.lifecycle.unmount();
   });
 
+  it("leaves the rails alone when a filter changes", async () => {
+    // The two are independent readings of the same board: clearing a filter is
+    // not a request to close Done again.
+    const slot = await renderBoard({ subPath: "status:waiting-on-me/expand:done" });
+    await waitFor(() => expect(slot.getByRole("button", { name: "Clear" })).toBeTruthy());
+    fireEvent.click(slot.getByRole("button", { name: "Clear" }));
+    expect(slot.inspection.navigateCalls).toEqual([
+      { method: "toPluginPanel", path: "board", options: { subPath: "expand:done" } },
+    ]);
+    slot.lifecycle.unmount();
+  });
+
   it("clears back to the unfiltered board", async () => {
     const slot = await renderBoard({ subPath: "status:done" });
     await waitFor(() => expect(slot.getByRole("button", { name: "Clear" })).toBeTruthy());
@@ -384,6 +441,8 @@ describe("dragging a card", () => {
     slot.lifecycle.unmount();
   });
 
+  // Done is a rail by default, so this is also the test that a collapsed column
+  // is still a drop target — dropping a card there is how you finish it by hand.
   it("pins done when you drop it on the terminal column", async () => {
     const slot = await renderBoard();
     await waitFor(() => expect(slot.getByText("Board thread")).toBeTruthy());

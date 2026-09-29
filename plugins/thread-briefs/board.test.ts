@@ -3,7 +3,7 @@ import type { BriefCard } from "./contract.js";
 import {
   BOARD_COLUMNS,
   DONE_COLUMN,
-  NO_BRIEF_COLUMN,
+  NO_STAGE_COLUMN,
   NO_FILTERS,
   actorHint,
   buildRows,
@@ -15,11 +15,14 @@ import {
   groupByColumn,
   isPinnedByHand,
   isStageColumn,
+  layOutColumns,
   matchesFilters,
   planDrop,
   statusRank,
   subPathFromFilters,
+  subPathFromView,
   toggleFilterValue,
+  viewFromSubPath,
   visibleColumns,
   type BoardRow,
   type BoardRowThread,
@@ -88,7 +91,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
 });
 
 describe("columns", () => {
-  it("runs briefless, then the four stages, then done", () => {
+  it("runs stageless, then the four stages, then done", () => {
     expect(BOARD_COLUMNS).toEqual([
       "none",
       "discovery",
@@ -103,8 +106,8 @@ describe("columns", () => {
     // Briefs are never backfilled, so this is the normal state for a thread
     // that was dormant when the plugin arrived — and dropping it would make the
     // board indistinguishable from one where the thread was finished.
-    expect(columnFor(null, null)).toBe(NO_BRIEF_COLUMN);
-    expect(columnFor(null, "working")).toBe(NO_BRIEF_COLUMN);
+    expect(columnFor(null, null)).toBe(NO_STAGE_COLUMN);
+    expect(columnFor(null, "working")).toBe(NO_STAGE_COLUMN);
   });
 
   it("puts a done thread in the terminal column whatever its stage", () => {
@@ -124,7 +127,7 @@ describe("columns", () => {
   it("only the stage columns count as stage columns", () => {
     expect(isStageColumn("planning")).toBe(true);
     expect(isStageColumn(DONE_COLUMN)).toBe(false);
-    expect(isStageColumn(NO_BRIEF_COLUMN)).toBe(false);
+    expect(isStageColumn(NO_STAGE_COLUMN)).toBe(false);
   });
 });
 
@@ -141,7 +144,7 @@ describe("buildRows", () => {
     const [built] = rowsFor([thread()], []);
     expect(built?.card).toBeNull();
     expect(built?.status).toBeNull();
-    expect(built?.column).toBe(NO_BRIEF_COLUMN);
+    expect(built?.column).toBe(NO_STAGE_COLUMN);
   });
 
   it("drops a card with no thread beside it", () => {
@@ -271,7 +274,7 @@ describe("filters", () => {
     );
   });
 
-  it("hides the briefless column as soon as a status is asked for", () => {
+  it("hides the No stage column as soon as a status is asked for", () => {
     expect(visibleColumns(NO_FILTERS)).toEqual([...BOARD_COLUMNS]);
     expect(
       visibleColumns({ projectIds: [], statuses: ["waiting-on-me"] }),
@@ -358,6 +361,137 @@ describe("filters", () => {
   });
 });
 
+describe("the layout", () => {
+  const layout = (
+    rows: readonly BoardRow[],
+    extra: Partial<Parameters<typeof layOutColumns>[0]> = {},
+  ) =>
+    new Map(
+      layOutColumns({
+        rows,
+        filters: NO_FILTERS,
+        expanded: [],
+        ...extra,
+      }).map((entry) => [entry.column, entry] as const),
+    );
+
+  it("collapses Done by default, cards and all", () => {
+    // The one column whose contents are by definition not work. It keeps its
+    // cards — they are just behind a rail — so nothing has left the board.
+    const done = layout([row({ status: "done", column: DONE_COLUMN })]).get(
+      DONE_COLUMN,
+    );
+    expect(done?.isCollapsed).toBe(true);
+    expect(done?.rows).toHaveLength(1);
+    expect(done?.canToggle).toBe(true);
+  });
+
+  it("opens Done when the URL says it is expanded", () => {
+    expect(
+      layout([row({ status: "done", column: DONE_COLUMN })], {
+        expanded: [DONE_COLUMN],
+      }).get(DONE_COLUMN)?.isCollapsed,
+    ).toBe(false);
+  });
+
+  it("collapses No stage only while it is empty", () => {
+    expect(layout([]).get(NO_STAGE_COLUMN)?.isCollapsed).toBe(true);
+    // Once it holds something, the Summarize button on those cards is the point.
+    expect(
+      layout([row({ card: null, status: null, column: NO_STAGE_COLUMN })]).get(
+        NO_STAGE_COLUMN,
+      )?.isCollapsed,
+    ).toBe(false);
+  });
+
+  it("offers no toggle on a rail with nothing behind it", () => {
+    // Pressing it would open an empty column, and the count already said so.
+    expect(layout([]).get(NO_STAGE_COLUMN)?.canToggle).toBe(false);
+  });
+
+  it("never collapses the only column on the board", () => {
+    // `status:done` leaves Done alone; collapsing it would leave a board that is
+    // one closed strip and no way to read what was asked for.
+    const only = layOutColumns({
+      rows: [row({ status: "done", column: DONE_COLUMN })],
+      filters: { projectIds: [], statuses: ["done"] },
+      expanded: [],
+    });
+    expect(only).toHaveLength(1);
+    expect(only[0]?.isCollapsed).toBe(false);
+    expect(only[0]?.canToggle).toBe(false);
+  });
+
+  it("never collapses a stage column", () => {
+    for (const stage of ["discovery", "planning", "implementation", "review"]) {
+      const entry = layout([]).get(stage as never);
+      expect(entry?.isCollapsed).toBe(false);
+      expect(entry?.canToggle).toBe(false);
+    }
+  });
+
+  it("keeps the cards sorted inside a collapsed column", () => {
+    // Collapsing is a width, not a different grouping: expanding must not
+    // reshuffle what was already computed.
+    const pinned = row({ threadId: "a", isPinned: true, column: DONE_COLUMN, status: "done" });
+    const other = row({ threadId: "b", column: DONE_COLUMN, status: "done" });
+    expect(
+      layout([other, pinned]).get(DONE_COLUMN)?.rows.map((entry) => entry.threadId),
+    ).toEqual(["a", "b"]);
+  });
+});
+
+describe("the view in the URL", () => {
+  it("round-trips filters and expansion together", () => {
+    const subPath = subPathFromView({
+      filters: { projectIds: ["proj_a"], statuses: ["done"] },
+      expanded: [DONE_COLUMN],
+    });
+    expect(subPath).toBe("project:proj_a/status:done/expand:done");
+    expect(viewFromSubPath(subPath)).toEqual({
+      filters: { projectIds: ["proj_a"], statuses: ["done"] },
+      expanded: [DONE_COLUMN],
+    });
+  });
+
+  it("writes the empty path for the default view", () => {
+    expect(subPathFromView({ filters: NO_FILTERS, expanded: [] })).toBe("");
+    expect(viewFromSubPath("")).toEqual({
+      filters: { projectIds: [], statuses: [] },
+      expanded: [],
+    });
+  });
+
+  it("is additive, so a link saved before this existed still parses", () => {
+    expect(viewFromSubPath("status:done")).toEqual({
+      filters: { projectIds: [], statuses: ["done"] },
+      expanded: [],
+    });
+    // And the filters alone still read out of a path that carries an expansion.
+    expect(filtersFromSubPath("status:done/expand:done").statuses).toEqual([
+      "done",
+    ]);
+  });
+
+  it("ignores a column that cannot collapse anyway", () => {
+    expect(viewFromSubPath("expand:review,nonsense").expanded).toEqual([]);
+  });
+
+  it("is canonical, so one view is always one string", () => {
+    expect(
+      subPathFromView({
+        filters: NO_FILTERS,
+        expanded: [DONE_COLUMN, NO_STAGE_COLUMN],
+      }),
+    ).toBe(
+      subPathFromView({
+        filters: NO_FILTERS,
+        expanded: [NO_STAGE_COLUMN, DONE_COLUMN],
+      }),
+    );
+  });
+});
+
 describe("planDrop", () => {
   it("pins the stage you dropped on", () => {
     expect(planDrop(row(), "review")).toEqual([
@@ -416,10 +550,10 @@ describe("planDrop", () => {
     ]);
   });
 
-  it("refuses the briefless column in both directions", () => {
-    expect(planDrop(row(), NO_BRIEF_COLUMN)).toEqual([]);
+  it("refuses the No stage column in both directions", () => {
+    expect(planDrop(row(), NO_STAGE_COLUMN)).toEqual([]);
     expect(
-      planDrop(row({ card: null, status: null, column: NO_BRIEF_COLUMN }), "review"),
+      planDrop(row({ card: null, status: null, column: NO_STAGE_COLUMN }), "review"),
     ).toEqual([]);
   });
 });
