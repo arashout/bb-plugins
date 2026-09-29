@@ -39,7 +39,7 @@ import { attemptEvidence, decideAttempt, decisionId, holdsPr, sameBody, StaleWri
 import type { ModelChoice, ModelRole } from "./execution.js";
 import { githubRateLimit, prTarget } from "./ghactions.js";
 import type { LegacyAttempt } from "./legacy-history.js";
-import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type CriterionEvidence } from "./outcome-evidence.js";
+import { evidenceContract, pendingCriteria, stepPhrase, type ContractRow, type Criterion, type CriterionEvidence } from "./outcome-evidence.js";
 import { prGates, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor } from "./pr-holds.js";
 import { ROSTER_CHANGED } from "./roster-shared.js";
@@ -1373,6 +1373,14 @@ export function createEffortV2(deps: EffortV2Deps) {
       return { execution, parentThreadId: parent.coordinatorThreadId, cancelled, draining: legacy.draining };
     } finally { changing.delete(effortId); }
   }
+  /** The active instruction's criteria as its roster counts them; null without one. */
+  function criteria(effortId: string, work: RosterSources["work"]): Criterion[] | null {
+    const effort = deps.efforts.get(effortId);
+    const active = effort && deps.work.instruction(effort.id);
+    if (!effort || !active) return null;
+    const rows = deps.work.rows(effort.id);
+    return rowContract(effort, active.scope, rows, work, deps.work.decisions(effort.id), evidenceOf(rows.map((row) => row.target))).criteria;
+  }
   const handlers = {
     effort_roster_get: ({ effortId, since }: { effortId: string; since?: number }) => roster(effortId, since),
     effort_roster_list: () => deps.efforts.list().map((effort) => {
@@ -1464,5 +1472,5 @@ export function createEffortV2(deps: EffortV2Deps) {
   };
   /** A GitHub write that hit a rate limit holds every read too: when the write may run again, or null when the error is no rate limit. */
   const rateLimitedUntil = async (error: string) => await limit(error, deps.reconciler.now()) ? limitedUntil : null;
-  return { handlers, commands, settle, planRow, reconciler: { run, tick, recoverAll, threadChanged, observed, legacyChanged, due: markDue, readFull, rateLimitedUntil } };
+  return { handlers, commands, settle, planRow, criteria, reconciler: { run, tick, recoverAll, threadChanged, observed, legacyChanged, due: markDue, readFull, rateLimitedUntil } };
 }

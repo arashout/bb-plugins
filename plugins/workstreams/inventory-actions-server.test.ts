@@ -207,8 +207,9 @@ describe("inventory actions on the server", () => {
     const signals = env.harness.inspection.realtimeSignals.length;
     expect(await confirm()).toEqual({ ok: true, detail: `Confirmed the approval's comments handled on ${HEAD.slice(0, 7)}.` });
     expect(after().map((call) => call.method)).toEqual(["inspectPrs"]);
-    // The board and roster panes gate on the record, so they're told after it's saved, not only by the read before it.
-    expect(env.harness.inspection.realtimeSignals.slice(signals).map((signal) => signal.channel).slice(-2)).toEqual(["board-changed", "inventory-changed"]);
+    // The board, roster, and deck panes gate on the record, so they're told after it's saved, not only by the read before it.
+    expect(env.harness.inspection.realtimeSignals.slice(signals).map((signal) => signal.channel).slice(-3))
+      .toEqual(["board-changed", "inventory-changed", "deck-changed"]);
     expect(stored().map((row) => JSON.parse((row as { body: string }).body))).toMatchObject([{ prUrl: url(319), headOid: HEAD,
       fingerprint: FEEDBACK.fingerprint, provenance: { kind: "user" } }]);
     expect(await env.row(319)).toMatchObject({ attention: [{ kind: "merge-waiting", action: "merge" }], lastAction: { action: "confirm-handled", ok: true } });

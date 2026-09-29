@@ -27,6 +27,8 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
+import { deckSeenSchema, deckView, deckViewSchema, type DeckView } from "./deck.js";
+import { DECK_CHANGED } from "./deck-shared.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
   type AssignmentSource } from "./effort-assignments.js";
@@ -578,6 +580,11 @@ export const rpcContract = defineRpcContract({
   ...effortV2Contract,
   ...effortPilesContract,
   ...classifyContract,
+  /**
+   * Read-only: the effort deck. Every unarchived effort's card on its pile, and the Unclassified deck. `seen` is when the view last marked
+   * each PR's row seen: a row whose write landed counts again only once seen at or after it.
+   */
+  deck_get: { input: z.object({ seen: deckSeenSchema.optional() }).strict(), output: deckViewSchema },
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -1008,7 +1015,9 @@ export default async function plugin(bb: BbPluginApi) {
 
   let inventoryRefreshing = false;
   let inventoryTargeting = false;
-  const inventoryChanged = () => bb.realtime.publish(INVENTORY_CHANGED, { refreshing: inventoryRefreshing || inventoryTargeting });
+  const deckChanged = () => bb.realtime.publish(DECK_CHANGED, {});
+  // Every deck row is an inventory row, so the deck changes with it.
+  const inventoryChanged = () => { bb.realtime.publish(INVENTORY_CHANGED, { refreshing: inventoryRefreshing || inventoryTargeting }); deckChanged(); };
   /**
    * A roster Refresh skips the scan lock, so a scan read that began before it
    * can land after it. Reads are numbered as they begin, and a scan's older read
@@ -2392,6 +2401,7 @@ export default async function plugin(bb: BbPluginApi) {
     threadSignal = setTimeout(() => {
       threadSignal = null;
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
     }, 400);
   }
   bb.onDispose(() => {
@@ -3759,6 +3769,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       const pile = piles.move(effort, move, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       return { ok: true as const, pile };
     } catch (error) { return { ok: false as const, error: (error as Error).message }; }
   }
@@ -3804,8 +3815,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Suggestions for your open PRs no effort owns, from what the board already read: nothing is read again, and nothing moves. */
-  async function classifyGet() {
-    const current = await board();
+  async function classifyGet(read?: Board) {
+    const current = read ?? await board();
     const pattern = compilePattern((await settings.get()).ticketPattern);
     const work = readWorkContext(current, pattern, false, prFacts.reads());
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
@@ -5275,8 +5286,8 @@ export default async function plugin(bb: BbPluginApi) {
    * The PR inventory: every open PR you author, and every open PR an unarchived effort names as a member, grouped by the effort that owns
    * it, explicitly or through its ticket. It reads only what the board keeps: the inventory's reads, checkouts, and the roster's reads.
    */
-  async function inventoryGet(only?: InventoryQuestion): Promise<InventoryView> {
-    const current = await board();
+  async function inventoryGet(only?: InventoryQuestion, read?: Board): Promise<InventoryView> {
+    const current = read ?? await board();
     const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
     const shared = (prUrl: string) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
@@ -5314,6 +5325,42 @@ export default async function plugin(bb: BbPluginApi) {
     return inventoryView(rows, { checkedAt: current.prInventory.lastSuccessAt, attemptedAt: current.prInventory.lastAttemptAt,
       refreshing: current.prInventory.refreshing, rateLimitedUntil: (pollLimitedUntil ?? 0) > Date.now() ? pollLimitedUntil : null,
       warnings: current.prInventory.warnings }, only);
+  }
+
+  /** The effort deck from one board read: each unarchived effort's card on its pile, and the Unclassified deck. See deck.ts. */
+  async function deckGet(seen: Readonly<Record<string, number>> = {}): Promise<DeckView> {
+    const current = await board();
+    const view = await inventoryGet(undefined, current);
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const merges = inventory.merges();
+    // A merged PR's title and branch still place it by ticket, as a kept read places a PR the board no longer lists.
+    const work = readWorkContext(current, pattern, false, [...prFacts.reads(), ...merges.map((merge) => ({ prUrl: merge.url, title: merge.title,
+      headRefName: merge.headRefName ?? "" }))]);
+    // An archived effort still owns its PRs, so the deck lists it with the done efforts rather than lose them.
+    const efforts = current.efforts.filter((effort) => !effort.mergedInto);
+    const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
+    const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
+      unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []))));
+    const decisions = new Map(efforts.flatMap((effort) => {
+      const asked = effortWork.asked(effort.id);
+      return effortWork.decisions(effort.id).flatMap((decision) => decision.body.targets.map((target) => [prWorkItemKey(target.target),
+        { n: decision.n, question: decision.body.question, since: asked.get(decision.id) ?? null }] as const));
+    }));
+    const rows = view.groups.flatMap((group) => group.rows.map((row) => {
+      const pr = inventory.get(row.prUrl)?.pr ?? scanned.get(row.prUrl) ?? null;
+      return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [], decision: decisions.get(row.prUrl) ?? null,
+        acted: row.lastAction && { kind: row.lastAction.action, state: row.lastAction.ok ? "sent" as const : "refused" as const, at: row.lastAction.at } };
+    }));
+    const { groups, oneOffsId } = await classifyGet(current);
+    return deckView({ now: Date.now(), rows, unclassified: { groups, oneOffsId },
+      efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
+        archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
+        parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work) })),
+      merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id }] : []; }),
+      linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
+      threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
+        updatedAt: facts.updatedAt }])),
+      read: { checkedAt: view.checkedAt, refreshing: view.refreshing }, seen: new Map(Object.entries(seen)) });
   }
 
   const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]),
@@ -5430,6 +5477,7 @@ export default async function plugin(bb: BbPluginApi) {
       const effort = effortStore.establish({ sourceKey, name: trimmed, goal: goal.trim(), projectId: projectId ?? "",
         members: { tickets: [], prUrls: [] }, coordinatorState: "none" });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       return { ok: true as const, effort };
     },
     effort_admin_update: async ({ effortKey, name, goal, expectedScope }) => {
@@ -5446,6 +5494,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const effort = effortStore.updateDetails(record.id, { name: trimmed, goal: goal.trim() });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       if (record.coordinatorThreadId) {
         try {
           const thread = await bb.sdk.threads.get({ threadId: record.coordinatorThreadId });
@@ -5473,6 +5522,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "An affected worker or advance job is still active. Wait for it to settle before archiving." };
       const effort = effortStore.setArchived(record.id, archived);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       // Archiving pauses a v2 effort's rows and restoring resumes them; running work drains, nothing is cancelled.
       await effortV2.settle(record.id, archived ? "archive" : "restore");
       return { ok: true as const, effort };
@@ -5518,6 +5568,7 @@ export default async function plugin(bb: BbPluginApi) {
           return effortStore.merge(result.preview.source.id, result.preview.destination.id);
         })();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
+        deckChanged();
         await syncV2Targets();
         const { pending, notice } = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
         return { ok: true as const, effort, pendingThreadSync: pending, notice };
@@ -5539,6 +5590,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
     classify_get: () => classifyGet(),
+    deck_get: ({ seen }) => deckGet(seen),
     classify_assign: ({ effortKey, prUrls, tickets }) => classifyInto(() => effortStore.get(effortKey), "assign", prUrls, tickets),
     classify_new_effort: async ({ name, goal, prUrls, tickets, requestId }) => {
       const trimmed = adminName(name);

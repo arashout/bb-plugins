@@ -765,6 +765,45 @@ v2 effort. A PR whose rule placement was undone stays where the undo left it.
 `classify_get` lists the rules with the PRs each placed in the last 7 days, and
 `classify_rule_remove` removes one and leaves its PRs in place.
 
+## Effort deck
+
+`deck_get` returns the effort deck from one board read, and the `deck-changed`
+realtime event fires after each inventory read or action, pile move, effort
+edit, and thread change. Every row is an inventory row, filed in one section by
+the move its inventory row leads with: `merge`, `confirm`, `nudge`, `request`,
+`ready`, or `work` (fixed in its thread) is the user's; `flight` needs no one
+yet (a review not yet due a nudge, running checks, or code work a thread is
+doing); `blocked` waits on something else, named in `waitsOn`: the PR it is
+stacked on, an open v2 decision, or a hold. A stacked PR in an approved stack
+is a merge, since the preview merges the stack in order.
+
+**Needs you** counts rows in the user's sections on the active pile. Held and
+done efforts pause, and PRs no effort owns are "to sort". A row the user acted
+on (`acted`) stops counting while its write waits or runs, and once it lands
+until the view marks its row seen: `deck_get` takes `seen`, when the view last
+marked each PR's row seen. A refusal stays theirs, and a mark older than a day
+is history. `deck-shared.ts` holds this one rule for every view.
+
+- `active`: one card per active effort, most Needs you first, One-offs after
+  the rest. The Unclassified deck (`unclassified`: its rows and
+  `classify_get`'s suggestion groups) follows the last card.
+- `held`: held efforts' cards, which ask nothing. `done`: each done effort's
+  name, merges, and still-open PRs, and each archived effort (`archived`)
+  while it still owns open PRs, which pause as a done effort's do.
+
+Each card gives a one-line `status`; `stats` (open PRs, ready to merge, merged
+in the last 7 days, median PR age, and the oldest wait); `progress` (merges a
+read saw against open PRs, and how many of the active v2 instruction's "done
+when" criteria hold); up to three `next` steps (the unmet "done when"
+criteria, else the oldest moves of the user's, then the oldest waits);
+`blocked`, oldest first; a `linear` rollup of the stored Linear details of its
+tickets (`known` 0 means no Linear data); `people` (reviewers the user waits
+on, and reviewers whose requested changes wait on the user); its parent and PR
+`threads`, read-only; the week's merges, reviews, and pushes; and its rows by
+section. A merge counts once a read sees it: the poll's read of a PR that left
+your open PRs, a Refresh, or a checkout scan. A merged PR stays in the effort
+whose ticket it carries.
+
 ## Effort rosters (v2)
 
 An effort can move to its v2 roster: one permanently numbered row per PR the
