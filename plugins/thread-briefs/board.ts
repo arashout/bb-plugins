@@ -350,14 +350,16 @@ export function visibleColumns(filters: BoardFilters): BoardColumn[] {
 export const FILTERABLE_STATUSES: readonly BriefStatus[] = STATUS_ORDER;
 
 /**
- * The filters as a URL path remainder, e.g. `project:prj_a,prj_b/status:done`.
+ * The filters as one line, e.g. `project:prj_a,prj_b/status:done`.
  *
- * In the URL rather than in storage so a view is linkable and the browser's own
- * back and forward walk between views for nothing. Values are percent-encoded
- * and the whole thing is canonically ordered, so the same filter always
- * produces the same string and a navigation to an unchanged filter is a no-op.
+ * A line rather than a JSON object because it is read back by
+ * {@link filtersFromLine}, which is total: a line left behind by another
+ * version of this plugin degrades to the filters it still recognises, where a
+ * parsed object would have to be validated field by field to say the same
+ * thing. Values are escaped and the whole thing is canonically ordered, so the
+ * same filter always produces the same line.
  */
-export function subPathFromFilters(filters: BoardFilters): string {
+export function lineFromFilters(filters: BoardFilters): string {
   const segments: string[] = [];
   if (filters.projectIds.length > 0) {
     segments.push(`project:${encodeList([...filters.projectIds].sort())}`);
@@ -372,18 +374,17 @@ export function subPathFromFilters(filters: BoardFilters): string {
 }
 
 /**
- * Filters back out of a path remainder, ignoring anything it does not
- * recognise.
+ * Filters back out of a line, ignoring anything it does not recognise.
  *
- * Deliberately total: this parses a URL, which a person can type, a bookmark
- * can preserve across a rename of these keys, and a future version of this
- * plugin can extend. Every failure mode collapses to "that filter is not
+ * Deliberately total: this parses storage, which outlives the build that wrote
+ * it — an older line is missing keys this version knows, a newer one carries
+ * keys it does not. Every failure mode collapses to "that filter is not
  * applied", which shows more than intended rather than crashing the page.
  */
-export function filtersFromSubPath(subPath: string): BoardFilters {
+export function filtersFromLine(line: string): BoardFilters {
   const projectIds: string[] = [];
   const statuses: BriefStatus[] = [];
-  for (const segment of subPath.split("/")) {
+  for (const segment of line.split("/")) {
     const separator = segment.indexOf(":");
     if (separator === -1) continue;
     const key = segment.slice(0, separator);
@@ -524,12 +525,12 @@ export function layOutColumns(args: {
 /**
  * A whole board view: what is filtered out, and which rails are open.
  *
- * Both travel in the URL for the same reason — a view worth arriving at is worth
- * linking to, and the browser's own back button then walks between views for no
- * code here. The expansion rides in the same path remainder as the filters
- * because {@link filtersFromSubPath} ignores segments it does not recognise,
- * which makes `expand:` additive: a bookmark saved before this existed still
- * parses, and one saved after still parses in a build without it.
+ * Both are remembered for the same reason — the board is a place you come back
+ * to rather than one you arrive at fresh, and a filter you have to reapply
+ * every visit is one you stop using. The expansion rides in the same line as
+ * the filters because {@link filtersFromLine} ignores segments it does not
+ * recognise, which makes `expand:` additive: a line stored before this existed
+ * still parses, and one stored after still parses in a build without it.
  */
 export type BoardView = {
   filters: BoardFilters;
@@ -538,10 +539,10 @@ export type BoardView = {
 
 export const EMPTY_VIEW: BoardView = { filters: NO_FILTERS, expanded: [] };
 
-/** Filters first, then the expansion, so one view is always one string. */
-export function subPathFromView(view: BoardView): string {
+/** Filters first, then the expansion, so one view is always one line. */
+export function lineFromView(view: BoardView): string {
   const segments: string[] = [];
-  const filters = subPathFromFilters(view.filters);
+  const filters = lineFromFilters(view.filters);
   if (filters !== "") segments.push(filters);
   const ordered = COLLAPSIBLE_COLUMNS.filter((column) =>
     view.expanded.includes(column),
@@ -551,13 +552,13 @@ export function subPathFromView(view: BoardView): string {
 }
 
 /**
- * A view back out of a path remainder. Total, like the filter parse it wraps:
- * an unrecognised column in `expand:` is one that cannot collapse anyway, so
+ * A view back out of a line. Total, like the filter parse it wraps: an
+ * unrecognised column in `expand:` is one that cannot collapse anyway, so
  * dropping it silently is the same answer as honouring it.
  */
-export function viewFromSubPath(subPath: string): BoardView {
+export function viewFromLine(line: string): BoardView {
   const expanded: BoardColumn[] = [];
-  for (const segment of subPath.split("/")) {
+  for (const segment of line.split("/")) {
     if (!segment.startsWith("expand:")) continue;
     for (const value of decodeList(segment.slice("expand:".length))) {
       const column = value as BoardColumn;
@@ -566,7 +567,7 @@ export function viewFromSubPath(subPath: string): BoardView {
       }
     }
   }
-  return { filters: filtersFromSubPath(subPath), expanded };
+  return { filters: filtersFromLine(line), expanded };
 }
 
 // -------------------------------------------------------------------- the drags

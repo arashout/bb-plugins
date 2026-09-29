@@ -11,7 +11,7 @@ import {
   columnFor,
   compareRows,
   countByStatus,
-  filtersFromSubPath,
+  filtersFromLine,
   groupByColumn,
   isPinnedByHand,
   isStageColumn,
@@ -19,10 +19,10 @@ import {
   matchesFilters,
   planDrop,
   statusRank,
-  subPathFromFilters,
-  subPathFromView,
+  lineFromFilters,
+  lineFromView,
   toggleFilterValue,
-  viewFromSubPath,
+  viewFromLine,
   visibleColumns,
   type BoardRow,
   type BoardRowThread,
@@ -298,49 +298,49 @@ describe("filters", () => {
     ).toContain("discovery");
   });
 
-  it("round-trips through the sub path", () => {
+  it("round-trips through the stored line", () => {
     const filters = {
       projectIds: ["proj_b", "proj_a"],
       statuses: ["done" as const, "waiting-on-me" as const],
     };
-    const subPath = subPathFromFilters(filters);
-    expect(subPath).toBe("project:proj_a,proj_b/status:waiting-on-me,done");
-    expect(filtersFromSubPath(subPath)).toEqual({
+    const line = lineFromFilters(filters);
+    expect(line).toBe("project:proj_a,proj_b/status:waiting-on-me,done");
+    expect(filtersFromLine(line)).toEqual({
       projectIds: ["proj_a", "proj_b"],
       statuses: ["waiting-on-me", "done"],
     });
   });
 
-  it("writes the empty path for no filters, so the root is the unfiltered board", () => {
-    expect(subPathFromFilters(NO_FILTERS)).toBe("");
-    expect(filtersFromSubPath("")).toEqual({ projectIds: [], statuses: [] });
+  it("writes an empty line for no filters, so nothing stored is the unfiltered board", () => {
+    expect(lineFromFilters(NO_FILTERS)).toBe("");
+    expect(filtersFromLine("")).toEqual({ projectIds: [], statuses: [] });
   });
 
-  it("is canonical, so the same filter always produces the same URL", () => {
+  it("is canonical, so the same filter always produces the same line", () => {
     expect(
-      subPathFromFilters({ projectIds: ["b", "a"], statuses: ["done"] }),
-    ).toBe(subPathFromFilters({ projectIds: ["a", "b"], statuses: ["done"] }));
+      lineFromFilters({ projectIds: ["b", "a"], statuses: ["done"] }),
+    ).toBe(lineFromFilters({ projectIds: ["a", "b"], statuses: ["done"] }));
   });
 
   it("ignores anything it does not recognise rather than failing", () => {
-    // This parses a URL a person can type and a bookmark can outlive.
-    expect(filtersFromSubPath("status:nonsense/colour:red/nope")).toEqual({
+    // This parses storage, which outlives the build that wrote it.
+    expect(filtersFromLine("status:nonsense/colour:red/nope")).toEqual({
       projectIds: [],
       statuses: [],
     });
   });
 
-  it("percent-encodes project ids and reads them back", () => {
-    const subPath = subPathFromFilters({
+  it("escapes project ids and reads them back", () => {
+    const line = lineFromFilters({
       projectIds: ["with/slash"],
       statuses: [],
     });
-    expect(subPath).not.toContain("with/slash");
-    expect(filtersFromSubPath(subPath).projectIds).toEqual(["with/slash"]);
+    expect(line).not.toContain("with/slash");
+    expect(filtersFromLine(line).projectIds).toEqual(["with/slash"]);
   });
 
   it("de-duplicates repeated values", () => {
-    expect(filtersFromSubPath("status:done,done/project:a,a").statuses).toEqual([
+    expect(filtersFromLine("status:done,done/project:a,a").statuses).toEqual([
       "done",
     ]);
   });
@@ -441,50 +441,50 @@ describe("the layout", () => {
   });
 });
 
-describe("the view in the URL", () => {
+describe("the stored view", () => {
   it("round-trips filters and expansion together", () => {
-    const subPath = subPathFromView({
+    const line = lineFromView({
       filters: { projectIds: ["proj_a"], statuses: ["done"] },
       expanded: [DONE_COLUMN],
     });
-    expect(subPath).toBe("project:proj_a/status:done/expand:done");
-    expect(viewFromSubPath(subPath)).toEqual({
+    expect(line).toBe("project:proj_a/status:done/expand:done");
+    expect(viewFromLine(line)).toEqual({
       filters: { projectIds: ["proj_a"], statuses: ["done"] },
       expanded: [DONE_COLUMN],
     });
   });
 
-  it("writes the empty path for the default view", () => {
-    expect(subPathFromView({ filters: NO_FILTERS, expanded: [] })).toBe("");
-    expect(viewFromSubPath("")).toEqual({
+  it("writes an empty line for the default view", () => {
+    expect(lineFromView({ filters: NO_FILTERS, expanded: [] })).toBe("");
+    expect(viewFromLine("")).toEqual({
       filters: { projectIds: [], statuses: [] },
       expanded: [],
     });
   });
 
-  it("is additive, so a link saved before this existed still parses", () => {
-    expect(viewFromSubPath("status:done")).toEqual({
+  it("is additive, so a line stored before this existed still parses", () => {
+    expect(viewFromLine("status:done")).toEqual({
       filters: { projectIds: [], statuses: ["done"] },
       expanded: [],
     });
-    // And the filters alone still read out of a path that carries an expansion.
-    expect(filtersFromSubPath("status:done/expand:done").statuses).toEqual([
+    // And the filters alone still read out of a line that carries an expansion.
+    expect(filtersFromLine("status:done/expand:done").statuses).toEqual([
       "done",
     ]);
   });
 
   it("ignores a column that cannot collapse anyway", () => {
-    expect(viewFromSubPath("expand:review,nonsense").expanded).toEqual([]);
+    expect(viewFromLine("expand:review,nonsense").expanded).toEqual([]);
   });
 
   it("is canonical, so one view is always one string", () => {
     expect(
-      subPathFromView({
+      lineFromView({
         filters: NO_FILTERS,
         expanded: [DONE_COLUMN, NO_STAGE_COLUMN],
       }),
     ).toBe(
-      subPathFromView({
+      lineFromView({
         filters: NO_FILTERS,
         expanded: [NO_STAGE_COLUMN, DONE_COLUMN],
       }),

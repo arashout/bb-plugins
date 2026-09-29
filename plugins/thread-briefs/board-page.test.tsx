@@ -77,18 +77,29 @@ const panelOf = async (): Promise<PluginNavPanelRegistration> => {
 };
 
 type RenderOptions = {
-  subPath?: string;
+  /** The remembered view this board opens onto. See {@link STORAGE_KEY}. */
+  stored?: string;
   cards?: readonly BriefCard[];
   threads?: readonly PluginSidebarThread[];
   projects?: readonly PluginSidebarProject[];
   rpc?: Record<string, (input: never) => unknown>;
 };
 
+/** Where the board keeps its view, under the harness's plugin id. */
+const STORAGE_KEY = "test-plugin:board-filters";
+
+const storedView = () => window.localStorage.getItem(STORAGE_KEY);
+
 const renderBoard = async (options: RenderOptions = {}): Promise<RenderedSlot> => {
   const panel = await panelOf();
+  if (options.stored !== undefined) {
+    window.localStorage.setItem(STORAGE_KEY, options.stored);
+  }
   return renderSlot(
     panel,
-    { subPath: options.subPath ?? "" },
+    // The host passes the panel's sub path; the board ignores it and keeps its
+    // view in storage instead. See {@link BoardPage}.
+    { subPath: "" },
     {
       sidebarThreads: {
         status: "ready",
@@ -177,7 +188,7 @@ describe("the board", () => {
 
   it("puts a done thread in the terminal column", async () => {
     const slot = await renderBoard({
-      subPath: "expand:done",
+      stored: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
     });
     await waitFor(() =>
@@ -200,14 +211,10 @@ describe("the board", () => {
     // The count is on the rail, so a collapsed column never reads as empty.
     expect(column(slot, "Done").getByText("1")).toBeTruthy();
     fireEvent.click(rail);
-    // Expansion rides in the URL beside the filters, so the view is linkable.
-    expect(slot.inspection.navigateCalls).toEqual([
-      {
-        method: "toPluginPanel",
-        path: "board",
-        options: { subPath: "expand:done" },
-      },
-    ]);
+    expect(column(slot, "Done").getByText("Board thread")).toBeTruthy();
+    // Expansion is remembered beside the filters, so the board reopens as you
+    // left it.
+    expect(storedView()).toBe("expand:done");
     slot.lifecycle.unmount();
   });
 
@@ -255,7 +262,7 @@ describe("the board", () => {
 
   it("warns that a cold done thread is on its way out", async () => {
     const slot = await renderBoard({
-      subPath: "expand:done",
+      stored: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
       threads: [thread({ latestAttentionAt: NOW - 30 * 60 * 60 * 1000 })],
     });
@@ -265,7 +272,7 @@ describe("the board", () => {
 
   it("folds a running thread out of Done into its stage column", async () => {
     const slot = await renderBoard({
-      subPath: "expand:done",
+      stored: "expand:done",
       cards: [card({ status: "done", nextStep: "" })],
       threads: [thread({ status: "active" })],
     });
@@ -279,7 +286,7 @@ describe("the board", () => {
   it("redraws on a briefs-changed event", async () => {
     let status: BriefCard["status"] = "waiting-on-me";
     const slot = await renderBoard({
-      subPath: "expand:done",
+      stored: "expand:done",
       rpc: {
         listBriefCards: () => ({
           cards: [card({ status, nextStep: status === "done" ? "" : "Push" })],
@@ -301,22 +308,22 @@ describe("the board", () => {
 });
 
 describe("the filters", () => {
-  it("puts a chosen status in the URL", async () => {
+  it("applies a chosen status, and remembers it", async () => {
     const slot = await renderBoard();
     await waitFor(() => expect(slot.getByText("Board thread")).toBeTruthy());
-    fireEvent.click(slot.getByRole("button", { name: /Waiting on you/ }));
-    expect(slot.inspection.navigateCalls).toEqual([
-      {
-        method: "toPluginPanel",
-        path: "board",
-        options: { subPath: "status:waiting-on-me" },
-      },
-    ]);
+    const chip = slot.getByRole("button", { name: /Waiting on you/ });
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(chip);
+    expect(
+      slot.getByRole("button", { name: /Waiting on you/ }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(slot.getByRole("button", { name: "Clear" })).toBeTruthy();
+    expect(storedView()).toBe("status:waiting-on-me");
     slot.lifecycle.unmount();
   });
 
-  it("reads the filter back out of the URL", async () => {
-    const slot = await renderBoard({ subPath: "status:done" });
+  it("reopens on the view it was left on", async () => {
+    const slot = await renderBoard({ stored: "status:done" });
     await waitFor(() => expect(slot.getByRole("region", { name: "Done" })).toBeTruthy());
     // Only the columns a done filter can ever fill: an empty column under a
     // filter reads as "nothing here" when the filter is what emptied it.
@@ -350,58 +357,32 @@ describe("the filters", () => {
     });
     await waitFor(() => expect(slot.getByText("Beta thread")).toBeTruthy());
     fireEvent.click(slot.getByRole("button", { name: /Beta/ }));
-    expect(slot.inspection.navigateCalls).toEqual([
-      {
-        method: "toPluginPanel",
-        path: "board",
-        options: { subPath: "project:proj_beta" },
-      },
-    ]);
-    slot.lifecycle.unmount();
-  });
-
-  it("restores the last filter on arriving at the panel root", async () => {
-    window.localStorage.setItem("test-plugin:board-filters", "status:done");
-    const slot = await renderBoard({ subPath: "" });
-    await waitFor(() =>
-      expect(slot.inspection.navigateCalls).toEqual([
-        {
-          method: "toPluginPanel",
-          path: "board",
-          options: { subPath: "status:done", replace: true },
-        },
-      ]),
-    );
-    slot.lifecycle.unmount();
-  });
-
-  it("does not override a filter already in the URL", async () => {
-    window.localStorage.setItem("test-plugin:board-filters", "status:done");
-    const slot = await renderBoard({ subPath: "status:working" });
-    await waitFor(() => expect(slot.getByRole("region", { name: "Discovery" })).toBeTruthy());
-    expect(slot.inspection.navigateCalls).toEqual([]);
+    expect(slot.queryByText("Board thread")).toBeNull();
+    expect(slot.getByText("Beta thread")).toBeTruthy();
+    expect(storedView()).toBe("project:proj_beta");
     slot.lifecycle.unmount();
   });
 
   it("leaves the rails alone when a filter changes", async () => {
     // The two are independent readings of the same board: clearing a filter is
     // not a request to close Done again.
-    const slot = await renderBoard({ subPath: "status:waiting-on-me/expand:done" });
+    const slot = await renderBoard({ stored: "status:waiting-on-me/expand:done" });
     await waitFor(() => expect(slot.getByRole("button", { name: "Clear" })).toBeTruthy());
     fireEvent.click(slot.getByRole("button", { name: "Clear" }));
-    expect(slot.inspection.navigateCalls).toEqual([
-      { method: "toPluginPanel", path: "board", options: { subPath: "expand:done" } },
-    ]);
+    expect(
+      slot.queryByRole("button", { name: "Show the Done column" }),
+    ).toBeNull();
+    expect(storedView()).toBe("expand:done");
     slot.lifecycle.unmount();
   });
 
   it("clears back to the unfiltered board", async () => {
-    const slot = await renderBoard({ subPath: "status:done" });
+    const slot = await renderBoard({ stored: "status:done" });
     await waitFor(() => expect(slot.getByRole("button", { name: "Clear" })).toBeTruthy());
     fireEvent.click(slot.getByRole("button", { name: "Clear" }));
-    expect(slot.inspection.navigateCalls).toEqual([
-      { method: "toPluginPanel", path: "board", options: { subPath: "" } },
-    ]);
+    expect(slot.getByRole("region", { name: "Implementation" })).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Clear" })).toBeNull();
+    expect(storedView()).toBe("");
     slot.lifecycle.unmount();
   });
 });

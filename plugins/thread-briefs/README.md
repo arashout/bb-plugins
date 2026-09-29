@@ -272,8 +272,9 @@ caught up, and **Done** fills with cards whose whole point is that you are
 finished with them. So both give their width up and the stages take it. Three
 rules:
 
-- **Done starts collapsed** on every load. Expanding is one click and it sticks in
-  the URL, so "show me what I finished" is a link rather than a preference.
+- **Done starts collapsed** until you open it. Expanding is one click and it
+  sticks, so "show me what I finished" is a board you keep rather than a click
+  you repeat.
 - **No stage collapses only while it is empty** — which is most of the time, and
   is exactly when it is worth nothing. When it does hold threads, the Summarize
   button on those cards is the point, so it opens itself.
@@ -328,15 +329,23 @@ headings, same cards, same data path, and the pins are taps. A collapsed column
 stacks as a full-width strip with its label the right way up, since a vertical
 rail is only worth it where the columns are side by side.
 
-**The whole view lives in the URL.**
-`/plugins/thread-briefs/board/status:waiting-on-me/expand:done` is a link you can
-send or bookmark, and browser back and forward walk between views for free. The
-last one is remembered, so opening the page from the sidebar lands where you left
-it; arriving with a view already in the path leaves it alone. Filters and rails
-are independent — clearing a filter is not a request to close Done again — and
-anything unrecognised in the path is ignored rather than fatal, because that path
-outlives this version of the plugin: `expand:` is additive, so a link saved before
-it existed still parses, and one saved after still parses in a build without it.
+**The whole view is remembered, in local storage.** Filters and rails go into one
+line — `status:waiting-on-me/expand:done` — written when you change either and
+read once when the board mounts, so opening the page from the sidebar lands where
+you left it. Filters and rails are independent: clearing a filter is not a request
+to close Done again. Anything unrecognised in the line is ignored rather than
+fatal, because the line outlives the build that wrote it: `expand:` is additive,
+so a line stored before it existed still parses, and one stored after still parses
+in a build without it.
+
+The panel's `subPath` was the obvious home for this and is the one place it
+cannot live. `useBbNavigate().toPluginPanel` percent-encodes each path segment on
+the way out, and react-router 7 hands params back raw — it undoes `%2F` and
+nothing else — so `status:done` left as `status%3Adone` and came back unparsable.
+Every filter read as "no filter" and the page looked dead: chips lit nothing,
+rails would not open. A board is somewhere you return to rather than something
+you send, so the linkability the URL bought was not worth a view that does not
+survive its own round trip.
 
 **Where the data comes from** is the same split as the row glyphs. One
 `listBriefCards` call — a single kv scan, no per-thread lookups — carries the
@@ -402,7 +411,7 @@ so a sweep running up to an hour late is invisible.
 | Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, in every palette colour, plus one grey done ring — since a row status takes an icon *name* and not a component, every combination has to be registered at init, before any project is known |
 | Auto-archive | a `17 * * * *` `bb.background.schedule` over `threads.list`, `planArchives` deciding purely, `threads.archive` doing it, and `autoArchivedAt` on the brief row remembering it |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
-| Board | a `navPanel` with an `experimental_sidebarAccessory`, one `listBriefCards` call joined on the client to `experimental_useSidebarThreads`, filters carried in the panel's `subPath` via `useBbNavigate().toPluginPanel`, and every rule — columns, order, drops, filter parsing — pure in `board.ts` |
+| Board | a `navPanel` with an `experimental_sidebarAccessory`, one `listBriefCards` call joined on the client to `experimental_useSidebarThreads`, the view in component state and mirrored to local storage (*not* the panel's `subPath` — see above), and every rule — columns, order, drops, view parsing — pure in `board.ts` |
 | Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `experimental_onSubmitted` for the send that retires it |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |

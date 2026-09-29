@@ -33,13 +33,12 @@
  * therefore the same shape as the row glyphs: stored facts over the wire, live
  * facts from the hook, folded together in a pure function in `board.ts`.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   experimental_Icon as Icon,
   experimental_usePluginId,
   experimental_useSidebarThreads,
-  useBbNavigate,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -66,6 +65,7 @@ import {
   NO_STAGE_COLUMN,
   NO_FILTERS,
   COLUMN_CAP,
+  EMPTY_VIEW,
   actorHint,
   buildRows,
   cardRingIcon,
@@ -76,10 +76,11 @@ import {
   matchesFilters,
   planDrop,
   statusLabel,
-  subPathFromView,
+  lineFromView,
   toggleFilterValue,
-  viewFromSubPath,
+  viewFromLine,
   type BoardColumn,
+  type BoardView,
   type BoardDrop,
   type BoardFilters,
   type BoardRow,
@@ -95,28 +96,38 @@ export const BOARD_PATH = "board";
 const TICK_MS = 60_000;
 
 /**
- * Where the last filter is remembered, so reopening the board lands where you
- * left it.
+ * Where the view is kept: React state for this session, local storage so
+ * reopening the board lands where you left it.
  *
- * The URL is the source of truth — that is what makes a view linkable and lets
- * browser back walk between them — and this is only the default for arriving at
- * the panel root with no filter in the path. Keyed by plugin id because a copy
- * of this plugin published under another name must not share the entry.
+ * **Why not the URL.** The panel's `subPath` was the obvious home — it is what
+ * makes a view linkable and hands you browser back between views for free — and
+ * it does not survive the round trip. `toPluginPanel` percent-encodes each
+ * segment on the way out (`status:done` → `status%3Adone`), and react-router 7
+ * hands params back raw: it undoes `%2F` and nothing else. So the view came
+ * back as an unparsable string, every filter read as "no filter", and the page
+ * looked dead — the chips lit nothing, the rails would not open. A board is a
+ * thing you come back to rather than one you send someone, so the linkability
+ * was paying for a bug rather than a feature, and this is the whole of what it
+ * bought: one line, written on change, read once on mount.
+ *
+ * Keyed by plugin id because a copy of this plugin published under another name
+ * must not share the entry.
  */
-const filterStorageKey = (pluginId: string) => `${pluginId}:board-filters`;
+const viewStorageKey = (pluginId: string) => `${pluginId}:board-filters`;
 
-function readStoredSubPath(pluginId: string): string {
+function readStoredView(pluginId: string): BoardView {
   try {
-    return window.localStorage.getItem(filterStorageKey(pluginId)) ?? "";
+    const line = window.localStorage.getItem(viewStorageKey(pluginId));
+    return viewFromLine(line ?? "");
   } catch {
-    // Storage disabled is a board with no remembered filter, not a broken one.
-    return "";
+    // Storage disabled is a board with no remembered view, not a broken one.
+    return EMPTY_VIEW;
   }
 }
 
-function storeSubPath(pluginId: string, subPath: string): void {
+function storeView(pluginId: string, view: BoardView): void {
   try {
-    window.localStorage.setItem(filterStorageKey(pluginId), subPath);
+    window.localStorage.setItem(viewStorageKey(pluginId), lineFromView(view));
   } catch {
     // As above: the board stays usable without the memory.
   }
@@ -800,23 +811,25 @@ function Column({
 
 // -------------------------------------------------------------------- the page
 
-export function BoardPage({ subPath }: { subPath: string }) {
+export function BoardPage() {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
   const pluginId = experimental_usePluginId();
   const now = useNow(TICK_MS);
   const { rows, projects, isLoading, reload } = useBoardRows(now);
 
-  const view = useMemo(() => viewFromSubPath(subPath), [subPath]);
+  // Read once, on mount: nothing else in this window writes the entry, and a
+  // board that re-read storage would be answering a question nobody asked.
+  const [view, setStoredView] = useState<BoardView>(() =>
+    readStoredView(pluginId),
+  );
   const { filters } = view;
 
   const setView = useCallback(
-    (next: { filters: BoardFilters; expanded: readonly BoardColumn[] }) => {
-      const nextSubPath = subPathFromView(next);
-      storeSubPath(pluginId, nextSubPath);
-      navigate.toPluginPanel(BOARD_PATH, { subPath: nextSubPath });
+    (next: BoardView) => {
+      storeView(pluginId, next);
+      setStoredView(next);
     },
-    [navigate, pluginId],
+    [pluginId],
   );
 
   // Changing a filter leaves the rails where they were: the two are independent
@@ -835,18 +848,6 @@ export function BoardPage({ subPath }: { subPath: string }) {
       }),
     [setView, view.expanded, view.filters],
   );
-
-  // Arriving at the panel root restores the last filter, once, as a replace so
-  // back does not bounce between the empty board and the restored one.
-  const restored = useRef(false);
-  useEffect(() => {
-    if (restored.current) return;
-    restored.current = true;
-    if (subPath !== "") return;
-    const stored = readStoredSubPath(pluginId);
-    if (stored === "") return;
-    navigate.toPluginPanel(BOARD_PATH, { subPath: stored, replace: true });
-  }, [navigate, pluginId, subPath]);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [dragging, setDragging] = useState<BoardRow | null>(null);

@@ -574,7 +574,7 @@ the width:
 
 | Column | Collapsed |
 | --- | --- |
-| **Done** | always, on every load, unless `expand:done` is in the path |
+| **Done** | always, until you open it — the board then remembers it open |
 | **No stage** | while it is empty — it opens itself as soon as it holds a thread |
 | any stage | never |
 | the only column on the board | never (filtering to `status:done` leaves Done alone, and one closed strip is not a board) |
@@ -582,15 +582,14 @@ the width:
 A rail keeps its label, its count and its drop target, so it can never read as
 empty and dropping a card on Done still finishes it by hand; the rail widens while
 a card is in the air. Clicking a rail expands it and writes `expand:<column>` into
-the path, so an expansion is linkable and survives back and forward. A rail with a
-count of zero is not a button — there is nothing behind it to show.
+the remembered view, so the board reopens with it open. A rail with a count of
+zero is not a button — there is nothing behind it to show.
 
 A column a filter can only leave empty is **hidden**, not drawn empty. Filtering
 to Done leaves one column; filtering to any other status drops Done *and* No stage
 — a thread with no brief has no status to match. A status filter that merely
 *includes* `done` does not force Done open: the filter and the rails are separate
-readings of the board, so the path stays the single source of truth for which
-rails are open.
+readings of the board, and only the rails say which rails are open.
 
 ### The card
 
@@ -631,24 +630,32 @@ Drag-and-drop does not work on touch, so the **expanded card carries the panel's
 own stage and status controls**. On a compact viewport the columns stack into one
 scrolling list with their headers as section headings.
 
-### The view and the URL
+### The remembered view
 
-The filters *and* which rails are open live in the panel's sub-path, so a view is
-a link:
+The filters *and* which rails are open are one view, kept in component state and
+mirrored to `localStorage` (keyed by plugin id, under `<pluginId>:board-filters`)
+as a single line:
 
 ```
-/plugins/thread-briefs/board                           # everything, Done collapsed
-/plugins/thread-briefs/board/status:waiting-on-me      # what needs you
-/plugins/thread-briefs/board/project:prj_a/status:done # one project, finished
-/plugins/thread-briefs/board/expand:done               # everything, Done open
+                                  # everything, Done collapsed
+status:waiting-on-me              # what needs you
+project:prj_a/status:done         # one project, finished
+expand:done                       # everything, Done open
 ```
 
-Browser back and forward walk between views. The last view is remembered in
-`localStorage` (keyed by plugin id) and restored when you arrive at the bare
-`/board`; a path that already carries one is left alone. Unrecognised keys and
+It is written whenever you change a filter or a rail, and read once when the board
+mounts, so reopening the page lands where you left it. Unrecognised keys and
 values are ignored rather than fatal, which is what makes `expand:` additive — a
-link saved before it existed still parses, and one saved after still parses in a
+line stored before it existed still parses, and one stored after still parses in a
 build without it. Changing a filter leaves the rails as they were.
+
+**Not the panel's `subPath`.** That was the first home for this and it loses the
+view: `useBbNavigate().toPluginPanel` percent-encodes every path segment, and
+react-router 7 returns params raw (it undoes `%2F` and nothing else), so
+`status:done` comes back as `status%3Adone` and parses as no filter at all. The
+symptom is a board that renders correctly and responds to nothing — chips that
+never light, rails that never open. If a future bb decodes its params, a board
+view could move back into the URL and become linkable again.
 
 The project chips only list projects that have a thread on the board, and appear
 only when there is more than one.
