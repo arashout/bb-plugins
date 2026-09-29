@@ -506,6 +506,8 @@ export function createEffortV2(deps: EffortV2Deps) {
         attempts: (target) => deps.work.attempts(target) })),
       attempts: (target: string) => deps.work.attempts(target).length };
   }
+  /** PRs a roster showed Done only on a legacy Advance job's word, with the effort that showed each; a tick reads each in full. */
+  const confirming = new Map<string, string>();
   async function roster(effortId: string, since?: number): Promise<EffortRoster> {
     const { effort, redirectedFrom } = resolve(effortId);
     const sources = await deps.sources();
@@ -514,7 +516,12 @@ export function createEffortV2(deps: EffortV2Deps) {
     const read = effortRoster({ effort, redirectedFrom, sources, number: (targets) => deps.numbers(effort.id, targets, { assign: true }),
       execution: deps.execution.get(effort.id), v2Execution: await deps.launches.execution(), v2: instructionView(effort, sources),
       launches: { ...admission, uncertain: uncertain.filter((attempt) => attempt.effortId === effort.id),
-        elsewhere: [...new Set(uncertain.flatMap((attempt) => attempt.effortId === effort.id ? [] : [deps.efforts.get(attempt.effortId)?.name ?? attempt.effortId]))].sort() } });
+        elsewhere: [...new Set(uncertain.flatMap((attempt) => attempt.effortId === effort.id ? [] : [deps.efforts.get(attempt.effortId)?.name ?? attempt.effortId]))].sort() },
+      confirm: (target) => {
+        if (confirming.has(target)) return;
+        confirming.set(target, effort.id);
+        nudge();
+      } });
     const issues = numberIssues(effort.id, read);
     const changes = changesSince(effort.id, read.rows, since);
     return { ...read, issues: issues.list, lastCommand: lastCommand(effort.id), ...changes,
@@ -1209,7 +1216,7 @@ export function createEffortV2(deps: EffortV2Deps) {
    * One tick: select due rows, oldest first. Read them cheaply (skipping any read in the last minute) along with every PR a
    * waiting row waits on, so a parent's merge wakes its child in this tick. Read in full only what changed, left the open
    * list, has no full read, or needs one under two minutes old for its next step, at most four a minute. Then plan, commit,
-   * and act.
+   * and act, and confirm what rosters showed Done on a legacy job's word.
    */
   async function tick(): Promise<void> {
     await commitDue();
@@ -1229,7 +1236,7 @@ export function createEffortV2(deps: EffortV2Deps) {
     const woken = watched.filter((item) => changed.has(prWorkItemKey(item.on))).map((item) => item.row);
     for (const row of woken) changed.add(row.target);
     due = [...new Map([...due, ...woken].map((row) => [row.target, row])).values()];
-    if (due.length === 0) return;
+    if (due.length === 0) return confirmSettled();
     const sources = await deps.sources();
     for (const row of due) {
       const fullAt = sources.full(row.target)?.fullAt ?? null;
@@ -1240,6 +1247,18 @@ export function createEffortV2(deps: EffortV2Deps) {
     }
     for (const effortId of new Set(due.map((row) => row.effortId)))
       for (const item of await pass(effortId, new Set(due.filter((row) => row.effortId === effortId).map((row) => row.target)))) await act(effortId, item);
+    await confirmSettled();
+  }
+  /**
+   * After the due rows, read in full each PR a roster showed Done only on a legacy job's word, within what the budget leaves; one
+   * not read yet waits for the next tick. A read tells its roster to look again, and its full read now places the row.
+   */
+  async function confirmSettled(): Promise<void> {
+    for (const [target, effortId] of confirming) {
+      if (!await readFull(target)) continue;
+      confirming.delete(target);
+      deps.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId, prUrl: target });
+    }
   }
   /** Pass 0, on every start: read every unfinished launch back, then make every open row due. */
   async function recoverAll(): Promise<void> {

@@ -604,6 +604,54 @@ describe("the v2 reconciler's reads beside the board's", () => {
     expect(env.calls("inspectPrs").at(-1)!.input.prUrls).toEqual([url(346)]);
   });
 
+  it("confirms with a full read a roster row Done only because a legacy job saw it merge, names a read that fails, and reads it no more once GitHub agrees", async () => {
+    // 352 merged without the board ever listing it; only its legacy Advance job saw that. Another effort, not on v2, names it.
+    const env = await setup([351], { others: [352], live: (n) => n === 352 ? { state: "MERGED" } : {} });
+    const returns = createEffortStore(env.db).establish({ sourceKey: "returns-desk", name: "Returns desk", goal: "Take returns at the desk", projectId: PROJECT,
+      coordinatorState: "none", members: { tickets: [], prUrls: [url(352)] } });
+    saveLegacyJob(env.db, 352, { status: "merged", uncertain: false });
+    const next = await restart(env);
+    const row = async () => (await next.harness.callRpc("effort_roster_get", { effortId: returns.id }) as EffortRoster).rows[0];
+    const reads = () => env.calls("advanceInspect").filter((call) => call.input.prUrl === url(352)).length;
+    expect(await row()).toMatchObject({ state: "done", cause: "merged", label: "Merged when legacy Advance last read it; confirming with GitHub" });
+    // The roster read only asked; the next tick reads GitHub.
+    expect(reads()).toBe(0);
+    env.github.failFor.add(352);
+    await next.reconciler.tick();
+    expect(reads()).toBe(1);
+    // The row says the read failed rather than that it is still confirming, and the read is tried again after its backoff.
+    expect(await row()).toMatchObject({ state: "done", cause: "merged", label: "Merged when legacy Advance last read it; GitHub read failed", failedAt: START });
+    env.github.failFor.delete(352);
+    env.at(MINUTE);
+    await next.reconciler.tick();
+    expect(reads()).toBe(2);
+    expect(await row()).toMatchObject({ state: "done", cause: "merged", label: "Merged" });
+    env.at(10 * MINUTE);
+    await next.reconciler.tick();
+    expect(reads()).toBe(2);
+  });
+
+  it("confirms a legacy job's word only with the full reads the due rows leave", async () => {
+    // Legacy Advance alone saw 361–364 merge. 360 is due with no full read yet, and it decides its next step on one.
+    const settled = [361, 362, 363, 364];
+    const env = await setup([360], { others: settled, live: (n) => n === 360 ? {} : { state: "MERGED" } });
+    const returns = createEffortStore(env.db).establish({ sourceKey: "returns-desk", name: "Returns desk", goal: "Take returns at the desk", projectId: PROJECT,
+      coordinatorState: "none", members: { tickets: [], prUrls: settled.map(url) } });
+    for (const n of settled) saveLegacyJob(env.db, n, { status: "merged", uncertain: false });
+    const next = await restart(env);
+    await next.harness.callRpc("effort_roster_get", { effortId: returns.id });
+    const reads = (n: number) => env.calls("advanceInspect").filter((call) => call.input.prUrl === url(n)).length;
+    const before = reads(360);
+    await next.reconciler.recoverAll();
+    await next.reconciler.tick();
+    // 360 takes the first of the minute's four full reads; the confirmations share the other three, and the last waits a tick.
+    expect([reads(360) - before, ...settled.map(reads)]).toEqual([1, 1, 1, 1, 0]);
+    expect(next.row(360)?.phase).toBe("prepared");
+    env.at(MINUTE + 1_000);
+    await next.reconciler.tick();
+    expect(settled.map(reads)).toEqual([1, 1, 1, 1]);
+  });
+
   it("makes a row due at once when the board's own read of its PR comes in, ahead of the row's poll", async () => {
     const env = await setup([348]);
     await env.reconciler.recoverAll();

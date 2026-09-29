@@ -4,7 +4,9 @@
 // work, so an open row is Doing only while a writer holds it, a system issue
 // only while a legacy launch is uncertain, and otherwise it shows the need its
 // observed gates name. Legacy attempts stay history: they explain counts and
-// never become current state.
+// never become current state, with one exception: when the board holds no
+// facts for a PR, a legacy job that saw it merge or close files it as Done until
+// a full read confirms it.
 import { z } from "zod";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
@@ -269,6 +271,18 @@ export function observedFacts(target: string, sources: Pick<RosterSources, "fact
   return { pr, observation, cheapAt, stored, full, facts: full?.facts ?? (pr && cheapFacts(pr)) };
 }
 
+/**
+ * How a PR the board holds no facts for ended: its kept full read, or the newest legacy Advance job when it saw the PR merge or
+ * close after that read. A legacy job's word is unconfirmed until a full read agrees. The roster and the inventory both settle it here.
+ */
+export function settledOffBoard(target: string, sources: Pick<RosterSources, "full" | "legacy">): { state: "MERGED" | "CLOSED"; confirmed: boolean } | null {
+  const kept = sources.full(target);
+  const job = sources.legacy.get(target)?.job;
+  if ((job?.status === "merged" || job?.status === "closed") && job.updatedAt > ((kept?.facts && kept.fullAt) ?? -Infinity))
+    return { state: job.status === "merged" ? "MERGED" : "CLOSED", confirmed: false };
+  return kept?.facts && kept.facts.state !== "OPEN" ? { state: kept.facts.state, confirmed: true } : null;
+}
+
 const WORK_OWNER: Record<NonNullable<WorkRow["body"]["owner"]>["kind"], RosterRow["owner"]> = { user: "you", ci: "ci", reviewer: "reviewer", pr: "parent",
   github: "github", "legacy-job": "legacy-job", thread: "thread", "v2-attempt": "v2" };
 /**
@@ -309,7 +323,7 @@ function membershipOf(target: string, scope: InstructionScope | null, outside: b
 }
 
 function rosterRow(target: string, number: { n: number; provisional: boolean }, sources: RosterSources, instruction: RosterInstruction | null, outside: ReadonlySet<string>,
-  context: { mode: RosterMode; numberOf: ReadonlyMap<string, number>; heads: ReadonlyMap<string, string> }): RosterRow {
+  context: { mode: RosterMode; numberOf: ReadonlyMap<string, number>; heads: ReadonlyMap<string, string>; confirm: (target: string) => void }): RosterRow {
   const item = sources.work.items.get(target);
   const checkouts = [...item?.paths ?? []];
   const hold = prHoldFor(target, sources.holds);
@@ -325,6 +339,15 @@ function rosterRow(target: string, number: { n: number; provisional: boolean }, 
     if (current) return { state: current.body.userState, cause: current.body.cause, label: current.body.detail,
       owner: current.body.owner && WORK_OWNER[current.body.owner.kind], modifiers: current.body.modifiers };
     if (facts && facts.state !== "OPEN") return { state: "done", cause: facts.state === "MERGED" ? "merged" : "closed", label: facts.state === "MERGED" ? "Merged" : "Closed", owner: null };
+    const settled = pr ? null : settledOffBoard(target, sources);
+    if (settled && !settled.confirmed) context.confirm(target);
+    if (settled) {
+      const ended = settled.state === "MERGED" ? "Merged" : "Closed";
+      // A full read that failed since the legacy job's word is named, so a PR GitHub can't read doesn't stay "confirming".
+      const failed = (stored?.failedAt ?? -Infinity) > (legacy?.job.updatedAt ?? Infinity);
+      return { state: "done", cause: settled.state === "MERGED" ? "merged" : "closed", owner: null,
+        label: settled.confirmed ? ended : `${ended} when legacy Advance last read it; ${failed ? "GitHub read failed" : "confirming with GitHub"}` };
+    }
     const active = writer(target, checkouts, legacy, sources);
     if (active) return { state: "doing", ...active };
     if (legacy?.cause === "uncertain") return { state: "issue", cause: "legacy-uncertain", label: "Legacy launch outcome uncertain; recheck it", owner: "legacy-job" };
@@ -391,6 +414,8 @@ export function effortRoster(input: {
   /** The active instruction, its rows, its rollup, its open decisions, and our attempts on a PR; absent for a legacy effort or a copy without them. */
   v2?: RosterInstruction & { active: Omit<NonNullable<EffortRoster["instruction"]>, "included" | "excluded"> | null; rollup: string[] | null;
     contract: EffortRoster["contract"]; decisions: EffortRoster["decisions"]; attempts(target: string): number };
+  /** Told of each row shown Done only on a legacy Advance job's word, so a full read can confirm it; absent where nothing can read GitHub. */
+  confirm?(target: string): void;
 }): EffortRoster {
   const { effort, sources, v2 = null } = input;
   const execution = input.execution ?? { mode: "legacy", revision: 0 };
@@ -406,7 +431,7 @@ export function effortRoster(input: {
     const slug = prTarget(row.target)?.slug;
     return branch && slug ? [[`${slug}:${branch}`, row.target] as const] : [];
   }));
-  const context = { mode: { name: effort.name, execution, v2Execution }, numberOf, heads };
+  const context = { mode: { name: effort.name, execution, v2Execution }, numberOf, heads, confirm: input.confirm ?? (() => {}) };
   const rows = numbered.rows.map((row) => rosterRow(row.target, row, sources, v2, outside, context)).sort((a, b) => a.n - b.n);
   // A failure several PRs share is one issue naming each of them. Each row's detail names its own PR's facts (its head, its tries, its run),
   // so issues group by cause, labeled with the detail only when every PR in the issue shares it.

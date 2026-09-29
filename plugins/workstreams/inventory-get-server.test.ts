@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
 import { advancePreviewJobSchema } from "./bulk-advance.js";
 import type { Pr, RawUnit } from "./contract.js";
+import type { EffortRoster } from "./effort-roster.js";
+import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
@@ -69,7 +71,7 @@ async function setup() {
   efforts.setArchived(old.id, true);
   createPrHoldStore(db).set(url(315), true, "Waiting on the store layout review");
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { harness, db, shelf, get: async (input: object = {}) => await harness.callRpc("inventory_get", input) as InventoryView };
+  return { harness, db, shelf, facts, get: async (input: object = {}) => await harness.callRpc("inventory_get", input) as InventoryView };
 }
 
 describe("the PR inventory read model", () => {
@@ -91,6 +93,20 @@ describe("the PR inventory read model", () => {
     expect(rows.get(401)).toMatchObject({ authored: false, title: "", status: "Not read yet", checkedAt: null });
     expect(view.counts).toEqual({ "forgotten-draft": 1, "missing-reviewer": 1, "needs-nudge": 0 });
     expect(view).toMatchObject({ checkedAt: expect.any(String), refreshing: false, rateLimitedUntil: null });
+  });
+
+  it("settles an effort's PR the board holds no facts for as its roster does, so the two agree on whether it is open", async () => {
+    const env = await setup();
+    const kept = createPrFactsStore(env.db);
+    const read = { ...env.facts, prUrl: url(404), number: 404, title: "Shelve maps flat" };
+    const views = async () => [(await env.get()).groups.flatMap((group) => group.rows).some((row) => row.number === 404),
+      (await env.harness.callRpc("effort_roster_get", { effortId: env.shelf.id }) as EffortRoster).rows.find((row) => row.number === 404)?.state];
+    // A full read found #404 open before its legacy Advance job saw it merge: the newer word wins in both.
+    kept.full(url(404), { facts: read, fullAt: 0, signature: null, cheapAt: null });
+    expect(await views()).toEqual([false, "done"]);
+    // A full read after the job's word outranks it in both.
+    kept.full(url(404), { facts: read, fullAt: Date.now() + 60_000, signature: null, cheapAt: null });
+    expect(await views()).toEqual([true, "not-in-instruction"]);
   });
 
   it("marks a PR a v2 roster manages with its roster state, and filters by question while still counting every row", async () => {

@@ -33,7 +33,7 @@ import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRA
   currentRow, USER_STATES, type V2Target } from "./effort-work-store.js";
 import type { ResourceThread } from "./effort-resources.js";
 import type { CheckoutInspection } from "./advance-contract.js";
-import { rosterTargets } from "./effort-roster.js";
+import { rosterTargets, settledOffBoard } from "./effort-roster.js";
 import { currentLegacyAttempts } from "./legacy-history.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
@@ -5123,9 +5123,8 @@ export default async function plugin(bb: BbPluginApi) {
       const kept = prFacts.get(prUrl);
       const observation = inventory.observation(prUrl) ?? (kept && { checkedAt: kept.fullAt === null ? null : new Date(kept.fullAt).toISOString(),
         failedAt: kept.failedAt === null ? null : new Date(kept.failedAt).toISOString(), error: kept.error });
-      // A legacy Advance job that saw the PR merge or close settles it too, when no board read holds its facts.
-      const settled = legacy.get(prUrl)?.job.status;
-      const state = pr?.state ?? kept?.facts?.state ?? (settled === "merged" || settled === "closed" ? settled.toUpperCase() : null);
+      // When no board read holds its facts, the roster's rule settles it: its kept full read, or a newer legacy Advance job that saw it merge or close.
+      const state = pr?.state ?? settledOffBoard(prUrl, { full: prFacts.get, legacy })?.state ?? kept?.facts?.state ?? null;
       // Only open PRs; one read and then dropped has closed or left, and one never read may still be open. The board's newest read
       // finding it merged or closed settles it over an older checkout or roster read that still says open.
       if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { effortRoster, type RosterSources } from "./effort-roster.js";
-import { cheapSignature } from "./effort-roster-store.js";
+import { cheapSignature, type StoredPrFacts } from "./effort-roster-store.js";
 import type { EstablishedEffort } from "./effort-store.js";
 import type { StoredAttempt, WorkRow, WorkRowBody } from "./effort-work-store.js";
 import { INKWELL_ADVANCE_BATCHES, INKWELL_ADVANCE_EFFORTS, INKWELL_ROSTER } from "./inkwell-fixtures.js";
@@ -14,14 +14,14 @@ const open = INKWELL_ROSTER.inventory[0]!.pr;
 const pr = (url: string, patch: Partial<Pr> = {}): Pr => ({ ...open, url, number: Number(url.split("/").at(-1)), ...patch });
 const legacy = currentLegacyAttempts(INKWELL_ADVANCE_BATCHES);
 
-function roster(prUrls: string[], patch: Partial<RosterSources> = {}, facts: Record<string, Pr | null> = {}) {
+function roster(prUrls: string[], patch: Partial<RosterSources> = {}, facts: Record<string, Pr | null> = {}, confirm?: (target: string) => void) {
   const sources: RosterSources = {
     now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
     work: { items: new Map(prUrls.map((url) => [url, { paths: [`/Users/reader/src/${url.split("/").at(-1)}`], tickets: [] }])), ownerForPr: () => null },
     facts: (url) => url in facts ? facts[url]! : pr(url), observation: () => ({ checkedAt: "2026-09-28T00:00:00.000Z", failedAt: null }),
     feedback: () => null, tickets: () => new Map(), ...patch,
   };
-  return effortRoster({ effort: effort(prUrls), redirectedFrom: null, sources,
+  return effortRoster({ effort: effort(prUrls), redirectedFrom: null, sources, ...confirm ? { confirm } : {},
     number: (targets) => ({ snapshotId: null, rows: targets.map((target, index) => ({ n: index + 1, target, provisional: true })) }) });
 }
 const urls = Array.from({ length: 8 }, (_, index) => `https://github.com/inkwell/atlas/pull/${410 + index}`);
@@ -106,6 +106,48 @@ describe("effort roster rows", () => {
       ["not-in-instruction", "source-unavailable", "Not observed yet", "github"],
       ["not-in-instruction", "source-unavailable", "GitHub read failed", "github"],
     ]);
+  });
+
+  it("files a PR the board dropped as Done when a legacy job saw it merge or close after any full read, and asks for a full read to confirm it", () => {
+    // The early rehearsal's Security row: legacy Advance saw it merge, and the board, which read it, holds no facts for it now.
+    const [legacyOnly, keptMerged, reopened, staleOpen, legacyClosed, keptClosed, unreadable] = urls;
+    const base = legacy.get(INKWELL_ADVANCE_EFFORTS["Reader accounts"][0]!)!;
+    const job = (prUrl: string, status: "merged" | "closed", updatedAt: number) => ({ ...base, cause: status, label: status, job: { ...base.job, prUrl, status, updatedAt } });
+    const kept = (prUrl: string, state: "OPEN" | "MERGED" | "CLOSED", fullAt: number) => ({ fullAt, failedAt: null, error: null, signature: cheapSignature(pr(prUrl)),
+      facts: { prUrl, number: 0, title: "", repo: "inkwell/atlas", headRefName: "", baseRefName: "main", headOid: "", baseOid: "", state, isDraft: false, isCrossRepository: false,
+        reviewDecision: null, mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN", needsPreparation: false, readiness: "needs-attention" as const, detail: "", unresolvedThreads: 0,
+        threadsComplete: true, checks: "passed" as const, basePrNumber: null, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } } });
+    const at = (minute: number) => Date.UTC(2026, 8, 27, 12, minute);
+    const reads: Record<string, StoredPrFacts> = {
+      // A full read saw it merge before the board dropped it, so the board's later read no longer matches the one the full read kept.
+      [keptMerged!]: kept(keptMerged!, "MERGED", at(0)),
+      // A full read found it open again after the legacy job saw it close.
+      [reopened!]: kept(reopened!, "OPEN", at(30)),
+      [staleOpen!]: kept(staleOpen!, "OPEN", at(0)),
+      [keptClosed!]: kept(keptClosed!, "CLOSED", at(0)),
+      // The full read that would confirm the legacy job's word failed.
+      [unreadable!]: { fullAt: null, failedAt: at(20), error: "GraphQL: Could not resolve to a PullRequest.", signature: null, facts: null },
+    };
+    const confirmed: string[] = [];
+    const targets = [legacyOnly!, keptMerged!, reopened!, staleOpen!, legacyClosed!, keptClosed!, unreadable!];
+    const rows = roster(targets, {
+      full: (url) => reads[url] ?? null,
+      legacy: new Map([[legacyOnly!, job(legacyOnly!, "merged", at(10))], [reopened!, job(reopened!, "closed", at(10))], [staleOpen!, job(staleOpen!, "merged", at(10))],
+        [legacyClosed!, job(legacyClosed!, "closed", at(10))], [unreadable!, job(unreadable!, "merged", at(10))]]),
+    }, Object.fromEntries(targets.map((target) => [target, null])), (target) => confirmed.push(target)).rows;
+    expect(rows.map((row) => [row.state, row.cause, row.label])).toEqual([
+      ["done", "merged", "Merged when legacy Advance last read it; confirming with GitHub"],
+      ["done", "merged", "Merged"],
+      ["not-in-instruction", "observe", "No longer on the board; refresh to read it"],
+      ["done", "merged", "Merged when legacy Advance last read it; confirming with GitHub"],
+      // Closed counts as settled too, whether the legacy job or a kept full read saw it.
+      ["done", "closed", "Closed when legacy Advance last read it; confirming with GitHub"],
+      ["done", "closed", "Closed"],
+      // Still Done on the legacy job's word, but the row says GitHub couldn't confirm it rather than that it is still confirming.
+      ["done", "merged", "Merged when legacy Advance last read it; GitHub read failed"],
+    ]);
+    // Only the legacy job's word needs a full read; a kept full read is GitHub's own. A failed read is asked for again.
+    expect(confirmed).toEqual([legacyOnly, staleOpen, legacyClosed, unreadable]);
   });
 
   it("names a cheap read's need but never calls a PR a merge candidate from a cheap read", () => {
