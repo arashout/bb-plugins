@@ -74,11 +74,11 @@ describe("effort suggestions", () => {
       ["new: Batch shelf sync", "medium", ["atlas #420", "atlas #421"]],
       ["Shelf order", "medium", ["folio #450"]],
       ["new: Reading streaks", "low", ["folio #430", "folio #431"]],
+      // quill #209 shares only the OPS prefix with Vault audits, which never suggests an effort alone; its ticket is its own.
+      ["one-off", "low", ["folio #440", "quill #209"]],
       // Its own group: accepting Reader accounts' high group never carries a PR whose signals disagree.
       ["Reader accounts", "low", ["folio #461"]],
       ["Catalog search", "low", ["catalog #101"]],
-      ["Vault audits", "low", ["quill #209"]],
-      ["one-off", "low", ["folio #440"]],
       [null, null, ["catalog #102", "folio #441", "folio #442", "folio #462", "quill #301"]],
     ]);
   });
@@ -119,8 +119,9 @@ describe("effort suggestions", () => {
     expect(groups.find((group) => group.target === null)!.prs.find((row) => row.number === 301)!.signals).toEqual([]);
     // UTF-8 matches the ticket pattern, but no other work uses a UTF prefix, so it isn't a ticket that makes #442 standalone.
     expect(groups.find((group) => group.target === null)!.prs.map((row) => row.number)).toContain(442);
-    expect(groups.find((group) => group.key === "one-off")).toMatchObject({ reason: "Standalone ticket that nothing else carries", tickets: ["ABC-879"],
-      prs: [{ number: 440, signals: [{ kind: "ticket", effortId: null, text: "ticket ABC-879" }] }] });
+    expect(groups.find((group) => group.key === "one-off")).toMatchObject({ reason: "Standalone ticket that nothing else carries", tickets: ["ABC-879", "OPS-43"],
+      prs: [{ number: 440, signals: [{ kind: "ticket", effortId: null, text: "standalone ticket ABC-879" }] },
+        { number: 209, signals: [{ kind: "ticket", effortId: null, text: "standalone ticket OPS-43" }] }] });
   });
 
   it("names a proposed effort from Linear, or its board group, or its first PR, and offers the tickets that tie it", () => {
@@ -130,6 +131,66 @@ describe("effort suggestions", () => {
     expect(groups.find((group) => group.key === "new:Reading streaks")).toMatchObject({ reason: "Board group, no effort yet", tickets: [] });
     expect(groups.find((group) => group.target?.kind === "new" && group.target.name === "Batch shelf sync")).toMatchObject({ reason: "Stacked PRs, no effort yet",
       prs: [{ number: 420, signals: [] }, { number: 421, signals: [{ kind: "stack", effortId: null, text: "stacked on atlas #420" }] }] });
+  });
+
+  // You check a group's signals before you accept it, so each group names the ones behind its target, strongest first, and none that point elsewhere.
+  it("lists the specific signals behind each group's target, strongest first", () => {
+    const signals = new Map(suggestEfforts(inkwell()).map((group) => [group.key, group.signals]));
+    expect(signals.get("effort:pickup:high")).toEqual(["ticket ABC-331"]);
+    // folio #461's thread points at Store pickup, not Reader accounts, so it isn't why the group goes there.
+    expect(signals.get("effort:accounts:low")).toEqual(["ticket ABC-205"]);
+    expect(signals.get("new:https://github.com/inkwell/atlas/pull/420")).toEqual(["stacked on atlas #420"]);
+    expect(signals.get("one-off")).toEqual(["standalone ticket ABC-879", "standalone ticket OPS-43"]);
+    expect(signals.get("none")).toEqual([]);
+  });
+});
+
+describe("a ticket prefix", () => {
+  // The real failure: one team prefix on every ticket pulled 11 unrelated PRs into the one effort that held the others, as one low group.
+  const owned = [pr("atlas", 405, "ABC-201 Let readers update their email", "abc-201-email", { effortId: "accounts" }),
+    pr("atlas", 406, "ABC-202 Confirm email changes by link", "abc-202-confirm", { effortId: "accounts" }),
+    pr("spine", 150, "ABC-203 Sign in with a library card", "abc-203-card", { effortId: "accounts" })];
+  const repos = ["folio", "quill", "spine", "catalog", "atlas"];
+  const unrelated = Array.from({ length: 11 }, (_, index) => pr(repos[index % repos.length]!, 500 + index, `ABC-${610 + index} Change ${index + 1}`, `abc-${610 + index}`));
+  const input = (prs: ClassifyPr[], threads: ClassifyInput["threads"] = []): ClassifyInput => ({ ...inkwell(), prs: [...owned, ...prs], groups: [], threads,
+    efforts: [{ id: "accounts", name: "Reader accounts", tickets: [] }] });
+
+  it("never suggests an effort for PRs that share only a team prefix with its work", () => {
+    const groups = suggestEfforts(input(unrelated));
+    expect(groups.filter((group) => group.target?.kind === "effort")).toEqual([]);
+    expect(groups.flatMap((group) => group.prs.flatMap((row) => row.signals)).filter((signal) => signal.kind === "prefix")).toEqual([]);
+    // Each ticket is its own, so they're offered as one-offs, weakly, which the deck asks about again before it marks them.
+    expect(summary(input(unrelated))).toEqual([["one-off", "low", unrelated.map((row) => `${row.repo.split("/")[1]} #${row.number}`).sort()]]);
+    // A standing rule can still name the prefix: that placement is yours, on purpose.
+    expect(ruleFor([{ id: "r", kind: "ticket-prefix", value: "ABC", effortId: "accounts", createdAt: 0 }], unrelated[0]!, null)?.effortId).toBe("accounts");
+  });
+
+  it("adds weight to another signal for the same effort", () => {
+    const badge = pr("folio", 470, "Show reader badges", "abc-230-badges");
+    const thread = [{ id: "thr-badges", title: "Reader badges", prUrls: [badge.url, url("atlas", 405)] }];
+    expect(suggestEfforts(input([badge], thread))).toMatchObject([{ key: "effort:accounts:high", signals: ["thread “Reader badges”", "prefix ABC"] }]);
+    // The same thread without the prefix is a medium suggestion.
+    const other = { ...badge, headRefName: "xyz-5-badges" };
+    expect(suggestEfforts(input([other], thread))).toMatchObject([{ key: "effort:accounts:medium", signals: ["thread “Reader badges”"] }]);
+  });
+
+  // A weak group asks before it moves anything, so two faint signals must not add up to a moderate one that moves on one click.
+  it("adds nothing to a lone code area, which is as faint", () => {
+    const shell = pr("atlas", 700, "Tidy the app shell", "abc-700-shell", { areas: ["inkwell/atlas:app"] });
+    const prs = [{ ...owned[0]!, areas: ["inkwell/atlas:app"] }, ...owned.slice(1), shell];
+    expect(suggestEfforts({ ...input([]), prs })).toMatchObject([{ key: "effort:accounts:low", signals: ["area inkwell/atlas:app"],
+      prs: [{ number: 700, signals: [{ kind: "area" }] }] }]);
+  });
+
+  it("counts only for the effort the other signal points at", () => {
+    // OPS is Vault audits' prefix, but the thread ties quill #500 to Reader accounts, so OPS says nothing about where it goes.
+    const vault = [pr("folio", 311, "OPS-41 Rotate vault audit keys", "ops-41-keys", { effortId: "vault" }),
+      pr("folio", 312, "OPS-42 Record vault access reviews", "ops-42-reviews", { effortId: "vault" })];
+    const token = pr("quill", 500, "Log token use", "ops-77-token-log");
+    const efforts = [{ id: "accounts", name: "Reader accounts", tickets: [] }, { id: "vault", name: "Vault audits", tickets: [] }];
+    const thread = [{ id: "thr-token", title: "Token log", prUrls: [token.url, url("atlas", 405)] }];
+    expect(suggestEfforts({ ...input([...vault, token], thread), efforts })).toMatchObject([{ key: "effort:accounts:medium", signals: ["thread “Token log”"],
+      prs: [{ number: 500, signals: [{ kind: "thread", effortId: "accounts" }] }] }]);
   });
 });
 

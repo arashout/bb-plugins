@@ -226,7 +226,7 @@ describe("suggestions over RPC", () => {
     expect(groups.map((group) => [group.key, group.prs.map((row) => row.number), group.prs.map((row) => row.signals.map((signal) => signal.text))])).toEqual([
       [`effort:${env.shelf.id}:medium`, [313], [["thread “Direct work”"]]],
       // "Checkout work" names Shelf order's #314, but only runs in #316's checkout, so #316 stays standalone.
-      ["one-off", [316], [["ticket ABC-316"]]],
+      ["one-off", [316], [["standalone ticket ABC-316"]]],
       // #320 shares ABC-900 with the done Quill export, which takes no new work.
       ["none", [317, 320], [[], []]],
     ]);

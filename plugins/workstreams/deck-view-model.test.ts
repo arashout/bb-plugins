@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, uncScreen, uncSnapshot, type CardScreen,
+import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, uncScreen, uncSnapshot, type CardScreen,
   type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
@@ -137,15 +137,38 @@ describe("an effort card", () => {
 });
 
 describe("the Unclassified deck", () => {
-  it("groups PRs by suggestion with the reason once per group, one button each, and each PR's signals", () => {
+  it("groups PRs by suggestion with its strength and signals once per group, one button each, and each PR's signals", () => {
     const unc = uncScreen(inkwellDeck(), none, new Map(), { now: NOW });
-    expect(unc.groups.map((group) => [group.title, group.reason, group.confidence, group.button.label, group.lines.map((line) => [line.ref, line.signals])])).toEqual([
-      ["Shelf order", "Shared ticket · same ticket prefix", "high", "Put 1 in Shelf order", [["folio #325", ["ticket ABC-355", "prefix ABC"]]]],
-      ["Delivery windows", "Shared ticket ABC-210, no effort yet", "medium", "New effort from 2…",
+    expect(unc.groups.map((group) => [group.title, group.strength, group.signals, group.button.label, group.lines.map((line) => [line.ref, line.signals])])).toEqual([
+      ["Shelf order", "strong", ["ticket ABC-355", "prefix ABC"], "Put 1 in Shelf order", [["folio #325", ["ticket ABC-355", "prefix ABC"]]]],
+      ["Delivery windows", "moderate", ["ticket ABC-210", "board group “Checkout”"], "New effort from 2…",
         [["atlas #410", ["ticket ABC-210"]], ["catalog #97", ["board group “Checkout”"]]]],
-      ["No clear signal", "Pick an effort for each PR.", null, "Pick per PR", [["folio #305", []]]]]);
+      ["No clear signal", null, [], "Pick per PR", [["folio #305", []]]]]);
+    expect(unc.groups.at(-1)!.reason).toBe("Pick an effort for each PR.");
     // Unclassified PRs are to sort, never Needs you.
     expect(unc.groups.flatMap((group) => group.lines).some((line) => line.needs)).toBe(false);
+  });
+
+  // A weak suggestion rests on one faint signal, so the one button that would move its PRs at once asks first. A new effort's naming dialog
+  // already asks, and strong or moderate groups move on one click, with Undo.
+  it("asks again before a weak group moves anything", () => {
+    const base = inkwellDeck();
+    const [shelf, delivery, rest] = base.unclassified.groups;
+    const view = inkwellDeck({ unclassified: { ...base.unclassified, groups: [
+      { ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area", signals: ["area inkwell/folio:shelves"] },
+      { ...delivery!, confidence: "low" },
+      { ...rest!, key: "one-off", target: { kind: "one-off" }, confidence: "low", reason: "Standalone ticket that nothing else carries", signals: ["standalone ticket ABC-305"] }] } });
+    const unc = uncScreen(view, none, new Map(), { now: NOW });
+    expect(unc.groups.map((group) => [group.title, group.strength, group.button.label, group.button.confirm])).toEqual([
+      ["Shelf order", "weak", "Put 1 in Shelf order…", true], ["Delivery windows", "weak", "New effort from 2…", false], ["One-offs", "weak", "Mark 1 one-off…", true]]);
+    expect(uncScreen(inkwellDeck(), none, new Map(), { now: NOW }).groups.map((group) => group.button.confirm)).toEqual([false, false, false]);
+    // Across groups, Accept takes the rest and leaves each weak one for its own confirm, and says so; alone, its Accept opens that confirm.
+    const keys = unc.groups.map((group) => group.key);
+    expect(acceptPlan(unc.groups, keys)).toEqual({ take: ["new:ABC-210"], left: "2 weak groups left: accept each alone." });
+    expect(acceptPlan(unc.groups, keys.slice(0, 2))).toEqual({ take: ["new:ABC-210"], left: "1 weak group left: accept it alone." });
+    expect(acceptPlan(unc.groups, [keys[0]!])).toEqual({ take: [keys[0]], left: null });
+    const strong = uncScreen(inkwellDeck(), none, new Map(), { now: NOW }).groups;
+    expect(acceptPlan(strong, strong.map((group) => group.key))).toEqual({ take: strong.map((group) => group.key), left: null });
   });
 
   it("counts coverage as the open PRs in a real effort, with One-offs and what's to sort beside it", () => {

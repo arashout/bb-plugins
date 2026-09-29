@@ -471,11 +471,12 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
     threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }]]),
     unclassified: { oneOffsId: oneOffs.id, groups: [
       { key: `effort:${shelf}:high`, target: { kind: "effort", effortId: shelf, name: "Shelf order" }, confidence: "high", reason: "Shared ticket · same ticket prefix",
-        tickets: [], prs: [pr("folio", 325, "Remember the last shelf you browsed", [{ kind: "ticket", text: "ticket ABC-355" }, { kind: "prefix", text: "prefix ABC" }], shelf)] },
-      { key: "new:ABC-210", target: { kind: "new", name: "Delivery windows" }, confidence: "medium", reason: "Shared ticket ABC-210, no effort yet", tickets: ["ABC-210"],
+        signals: ["ticket ABC-355", "prefix ABC"], tickets: [], prs: [pr("folio", 325, "Remember the last shelf you browsed", [{ kind: "ticket", text: "ticket ABC-355" }, { kind: "prefix", text: "prefix ABC" }], shelf)] },
+      { key: "new:ABC-210", target: { kind: "new", name: "Delivery windows" }, confidence: "medium", reason: "Shared ticket ABC-210, no effort yet",
+        signals: ["ticket ABC-210", "board group “Checkout”"], tickets: ["ABC-210"],
         prs: [pr("atlas", 410, "Show delivery windows at checkout", [{ kind: "ticket", text: "ticket ABC-210" }], null),
           pr("catalog", 97, "Merge duplicate author records", [{ kind: "group", text: "board group “Checkout”" }], null)] },
-      { key: "none", target: null, confidence: null, reason: "No clear signal. Pick an effort for each PR.", tickets: [],
+      { key: "none", target: null, confidence: null, reason: "No clear signal. Pick an effort for each PR.", signals: [], tickets: [],
         prs: [pr("folio", 305, "Load cover images lazily", [], null)] }] },
     read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false, limitedUntil: null }, seen: new Map(), ...patch });
 }

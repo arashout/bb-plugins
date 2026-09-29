@@ -238,10 +238,18 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   };
 }
 
+/** How strongly a suggestion's signals point at its target, as its group says it. */
+export type Strength = "strong" | "moderate" | "weak";
+const STRENGTH: Record<NonNullable<SuggestionGroup["confidence"]>, Strength> = { high: "strong", medium: "moderate", low: "weak" };
 export type UncGroup = {
-  key: string; title: string; target: SuggestionGroup["target"]; color: string; reason: string; confidence: SuggestionGroup["confidence"];
-  /** What its one button does to the rows still here, and how many. */
-  button: { kind: "assign" | "new" | "one-off" | "pick"; label: string; count: number };
+  key: string; title: string; target: SuggestionGroup["target"]; color: string; reason: string; strength: Strength | null;
+  /** The specific signals behind its target, strongest first, shown before you accept it. */
+  signals: readonly string[];
+  /**
+   * What its one button does to the rows still here, and how many. `confirm`: a weak suggestion that would move PRs at once asks first,
+   * listing each PR with its signals.
+   */
+  button: { kind: "assign" | "new" | "one-off" | "pick"; label: string; count: number; confirm: boolean };
   lines: DeckLine[];
   /** You accepted all of it that was left to sort: one line with Undo until Mark seen. */
   accepted: { text: string; actionId: string } | null;
@@ -252,6 +260,22 @@ export type UncScreen = {
 };
 /** A suggestion you accepted, by its group key, with the PRs it moved, until Mark seen. */
 export type Accepted = ReadonlyMap<string, { actionId: string; text: string; prUrls: readonly string[] }>;
+
+/** What accepting a group does to `n` of its PRs, as its button and a weak group's confirm say it. */
+export function acceptLabel(target: SuggestionGroup["target"], n: number): string {
+  return target?.kind === "effort" ? `Put ${n} in ${target.name}` : target?.kind === "new" ? `New effort from ${n}`
+    : target?.kind === "one-off" ? `Mark ${n} one-off${n === 1 ? "" : "s"}` : "Pick per PR";
+}
+
+/**
+ * What Accept takes from a selection across the groups `keys`. A weak group asks on its own, so across two or more groups Accept takes
+ * the rest and leaves each weak one, and `left` says so; a lone weak group is taken, and its Accept opens its confirm.
+ */
+export function acceptPlan(groups: readonly Pick<UncGroup, "key" | "button">[], keys: readonly string[]): { take: string[]; left: string | null } {
+  const weak = keys.length > 1 ? keys.filter((key) => groups.some((group) => group.key === key && group.button.confirm)) : [];
+  const n = weak.length;
+  return { take: keys.filter((key) => !weak.includes(key)), left: n ? `${n} weak group${n === 1 ? "" : "s"} left: accept ${n === 1 ? "it" : "each"} alone.` : null };
+}
 
 /**
  * The Unclassified deck: each suggestion group with its reason once and one button, rows settled against what you last marked seen
@@ -280,11 +304,12 @@ export function uncScreen(view: DeckView, seen: { rows: Readonly<Record<string, 
     const count = lines.filter((line) => !line.dim).length;
     const title = !group ? "Left since you looked" : target?.kind === "effort" ? target.name : target?.kind === "new" ? target.name : target?.kind === "one-off" ? "One-offs"
       : "No clear signal";
-    const button: UncGroup["button"] = target?.kind === "effort" ? { kind: "assign", label: `Put ${count} in ${target.name}`, count }
-      : target?.kind === "new" ? { kind: "new", label: `New effort from ${count}…`, count }
-      : target?.kind === "one-off" ? { kind: "one-off", label: `Mark ${count} one-off${count === 1 ? "" : "s"}`, count } : { kind: "pick", label: "Pick per PR", count };
+    const strength = group?.confidence ? STRENGTH[group.confidence] : null;
+    const confirm = strength === "weak" && (target?.kind === "effort" || target?.kind === "one-off");
+    const button: UncGroup["button"] = { kind: target?.kind === "effort" ? "assign" : target?.kind ?? "pick",
+      label: `${acceptLabel(target, count)}${confirm || target?.kind === "new" ? "…" : ""}`, count, confirm };
     return { key, title, target, color: target?.kind === "effort" ? effortColor(target.effortId) : target?.kind === "one-off" ? ONE_OFF_COLOR : "#d3a35a",
-      reason: (group?.reason ?? "").replace(/^No clear signal\.\s*/u, ""), confidence: group?.confidence ?? null, button, lines, accepted: done ?? null };
+      reason: (group?.reason ?? "").replace(/^No clear signal\.\s*/u, ""), strength, signals: group?.signals ?? [], button, lines, accepted: done ?? null };
   }).filter((group) => group.lines.length || group.accepted);
   const collapsed = new Set(groups.filter((group) => group.accepted).map((group) => group.key));
   const open = (cards: readonly DeckCard[]) => cards.reduce((sum, card) => sum + card.stats.open, 0);

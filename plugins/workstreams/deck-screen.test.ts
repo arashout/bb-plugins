@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, paletteItems, stripChips, uncScreen, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
-import { ConfirmBody, DeckPane, HelpBody, PaletteBody, SeedBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { ConfirmBody, DeckPane, HelpBody, PaletteBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import type { SeedProposal } from "./linear-seed.js";
 
 const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs";
@@ -136,16 +136,16 @@ describe("the effort deck's markup", () => {
     expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
   });
 
-  it("draws the Unclassified deck: coverage, rules, and each suggestion's reason once with its one button and each PR's signals", () => {
+  it("draws the Unclassified deck: coverage, rules, and each suggestion's strength and signals once before its one button, and each PR's signals", () => {
     const html = pane(inkwellDeck(), "unc");
     expect(text(html)).toContain("Effort coverage 59% of 17 open PRs are in a real effort");
     expect(text(html)).toContain("10 in efforts 3 one-offs 4 to sort");
     expect(text(html)).toContain("Branch shelf/* → Shelf order · 2 this week");
     const group = text(section(html, `effort:${SHELF}:high`));
-    expect(group).toContain("→ Shelf order Shared ticket · same ticket prefix high Put 1 in Shelf order p");
+    expect(group).toContain("→ Shelf order strong ticket ABC-355 · prefix ABC Put 1 in Shelf order p");
     expect(group).toContain("folio #325 ABC-355 Remember the last shelf you browsed ticket ABC-355 prefix ABC Conflicts");
-    expect(group.match(/Shared ticket · same ticket prefix/gu)).toHaveLength(1);
-    expect(text(section(html, "new:ABC-210"))).toContain("→ new Delivery windows");
+    expect(group.match(/ticket ABC-355 · prefix ABC/gu)).toHaveLength(1);
+    expect(text(section(html, "new:ABC-210"))).toContain("→ new Delivery windows moderate ticket ABC-210 · board group “Checkout” New effort from 2… p");
     expect(text(section(html, "none"))).toContain("No clear signal Pick an effort for each PR. Pick per PR e");
     expect(button(html, "seed")).toEqual({ text: "Seed from Linear…", disabled: false });
   });
@@ -228,6 +228,22 @@ describe("the deck's dialogs", () => {
       onReviewer: noop, onReplan: noop, onConfirm: noop, onCancel: noop }));
     expect(html).toMatch(/<button type="button" data-deck-confirm="true" disabled=""/u);
     expect(text(html)).toContain("Plan again first");
+  });
+
+  it("marks a weak group, and lists each PR with its signals before a weak accept moves them", () => {
+    const base = inkwellDeck();
+    const [shelf, ...rest] = base.unclassified.groups;
+    const view = inkwellDeck({ unclassified: { ...base.unclassified, groups: [{ ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area",
+      signals: ["area inkwell/folio:shelves"] }, ...rest] } });
+    const group = section(pane(view, "unc"), `effort:${SHELF}:low`);
+    expect(text(group)).toContain("→ Shelf order weak area inkwell/folio:shelves Put 1 in Shelf order… p");
+    expect(group).toMatch(/data-deck-strength="weak" title="weak signals" class="[^"]*text-amber-700/u);
+    const lines = [{ prUrl: "u1", ref: "folio #325", title: "Remember the last shelf you browsed", signals: ["area inkwell/folio:shelves"] },
+      { prUrl: "u2", ref: "folio #326", title: "Show the shelf you came from", signals: [] }];
+    const html = text(renderToStaticMarkup(createElement(WeakBody, { lines, label: "Put 2 in Shelf order", busy: false, error: null, onAccept: noop, onCancel: noop })));
+    expect(html).toContain("folio #325 Remember the last shelf you browsed area inkwell/folio:shelves");
+    expect(html).toContain("folio #326 Show the shelf you came from No signal of its own; it goes with its group");
+    expect(html).toContain("Cancel esc Put 2 in Shelf order ⌘↵");
   });
 
   it("lists every action in ⌘K with its key and why a grayed one can't run, and groups the keys in ?", () => {

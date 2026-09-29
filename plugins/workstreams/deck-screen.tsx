@@ -10,7 +10,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
-import type { Availability, CardScreen, Chip, DeckLine, PaletteItem, SectionScreen, Tone, UncGroup, UncScreen } from "./deck-view-model";
+import type { Availability, CardScreen, Chip, DeckLine, PaletteItem, SectionScreen, Strength, Tone, UncGroup, UncScreen } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
 import { usePortalScopeProps } from "./lib/portal-scope";
@@ -424,7 +424,7 @@ export function CardSections({ screen, state, run, open, stuck }: { screen: Card
 // ---------------------------------------------------------------------------
 
 export type RuleItem = { id: string; text: string };
-const CONFIDENCE = { low: 1, medium: 2, high: 3 } as const;
+const STRENGTH_DOTS: Record<Strength, number> = { weak: 1, moderate: 2, strong: 3 };
 function Group({ group, state, run, stuck }: { group: UncGroup; state: RowState; run: Run; stuck: boolean }) {
   if (group.accepted) return <section data-deck-sec={group.key} className="mt-0.5">
     <div className="flex min-h-9 items-center gap-2 border-b border-border/50 py-1 pl-2 pr-1 text-[12.5px]">
@@ -436,18 +436,22 @@ function Group({ group, state, run, stuck }: { group: UncGroup; state: RowState;
   </section>;
   const target = group.target;
   const live = group.button.count > 0;
+  const detail = group.signals.length ? group.signals.join(" · ") : group.reason;
   return <section data-deck-sec={group.key} className="mt-0.5">
     <div className={cn("sticky z-[4] flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1", stuck ? "top-[34px]" : "top-0")}>
       <span aria-hidden className="h-3.5 w-[3px] shrink-0 rounded-full" style={{ background: group.color }} />
       {target ? <span className="text-[12px] text-muted-foreground">→{target.kind === "new" ? " new" : ""}</span> : null}
       {target ? <Dot color={group.color} /> : null}
       <h2 className={cn("truncate text-[12.5px]", target ? "font-semibold" : "font-medium text-muted-foreground")}>{group.title}</h2>
-      <span className="min-w-0 flex-[1_1_200px] truncate text-[11.5px] text-muted-foreground" title={group.reason}>{group.reason}
-        {group.confidence ? <span className="ml-1.5 inline-flex items-center gap-0.5 align-middle" title={`${group.confidence} confidence`}>{[1, 2, 3].map((dot) =>
-          <i key={dot} className={cn("inline-block size-1 rounded-full", dot <= CONFIDENCE[group.confidence!] ? "bg-foreground/70" : "bg-border")} />)}
-          <span className="ml-1 capitalize">{group.confidence}</span></span> : null}</span>
+      {group.strength ? <span data-deck-strength={group.strength} title={`${group.strength} signals`}
+        className={cn("inline-flex shrink-0 items-center gap-0.5 text-[11.5px]", group.strength === "weak" ? TONE.amber.text : "text-muted-foreground")}>
+        {[1, 2, 3].map((dot) => <i key={dot} aria-hidden className={cn("inline-block size-1 rounded-full", dot <= STRENGTH_DOTS[group.strength!] ? "bg-current" : "bg-border")} />)}
+        <span className="ml-1 capitalize">{group.strength}</span></span> : null}
+      {/* What it rests on, before you accept it: the specific signals, or why there are none. */}
+      <span data-deck-signals className="min-w-0 flex-[1_1_200px] truncate text-[11.5px] text-muted-foreground" title={detail}>{detail}</span>
       <button type="button" data-deck-focus={`group-${group.key}`} aria-disabled={live ? undefined : true} onClick={() => { if (live) run({ kind: "group", key: group.key }); }}
-        title={group.button.kind === "pick" ? "Pick an effort for each PR (e)" : "Moves nothing until you press it; Undo takes it back"}
+        title={group.button.kind === "pick" ? "Pick an effort for each PR (e)" : group.button.confirm ? "Weak signals: lists each PR and its signals before it moves them"
+          : "Moves nothing until you press it; Undo takes it back"}
         className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>{group.button.label}<Kbd>{group.button.kind === "pick" ? "e" : "p"}</Kbd></button>
     </div>
     <div className="pb-1.5 pt-0.5">{group.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0} />)}</div>
@@ -720,6 +724,19 @@ export function SeedBody({ proposals, keyed, picked, busy, error, onPick, onCrea
     <p className="text-[12px] text-muted-foreground">Each takes only PRs no effort owns. It never syncs with Linear after; Undo takes it back.</p>
     {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
     <DialogButtons busy={busy} label={picked.size ? `Create ${plural(picked.size, "effort")}` : "Create"} onOk={onCreate} onCancel={onCancel} disabled={!picked.size} />
+  </div>;
+}
+
+/** A weak suggestion asks before it moves anything: each PR with the signals behind it, then one button. */
+export function WeakBody({ lines, label, busy, error, onAccept, onCancel }: { lines: readonly Pick<DeckLine, "prUrl" | "ref" | "title" | "signals">[]; label: string;
+  busy: boolean; error: string | null; onAccept(): void; onCancel(): void }) {
+  return <div className="grid gap-3 text-[12.5px]">
+    <ul data-deck-weak className="grid max-h-[50vh] gap-1.5 overflow-y-auto">{lines.map((line) => <li key={line.prUrl} className="min-w-0">
+      <b className="font-medium">{line.ref}</b> <span className="text-muted-foreground">{line.title}</span>
+      <span className="block truncate text-[11.5px] text-muted-foreground">{line.signals.length ? line.signals.join(" · ") : "No signal of its own; it goes with its group"}</span>
+    </li>)}</ul>
+    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
+    <DialogButtons busy={busy} label={label} onOk={onAccept} onCancel={onCancel} />
   </div>;
 }
 

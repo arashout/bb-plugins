@@ -14,10 +14,14 @@
 //   group  2  the board's derived group also holds the effort's PRs
 //   prefix 1  every owned PR with this ticket prefix is in the effort
 //   area   1  the only effort whose PRs change this code area
-// The best effort wins by its margin over the next: high at 3 or more, medium
-// at 2, low at 1; a tie suggests nothing. A cohort with no effort signal and
-// two or more PRs is proposed as a new effort, and a lone PR whose ticket
-// nothing else carries, under a prefix other work uses, as a one-off.
+// A ticket prefix names a team, not a piece of work, so it only adds weight
+// to a signal of weight 2 or more for the same effort; alone or beside a code
+// area it counts nothing (a standing rule can still name a prefix). The best
+// effort wins by its margin over the next: high at 3 or more, medium at 2,
+// low at 1; a tie suggests nothing. A cohort with no effort signal and two or
+// more PRs is proposed as a new effort, and a lone PR whose ticket nothing
+// else carries, under a prefix other work uses, as a one-off: so a lone PR
+// tied to an effort only by its prefix is a low one-off.
 import { z } from "zod";
 import { stackParent } from "./pr-backlog.js";
 import { ticketsIn } from "./threads.js";
@@ -46,6 +50,8 @@ export const suggestionGroupSchema = z.object({
   /** One group per effort and confidence, so accepting a group never trusts a PR more than its own signals earned. */
   confidence: z.enum(CONFIDENCES).nullable(),
   reason: z.string(),
+  /** The specific signals behind its target, strongest kind first, for you to check before you accept it; empty without a target. */
+  signals: z.array(z.string()),
   /** Tickets its PRs carry that no effort owns: accepting may add them, so later PRs on them join too. */
   tickets: z.array(z.string()),
   prs: z.array(z.object({ prUrl: z.string(), repo: z.string(), number: z.number(), title: z.string(), signals: z.array(signalSchema) }).strict()),
@@ -197,7 +203,10 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
   const placed: Placed[] = [];
   for (const members of cohorts.values()) {
     const list = [...members];
-    const found = new Map(list.map((pr) => [pr.url, signals(pr)]));
+    const raw = new Map(list.map((pr) => [pr.url, signals(pr)]));
+    // A prefix counts only for an effort that a signal of weight 2 or more in the cohort points at too.
+    const backed = new Set([...raw.values()].flat().flatMap((signal) => WEIGHT[signal.kind] >= 2 ? [signal.effortId] : []));
+    const found = new Map([...raw].map(([url, own]) => [url, own.filter((signal) => signal.kind !== "prefix" || backed.has(signal.effortId))]));
     const score = new Map<string, number>();
     for (const kind of SIGNAL_KINDS) for (const id of new Set(list.flatMap((pr) => found.get(pr.url)!.flatMap((signal) => signal.kind === kind ? [signal.effortId!] : []))))
       score.set(id, (score.get(id) ?? 0) + WEIGHT[kind]);
@@ -224,7 +233,7 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
     } else if (!best && tickets.get(list[0]!.url)!.length > 0 && tickets.get(list[0]!.url)!.every((ticket) =>
       allTickets.get(ticket)!.size === 1 && !byTicket.has(ticket) && known(ticket, list[0]!.url))) {
       placed.push({ target: { kind: "one-off" }, key: "one-off", confidence: "low", reason: "Standalone ticket that nothing else carries",
-        prs: rows((pr) => tickets.get(pr.url)!.map((ticket) => ({ kind: "ticket" as const, effortId: null, text: `ticket ${ticket}` }))) });
+        prs: rows((pr) => tickets.get(pr.url)!.map((ticket) => ({ kind: "ticket" as const, effortId: null, text: `standalone ticket ${ticket}` }))) });
     } else placed.push({ target: null, key: "none", confidence: null, reason: "No clear signal. Pick an effort for each PR.", prs: rows() });
   }
 
@@ -232,7 +241,7 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
   const rank = (confidence: Confidence | null) => confidence === null ? -1 : CONFIDENCES.indexOf(confidence);
   const owners = new Set(input.efforts.flatMap((effort) => effort.tickets));
   for (const item of placed) {
-    const group = groups.get(item.key) ?? { key: item.key, target: item.target, confidence: item.confidence, reason: item.reason, tickets: [], prs: [] };
+    const group = groups.get(item.key) ?? { key: item.key, target: item.target, confidence: item.confidence, reason: item.reason, signals: [], tickets: [], prs: [] };
     for (const { pr, signals: found } of item.prs) {
       group.prs.push({ prUrl: pr.url, repo: pr.repo, number: pr.number, title: displayTitle(pr.title), signals: found });
       for (const ticket of tickets.get(pr.url)!) if (!owners.has(ticket) && !group.tickets.includes(ticket)) group.tickets.push(ticket);
@@ -246,6 +255,9 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
     const target = group.target;
     if (target?.kind === "effort") group.reason = capitalize(SIGNAL_KINDS.filter((kind) => group.prs.some((pr) =>
       pr.signals.some((signal) => signal.kind === kind && signal.effortId === target.effortId))).slice(0, 2).map((kind) => REASONS[kind]).join(" · "));
+    const aim = target?.kind === "effort" ? target.effortId : null;
+    if (target) group.signals = [...new Set(SIGNAL_KINDS.flatMap((kind) => group.prs.flatMap((pr) =>
+      pr.signals.flatMap((signal) => signal.kind === kind && signal.effortId === aim ? [signal.text] : []))))];
   }
   return [...groups.values()].sort((a, b) => Number(a.target === null) - Number(b.target === null) || rank(b.confidence) - rank(a.confidence) ||
     b.prs.length - a.prs.length || a.key.localeCompare(b.key));

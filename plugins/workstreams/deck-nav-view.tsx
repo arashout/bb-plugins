@@ -15,10 +15,10 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
   type Seen, type ViewPlace } from "./deck-place";
-import { availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
+import { acceptLabel, acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
   uncScreen, uncSnapshot, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type UncGroup } from "./deck-view-model";
-import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, type DeckCommand, type RuleDraft,
-  type RuleItem } from "./deck-screen";
+import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
+  type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
@@ -76,7 +76,8 @@ type Dialogs =
   | { kind: "hold-pr"; prUrl: string; ref: string; reason: string }
   | { kind: "rule"; draft: RuleDraft; matches: number | null } | { kind: "new"; prUrls: string[]; refs: string[]; name: string; goal: string; group: string | null }
   | { kind: "move"; prUrls: string[]; refs: string[]; group: string | null } | { kind: "palette"; query: string; highlight: number } | { kind: "help" }
-  | { kind: "seed"; proposals: SeedProposal[] | null; keyed: boolean; picked: string[]; requestId: string };
+  | { kind: "seed"; proposals: SeedProposal[] | null; keyed: boolean; picked: string[]; requestId: string }
+  | { kind: "weak"; group: string; lines: readonly DeckLine[] };
 
 export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const navigate = useBbNavigate();
@@ -361,8 +362,9 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const cardOf = (id: string) => view?.active.find((item) => item.id === id) ?? view?.held.find((item) => item.id === id) ?? null;
 
   // ---- membership: accept, move, one-off, new effort, rules ---------------
+  /** `note`: what else an Accept across groups did, said with its result so the result doesn't hide it. */
   async function classify(call: () => Promise<{ ok: true; actionId: string; effort: { name: string }; added: number } | { ok: false; error: string }>, group: string | null,
-    prUrls: readonly string[]) {
+    prUrls: readonly string[], note?: string | null) {
     setBusy(true);
     let result: Awaited<ReturnType<typeof call>>;
     try { result = await call(); } catch (cause) { result = { ok: false, error: message(cause) }; }
@@ -380,7 +382,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     let used = false;
     setUndo({ label: text, live: () => !used, run: async () => { used = true; await undoIt(); } });
     closeDialog();
-    say(text, true);
+    say(note ? `${text} · ${note}` : text, true);
     if (group) nextGroupFocus(group, prUrls);
     load();
     return true;
@@ -397,20 +399,22 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     pendingFocus.current = row ? { row: row.prUrl, section: next!.key } : { id: "heading" };
     scrollFocus.current = true;
   }
-  const assign = (effortId: string, prUrls: string[], group: string | null) =>
-    classify(() => rpc.call("classify_assign", { effortKey: effortId, prUrls }), group, prUrls);
-  const oneOff = (prUrls: string[], group: string | null) => classify(() => rpc.call("classify_one_off", { prUrls }), group, prUrls);
-  function acceptGroup(key: string) {
+  const assign = (effortId: string, prUrls: string[], group: string | null, note?: string | null) =>
+    classify(() => rpc.call("classify_assign", { effortKey: effortId, prUrls }), group, prUrls, note);
+  const oneOff = (prUrls: string[], group: string | null, note?: string | null) => classify(() => rpc.call("classify_one_off", { prUrls }), group, prUrls, note);
+  /** `asked`: a weak group's rows you already checked in its confirm; before that, its Accept opens the confirm. `note`: see `classify`. */
+  function acceptGroup(key: string, { asked, note }: { asked?: readonly DeckLine[]; note?: string | null } = {}) {
     const group = unc?.groups.find((item) => item.key === key);
     if (!group) return;
     const live = group.lines.filter((line) => !line.dim);
     const picked = live.filter((line) => here.selected.includes(line.prUrl));
-    const rows = picked.length ? picked : live;
+    const rows = asked ?? (picked.length ? picked : live);
     if (!rows.length) return;
+    if (group.button.confirm && !asked) { openDialog({ kind: "weak", group: key, lines: rows }); return; }
     const prUrls = rows.map((line) => line.prUrl);
     const target = group.target;
-    if (target?.kind === "effort") void assign(target.effortId, prUrls, key);
-    else if (target?.kind === "one-off") void oneOff(prUrls, key);
+    if (target?.kind === "effort") void assign(target.effortId, prUrls, key, note);
+    else if (target?.kind === "one-off") void oneOff(prUrls, key, note);
     else if (target?.kind === "new") openDialog({ kind: "new", prUrls, refs: refs(rows), name: target.name, goal: "", group: key });
     else {
       // No clear signal: pick an effort for the rows you selected, else for the focused row, and the dialog names exactly those.
@@ -576,8 +580,10 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
       case "open-thread": if (row?.row?.thread) navigate.toThread(row.row.thread.id); return;
       case "open-pr": if (row) navigate.openUrl(row.prUrl); return;
       case "accept": {
-        if (selected.length) { for (const key of new Set(selected.map((item) => item.section))) acceptGroup(key); return; }
-        if (row) acceptGroup(row.section);
+        if (!selected.length) { if (row) acceptGroup(row.section); return; }
+        const plan = acceptPlan(unc?.groups ?? [], [...new Set(selected.map((item) => item.section))]);
+        for (const key of plan.take) acceptGroup(key, { note: plan.left });
+        if (plan.left) say(plan.left);
         return;
       }
       case "move": { const list = scopeRows(); if (list.length) openDialog({ kind: "move", prUrls: list.map((item) => item.prUrl), refs: refs(list), group: null }); return; }
@@ -685,6 +691,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     return count ? [{ id, count, tone: SECTIONS[id].tone }] : [];
   });
   const complete = dialog?.kind === "complete" ? cardOf(dialog.id) : null;
+  const weakGroup = dialog?.kind === "weak" ? unc?.groups.find((item) => item.key === dialog.group) ?? null : null;
   const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
   const moveTargets = [...order.flatMap((id) => { const item = cards.get(id); return item ? [{ id, name: item.card.name, color: item.color, open: item.card.stats.open }] : []; })];
 
@@ -728,6 +735,11 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
       onClose={closeDialog} onReturn={returnFocus} onConfirmKey={() => seed()}>
       {dialog?.kind === "seed" ? <SeedBody proposals={dialog.proposals} keyed={dialog.keyed} picked={new Set(dialog.picked)} busy={busy} error={dialogError}
         onPick={(projectId) => setDialog({ ...dialog, picked: toggleIn(dialog.picked, projectId) })} onCreate={() => seed()} onCancel={closeDialog} /> : null}
+    </DeckDialog>
+    <DeckDialog open={dialog?.kind === "weak"} title="Weak suggestion" sub={weakGroup ? `Only weak signals point ${dialog?.kind === "weak" && dialog.lines.length === 1 ? "this"
+      : "these"} at ${weakGroup.title}. Check each first.` : undefined} onClose={closeDialog} onReturn={returnFocus} onConfirmKey={() => acceptWeak()}>
+      {dialog?.kind === "weak" && weakGroup ? <WeakBody lines={dialog.lines} label={acceptLabel(weakGroup.target, dialog.lines.length)} busy={busy} error={dialogError}
+        onAccept={() => acceptWeak()} onCancel={closeDialog} /> : null}
     </DeckDialog>
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={closeDialog} onReturn={returnFocus}>
       {dialog?.kind === "palette" ? <div onKeyDown={(event) => {
@@ -807,6 +819,9 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
       say(text, made.length > 0);
       load();
     }, (cause: unknown) => { setBusy(false); setDialogError(message(cause)); });
+  }
+  function acceptWeak() {
+    if (dialog?.kind === "weak" && !busy) acceptGroup(dialog.group, { asked: dialog.lines });
   }
   function createEffort() {
     if (dialog?.kind !== "new" || busy || !dialog.name.trim()) return;
