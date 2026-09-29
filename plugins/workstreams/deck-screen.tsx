@@ -47,11 +47,20 @@ const BUTTON = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowr
 const GHOST = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="inline-block min-w-4 rounded border border-b-2 border-border px-1 text-center font-mono text-[10.5px] leading-[14px] text-muted-foreground">{children}</kbd>;
+/**
+ * A key badge. On a primary button (`inverted`, which fills with the foreground color) it's a translucent wash of the button's own text
+ * color with text in that color, so it never reads as an empty box; elsewhere it's a hairline with muted text. No key draws no badge.
+ */
+export function Kbd({ children, inverted }: { children?: string | null; inverted?: boolean }) {
+  if (!children?.trim()) return null;
+  return <kbd className={cn("inline-block min-w-4 rounded border px-1 text-center font-mono text-[10.5px] leading-[14px]",
+    inverted ? "border-transparent bg-background/20 text-background" : "border-border text-muted-foreground")}>{children}</kbd>;
 }
 /** A key's hint as kbds: "] →" reads as two keys for one action. */
-export const Keys = ({ keys }: { keys: string }) => <span className="inline-flex gap-0.5">{keys.split(" ").map((key) => <Kbd key={key}>{key}</Kbd>)}</span>;
+export function Keys({ keys, inverted }: { keys: string; inverted?: boolean }) {
+  const list = keys.split(" ").filter(Boolean);
+  return list.length ? <span className="inline-flex gap-0.5">{list.map((key) => <Kbd key={key} inverted={inverted}>{key}</Kbd>)}</span> : null;
+}
 const Dot = ({ color, hollow }: { color: string; hollow?: boolean }) => <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", hollow && "border border-dashed")}
   style={hollow ? { borderColor: color } : { background: color }} />;
 const Changed = ({ title }: { title: string }) => <span title={title} aria-label={title} className="inline-block size-1.5 shrink-0 rounded-full bg-sky-500" />;
@@ -65,7 +74,7 @@ function ActionButton({ id, on, run, label, tone, primary, line }: { id: DeckAct
     title={available.on ? `${ACTION[id].title}${key ? ` (${key})` : ""}` : `${ACTION[id].title.replace("…", "")}: ${available.why}`}
     onClick={() => { if (available.on) run({ kind: "action", id, line }); }}
     className={cn(BUTTON, primary ? "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90" : tone ? TONE[tone].button : "border-border hover:bg-foreground/[0.06]")}>
-    {label ?? ACTION[id].title}{key ? <Keys keys={key} /> : null}
+    {label ?? ACTION[id].title}<Keys keys={key ?? ""} inverted={primary} />
   </button>;
 }
 
@@ -535,7 +544,7 @@ export function BatchBar({ selected, kinds, unc, run }: { selected: number; kind
     <div className="mx-auto flex max-w-[1260px] flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]">
       <b className="mr-1 font-semibold">{selected} selected</b>
       {!unc && safe ? <button type="button" onClick={() => run({ kind: "action", id: "advance" })} className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background")}>
-        Advance · {safe}<Kbd>a</Kbd></button> : null}
+        Advance · {safe}<Kbd inverted>a</Kbd></button> : null}
       {kinds.map((kind) => <button key={kind.id} type="button" onClick={() => run({ kind: "action", id: kind.id })} className={cn(BUTTON, TONE[kind.tone].button)}>
         {ACTION[kind.id].title.replace("…", "")} {kind.count}<Kbd>{ACTION[kind.id].keys[0]}</Kbd></button>)}
       {unc ? <>
@@ -603,7 +612,7 @@ export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, on
       <span className="mr-auto text-[11.5px] text-muted-foreground">{dirty ? "Plan again first" : `Sends after ${seconds} s · Undo until then`}</span>
       <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
       <button type="button" data-deck-confirm disabled={busy || dirty || plan.items.length === 0} onClick={onConfirm}
-        className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Starting…" : `${plan.verb} ${plan.items.length}`}<Kbd>⌘↵</Kbd></button>
+        className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Starting…" : `${plan.verb} ${plan.items.length}`}<Kbd inverted>⌘↵</Kbd></button>
     </div>
   </div>;
 }
@@ -623,7 +632,7 @@ function DialogButtons({ busy, label, onOk, onCancel, disabled }: { busy: boolea
   return <div className="flex items-center justify-end gap-2 border-t border-border/60 pt-2.5">
     <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
     <button type="button" data-deck-confirm disabled={busy || disabled} onClick={onOk}
-      className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Working…" : label}<Kbd>⌘↵</Kbd></button>
+      className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Working…" : label}<Kbd inverted>⌘↵</Kbd></button>
   </div>;
 }
 
