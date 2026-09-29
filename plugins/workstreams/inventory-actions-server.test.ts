@@ -177,6 +177,24 @@ describe("inventory actions on the server", () => {
     expect(await env.row(314)).toMatchObject({ lastAction: { action: "request-review", ok: false } });
   });
 
+  it("holds every PR of an effort you put on hold: no row action, merge preview, or merge writes to one until you resume it", async () => {
+    const env = await setup();
+    const effort = createEffortStore(env.db).establish({ sourceKey: "pr:313", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
+      coordinatorState: "none", members: { tickets: [], prUrls: [url(313), url(316)] } });
+    expect(await env.rpc("effort_hold", { effortKey: effort.id, reason: "Store layout first" })).toMatchObject({ ok: true });
+    const held = env.since();
+    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD }))
+      .toEqual({ ok: false, error: "Its effort is on hold. Resume it first; nothing was written." });
+    expect(held()).toEqual([]);
+    const refusal = "Its effort is on hold. Resume it before merging this PR.";
+    expect((await env.rpc("action_merge_preview", { prUrl: url(316) }) as { ok: true; refusals: string[] }).refusals).toContain(refusal);
+    expect(await env.rpc("action_merge", { prUrl: url(316), sha: HEAD, acknowledgeUnresolved: false })).toEqual({ ok: false, error: refusal });
+    expect(held().map((call) => call.method)).not.toContain("prWrite");
+    // Resumed, its PRs take writes again.
+    expect(await env.rpc("effort_resume", { effortKey: effort.id })).toMatchObject({ ok: true });
+    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: true, detail: "Wrote ready." });
+  });
+
   // A confirmation clears the merge gate, so it binds to what the row showed, refused under a hold or after a push or a new comment, and
   // once recorded, the row asks to merge through the same fresh preview, which accepts it.
   it("confirms an approval's comments from its row, as yours and on its head, after which the row and the fresh preview offer the merge", async () => {

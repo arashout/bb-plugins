@@ -29,7 +29,7 @@ import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establ
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
-import { DECK_CHANGED, type RowActed } from "./deck-shared.js";
+import { DECK_CHANGED, type DeckPile, type RowActed } from "./deck-shared.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
   type AssignmentSource } from "./effort-assignments.js";
@@ -853,6 +853,7 @@ export default async function plugin(bb: BbPluginApi) {
     const hold = prHolds.get(prUrl);
     return hold ? `On hold${hold.reason ? `: ${hold.reason}` : ""}. Release the hold before advancing or merging this PR.` : null;
   };
+  const EFFORT_HELD_MERGE = "Its effort is on hold. Resume it before merging this PR.";
   const effortStore = createEffortStore(db);
   const effortWork = createEffortWorkStore(db);
   const piles = createEffortPileStore(db);
@@ -4890,7 +4891,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function directActionRun(input: DirectTarget, action: DirectAction, act: () => Promise<WriteResult>): Promise<WriteResult> {
     const unit = directUnit(input);
     const prUrl = "prUrl" in input ? input.prUrl : unit?.pr?.url;
-    const held = action === "merge" && prUrl ? holdMessage(prUrl) : null;
+    const held = action === "merge" && prUrl ? holdMessage(prUrl) ?? (await effortHeld(prUrl) ? EFFORT_HELD_MERGE : null) : null;
     if (held) return { ok: false, error: held };
     // Merging a Ready row stays allowed: Ready means no v2 worker holds it.
     const claimed = v2Claimed(prUrl, unit?.path);
@@ -5398,11 +5399,23 @@ export default async function plugin(bb: BbPluginApi) {
   /** What each inventory action did, newest first: the last 200 clicks, refusals included. */
   const actionRecords = async (): Promise<ActionRecord[]> => actionRecordsSchema.parse((await bb.storage.kv.get<unknown>("inventoryActions")) ?? []);
   let recording: Promise<unknown> = Promise.resolve();
+  /** Each PR's pile now, from one read, as the deck files it: an archived effort's PRs pause with the done efforts'. */
+  const pileOf = async (): Promise<(prUrl: string) => DeckPile> => {
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    return (prUrl) => {
+      const owner = work.ownerForPr(prUrl);
+      const effort = owner && effortStore.get(owner.id);
+      return !effort ? "unclassified" : effort.archivedAt ? "done" : piles.get(effort).pile;
+    };
+  };
+  /** Holding an effort holds each of its PRs: no write or merge reaches one until you resume the effort. */
+  const effortHeld = async (prUrl: string) => (await pileOf())(prUrl) === "held";
   /** The inventory's one-click GitHub writes. Each is one click's authorization, checked again on fresh facts; see inventory-actions.ts. */
   const inventoryActions = createInventoryActions({
     now: Date.now,
     listed: (prUrl) => inventory.get(prUrl) !== undefined,
     hold: (prUrl) => prHolds.get(prUrl),
+    effortHold: async (prUrl) => await effortHeld(prUrl) ? "Its effort is on hold. Resume it first; nothing was written." : null,
     writer: (prUrl) => {
       const paths = readUnits().flatMap((unit) => unit.pr && prWorkItemKey(unit.pr.url) === prWorkItemKey(prUrl) ? [unit.path] : []);
       for (const path of [null, ...paths]) { const claimed = v2Claimed(prUrl, path); if (claimed) return `${claimed} Nothing was written.`; }
@@ -5460,15 +5473,7 @@ export default async function plugin(bb: BbPluginApi) {
       : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
       : item.kind === "request" ? inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!)
       : inventoryActions.confirmHandled(item.prUrl, item.headOid!, item.fingerprint!),
-    // As the deck files each PR: an archived effort's PRs pause with the done efforts'.
-    piles: async () => {
-      const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-      return (prUrl) => {
-        const owner = work.ownerForPr(prUrl);
-        const effort = owner && effortStore.get(owner.id);
-        return !effort ? "unclassified" : effort.archivedAt ? "done" : piles.get(effort).pile;
-      };
-    } });
+    piles: pileOf });
   deckBatches.resume();
   bb.onDispose(() => deckBatches.dispose());
 
@@ -6193,7 +6198,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!read.ok) return read;
       const { mergeMethod, deleteBranchOnMerge } = await settings.get();
       const verdict = mergeVerdict(read.live, approvalFeedback.get(target.prUrl));
-      const held = holdMessage(target.prUrl);
+      const held = holdMessage(target.prUrl) ?? (await effortHeld(target.prUrl) ? EFFORT_HELD_MERGE : null);
       if (held) verdict.refusals.unshift(held);
       // The merge refuses while a v2 worker claims the PR or its checkout, so the preview never offers it.
       const claimed = v2Claimed(target.prUrl, directUnit(input)?.path);

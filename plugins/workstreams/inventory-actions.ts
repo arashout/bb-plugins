@@ -3,10 +3,10 @@
 // handled. Each click authorizes one write on the facts the row showed, which
 // the click sends back: a GitHub write, or for a confirmation, a verification
 // recorded as yours. Before writing, it reads the PR again, and it refuses
-// under a hold, a v2 claim or another writer, and when the facts the step
-// depends on changed since the row was shown. Every outcome is recorded,
-// refusals included. Merge is not here: the row opens the existing fresh merge
-// preview, and nothing merges outside it.
+// under a hold (the PR's or its effort's), a v2 claim or another writer, and
+// when the facts the step depends on changed since the row was shown. Every
+// outcome is recorded, refusals included. Merge is not here: the row opens the
+// existing fresh merge preview, and nothing merges outside it.
 import type { ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import type { Pr, PrWrite } from "./contract.js";
 import { REVIEWER } from "./ghactions.js";
@@ -24,6 +24,8 @@ export type InventoryActionDeps = {
   /** Whether the PR is one of your open PRs in the inventory. */
   listed(prUrl: string): boolean;
   hold(prUrl: string): PrHold | null;
+  /** Why the PR's effort holds it: you put the effort on hold, which holds each of its PRs until you resume it. Null otherwise. */
+  effortHold(prUrl: string): Promise<string | null>;
   /** Why another writer holds the PR or a checkout of it (a v2 claim, a legacy batch, a launching board action), or null. */
   writer(prUrl: string): string | null;
   /** Take the PR's board-action lock, or null when another action holds it; the result releases it. */
@@ -75,7 +77,7 @@ export function createInventoryActions(deps: InventoryActionDeps) {
     };
     const refuse = (error: string) => finish({ ok: false, error });
     if (!deps.listed(prUrl)) return refuse("That PR isn't one of your open PRs in the inventory. Refresh it and try again.");
-    const guarded = heldOrClaimed(prUrl);
+    const guarded = heldOrClaimed(prUrl) ?? await deps.effortHold(prUrl);
     if (guarded) return refuse(guarded);
     const release = deps.lock(prUrl);
     if (!release) return refuse("Another action on this PR is still running; nothing was written.");
@@ -84,7 +86,7 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (!read.ok) return refuse(`GitHub couldn't be read, so nothing was written: ${read.error}`);
       if (!read.pr) return refuse("This PR is no longer open; nothing was written.");
       // A hold or a claim may have landed while GitHub answered.
-      const late = heldOrClaimed(prUrl);
+      const late = heldOrClaimed(prUrl) ?? await deps.effortHold(prUrl);
       if (late) return refuse(late);
       const step = await decide(read.pr);
       if ("refuse" in step) return refuse(step.refuse);

@@ -26,12 +26,13 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<In
   const records: ActionRecord[] = [];
   const writes: PrWrite[] = [];
   const confirmed: unknown[][] = [];
-  let hold: PrHold | null = null, writer: string | null = null, locked = false;
+  let hold: PrHold | null = null, writer: string | null = null, effortHold: string | null = null, locked = false;
   const { listed = true, fresh = pr() } = options;
   const deps: InventoryActionDeps = {
     now: () => 1_000,
     listed: () => listed,
     hold: () => hold,
+    effortHold: async () => effortHold,
     writer: () => writer,
     lock: () => { if (locked) return null; locked = true; return () => { locked = false; }; },
     read: vi.fn(async () => { log.push("read"); return { ok: true as const, pr: fresh }; }),
@@ -42,7 +43,8 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<In
     ...options.deps,
   };
   return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed,
-    hold: (value: PrHold | null) => { hold = value; }, writer: (value: string | null) => { writer = value; }, lock: () => { locked = true; } };
+    hold: (value: PrHold | null) => { hold = value; }, writer: (value: string | null) => { writer = value; },
+    effortHold: (value: string | null) => { effortHold = value; }, lock: () => { locked = true; } };
 }
 
 describe("inventory actions", () => {
@@ -62,10 +64,14 @@ describe("inventory actions", () => {
     const claimed = setup({ fresh: draft });
     claimed.writer("A worker from the Shelf order roster is writing this PR or checkout.");
     expect(await claimed.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
+    // Holding its effort holds the PR too, as the Hold dialog promises.
+    const effortHeld = setup({ fresh: draft });
+    effortHeld.effortHold("Its effort is on hold. Resume it first; nothing was written.");
+    expect(await effortHeld.actions.markReady(URL, HEAD)).toEqual({ ok: false, error: "Its effort is on hold. Resume it first; nothing was written." });
     const busy = setup({ fresh: draft });
     busy.lock();
     expect(await busy.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Another action") });
-    for (const env of [held, claimed, busy]) {
+    for (const env of [held, claimed, effortHeld, busy]) {
       expect(env.log).toEqual([]);
       expect(env.records).toMatchObject([{ action: "mark-ready", ok: false }]);
     }
@@ -83,6 +89,14 @@ describe("inventory actions", () => {
     });
     expect(await env.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
     expect(env.log).toEqual(["read"]);
+    const effortHeld = setup({ fresh: draft });
+    (effortHeld.deps.read as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      effortHeld.log.push("read");
+      effortHeld.effortHold("Its effort is on hold. Resume it first; nothing was written.");
+      return { ok: true, pr: draft };
+    });
+    expect(await effortHeld.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Its effort is on hold") });
+    expect(effortHeld.log).toEqual(["read"]);
   });
 
   it("refuses to mark ready when the facts it rests on changed from the row's: a new head, no longer a draft, closed, or unread", async () => {

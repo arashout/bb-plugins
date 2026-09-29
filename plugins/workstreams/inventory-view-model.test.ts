@@ -65,7 +65,7 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
     for (const pr of approvedWithComments) expect(action(find(pr), "merge")).toBeUndefined();
     const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
     const store = createApprovalFeedbackStore(db);
-    const actions = createInventoryActions({ now: () => NOW, listed: () => true, hold: () => null, writer: () => null, lock: () => () => {},
+    const actions = createInventoryActions({ now: () => NOW, listed: () => true, hold: () => null, effortHold: async () => null, writer: () => null, lock: () => () => {},
       read: async (prUrl) => ({ ok: true, pr: inkwellInventoryPrs(store.get).find((pr) => pr.url === prUrl) ?? null }),
       attention: async (fresh) => inkwellInventory(store.get).groups.flatMap((group) => group.rows).find((row) => row.prUrl === fresh.url)!.attention,
       write: async () => { throw new Error("Confirming writes nothing to GitHub"); },
