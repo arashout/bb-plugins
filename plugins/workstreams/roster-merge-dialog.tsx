@@ -131,10 +131,13 @@ export function MergePreviewBody({ items, selected, busy, notice, onToggle, onMe
   </div>;
 }
 
-/** The dialog: reads every PR's preview in parallel when it opens, picks each one nothing refuses, and merges only on a click or ⌘↵. */
-export function MergePreviewDialog({ targets, rows, onClose, onMerged, onOpenUrl }: { targets: readonly { target: string; n: number | null }[] | null;
+/**
+ * The dialog: reads every PR's preview in parallel when it opens, picks each one nothing refuses, and merges only on a click or ⌘↵.
+ * `onClosed` puts focus back where the caller wants it, since the dialog has no trigger of its own to return to.
+ */
+export function MergePreviewDialog({ targets, rows, onClose, onMerged, onOpenUrl, onClosed }: { targets: readonly { target: string; n: number | null }[] | null;
   /** What names each PR: the roster's rows, or the inventory's. */
-  rows: readonly Pick<RosterRow, "target" | "repo" | "number" | "title">[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void }) {
+  rows: readonly Pick<RosterRow, "target" | "repo" | "number" | "title">[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void; onClosed?: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
   const [items, setItems] = useState<MergeItem[]>([]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -182,6 +185,7 @@ export function MergePreviewDialog({ targets, rows, onClose, onMerged, onOpenUrl
   return <Dialog open={targets !== null} onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
     <DialogContent ref={content} className={cn("max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto", POINTER_CURSORS)}
       onOpenAutoFocus={(event) => { event.preventDefault(); content.current?.focus(); }}
+      onCloseAutoFocus={(event) => { if (onClosed) { event.preventDefault(); onClosed(); } }} onAfterCloseAutoFocus={onClosed}
       onKeyDown={(event) => { if (mergeTrigger({ kind: "key", key: event.key, metaKey: event.metaKey, ctrlKey: event.ctrlKey }) === "merge") { event.preventDefault(); void merge("merge"); } }}>
       <DialogHeader>
         <DialogTitle>Fresh merge preview</DialogTitle>

@@ -206,7 +206,7 @@ describe("the inventory before its first read", () => {
   it("keeps the view tabs while it reads or when the read failed, so every other view stays one click away", () => {
     const pending = (error: string | null) => renderToStaticMarkup(createElement(InventoryPending, { error, onRetry: noop, onView: noop, onHow: noop }));
     for (const html of [pending(null), pending("HTTP 500")]) {
-      expect([...html.matchAll(/role="tab"[^>]*>([^<]+)</gu)].map((match) => match[1])).toEqual(["Inventory", "Map", "Pipeline", "Work", "Efforts"]);
+      expect([...html.matchAll(/role="tab"[^>]*>([^<]+)</gu)].map((match) => match[1])).toEqual(["Efforts", "All PRs", "Map", "Pipeline", "Work", "Manage efforts"]);
       expect(text(html)).toContain("How it works");
     }
     expect(text(pending(null))).toContain("Reading your open PRs…");

@@ -1,14 +1,14 @@
-export type ViewId = "inventory" | "map" | "pipeline" | "work" | "efforts" | "board" | "roster";
+export type ViewId = "deck" | "inventory" | "map" | "pipeline" | "work" | "efforts" | "board" | "roster";
 
 /**
- * Renamed from "bb-workstreams:last-view" when the PR inventory became the front door (plan amendment A13), so a view remembered
- * before then opens the inventory once; after that, the panel reopens the last view you chose.
+ * Renamed when the effort deck became the front door (plan amendment A15), as it was when the PR inventory did (A13), so a view
+ * remembered before then opens the deck once; after that, the panel reopens the last view you chose.
  */
-export const VIEW_STORAGE_KEY = "bb-workstreams:last-view-since-inventory";
+export const VIEW_STORAGE_KEY = "bb-workstreams:last-view-since-deck";
 
 export function viewFromSubPath(subPath: string): ViewId | null {
   const head = subPath.split("/").find(Boolean);
-  return head === "board-v2" ? "board" : head === "inventory" || head === "map" || head === "pipeline" || head === "work" || head === "efforts" || head === "board"
+  return head === "board-v2" ? "board" : head === "deck" || head === "inventory" || head === "map" || head === "pipeline" || head === "work" || head === "efforts" || head === "board"
     || head === "roster" ? head : null;
 }
 
@@ -20,13 +20,14 @@ export function rosterRoute(subPath: string): { effortId: string | null; n: numb
   return { effortId: decoded, n: n !== undefined && /^\d+$/u.test(n) ? Number(n) : null };
 }
 
-/** The view the panel root opens: the last one chosen, else the PR inventory. */
+/** The view the panel root opens: the last one chosen, else the effort deck. */
 export function readLastView(): ViewId {
   try {
     const saved = window.localStorage.getItem(VIEW_STORAGE_KEY);
-    return saved === "board" || saved === "board-v2" ? "board" : saved === "map" || saved === "pipeline" || saved === "work" || saved === "efforts" ? saved : "inventory";
+    return saved === "board" || saved === "board-v2" ? "board"
+      : saved === "inventory" || saved === "map" || saved === "pipeline" || saved === "work" || saved === "efforts" ? saved : "deck";
   } catch {
-    return "inventory";
+    return "deck";
   }
 }
 

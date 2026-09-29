@@ -17,9 +17,9 @@ import { actionCall, INVENTORY_CHANGED, inventoryScreen, withOutcome, type Actio
   type Outcome } from "./inventory-view-model";
 import { MergePreviewDialog } from "./roster-merge-dialog";
 
-/** The views beside the inventory, in the order the tabs and `V` walk them. */
-export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Efforts" }] as const;
-export type OtherView = (typeof OTHER_VIEWS)[number]["id"];
+/** The views after All PRs, in tab order; the effort deck comes before it. */
+export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
+export type OtherView = "deck" | (typeof OTHER_VIEWS)[number]["id"];
 
 export type InventoryPaneProps = RowCallbacks & {
   screen: InventoryScreen;
@@ -54,7 +54,8 @@ function Counts({ screen, onFilter }: Pick<InventoryPaneProps, "screen" | "onFil
 function Header({ onView, onHow }: Pick<InventoryPaneProps, "onView" | "onHow">) {
   return <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-2.5">
     <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
-      <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">Inventory</button>
+      <button type="button" role="tab" aria-selected={false} onClick={() => onView("deck")} className={cn("rounded px-1 py-1 text-muted-foreground hover:text-foreground", FOCUS)}>Efforts</button>
+      <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">All PRs</button>
       {OTHER_VIEWS.map((view) => <button key={view.id} type="button" role="tab" aria-selected={false} onClick={() => onView(view.id)}
         className={cn("rounded px-1 py-1 text-muted-foreground hover:text-foreground", FOCUS)}>{view.title}</button>)}
     </div>
