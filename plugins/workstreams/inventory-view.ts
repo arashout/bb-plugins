@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { PrObservation } from "./inventory-store.js";
 import { attentionReasonSchema, type AttentionReason } from "./pr-attention.js";
+import { EFFORT_PILES } from "./effort-piles.js";
 import { prHoldSchema, type PrHold } from "./pr-holds.js";
 import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } from "./pipeline.js";
 import type { ResolvedThreadLink } from "./work-context.js";
@@ -46,7 +47,8 @@ export const inventoryRowSchema = z.object({
     reviewers: z.array(z.string()) }).strict().nullable(),
 }).strict();
 export type InventoryRow = z.infer<typeof inventoryRowSchema>;
-const effortSchema = z.object({ id: z.string(), name: z.string() }).strict();
+/** `pile` is the effort's pile, or archived, which the server always says: All PRs writes nothing to a held, done, or archived effort's PRs. */
+const effortSchema = z.object({ id: z.string(), name: z.string(), pile: z.enum([...EFFORT_PILES, "archived"]).optional() }).strict();
 export const inventoryViewSchema = z.object({
   /** One group per effort that owns a row, by name, then "No effort" (a null effort). */
   groups: z.array(z.object({ effort: effortSchema.nullable(), rows: z.array(inventoryRowSchema) }).strict()),
@@ -115,7 +117,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
 }
 
 /** Rows by effort, "No effort" last; only rows with a reason of `only`'s question when given. Counts always cover every row. */
-export function inventoryView(rows: readonly (InventoryRow & { effort: { id: string; name: string } | null })[],
+export function inventoryView(rows: readonly (InventoryRow & { effort: InventoryView["groups"][number]["effort"] })[],
   meta: Omit<InventoryView, "groups" | "counts">, only?: InventoryQuestion): InventoryView {
   const asks = (row: InventoryRow, question: InventoryQuestion) => row.attention.some((reason) => reason.question === question);
   const groups = new Map<string, InventoryView["groups"][number]>();

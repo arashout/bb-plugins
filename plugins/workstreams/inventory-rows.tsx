@@ -73,7 +73,8 @@ function Status({ line }: { line: InventoryLine }) {
  */
 function Next({ line, lines }: { line: InventoryLine; lines: 1 | 2 }) {
   if (line.steps.length === 0) {
-    const text = line.hold ? `Held by you${line.hold.reason ? `: "${line.hold.reason}"` : ""}` : line.authored ? "—" : "Asks nothing of you";
+    const text = line.hold ? `Held by you${line.hold.reason ? `: "${line.hold.reason}"` : ""}` : line.effortPile === "held" ? "Its effort is on hold"
+      : line.authored ? "—" : "Asks nothing of you";
     return <span className={cn(lines === 1 ? "line-clamp-1" : "line-clamp-2", "text-muted-foreground")} title={text}>{text}</span>;
   }
   const full = line.steps.map((step) => [step.text, step.owner.label, step.age].filter(Boolean).join(" · ")).join("; ");
@@ -161,6 +162,9 @@ function Actions({ line, props }: { line: InventoryLine; props: InventoryRowsPro
   const thread = line.actions.find((action) => action.id === "thread")!;
   const started = line.threads.find((item) => item.role === "started" && item.id !== thread.threadId);
   return <span className="flex flex-wrap items-center justify-end gap-1">
+    {line.effortPile === "held" ? <Tip label="Its effort is on hold: nothing writes to this PR until you resume the effort">
+      <span tabIndex={0} data-inventory-effort-hold className={cn("inline-flex h-6 items-center rounded-md bg-foreground/[0.05] px-1.5 text-[11px] text-muted-foreground", FOCUS)}>
+        On hold</span></Tip> : null}
     {line.actions.map((action) => {
       if (action.id === "refresh") return <ActionButton key={action.id} line={line} action={action} icon={action.label === "Reading…" ? "Loading" : "ArrowReloadHorizontal"} onAction={props.onAction} />;
       if (action.id === "thread") return <ActionButton key={action.id} line={line} action={action} icon="MessageSquare" onAction={props.onAction} />;

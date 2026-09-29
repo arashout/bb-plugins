@@ -24,7 +24,7 @@ export type InventoryActionDeps = {
   /** Whether the PR is one of your open PRs in the inventory. */
   listed(prUrl: string): boolean;
   hold(prUrl: string): PrHold | null;
-  /** Why the PR's effort holds it: you put the effort on hold, which holds each of its PRs until you resume it. Null otherwise. */
+  /** Why the PR's effort stops it: you put the effort on hold, completed it, or archived it, until you resume, reopen, or restore it. Null otherwise. */
   effortHold(prUrl: string): Promise<string | null>;
   /** Why another writer holds the PR or a checkout of it (a v2 claim, a legacy batch, a launching board action), or null. */
   writer(prUrl: string): string | null;

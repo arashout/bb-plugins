@@ -68,6 +68,8 @@ export type InventoryLine = {
   /** The server's state word; "Clear" on an approved PR reads "Ready to merge", and approval comments to confirm "Approved with comments". */
   status: string;
   hold: { reason: string | null; age: string } | null;
+  /** Its effort is on hold, done, or archived: All PRs offers no write on it. */
+  effortPile: "held" | "done" | "archived" | null;
   steps: Step[];
   /** The action the first step names, which the row leads with. */
   primary: ActionId | null;
@@ -80,7 +82,7 @@ export type InventoryLine = {
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
 };
-export type InventoryGroup = { key: string; effort: { id: string; name: string } | null; label: string; lines: InventoryLine[] };
+export type InventoryGroup = { key: string; effort: InventoryView["groups"][number]["effort"]; label: string; lines: InventoryLine[] };
 export type InventoryScreen = {
   counts: { key: InventoryQuestion; label: string; count: number; active: boolean }[];
   read: { text: string; title: string; refreshing: boolean };
@@ -166,9 +168,14 @@ export function nextSteps(row: InventoryRow, parents: ReadonlyMap<string, Invent
   return { steps: [], primary: null };
 }
 
-/** The row's actions: each write its attention offers, Merge… when it's mergeable or next in its stack, then Refresh and Open thread. */
+/** Why All PRs writes nothing to a done or archived effort's PR, and the way back; the server refuses it too. */
+const EFFORT_STOPPED = { done: "Its effort is done. Reopen it first", archived: "Its effort is archived. Restore it first" } as const;
+/**
+ * The row's actions: each write its attention offers, Merge… when it's mergeable or next in its stack, then Refresh and Open thread. A held
+ * effort's row offers no write, and a done or archived effort's row says why each can't run.
+ */
 export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, context: { now: number; limitedUntil: number | null;
-  running: ActionId | null }): LineAction[] {
+  running: ActionId | null; effortPile?: InventoryLine["effortPile"] }): LineAction[] {
   const actions: LineAction[] = [];
   const thread = row.threads.executor ?? row.threads.origin;
   const action = (id: ActionId, title: string, why: string | null, extra: Partial<LineAction> = {}): LineAction =>
@@ -193,7 +200,10 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   actions.push(action("refresh", `Read ${target} from GitHub now`, unread ?? (context.running === "refresh" ? "Reading GitHub now" : null)));
   actions.push(action("thread", thread ? `Open "${thread.title}"` : `Open ${target}'s thread`, thread ? null : "No thread is linked to this PR yet",
     { threadId: thread?.id ?? null }));
-  return actions;
+  const reads = (item: LineAction) => item.id === "refresh" || item.id === "thread";
+  if (context.effortPile === "held") return actions.filter(reads);
+  const stopped = context.effortPile && EFFORT_STOPPED[context.effortPile];
+  return stopped ? actions.map((item) => reads(item) ? item : { ...item, enabled: false, why: stopped }) : actions;
 }
 
 /** The PR's reviewers: those asked now, then those who reviewed and aren't asked again, with their latest review. */
@@ -236,9 +246,11 @@ function lastOf(row: InventoryRow, outcome: Outcome | undefined, now: number): I
 }
 
 export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, context: { now: number; limitedUntil: number | null;
-  running?: ActionId; outcome?: Outcome }): InventoryLine {
+  running?: ActionId; outcome?: Outcome; effortPile?: InventoryLine["effortPile"] }): InventoryLine {
   const { now } = context;
-  const { steps, primary } = nextSteps(row, parents, now);
+  const effortPile = context.effortPile ?? null;
+  // A held effort's PR asks nothing of you until you resume the effort, as a held PR asks nothing until you release it.
+  const { steps, primary } = effortPile === "held" ? { steps: [], primary: null } : nextSteps(row, parents, now);
   const working = row.threads.executor;
   const started = row.threads.origin && row.threads.origin.id !== working?.id ? row.threads.origin : null;
   return {
@@ -246,9 +258,9 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
     status: row.attention.some((reason) => reason.kind === "approval-comments") ? "Approved with comments"
       : row.status === "Clear" && row.stage === "ready" ? "Ready to merge" : row.status,
-    hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) },
+    hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) }, effortPile,
     steps, primary,
-    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null }),
+    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile }),
     threads: [...working ? [{ ...working, role: "working" as const }] : [], ...started ? [{ ...started, role: "started" as const }] : []],
     checked: checked(row, now),
     managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
@@ -290,11 +302,12 @@ export function inventoryScreen(view: InventoryView, options: { now: number; fil
   const limitedUntil = view.rateLimitedUntil !== null && view.rateLimitedUntil > now ? view.rateLimitedUntil : null;
   const all = view.groups.flatMap((group) => group.rows);
   const parents = new Map(all.map((row) => [keyOf(row), row]));
-  const make = (row: InventoryRow) => inventoryLine(row, parents, { now, limitedUntil, running: options.pending?.get(row.prUrl),
-    outcome: options.outcomes?.get(row.prUrl) });
+  const make = (effortPile: InventoryLine["effortPile"]) => (row: InventoryRow) => inventoryLine(row, parents, { now, limitedUntil,
+    running: options.pending?.get(row.prUrl), outcome: options.outcomes?.get(row.prUrl), effortPile });
   const groups = view.groups.flatMap((group): InventoryGroup[] => {
     const rows = filter ? group.rows.filter((row) => row.attention.some((reason) => reason.question === filter)) : group.rows;
-    return rows.length ? [{ key: group.effort?.id ?? "", effort: group.effort, label: group.effort?.name ?? "No effort", lines: stacked(rows, make) }] : [];
+    const pile = group.effort?.pile && group.effort.pile !== "active" ? group.effort.pile : null;
+    return rows.length ? [{ key: group.effort?.id ?? "", effort: group.effort, label: group.effort?.name ?? "No effort", lines: stacked(rows, make(pile)) }] : [];
   });
   const notices: InventoryScreen["notices"] = [];
   if (limitedUntil !== null) notices.push({ tone: "error", text: `GitHub's rate limit holds reads until ${clock(limitedUntil, now)}. Rows show the last good read.` });

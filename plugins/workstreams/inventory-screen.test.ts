@@ -203,6 +203,25 @@ describe("the reviewer picker", () => {
 });
 
 describe("All PRs beside the effort deck", () => {
+  // Holding an effort holds its PRs, so a row that offered Mark ready or Merge… would only be refused; a done effort's rows say why instead.
+  it("shows On hold in place of a held effort's writes, and disables a done or archived effort's writes with the way back", () => {
+    const piled = (pile: "held" | "done" | "archived"): InventoryView => ({ ...VIEW, groups: VIEW.groups.map((group) => group.effort?.name === "Shelf order"
+      ? { ...group, effort: { ...group.effort, pile } } : group) });
+    const shelf = (html: string) => html.slice(html.indexOf('data-inventory-group="Shelf order"'), html.indexOf('data-inventory-group="Store pickup"'));
+    for (const html of [pane(true, piled("held")), pane(false, piled("held"))]) {
+      const rows = shelf(html);
+      expect(rows.match(/data-inventory-effort-hold/gu)).toHaveLength(5);
+      expect(rows).not.toMatch(/data-inventory-action="(merge|mark-ready|request-review|nudge|confirm-handled)"/u);
+      expect(text(rows)).toContain("Its effort is on hold");
+      expect(rows).toMatch(/data-inventory-action="refresh"/u);
+    }
+    const done = shelf(pane(true, piled("done")));
+    expect(done).toContain('aria-label="Merge… folio #340: unavailable, Its effort is done. Reopen it first"');
+    expect(done).not.toContain("data-inventory-effort-hold");
+    // Reopen refuses an archived effort, so its rows name Restore, as the server does.
+    expect(shelf(pane(true, piled("archived")))).toContain('aria-label="Merge… folio #340: unavailable, Its effort is archived. Restore it first"');
+  });
+
   it("keeps per-PR Hold on every row, beside the effort-level hold, and offers Release on a held row", () => {
     const held: InventoryView = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 330
       ? { ...row, hold: { reason: "Waiting on the shelf redesign", heldAt: NOW - 3_600_000 } } : row) })) };

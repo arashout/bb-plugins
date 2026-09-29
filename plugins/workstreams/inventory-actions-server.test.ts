@@ -195,6 +195,33 @@ describe("inventory actions on the server", () => {
     expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: true, detail: "Wrote ready." });
   });
 
+  it("refuses every write and merge on a done effort's PRs with why, and says the pile so the rows offer none", async () => {
+    const env = await setup();
+    const effort = createEffortStore(env.db).establish({ sourceKey: "pr:313", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
+      coordinatorState: "none", members: { tickets: [], prUrls: [url(313), url(316)] } });
+    expect(await env.rpc("effort_complete", { effortKey: effort.id })).toMatchObject({ ok: true });
+    expect((await env.rpc("inventory_get", {}) as InventoryView).groups.find((group) => group.effort?.id === effort.id)?.effort)
+      .toEqual({ id: effort.id, name: "Shelf order", pile: "done" });
+    const done = env.since();
+    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD }))
+      .toEqual({ ok: false, error: "Its effort is done. Reopen it first; nothing was written." });
+    const refusal = "Its effort is done. Reopen it before merging this PR.";
+    expect((await env.rpc("action_merge_preview", { prUrl: url(316) }) as { ok: true; refusals: string[] }).refusals).toContain(refusal);
+    expect(await env.rpc("action_merge", { prUrl: url(316), sha: HEAD, acknowledgeUnresolved: false })).toEqual({ ok: false, error: refusal });
+    // The board's own writes stop too: a done effort's PR gets no branch update or nudge from any view.
+    const stopped = { ok: false, error: "Its effort is done. Reopen it first; nothing was written." };
+    expect(await env.rpc("action_update_branch", { prUrl: url(313) })).toEqual(stopped);
+    expect(await env.rpc("action_nudge", { prUrl: url(313), rerequest: false, comment: "Ping" })).toEqual(stopped);
+    expect(done().map((call) => call.method)).not.toContain("prWrite");
+    expect(await env.rpc("effort_reopen", { effortKey: effort.id })).toMatchObject({ ok: true });
+    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: true, detail: "Wrote ready." });
+    // An archived effort stops its PRs like a done one, and names its own way back, on the rows and from the server.
+    createEffortStore(env.db).setArchived(effort.id, true);
+    expect((await env.rpc("inventory_get", {}) as InventoryView).groups.find((group) => group.effort?.id === effort.id)?.effort?.pile).toBe("archived");
+    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD }))
+      .toEqual({ ok: false, error: "Its effort is archived. Restore it first; nothing was written." });
+  });
+
   // A confirmation clears the merge gate, so it binds to what the row showed, refused under a hold or after a push or a new comment, and
   // once recorded, the row asks to merge through the same fresh preview, which accepts it.
   it("confirms an approval's comments from its row, as yours and on its head, after which the row and the fresh preview offer the merge", async () => {
