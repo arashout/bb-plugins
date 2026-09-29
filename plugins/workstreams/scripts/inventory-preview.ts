@@ -26,7 +26,7 @@ const view: InventoryView = { ...base, rateLimitedUntil: NOW + 4 * 60_000, group
         detail: "Who needs a nudge changed since the row was shown (now @mira-l). Review it and try again; nothing was written." } } : row) })) };
 const pane = (wide: boolean, filter: InventoryQuestion | null) => renderToStaticMarkup(createElement(InventoryPane, {
   screen: inventoryScreen(view, { now: NOW, filter, pending: new Map([["https://github.com/inkwell/folio/pull/305", "refresh"]]) }), wide, error: null, picker: null,
-  onFilter: noop, onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop }));
+  onFilter: noop, onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onHold: noop }));
 const frame = (width: number, wide: boolean, filter: InventoryQuestion | null = null) =>
   `<section style="width:${width}px;height:1100px;border:1px solid #2a2a2a;flex:none;display:flex" data-bb-plugin="workstreams">${pane(wide, filter)}</section>`;
 const line = inventoryScreen(view, { now: NOW, filter: null }).groups.flatMap((group) => group.lines).find((item) => item.number === 325)!;

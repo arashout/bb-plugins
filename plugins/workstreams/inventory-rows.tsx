@@ -21,6 +21,8 @@ export type RowCallbacks = {
   onOpenPr(url: string): void;
   onOpenThread(id: string): void;
   onOpenRoster(effortId: string, n: number | null): void;
+  /** Hold the PR, which asks for a reason first, or release its hold. */
+  onHold(line: InventoryLine): void;
 };
 export type InventoryRowsProps = RowCallbacks & { groups: InventoryGroup[]; picker: string | null };
 
@@ -179,6 +181,11 @@ function Actions({ line, props }: { line: InventoryLine; props: InventoryRowsPro
         </PopoverPrimitive.Portal>
       </PopoverPrimitive.Root>;
     })}
+    <Tip label={line.hold ? "Release the hold: batches and actions may write to it again" : "Hold this PR: nothing acts on it until you release it"}>
+      <button type="button" data-inventory-action="hold" aria-label={`${line.hold ? "Release" : "Hold…"} ${line.repo} #${line.number}`} onClick={() => props.onHold(line)}
+        className={cn("inline-flex h-6 items-center rounded-md px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", FOCUS)}>
+        {line.hold ? "Release" : "Hold…"}</button>
+    </Tip>
     {started ? <Tip label={`Open "${started.title}", where the work started`}>
       <button type="button" aria-label={`Open "${started.title}", where the work on ${line.repo} #${line.number} started`} onClick={() => props.onOpenThread(started.id)}
         className={cn("inline-flex h-6 items-center rounded-md px-1 text-[11px] text-muted-foreground hover:text-foreground", FOCUS)}>started</button>
@@ -196,7 +203,9 @@ function GroupHeader({ group, onOpenRoster }: { group: InventoryGroup } & Pick<R
   </button>;
 }
 
-const rowAttrs = (line: InventoryLine) => ({ "data-inventory-row": `${line.slug}#${line.number}`, "data-depth": line.depth });
+/** Rows take focus for the shared keys (j and k move between them), with the same inset ring as the deck's. */
+const rowAttrs = (line: InventoryLine) => ({ "data-inventory-row": `${line.slug}#${line.number}`, "data-depth": line.depth, tabIndex: -1 });
+const ROW_RING = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500";
 
 /** The narrowest pane the dense table fits: its fixed columns take 690px, and Title and Next · owner · age share the rest. */
 export const TABLE_MIN_WIDTH = 1100;
@@ -217,7 +226,7 @@ export function InventoryTable(props: InventoryRowsProps) {
     </thead>
     {props.groups.map((group) => <tbody key={group.key} data-inventory-group={group.label}>
       <tr><th colSpan={7} className="border-b border-border/60 px-2 pb-1 pt-4 text-left font-normal"><GroupHeader group={group} onOpenRoster={props.onOpenRoster} /></th></tr>
-      {group.lines.map((line) => <tr key={line.prUrl} {...rowAttrs(line)} className="border-b border-border/50 align-top hover:bg-foreground/[0.03]">
+      {group.lines.map((line) => <tr key={line.prUrl} {...rowAttrs(line)} className={cn("border-b border-border/50 align-top hover:bg-foreground/[0.03]", ROW_RING)}>
         <td className="px-2 py-1.5"><Pr line={line} onOpenPr={props.onOpenPr} /></td>
         <td className="px-2 py-1.5"><Title line={line} onOpenRoster={props.onOpenRoster} /></td>
         <td className="px-2 py-1.5"><Reviewers line={line} /></td>
@@ -235,7 +244,7 @@ export function InventoryList(props: InventoryRowsProps) {
   return <div role="list" aria-label="Open PRs" className="text-[12px]">
     {props.groups.map((group) => <div key={group.key} role="presentation" data-inventory-group={group.label}>
       <div role="presentation" className="border-b border-border/60 px-3 pb-1 pt-4"><GroupHeader group={group} onOpenRoster={props.onOpenRoster} /></div>
-      {group.lines.map((line) => <div key={line.prUrl} role="listitem" {...rowAttrs(line)} className="border-b border-border/50 px-3 py-1.5 hover:bg-foreground/[0.03]">
+      {group.lines.map((line) => <div key={line.prUrl} role="listitem" {...rowAttrs(line)} className={cn("border-b border-border/50 px-3 py-1.5 hover:bg-foreground/[0.03]", ROW_RING)}>
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0"><Pr line={line} onOpenPr={props.onOpenPr} /></span>
           <span className="min-w-0 flex-1"><Title line={line} onOpenRoster={props.onOpenRoster} /></span>

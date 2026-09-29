@@ -12,7 +12,7 @@ const VIEW = inkwellInventory();
 const noop = () => {};
 function pane(wide: boolean, view: InventoryView = VIEW, filter: InventoryQuestion | null = null, error: string | null = null) {
   return renderToStaticMarkup(createElement(InventoryPane, { screen: inventoryScreen(view, { now: NOW, filter }), wide, error, picker: null,
-    onFilter: noop, onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop }));
+    onFilter: noop, onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onHold: noop }));
 }
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, '"').replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 /** The column headers, not the effort headers inside the body. */
@@ -108,7 +108,7 @@ describe("the PR inventory screen's markup", () => {
         }
       };
       walk(InventoryPane({ screen: inventoryScreen(VIEW, { now: NOW, filter }), wide: true, error: null, picker: null, onFilter: (question) => pressed.push(question),
-        onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop }));
+        onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onHold: noop }));
       return found;
     };
     counts(null)[1]!.props.onClick();
@@ -141,9 +141,9 @@ describe("the PR inventory screen's markup", () => {
       }
       // A button's name starts with the words it shows, so saying "click Nudge" finds it (WCAG 2.5.3, label in name).
       const shown = [...html.matchAll(/<button[^>]*data-inventory-action="[^"]+"[^>]*aria-label="([^"]+)"[^>]*>([^<]+)<\/button>/gu)];
-      // The fixture's worded buttons: 3 Request review…, 1 Nudge, 2 Confirm handled, and 4 Merge…; Refresh and Open thread are icons named
-      // the same way.
-      expect(shown).toHaveLength(10);
+      // The fixture's worded buttons: 3 Request review…, 1 Nudge, 2 Confirm handled, 4 Merge…, and a Hold… on each of the 17 rows; Refresh
+      // and Open thread are icons named the same way.
+      expect(shown).toHaveLength(27);
       for (const [, name, label] of shown) expect(text(name!).startsWith(text(label!))).toBe(true);
     }
   });
@@ -199,6 +199,26 @@ describe("the reviewer picker", () => {
     expect(html).toMatch(/<button[^>]*data-inventory-request="true" aria-disabled="true"[^>]*title="Pick or type a reviewer first"/u);
     const none = renderToStaticMarkup(createElement(ReviewerPickerBody, { line: line("atlas #410"), onRequest: noop, onCancel: noop }));
     expect(text(none)).toContain("No past reviewers to suggest; type a login.");
+  });
+});
+
+describe("All PRs beside the effort deck", () => {
+  it("keeps per-PR Hold on every row, beside the effort-level hold, and offers Release on a held row", () => {
+    const held: InventoryView = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 330
+      ? { ...row, hold: { reason: "Waiting on the shelf redesign", heldAt: NOW - 3_600_000 } } : row) })) };
+    for (const html of [pane(true, held), pane(false, held)]) {
+      const buttons = [...html.matchAll(/data-inventory-action="hold" aria-label="([^"]+)"[^>]*>([^<]+)</gu)].map((match) => [match[1], match[2]]);
+      expect(buttons).toHaveLength(17);
+      expect(buttons).toContainEqual(["Hold… folio #340", "Hold…"]);
+      expect(buttons).toContainEqual(["Release folio #330", "Release"]);
+    }
+  });
+
+  it("lets j and k focus rows for the deck's keys, with the same accent ring", () => {
+    const html = pane(true);
+    expect([...html.matchAll(/<tr data-inventory-row="[^"]+" data-depth="\d" tabindex="-1" class="([^"]+)"/gu)].every((match) => match[1]!.includes("focus-visible:ring-sky-500")))
+      .toBe(true);
+    expect(html.match(/tabindex="-1"/gu)!.length).toBeGreaterThanOrEqual(17);
   });
 });
 

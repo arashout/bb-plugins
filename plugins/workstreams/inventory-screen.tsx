@@ -5,8 +5,10 @@
 // inventory_get's output, and every write is one click on one row, through
 // the inventory action RPCs or the existing fresh merge preview. InventoryPane
 // and its parts take data and callbacks as props and call no SDK hook, with
-// relative imports, so static-markup tests can render them.
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+// relative imports, so static-markup tests can render them. As All PRs beside
+// the effort deck (A15), it shares the deck's key registry: a key that writes
+// opens the deck's listing confirm for the focused row, never a write itself.
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
@@ -16,6 +18,11 @@ import { InventoryList, InventoryTable, TABLE_MIN_WIDTH, type RowCallbacks } fro
 import { actionCall, INVENTORY_CHANGED, inventoryScreen, withOutcome, type ActionId, type InventoryLine, type InventoryScreen, type LineAction,
   type Outcome } from "./inventory-view-model";
 import { MergePreviewDialog } from "./roster-merge-dialog";
+import type { DeckActionId } from "./deck-keys";
+import { readSeen, SEEN_KEY } from "./deck-place";
+import { availability, hintKeys, KIND_OF, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
+import { HelpBody, HintBar, HoldBody, PaletteBody } from "./deck-screen";
+import { DeckDialog, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 
 /** The views after All PRs, in tab order; the effort deck comes before it. */
 export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
@@ -33,6 +40,8 @@ export type InventoryPaneProps = RowCallbacks & {
   onView(view: OtherView): void;
   onHow(): void;
   rootRef?: RefObject<HTMLDivElement | null>;
+  /** The shared hint bar, under the rows. */
+  footer?: ReactNode;
 };
 
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -80,7 +89,7 @@ export function InventoryPending({ error, onRetry, onView, onHow }: { error: str
 export function InventoryPane(props: InventoryPaneProps) {
   const { screen, wide } = props;
   const rows = { groups: screen.groups, picker: props.picker, onAction: props.onAction, onRequest: props.onRequest, onPicker: props.onPicker,
-    onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread, onOpenRoster: props.onOpenRoster };
+    onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread, onOpenRoster: props.onOpenRoster, onHold: props.onHold };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header onView={props.onView} onHow={props.onHow} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
@@ -102,6 +111,7 @@ export function InventoryPane(props: InventoryPaneProps) {
         <Icon name="CircleCheck" className="size-4 shrink-0 text-muted-foreground" aria-hidden />{screen.empty}
       </p> : <div className="mt-2">{wide ? <InventoryTable {...rows} /> : <InventoryList {...rows} />}</div>}
     </div>
+    {props.footer}
   </div>;
 }
 
@@ -157,6 +167,9 @@ function useInventory() {
 }
 
 /** The inventory in the Workstreams panel: live from the server, one click per action, and the fresh merge preview behind Merge…. */
+/** The deck batch each row action is, for the shared keys. */
+const KEY_OF: Partial<Record<ActionId, DeckActionId>> = { merge: "merge", "confirm-handled": "confirm", nudge: "nudge", "request-review": "request", "mark-ready": "ready" };
+
 export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
@@ -215,15 +228,114 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     load();
   }, [rows, pending, rpc, navigate, load]);
 
+  // ---- the deck's shared keys, hint bar, palette, and ? sheet ----------------
+  const [dialog, setDialog] = useState<{ kind: "hold"; line: InventoryLine; reason: string } | { kind: "palette"; query: string; highlight: number } | { kind: "help" } | null>(null);
+  const [holdError, setHoldError] = useState<string | null>(null);
+  const [undo, setUndo] = useState<Undo | null>(null);
+  const [flash, setFlash] = useState<{ text: string; undo: boolean } | null>(null);
+  const [activeRow, setActiveRow] = useState<string | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  const say = useCallback((text: string, withUndo = false, ms?: number) => {
+    setFlash({ text, undo: withUndo });
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash(null), ms ?? (withUndo ? 9_000 : 5_000));
+  }, []);
+  const remember = () => { opener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : opener.current; };
+  /** Back to the control that opened a dialog, or its row, never the page body. */
+  const returnFocus = () => window.requestAnimationFrame(() => {
+    const element = opener.current;
+    const row = activeRow ? rootRef.current?.querySelector<HTMLElement>(`[data-inventory-row="${CSS.escape(activeRow)}"]`) : null;
+    (element?.isConnected ? element : row ?? rootRef.current?.querySelector<HTMLElement>("[data-inventory-row]"))?.focus({ preventScroll: true });
+  });
+  const batch = useBatchConfirm({ seenAt: () => { try { return readSeen(window.localStorage.getItem(SEEN_KEY), Date.now()).at; } catch { return {}; } },
+    scopeName: () => null, say, setUndo, load, onOpen: remember, onReturn: returnFocus, reread: view });
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const onIn = (event: FocusEvent) => setActiveRow((event.target as Element).closest<HTMLElement>("[data-inventory-row]")?.dataset.inventoryRow ?? null);
+    root.addEventListener("focusin", onIn);
+    return () => root.removeEventListener("focusin", onIn);
+  });
+  const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
+  const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
+    prs: { row: !!focused, thread: !!focused?.actions.find((action) => action.id === "thread")?.enabled,
+      moves: new Set((focused?.actions ?? []).flatMap((action) => action.enabled && KEY_OF[action.id] ? [KEY_OF[action.id]!] : [])) } };
+  const on = availability(context);
+  const contextRef = useRef(context);
+  contextRef.current = context;
+  const hold = (line: InventoryLine) => {
+    if (!line.hold) { remember(); setHoldError(null); setDialog({ kind: "hold", line, reason: "" }); return; }
+    void rpc.call("pr_hold_set", { prUrl: line.prUrl, held: false }).then(() => { say(`Released ${line.repo} #${line.number}.`); load(); }, (cause: unknown) => say(message(cause)));
+  };
+  const saveHold = () => {
+    if (dialog?.kind !== "hold") return;
+    const { line, reason } = dialog;
+    void rpc.call("pr_hold_set", { prUrl: line.prUrl, held: true, reason: reason.trim() || undefined }).then(() => { setDialog(null); say(`Held ${line.repo} #${line.number}.`); load(); },
+      (cause: unknown) => setHoldError(message(cause)));
+  };
+  function runKey(id: DeckActionId) {
+    const action = (actionId: ActionId) => focused?.actions.find((item) => item.id === actionId);
+    switch (id) {
+      case "view": onView("deck"); return;
+      case "palette": remember(); setDialog({ kind: "palette", query: "", highlight: 0 }); return;
+      case "help": remember(); setDialog({ kind: "help" }); return;
+      case "row-next": case "row-prev": {
+        const all = Array.from(rootRef.current?.querySelectorAll<HTMLElement>("[data-inventory-row]") ?? []);
+        const at = activeRow ? all.findIndex((element) => element.dataset.inventoryRow === activeRow) : -1;
+        const next = all[at < 0 ? 0 : Math.max(0, Math.min(all.length - 1, at + (id === "row-next" ? 1 : -1)))];
+        next?.focus({ preventScroll: true });
+        next?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      case "merge": { const merge = action("merge"); if (focused && merge) { remember(); void run(focused, merge); } return; }
+      case "confirm": case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
+      case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
+      case "hold-pr": if (focused) hold(focused); return;
+      case "refresh": { const refresh = action("refresh"); if (focused && refresh) void run(focused, refresh); return; }
+      case "open-thread": { const thread = action("thread")?.threadId; if (thread) navigate.toThread(thread); return; }
+      case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
+      default: return;
+    }
+  }
+  const runRef = useRef(runKey);
+  runRef.current = runKey;
+  useRegistryKeys(rootRef, { on: () => availability(contextRef.current), run: (id) => runRef.current(id), say, isRow: () => false });
+  const palette = paletteItems(on, [], { held: [], done: [] }, null, false);
+  const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
+  const runPalette = (item: PaletteItem) => { setDialog(null); window.setTimeout(() => { if (item.action) runKey(item.action.id); }, 0); };
+
   if (!screen) return <InventoryPending error={error} onRetry={load} onView={onView} onHow={onHow} />;
   const openRoster = (effortId: string, n: number | null) =>
     navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}${n === null ? "" : `/${n}`}` });
   return <>
     <InventoryPane screen={screen} wide={wide} error={error} picker={picker} rootRef={rootRef} onFilter={setFilter} onView={onView} onHow={onHow}
-      onAction={(line, action) => void run(line, action)} onPicker={setPicker}
+      onAction={(line, action) => { if (action.id === "merge") remember(); void run(line, action); }} onPicker={setPicker} onHold={hold}
       onRequest={(line, logins) => { setPicker(null); const action = line.actions.find((item) => item.id === "request-review"); if (action) void run(line, action, logins); }}
-      onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)} onOpenRoster={openRoster} />
-    <MergePreviewDialog targets={merging} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)}
+      onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)} onOpenRoster={openRoster}
+      footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
+    <MergePreviewDialog targets={merging} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} onClosed={returnFocus}
       rows={(merging ?? []).flatMap(({ target }) => { const row = rows.get(target); return row ? [{ target, repo: row.repo, number: row.number, title: row.title }] : []; })} />
+    {batch.element}
+    <DeckDialog open={dialog?.kind === "hold"} title={dialog?.kind === "hold" ? `Hold ${dialog.line.repo} #${dialog.line.number}` : ""}
+      sub="Nothing acts on this PR, and no batch writes to it, until you release it." onClose={() => setDialog(null)} onReturn={returnFocus} onConfirmKey={saveHold}>
+      {dialog?.kind === "hold" ? <HoldBody reason={dialog.reason} onReason={(reason) => setDialog({ ...dialog, reason })} busy={false} error={holdError} onHold={saveHold}
+        onCancel={() => setDialog(null)} /> : null}
+    </DeckDialog>
+    <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>
+      {dialog?.kind === "palette" ? <div onKeyDown={(event) => {
+        const live = matches.filter((item) => item.on);
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          setDialog({ ...dialog, highlight: Math.max(0, Math.min(live.length - 1, dialog.highlight + (event.key === "ArrowDown" ? 1 : -1))) });
+        } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); const item = live[dialog.highlight]; if (item) runPalette(item); }
+        else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setDialog(null); }
+      }}><PaletteBody query={dialog.query} items={matches} highlight={dialog.highlight} onQuery={(query) => setDialog({ ...dialog, query, highlight: 0 })}
+        onRun={runPalette} onHighlight={(highlight) => setDialog({ ...dialog, highlight })} /></div> : null}
+    </DeckDialog>
+    <DeckDialog open={dialog?.kind === "help"} wide closeKey="?" title="Keys and colors" sub="The same keys do the same thing in Efforts and All PRs. Grayed keys don't apply here."
+      onClose={() => setDialog(null)} onReturn={returnFocus}>
+      {dialog?.kind === "help" ? <HelpBody items={palette} /> : null}
+    </DeckDialog>
   </>;
 }

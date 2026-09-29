@@ -347,9 +347,9 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   // `V` cycles the views from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
-  // `?` opens How this works from any view. A roster and the effort deck own their keys, `?` included.
+  // `?` opens How this works from any view. A roster, the effort deck, and All PRs own their keys, `?` included.
   useEffect(() => {
-    if (view === "roster" || view === "deck") return;
+    if (view === "roster" || view === "deck" || view === "inventory") return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "v" && event.key !== "V" && event.key !== "?") return;
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;

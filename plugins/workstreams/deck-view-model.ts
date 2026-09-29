@@ -362,15 +362,13 @@ export function availability(context: KeyContext): Availability {
 export function hintKeys(context: KeyContext, on: Availability): [string, string][] {
   const { focused } = context;
   const pick = (...items: ([DeckActionId, string] | false)[]) => items.flatMap((item) => item && on[item[0]].on ? [[ACTION[item[0]].keys.join(" "), item[1]] as [string, string]] : []);
-  if (context.view === "prs") return pick(["row-next", "rows"], ["merge", "merge preview"], ["open-thread", "open thread"], ["view", "Efforts"], ["seen", "mark seen"]);
+  const move = (["merge", "confirm", "nudge", "request", "ready"] as const).find((id) => on[id].on && (context.view === "prs" || (focused?.needs && focused.section === SECTION_OF[id])));
+  const moveHint = move ? [move, move === "merge" ? "preview merge" : ACTION[move].title.replace("…", "").toLowerCase()] as [DeckActionId, string] : false;
+  if (context.view === "prs") return pick(["row-next", "rows"], moveHint, ["open-thread", "open thread"], ["view", "Efforts"]);
   if (context.selected.length) return [["x", "toggle"], ...pick(["advance", "advance"], ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && context.cur === "unc") return pick(["row-next", "rows"], ["select", "select"], ["accept", "accept this group"], ["move", "move…"], ["expand", "details"]);
-  if (focused) {
-    const move = (["merge", "confirm", "nudge", "request", "ready"] as const).find((id) => focused.needs && focused.section === SECTION_OF[id]);
-    return pick(["row-next", "rows"], move ? [move, ACTION[move].title.replace("…", "").toLowerCase()] : false, ["select", "select"], ["expand", "details"],
-      ["open-thread", "open thread"]);
-  }
+  if (focused) return pick(["row-next", "rows"], moveHint, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
   if (context.cur === "unc") return pick(["next", "flip"], ["row-next", "rows, then p accepts a group"], ["undo", "undo"]);
   return pick(["next", "flip"], ["row-next", "rows"], ["advance", "advance"], ["seen", "mark seen"], ["merge", "merge"]);
 }
