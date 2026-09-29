@@ -1,8 +1,9 @@
 // "How this works": the secondary information the header used to carry, in
 // one quiet panel. It is a fixed tab in BB's own right panel, so it can stay
-// open beside the Map or Board. Short sections, in the order a reader
-// asks: the PR inventory, how the groups are made, what the rows mean, the
-// keys, the Map's marks, and whether the board is healthy.
+// open beside any view. Short sections, in the order a reader asks: the
+// effort deck, its piles and holds, sorting PRs into efforts, Seed from
+// Linear, All PRs, the keys, then the Map and the legacy Board, and whether
+// the board is healthy.
 import type { ReactNode } from "react";
 import type { Board, BoardMode } from "./server";
 import { relativeTime } from "./workstreams";
@@ -12,6 +13,8 @@ import { runLabel } from "./runs";
 import { LinearFetchAction } from "./linearfetch";
 import { ROSTER_KEYS } from "./roster-view-model";
 import { INVENTORY_HOW } from "./inventory-view-model";
+import { ACTION } from "./deck-keys";
+import { SEND_DELAY_MS } from "./deck-shared";
 
 /** The fixed tab's stable reference: the owning nav panel, and this tab. */
 export const HOW_TAB = { panelId: "board", id: "how" } as const;
@@ -52,9 +55,13 @@ const MAP_KEYS: [string, string][] = [
   ["T", "Open the focused cluster's newest thread"],
 ];
 
+/** The deck's keys that matter most, read from its one registry so they say what the keys do; ? in the deck lists every one. */
+const DECK_KEYS: [string, string][] = (["next", "prev", "jump", "row-next", "row-prev", "select", "expand", "advance", "merge", "hold", "accept", "move", "seen",
+  "undo", "palette", "help"] as const).map((id) => [ACTION[id].keys.join(" / "), ACTION[id].title.replace("…", "")]);
+
 const BOTH_KEYS: [string, string][] = [
   ["v", "Next view; in Efforts and All PRs, switch between the two"],
-  ["?", "Open this panel"],
+  ["?", "Open this panel; in Efforts and All PRs, list their keys"],
 ];
 
 const STATES: [string, string][] = [
@@ -105,12 +112,82 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
   const enrichment = board?.health.enrichment ?? null;
   return (
     <div className="text-[12px]">
-      <Section title="The PR inventory">
+      <Section title="The effort deck">
+        <p>
+          Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card shows the
+          effort&apos;s status, next steps, what&apos;s blocked, Linear, people, threads, and recent activity. Its
+          open PRs sit below it in sections by the move each needs, with one button per section.
+        </p>
+        <p>
+          Color marks a move that&apos;s yours, and Needs you counts those moves; gray waits on others. A blue dot marks a
+          change since you looked, and rows stay in place until you mark the view seen.
+        </p>
+        <p>
+          Every GitHub write lists each PR in a confirm, then waits {Math.round(SEND_DELAY_MS / 1_000)} s with Undo.
+          Advance runs a card&apos;s safe next steps: nudge, request a review, mark ready, and confirm review notes. Merges
+          run only from the fresh merge preview, on a click or ⌘↵.
+        </p>
+      </Section>
+
+      <Section title="Piles and holds">
+        <p>
+          The strip is the active pile, with On hold and Done at its right. Hold moves an effort to On hold with an
+          optional reason, and its PRs stop counting until you resume it. Complete moves it to Done, and Reopen puts it
+          back at the end of the pile.
+        </p>
+        <p>
+          To pause one PR, choose Hold PR in its details. A held PR shows its reason, and no batch or Advance touches it
+          until you release it. One-offs collects PRs that merge on their own, and it stays on the active pile.
+        </p>
+      </Section>
+
+      <Section title="Sorting PRs into efforts">
+        <p>
+          Unclassified, the last card, lists open PRs that no effort owns, grouped by suggestion. Each group shows its
+          strength (strong, moderate, or weak) and the signals behind it: a shared ticket, Linear project, stack, linked
+          thread, board group, or code area. A ticket prefix only adds weight to a stronger signal. A lone PR whose ticket
+          nothing else carries is offered as a weak one-off.
+        </p>
+        <p>
+          Nothing moves until you press a group&apos;s button, and Undo takes it back. A weak group asks again first. You
+          can also move PRs to any effort, start a new effort from a selection, or mark PRs as one-offs.
+        </p>
+        <p>
+          A standing rule places new PRs on every read by ticket prefix, branch, repository, Linear project, or stack.
+          Removing a rule leaves the PRs it placed.
+        </p>
+      </Section>
+
+      <Section title="Seed from Linear">
+        <p>
+          Seed from Linear, on the Unclassified card, proposes one effort per Linear project that has tickets on your open
+          PRs. Each takes the project&apos;s name and description, and flags an effort that already matches. Check the ones
+          to create. Each takes only PRs that no effort owns, never syncs with Linear after, and Undo takes it back. It
+          needs a Linear API key in settings.
+        </p>
+      </Section>
+
+      <Section title="All PRs">
         <p>{INVENTORY_HOW.intro}</p>
         <Pairs rows={INVENTORY_HOW.rows} />
       </Section>
 
-      <Section title="How grouping works">
+      <Section title="Keys">
+        <p className="text-foreground">Efforts and All PRs</p>
+        <p>The same keys do the same thing in both. ? lists every key, and ⌘K lists every action.</p>
+        <Pairs rows={DECK_KEYS} mono />
+        <p className="pt-1 text-foreground">Map</p>
+        <Pairs rows={MAP_KEYS} mono />
+        <p className="pt-1 text-foreground">Roster</p>
+        <Pairs rows={ROSTER_KEYS} mono />
+        <p className="pt-1 text-foreground">Legacy Board</p>
+        <p className="text-muted-foreground">Search accepts ticket IDs, titles, repos, workstreams, and PR numbers such as 318, #318, or quill #318.</p>
+        <Pairs rows={BOARD_KEYS} mono />
+        <p className="pt-1 text-foreground">All views</p>
+        <Pairs rows={BOTH_KEYS} mono />
+      </Section>
+
+      <Section title="How the Map groups checkouts">
         <p>
           Checkouts with the same ticket form a cluster. Related clusters can form efforts, programs, and domains;
           levels that add no useful grouping collapse. Code seeds groups from changed code areas, shared words,
@@ -129,7 +206,7 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         )}
       </Section>
 
-      <Section title="What the states mean">
+      <Section title="Legacy Board states">
         <p>
           Efforts groups all tracked checkouts by effort, with open PRs without a scanned checkout under
           No effort assigned. PR backlog groups your open PRs by next action in organizations represented
@@ -153,18 +230,6 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         </p>
         <p>Archive idle leaf threads from their menu. Archived threads shows history and lets you undo an archive.</p>
         <Pairs rows={STATES} />
-      </Section>
-
-      <Section title="Keyboard shortcuts">
-        <p className="text-foreground">Efforts</p>
-        <p className="text-muted-foreground">Search accepts ticket IDs, titles, repos, workstreams, and PR numbers such as 318, #318, or quill #318.</p>
-        <Pairs rows={BOARD_KEYS} mono />
-        <p className="pt-1 text-foreground">Map</p>
-        <Pairs rows={MAP_KEYS} mono />
-        <p className="pt-1 text-foreground">Roster</p>
-        <Pairs rows={ROSTER_KEYS} mono />
-        <p className="pt-1 text-foreground">All views</p>
-        <Pairs rows={BOTH_KEYS} mono />
       </Section>
 
       <Section title="Map marks">
