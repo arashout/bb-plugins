@@ -8,6 +8,7 @@
 import type { ReactNode, RefObject } from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
+import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
 import type { Availability, CardScreen, Chip, DeckLine, PaletteItem, SectionScreen, Tone, UncGroup, UncScreen } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
@@ -418,7 +419,11 @@ export function Unclassified({ screen, rules, state, run, stuck }: { screen: Unc
           <p className="text-[12px] text-muted-foreground">{coverage.toSort ? "Open PRs with no effort. Each group is a suggestion; nothing moves until you press it."
             : "Every open PR is in an effort or in One-offs."}</p>
         </div>
-        <button type="button" data-deck-focus="rule" onClick={() => run({ kind: "action", id: "rule" })} className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>+ Standing rule</button>
+        <div className="flex gap-1.5">
+          <button type="button" data-deck-focus="seed" onClick={() => run({ kind: "action", id: "seed" })} title="Propose one effort per Linear project on your open PRs"
+            className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>Seed from Linear…</button>
+          <button type="button" data-deck-focus="rule" onClick={() => run({ kind: "action", id: "rule" })} className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>+ Standing rule</button>
+        </div>
       </div>
       <div className="mt-2.5 grid gap-2">
         <div className="rounded-[10px] border border-border/50 px-2.5 py-1.5">
@@ -630,6 +635,39 @@ export function NewEffortBody({ name, goal, refs, busy, error, onName, onGoal, o
     <p className="text-[12px] text-muted-foreground">Takes {refs.join(", ")}. The card joins the end of the pile; Undo takes it back.</p>
     {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
     <DialogButtons busy={busy} label="Create effort" onOk={onCreate} onCancel={onCancel} disabled={!name.trim()} />
+  </div>;
+}
+
+/**
+ * Seed from Linear: one proposed effort per Linear project on your open PRs. Nothing is picked until you check it, each shows how many of
+ * its PRs it would take and which effort it may duplicate, and Create makes only the ones you checked.
+ */
+export function SeedBody({ proposals, keyed, picked, busy, error, onPick, onCreate, onCancel }: { proposals: readonly SeedProposal[] | null; keyed: boolean;
+  picked: ReadonlySet<string>; busy: boolean; error: string | null; onPick(projectId: string): void; onCreate(): void; onCancel(): void }) {
+  const free = (proposal: SeedProposal) => proposal.prs.filter((pr) => !pr.effort).length;
+  const MATCH = { name: "has its name", members: "owns", seed: "was seeded from it" } as const;
+  return <div className="grid gap-3 text-[12.5px]">
+    {proposals === null ? <p role="status" className="text-muted-foreground">Reading Linear projects…</p>
+      : !proposals.length ? <p className="text-muted-foreground">{keyed ? "No Linear project has tickets on your open PRs yet. Projects show after the next scan reads Linear."
+        : "No Linear API key is set. Add one under Linear API keys in the Workstreams settings."}</p>
+      : <ul data-deck-seed className="grid max-h-[50vh] gap-1 overflow-y-auto">{proposals.map((proposal) => {
+        const count = free(proposal);
+        // Create skips a project an effort has the name of or was seeded from, so it can't be checked.
+        const exists = proposal.matches.some((match) => match.by !== "members");
+        return <li key={proposal.projectId}><label className={cn("grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2.5 rounded-md px-1.5 py-1",
+          count && !exists ? "hover:bg-foreground/[0.04]" : "opacity-60")}>
+          <input type="checkbox" checked={picked.has(proposal.projectId)} disabled={!count || exists} onChange={() => onPick(proposal.projectId)} className="mt-[3px]" />
+          <span className="min-w-0"><b className="font-medium">{proposal.name}</b>{proposal.goal ? <span className="block truncate text-[12px] text-muted-foreground"
+            title={proposal.goal}>{proposal.goal}</span> : null}
+            {proposal.matches.map((match) => <span key={`${match.by}-${match.id}`} className={cn("block text-[11.5px]", TONE.amber.text)}>
+              {match.name} {MATCH[match.by]}{match.by === "members" ? ` ${match.prs} of its PRs` : ""}</span>)}</span>
+          <span className="whitespace-nowrap text-[11.5px] text-muted-foreground" title={proposal.prs.map((pr) => `${pr.repo.split("/").at(-1)} #${pr.number}`).join(", ")}>
+            {exists ? "already exists" : count ? `takes ${count} of ${plural(proposal.prs.length, "PR")}` : "all in efforts"}</span>
+        </label></li>;
+      })}</ul>}
+    <p className="text-[12px] text-muted-foreground">Each takes only PRs no effort owns. It never syncs with Linear after; Undo takes it back.</p>
+    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
+    <DialogButtons busy={busy} label={picked.size ? `Create ${plural(picked.size, "effort")}` : "Create"} onOk={onCreate} onCancel={onCancel} disabled={!picked.size} />
   </div>;
 }
 

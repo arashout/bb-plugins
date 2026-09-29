@@ -388,6 +388,7 @@ export function availability(context: KeyContext): Availability {
   set("one-off", sorting, "focus or select an Unclassified row");
   set("new-effort", unc && selected.length > 0, "select Unclassified rows first");
   set("rule", deck, "Efforts only");
+  set("seed", deck, "Efforts only");
   set("palette", true); set("help", true);
   return out;
 }

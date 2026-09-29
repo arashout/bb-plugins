@@ -17,10 +17,11 @@ import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, meltSlack, PLACE_KE
   type Seen, type ViewPlace } from "./deck-place";
 import { availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
   uncScreen, uncSnapshot, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type UncGroup } from "./deck-view-model";
-import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, type DeckCommand, type RuleDraft, type RuleItem }
-  from "./deck-screen";
+import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, type DeckCommand, type RuleDraft,
+  type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 import { MergePreviewDialog } from "./roster-merge-dialog";
+import type { SeedProposal } from "./linear-seed";
 
 type OtherView = "prs" | "map" | "pipeline" | "work" | "efforts";
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -74,7 +75,8 @@ type Dialogs =
   | { kind: "hold"; id: string; effortKey: string; name: string; reason: string } | { kind: "complete"; id: string }
   | { kind: "hold-pr"; prUrl: string; ref: string; reason: string }
   | { kind: "rule"; draft: RuleDraft; matches: number | null } | { kind: "new"; prUrls: string[]; refs: string[]; name: string; goal: string; group: string | null }
-  | { kind: "move"; prUrls: string[]; refs: string[]; group: string | null } | { kind: "palette"; query: string; highlight: number } | { kind: "help" };
+  | { kind: "move"; prUrls: string[]; refs: string[]; group: string | null } | { kind: "palette"; query: string; highlight: number } | { kind: "help" }
+  | { kind: "seed"; proposals: SeedProposal[] | null; keyed: boolean; picked: string[]; requestId: string };
 
 export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const navigate = useBbNavigate();
@@ -560,6 +562,12 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
         openDialog({ kind: "rule", draft: { kind: "ticket-prefix", value: "", effortId: first?.id ?? "", now: true }, matches: null });
         return;
       }
+      case "seed": {
+        openDialog({ kind: "seed", proposals: null, keyed: true, picked: [], requestId: crypto.randomUUID() });
+        void rpc.call("linear_seed_preview", null).then((result) => setDialog((current) => current?.kind === "seed" ? { ...current, ...result } : current),
+          (cause: unknown) => setDialogError(message(cause)));
+        return;
+      }
       case "palette": openDialog({ kind: "palette", query: "", highlight: 0 }); return;
       case "help": openDialog({ kind: "help" }); return;
     }
@@ -690,6 +698,11 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
         efforts={moveTargets} onMove={(effortId) => void assign(effortId, dialog.prUrls, dialog.group)}
         onNew={() => setDialog({ kind: "new", prUrls: dialog.prUrls, refs: dialog.refs, name: "", goal: "", group: dialog.group })} /> : null}
     </DeckDialog>
+    <DeckDialog open={dialog?.kind === "seed"} title="Seed efforts from Linear" sub="One effort per Linear project on your open PRs. Check the ones to create."
+      onClose={closeDialog} onReturn={returnFocus} onConfirmKey={() => seed()}>
+      {dialog?.kind === "seed" ? <SeedBody proposals={dialog.proposals} keyed={dialog.keyed} picked={new Set(dialog.picked)} busy={busy} error={dialogError}
+        onPick={(projectId) => setDialog({ ...dialog, picked: toggleIn(dialog.picked, projectId) })} onCreate={() => seed()} onCancel={closeDialog} /> : null}
+    </DeckDialog>
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={closeDialog} onReturn={returnFocus}>
       {dialog?.kind === "palette" ? <div onKeyDown={(event) => {
         const live = matches.filter((item) => item.on);
@@ -743,6 +756,29 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
       } });
       say(text, true);
       loadRules();
+      load();
+    }, (cause: unknown) => { setBusy(false); setDialogError(message(cause)); });
+  }
+  /** Each seeded effort is one classification, so Undo takes all of them back together. */
+  function seed() {
+    if (dialog?.kind !== "seed" || busy || !dialog.picked.length) return;
+    setBusy(true);
+    void rpc.call("linear_seed_create", { projectIds: dialog.picked, requestId: dialog.requestId }).then((result) => {
+      setBusy(false);
+      if (!result.ok) { setDialogError(result.error); return; }
+      closeDialog();
+      const made = result.created.map((item) => item.effort.name);
+      const skipped = result.skipped.map((item) => `${item.name}: ${item.reason}`);
+      const text = [made.length ? `Created ${made.join(", ")}` : "Created nothing", ...skipped.length ? [`skipped ${skipped.join("; ")}`] : []].join(" · ");
+      let used = false;
+      setUndo(made.length ? { label: text, live: () => !used, run: async () => {
+        used = true;
+        let error: string | null = null;
+        for (const item of result.created) { const undone = await rpc.call("classify_undo", { actionId: item.actionId }); if (!undone.ok) error = undone.error; }
+        say(error ?? "Undone.");
+        load();
+      } } : null);
+      say(text, made.length > 0);
       load();
     }, (cause: unknown) => { setBusy(false); setDialogError(message(cause)); });
   }

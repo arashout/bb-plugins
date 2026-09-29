@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, paletteItems, stripChips, uncScreen, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
-import { ConfirmBody, DeckPane, HelpBody, PaletteBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { ConfirmBody, DeckPane, HelpBody, PaletteBody, SeedBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import type { SeedProposal } from "./linear-seed.js";
 
 const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs";
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -108,6 +109,33 @@ describe("the effort deck's markup", () => {
     expect(group.match(/Shared ticket · same ticket prefix/gu)).toHaveLength(1);
     expect(text(section(html, "new:ABC-210"))).toContain("→ new Delivery windows");
     expect(text(section(html, "none"))).toContain("No clear signal Pick an effort for each PR. Pick per PR e");
+    expect(button(html, "seed")).toEqual({ text: "Seed from Linear…", disabled: false });
+  });
+
+  // Seeding is two explicit clicks: nothing is checked when the preview opens, and a project Create would skip can't be checked: one whose PRs
+  // all have an effort, or one an effort has the name of.
+  it("previews Linear projects with what each takes and what it may duplicate, and creates only what you check", () => {
+    const prUrl = (number: number) => url("folio", number);
+    const pr = (number: number, effort: SeedProposal["prs"][number]["effort"]) => ({ prUrl: prUrl(number), repo: "inkwell/folio", number, title: `Change ${number}`,
+      tickets: [`ABC-${number}`], effort });
+    const shelf = { id: SHELF, name: "Shelf order" };
+    const proposals: SeedProposal[] = [
+      { projectId: "proj-lists", name: "Reading lists", goal: "Readers keep lists of books to read next.", prs: [pr(313, null), pr(320, shelf), pr(321, shelf)],
+        matches: [{ ...shelf, by: "members", prs: 2 }] },
+      { projectId: "proj-shelves", name: "Shelf order", goal: "", prs: [pr(316, shelf)], matches: [{ ...shelf, by: "name", prs: 1 }] },
+      { projectId: "proj-pickup", name: "Store pickup", goal: "", prs: [pr(322, null)], matches: [{ id: "effort-store-pickup", name: "Store pickup", by: "name", prs: 0 }] }];
+    const body = (picked: string[]) => renderToStaticMarkup(createElement(SeedBody, { proposals, keyed: true, picked: new Set(picked), busy: false, error: null,
+      onPick: noop, onCreate: noop, onCancel: noop }));
+    const html = body([]);
+    expect(text(html)).toContain("Reading lists Readers keep lists of books to read next. Shelf order owns 2 of its PRs takes 1 of 3 PRs");
+    expect(text(html)).toContain("Shelf order Shelf order has its name already exists");
+    expect(text(html)).toContain("Store pickup Store pickup has its name already exists");
+    expect(html.match(/type="checkbox"/gu)).toHaveLength(3);
+    expect(html).not.toMatch(/checked=""/u);
+    expect(html.match(/disabled=""/gu)).toHaveLength(3);
+    expect(text(body(["proj-lists"]))).toContain("Create 1 effort ⌘↵");
+    expect(text(renderToStaticMarkup(createElement(SeedBody, { proposals: [], keyed: false, picked: new Set<string>(), busy: false, error: null, onPick: noop,
+      onCreate: noop, onCancel: noop })))).toContain("No Linear API key is set.");
   });
 
   it("collapses a group to one line with Undo once you accepted all of it, and keeps drawing what a partial accept left to sort", () => {
@@ -172,6 +200,7 @@ describe("the deck's dialogs", () => {
     const palette = text(renderToStaticMarkup(createElement(PaletteBody, { query: "", items, highlight: 0, onQuery: noop, onRun: noop, onHighlight: noop })));
     expect(palette).toContain("Preview merge… m");
     expect(palette).toContain("Nudge reviewers… · no nudge is due n");
+    expect(palette).toContain("Seed efforts from Linear…");
     expect(palette).toContain(`${items.filter((item) => item.on).length} of ${items.length} available here`);
     const help = text(renderToStaticMarkup(createElement(HelpBody, { items })));
     for (const group of ["Deck", "Card", "Act", "Rows", "Unclassified", "Anywhere"]) expect(help).toContain(group);
