@@ -738,6 +738,88 @@ describe("sidebar row glyphs", () => {
   });
 });
 
+/**
+ * The count on the board's own sidebar row. It is the reason to open the board,
+ * and it costs no request: the overlay has already folded the briefs against the
+ * live thread list to draw the row glyphs, so the badge reads the same store the
+ * content script does.
+ */
+describe("the board's sidebar badge", () => {
+  const mountBoth = async (options: {
+    signals: RowSignal[];
+    threads?: PluginSidebarThread[];
+  }) => {
+    const captured = await loadApp();
+    const overlay = renderSlot(
+      captured.appOverlays[0]!,
+      {},
+      {
+        rpc: {
+          listRowSignals: () => ({
+            signals: options.signals,
+            staleAfterMs: 0,
+            archiveAfterMs: 0,
+          }),
+        },
+        sidebarThreads: {
+          threads: options.threads ?? [sidebarThread({ id: "thr_1" })],
+          projects: [{ id: "proj_alpha", name: "Alpha" }] as never,
+        },
+      },
+    );
+    const Accessory = captured.navPanels[0]!.experimental_sidebarAccessory!;
+    const badge = renderSlot({ component: Accessory }, {});
+    return { overlay, badge };
+  };
+
+  const waiting = (threadId: string): RowSignal => ({
+    threadId,
+    status: "waiting-on-me",
+    stage: "planning",
+    label: "Planning — Waiting on you",
+  });
+
+  it("counts the threads waiting on you", async () => {
+    const { overlay, badge } = await mountBoth({
+      signals: [waiting("thr_1"), waiting("thr_2")],
+      threads: [
+        sidebarThread({ id: "thr_1" }),
+        sidebarThread({ id: "thr_2" }),
+      ],
+    });
+    await waitFor(() =>
+      expect(
+        badge.getByRole("status", { name: "2 threads waiting on you" }),
+      ).toBeTruthy(),
+    );
+    badge.lifecycle.unmount();
+    overlay.lifecycle.unmount();
+  });
+
+  it("does not count a thread whose agent is running", async () => {
+    // The same live fold the row glyph makes: the agent has it, so it is not
+    // waiting on you.
+    const { overlay, badge } = await mountBoth({
+      signals: [waiting("thr_1")],
+      threads: [sidebarThread({ id: "thr_1", status: "active" })],
+    });
+    await waitFor(() => expect(badge.queryByRole("status")).toBeNull());
+    badge.lifecycle.unmount();
+    overlay.lifecycle.unmount();
+  });
+
+  it("draws nothing when nothing is waiting", async () => {
+    // An accessory shares the row's trailing column with the host's own options
+    // button, so the only badge worth the space is one that means "look here".
+    const { overlay, badge } = await mountBoth({
+      signals: [{ ...waiting("thr_1"), status: "done" }],
+    });
+    await waitFor(() => expect(badge.queryByRole("status")).toBeNull());
+    badge.lifecycle.unmount();
+    overlay.lifecycle.unmount();
+  });
+});
+
 describe("the re-entry refresher", () => {
   const STATE = {
     threadId: "thr_1",

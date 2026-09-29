@@ -117,6 +117,10 @@ keeps failing. The thread is also re-read immediately before the write, so a
 rename made during a summarizer call is not overwritten by a name chosen before
 it. Turning the setting off undoes nothing — bb's original title is not kept.
 
+**A page of its own** — a **Briefs** item in the sidebar opens [the
+board](#the-board): every thread as a card, in a column per stage, filtered by
+status and project, with a count of what is waiting on you on the sidebar row.
+
 **Sidebar sections** — optionally, the sidebar groups by status instead of by
 project:
 
@@ -214,6 +218,108 @@ quiet period is there to stop a busy thread being re-summarized every turn, and
 a thread with no brief has nothing to protect — only an empty panel, a missing
 ring and no section, for as long as its first turn takes.
 
+## The board
+
+A **Briefs** page in the sidebar, beside Plugins and Skills: every thread as a
+card, in a column per stage, with a count of what is waiting on you on the
+sidebar row itself.
+
+The sidebar row has one slot and this plugin spends it on the ring, so everything
+else a brief knows has nowhere to go there; the Brief panel has room but shows one
+thread at a time, which is the wrong shape for "which of these should I pick up".
+
+**The columns are stages. The filters are statuses.** Status is the question you
+arrive with — *what needs me?* — so it filters. Stage is the question you arrive
+unable to answer — *of the eleven threads waiting on me, which is one turn from
+done and which has not started?* — so it lays the board out. A status filter and
+a stage layout answer both in one glance; two stacked statuses would answer
+neither.
+
+```
+No brief   Discovery   Planning   Implementation   Review   Done
+```
+
+Six columns, in flow order. Two of them are not stages, and each is a deliberate
+exception:
+
+- **Done** is a *status*. It gets a terminal column anyway because the whole
+  affordance of a kanban is work flowing left into a bucket you stop looking at,
+  and without one the Review column mixes "needs my review" with "finished,
+  archiving tomorrow" — exactly the confusion the board exists to remove. The
+  cost is that column position stops meaning stage for that one column, and it is
+  paid back on the card: a done card still draws the closed ring, so its stage is
+  still legible.
+- **No brief** holds every thread this plugin has never summarized. Briefs are
+  never backfilled, so on any real install that is a real set — and a board that
+  quietly omitted them could not be read as "everything I have open", because a
+  missing thread would be indistinguishable from a finished one. Each card offers
+  **Summarize**. It is the same job bb's own catch-all **Threads** group does for
+  the [status sections](#sidebar-sections).
+
+A column that a filter can only ever leave empty is hidden rather than drawn
+empty, since an empty bucket reads as "nothing here" when the filter is what
+emptied it. So filtering to **Done** leaves one column; filtering to anything else
+drops Done and No brief — a briefless thread has no status, and asking for one is
+asking a question only a brief can answer.
+
+**The card** leads with `nextStep`, not `goal`. Goal is what you need when you
+have forgotten a thread; nextStep is what you need when choosing between threads,
+which is what this page is for — goal, current state and constraints are one
+chevron away, where they answer the other question. Around it: the stage ring in
+the project's colour, a status badge, `blockedOn` when set, the project, and how
+long the thread has sat. A next step the *agent* could take by itself is marked
+`agent can continue`, because `waiting-on-me` covers both that and work only you
+can do, and on a board the difference is worth a word.
+
+Cards are ordered pins first, then `waiting-on-me` → **Blocked** → **Working** →
+**Done**, then most recent. `working` ranks low on purpose: the agent has it, so
+it is the one row making progress without you.
+
+**Dragging a card writes a pin.** Between stage columns it sets the same manual
+stage the Brief panel does; onto **Done** it pins the status. Both are anchored to
+the thread's activity cursor, so a dragged card carries a `pinned` marker and
+retires on the next real turn — which is why the marker is there rather than
+letting the card appear to move back by itself. Three rules that are not
+obvious:
+
+- Dropping a card on the stage the summarizer **already** judged *clears* the pin
+  instead of setting one. Dragging a card back to where it would sit by itself is
+  a statement that the model was right, and pinning it there would leave a pin
+  that does nothing until it silently expires.
+- Dragging **out of** Done pins `waiting-on-me` rather than clearing the status
+  pin, because a done reading can come from the derivation as well as from a pin —
+  and clearing in that case would hand the card straight back to a derivation
+  that still says done, snapping it into the column you just dragged it out of.
+- **No brief** is not a drop target in either direction.
+
+Drag-and-drop is a pointer affordance, so the expanded card carries the panel's
+own stage and status controls. That is the whole mobile story: on a compact
+viewport the columns stack into one scrolling list with their headers as section
+headings, same cards, same data path, and the pins are taps.
+
+**Filters live in the URL.** `/plugins/thread-briefs/board/status:waiting-on-me`
+is a link you can send or bookmark, and browser back and forward walk between
+views for free. The last one is remembered, so opening the page from the sidebar
+lands where you left it; arriving with a filter already in the path leaves it
+alone. Anything unrecognised in the path is ignored rather than fatal, because
+that path outlives this version of the plugin.
+
+**Where the data comes from** is the same split as the row glyphs. One
+`listBriefCards` call — a single kv scan, no per-thread lookups — carries the
+stored facts, and everything live (title, project, pin, whether the agent is
+running, the attention cursor) is already in bb's own cache behind
+`experimental_useSidebarThreads`, which costs no request and updates exactly when
+the built-in sidebar does. The two are folded together by pure functions in
+`board.ts`, so which column a thread lands in and what a drop writes are tested
+without mounting anything.
+
+The **count on the sidebar row** — bb calls it a panel accessory — is threads
+waiting on you, and it costs nothing: the overlay that draws the row glyphs has
+already folded the briefs against the live thread list, so the badge reads that
+same store rather than making a second request per window. Nothing is drawn at
+zero; the accessory shares the row's trailing column with bb's own options
+button, so the only badge worth the space is one that means "look here".
+
 ## Auto-archiving finished threads
 
 A thread whose brief says **done** and which has had no activity for two days is
@@ -262,6 +368,7 @@ so a sweep running up to an hour late is invisible.
 | Ring artwork | `app.experimental_icons.register`, one inline SVG per stage plus the done ring, in every palette colour, plus one grey done ring — since a row status takes an icon *name* and not a component, every combination has to be registered at init, before any project is known |
 | Auto-archive | a `17 * * * *` `bb.background.schedule` over `threads.list`, `planArchives` deciding purely, `threads.archive` doing it, and `autoArchivedAt` on the brief row remembering it |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
+| Board | a `navPanel` with an `experimental_sidebarAccessory`, one `listBriefCards` call joined on the client to `experimental_useSidebarThreads`, filters carried in the panel's `subPath` via `useBbNavigate().toPluginPanel`, and every rule — columns, order, drops, filter parsing — pure in `board.ts` |
 | Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `experimental_onSubmitted` for the send that retires it |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |
@@ -293,7 +400,10 @@ replaces the whole sidebar list or touches none of it. The per-row hooks
 list to *consume*, not injection points into bb's own list. Inline row
 expansion therefore means forking `plugins/thread-list` (~28k lines) and
 re-merging it forever, so this plugin uses the additive surfaces bb supports
-instead: a row glyph, and a header button onto a side-panel tab.
+instead: a row glyph, a header button onto a side-panel tab, and — for everything
+that genuinely needs more room than a row has — [a page of its own](#the-board).
+The board is what the inline expansion was really for: it shows more per thread
+than a row ever could, without owning a single row.
 
 ### Why `thread.idle` rather than polling
 

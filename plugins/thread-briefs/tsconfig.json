@@ -27,6 +27,10 @@
     "transcript.ts",
     "summarize.ts",
     "server.ts",
+    "board.ts",
+    "clock.ts",
+    "controls.tsx",
+    "board-page.tsx",
     "app.tsx",
     "*.test.ts",
     "*.test.tsx"

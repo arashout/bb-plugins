@@ -19,7 +19,15 @@ const read = (name: string) =>
   readFileSync(join(import.meta.dirname, name), "utf8");
 
 /** Modules the frontend bundle is allowed to pull in at runtime. */
-const FRONTEND_MODULES = ["app.tsx", "shared.ts", "brief.ts"];
+const FRONTEND_MODULES = [
+  "app.tsx",
+  "shared.ts",
+  "brief.ts",
+  "board.ts",
+  "board-page.tsx",
+  "controls.tsx",
+  "clock.ts",
+];
 
 /**
  * Strip comments first: the word "import" inside prose would otherwise anchor a
@@ -65,10 +73,10 @@ describe("frontend bundle graph", () => {
     },
   );
 
-  it("app.tsx imports contract.ts for types only", () => {
+  it.each(FRONTEND_MODULES)("%s imports contract.ts for types only", (name) => {
     // contract.ts reaches the SDK root, so a runtime import of it would drag
     // the SDK into the app bundle.
-    expect(runtimeImports(read("app.tsx"))).not.toContain("./contract.js");
+    expect(runtimeImports(read(name))).not.toContain("./contract.js");
   });
 
   it("app.tsx gets its runtime constants from shared.ts", () => {

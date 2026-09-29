@@ -1,4 +1,5 @@
 import type {
+  BriefCard,
   BriefStage,
   BriefStatus,
   NextStepActor,
@@ -240,6 +241,37 @@ export const STATUS_LABELS: Record<BriefStatus, string> = {
  */
 export function rowLabelFor(stage: BriefStage, status: BriefStatus): string {
   return `${STAGE_LABELS[stage]} — ${STATUS_LABELS[status]}`;
+}
+
+/**
+ * The board's card for one stored brief.
+ *
+ * Built from the stored row rather than from a {@link ResolvedBrief}, because
+ * `modelStage` is the one fact the board needs that resolving deliberately
+ * throws away — it is what makes "dropped on the stage the summarizer already
+ * chose" a clearable pin rather than a new one.
+ */
+export function briefCardFor(stored: StoredBrief): BriefCard {
+  const resolved = resolveBrief(stored);
+  return {
+    threadId: stored.threadId,
+    stage: resolved.stage,
+    modelStage: stored.modelStage,
+    // Not `resolved.status`, which is typed as the full union including the
+    // live-only `working`: the stored status is what this wire field carries,
+    // and taking it from the narrower function says so without a cast.
+    status: effectiveStatus(stored),
+    stageOverride: resolved.stageOverride,
+    statusOverride: resolved.statusOverride,
+    nextStep: resolved.nextStep,
+    // Spread rather than assigned, so an absent actor stays absent: the schema
+    // is `.strict()` and an explicit `undefined` is not the same as no key.
+    ...(resolved.nextStepActor === undefined
+      ? {}
+      : { nextStepActor: resolved.nextStepActor }),
+    blockedOn: resolved.blockedOn,
+    lastSummarizedAt: resolved.lastSummarizedAt,
+  };
 }
 
 export function rowSignalFor(brief: ResolvedBrief): RowSignal {

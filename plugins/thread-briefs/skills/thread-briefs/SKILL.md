@@ -1,15 +1,17 @@
 ---
 name: thread-briefs
-description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the grey ring and auto-archiving of stale done threads, the side-panel Brief tab, the re-entry refresher above the composer, the manual stage and status overrides, and renaming threads to the brief's title.
+description: Configure or diagnose the Thread briefs plugin — the per-thread goal/state/next-step brief, its summarizer endpoint, the sidebar glyphs, the grey ring and auto-archiving of stale done threads, the side-panel Brief tab, the Briefs board page and its sidebar count, the re-entry refresher above the composer, the manual stage and status overrides, and renaming threads to the brief's title.
 ---
 
 # Thread briefs
 
 Keeps one short, durable brief per thread — goal, current state, next step,
 blocked on, constraints — generated outside the working chat so the thread's own
-context stays clean. Briefs surface as a glyph on the sidebar row and in full in
-the **Brief** tab of the thread's side panel, opened by the **Brief** button in
-the thread header or from the panel's new-tab launcher under Actions.
+context stays clean. Briefs surface as a glyph on the sidebar row, in full in
+the **Brief** tab of the thread's side panel (opened by the **Brief** button in
+the thread header or from the panel's new-tab launcher under Actions), and all at
+once on [the board](#the-board) — a **Briefs** page in the sidebar with one card
+per thread in a column per stage.
 
 The panel is where the whole brief lives, so it stays open beside the transcript;
 the header button is only a way in, and holds no state of its own. Panel tabs are
@@ -537,6 +539,105 @@ The panel is also where the ring is learned — the stage control draws each opt
 beside its own ring, and the status line at the top draws the ring that thread's
 row is currently showing.
 
+## The board
+
+A **Briefs** item in the sidebar (bb's own nav-panel list, beside Plugins and
+Skills) opens a page with one card per thread in a column per stage:
+
+```
+No brief   Discovery   Planning   Implementation   Review   Done
+```
+
+Columns are **stage**; the filters are **status** and **project**. That split is
+the design: status is the question you arrive with, stage is the one you arrive
+unable to answer, so filtering on the first and laying out the second answers both
+at once.
+
+Two columns are not stages:
+
+- **Done** is a status. It gets the terminal column anyway, because otherwise
+  Review holds both "needs my review" and "finished, archiving tomorrow". A done
+  card still draws the closed ring, so its stage stays readable.
+- **No brief** holds every thread with no brief at all. Briefs are never
+  backfilled, so this bucket is real and permanent for old threads; each card
+  offers **Summarize**. Same role as bb's **Threads** group under
+  [status grouping](#sidebar-sections).
+
+A column a filter can only leave empty is **hidden**, not drawn empty. Filtering
+to Done leaves one column; filtering to any other status drops Done *and* No brief
+— a briefless thread has no status to match.
+
+### The card
+
+`nextStep` is the body, not `goal`: the board's question is which thread to pick
+up. Goal, current state and constraints are behind the chevron, which fetches them
+with `getBrief` for that one card. Also on the face: the stage ring in the
+project's colour (the same glyph as the sidebar row, including the grey one for a
+cold done thread), a status badge, `blockedOn`, the project, and the idle age.
+
+`agent can continue` appears when `nextStepActor` is `agent` and the status is
+`waiting-on-me`. The derivation collapses those two cases (see
+[Stage and status](#stage-and-status)), so this is the only place the difference
+shows.
+
+Order inside a column: pinned threads, then `waiting-on-me` → Blocked → Working →
+Done, then most recently active. Working ranks low deliberately — the agent has
+it. Past 50 cards a column offers **Show all**.
+
+### Dragging
+
+A drag writes the same manual pins the Brief panel does, and they retire the same
+way — anchored to the thread's activity cursor, gone on the next real turn, which
+is what the `pinned` marker on the card is warning about.
+
+| Drag | Writes |
+| --- | --- |
+| to another stage column | `setStageOverride(<stage>)` |
+| to the stage the summarizer already chose | `setStageOverride(null)` — clears the pin |
+| to **Done** | `setStatusOverride("done")` |
+| out of **Done** | `setStatusOverride("waiting-on-me")`, then the stage if it also changed |
+| to or from **No brief** | nothing |
+
+Dragging out of Done *pins* rather than clears because a done reading can come
+from the derivation as well as a pin; clearing would hand the card back to a
+derivation that still says done and it would snap straight back.
+
+Drag-and-drop does not work on touch, so the **expanded card carries the panel's
+own stage and status controls**. On a compact viewport the columns stack into one
+scrolling list with their headers as section headings.
+
+### Filters and the URL
+
+Filters live in the panel's sub-path, so a view is a link:
+
+```
+/plugins/thread-briefs/board                           # everything
+/plugins/thread-briefs/board/status:waiting-on-me      # what needs you
+/plugins/thread-briefs/board/project:prj_a/status:done # one project, finished
+```
+
+Browser back and forward walk between views. The last filter is remembered in
+`localStorage` (keyed by plugin id) and restored when you arrive at the bare
+`/board`; a path that already carries a filter is left alone. Unrecognised keys
+and values are ignored rather than fatal.
+
+The project chips only list projects that have a thread on the board, and appear
+only when there is more than one.
+
+### The count on the sidebar row
+
+The number beside **Briefs** is threads `waiting-on-me`, with running threads
+excluded (they are `working`). It costs no request: the overlay that draws the row
+glyphs has already folded the briefs against the live thread list, and the badge
+reads that store. Nothing is drawn at zero.
+
+### Cost
+
+One `listBriefCards` per window per `briefs-changed` — one kv scan, no per-thread
+lookups, and the four prose fields the card never shows stay off the wire.
+Everything live comes from `experimental_useSidebarThreads`, which reads bb's own
+cache. The board shows **active** threads only; archived ones are not requested.
+
 ## Sidebar sections
 
 `bb plugin config thread-briefs set sidebarGrouping status` replaces the
@@ -630,6 +731,23 @@ no preference writes.
 - The refresher shows prose that reads stale: it is written by the summary, so
   it is exactly as fresh as the **Summarized …** line in the Brief panel.
   **Re-summarize** rewrites both.
+- A thread missing from the board entirely: the board is driven by the sidebar's
+  thread list, so an archived or hidden thread has no card even if it has a brief.
+  Check whether the [archive sweep](#stale-done-threads) took it.
+- The board's **No brief** column is huge on a fresh install: expected. Briefs are
+  never backfilled; the column empties as threads are worked, or card by card with
+  **Summarize**.
+- A card that moved back to where it was a turn later: that is the pin retiring,
+  not a failed write. Pins are anchored to the thread's activity cursor by design;
+  the `pinned` marker on the card says one is in force.
+- A card that will not stay out of **Done**: pin the status to something else from
+  the expanded card. Dragging already does this, but a re-summary after the next
+  turn will re-derive `done` if the brief still has nothing outstanding.
+- Drag does nothing on a phone or tablet: expected — it is an HTML5 pointer drag.
+  Use the stage and status controls on the expanded card.
+- No **Briefs** item in the sidebar: it is a nav panel, so it can be hidden or
+  reordered by the user in bb's own sidebar customize editor. Check there before
+  suspecting the plugin.
 - The header **Brief** button does nothing: it opens a tab in the thread's side
   panel, which only the main thread view has. A `ThreadChat` embedded elsewhere
   has no panel to open, and the host logs the declined open.

@@ -7,11 +7,11 @@ import {
   type BriefStage,
   type BriefState,
   type RefresherState,
-  type RowSignal,
   type StoredBrief,
   type StoredRefresher,
 } from "./contract.js";
 import {
+  briefCardFor,
   briefKey,
   deriveStatus,
   effectiveStatus,
@@ -662,27 +662,59 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ------------------------------------------------------------------- rpc
 
+  /**
+   * Every stored brief, projected into whatever the caller's surface wants.
+   *
+   * One kv scan and no `threads.get` per row, which is what lets both list calls
+   * stay cheap enough to run on every `briefs-changed` in every open window. The
+   * two callers differ only in the projection, so sharing the scan is also what
+   * keeps the sidebar's signals and the board's cards from drifting apart about
+   * which briefs exist.
+   */
+  const mapStoredBriefs = async <Value>(
+    project: (stored: StoredBrief) => Value,
+  ): Promise<Value[]> => {
+    const values: Value[] = [];
+    for (const key of await bb.storage.kv.list("brief:")) {
+      const stored = await readBrief(threadIdFromKey(key));
+      if (stored === null) continue;
+      values.push(project(stored));
+    }
+    return values;
+  };
+
+  /**
+   * The two done-thread thresholds, sent with every list call.
+   *
+   * On the wire rather than read from settings on the client, because the
+   * archive sweep decides with these same numbers: one source, so a grey card
+   * cannot promise an archiving the sweep is not about to do.
+   */
+  const ringThresholds = async () => {
+    const values = await settings.get();
+    return {
+      staleAfterMs: hoursToMs(values.doneStaleHours),
+      archiveAfterMs: hoursToMs(values.doneArchiveHours),
+    };
+  };
+
   bb.rpc.register(rpcContract, {
     getBrief: ({ threadId }) => briefState(threadId),
 
-    listRowSignals: async () => {
-      const keys = await bb.storage.kv.list("brief:");
-      const signals: RowSignal[] = [];
-      for (const key of keys) {
-        const stored = await readBrief(threadIdFromKey(key));
-        if (stored === null) continue;
-        // No live thread lookups here: the client folds the running/queued
-        // override and the staleness in per row, off the sidebar view it
-        // already has.
-        signals.push(rowSignalFor(resolveBrief(stored)));
-      }
-      const values = await settings.get();
-      return {
-        signals,
-        staleAfterMs: hoursToMs(values.doneStaleHours),
-        archiveAfterMs: hoursToMs(values.doneArchiveHours),
-      };
-    },
+    listRowSignals: async () => ({
+      // No live thread lookups here: the client folds the running/queued
+      // override and the staleness in per row, off the sidebar view it
+      // already has.
+      signals: await mapStoredBriefs((stored) =>
+        rowSignalFor(resolveBrief(stored)),
+      ),
+      ...(await ringThresholds()),
+    }),
+
+    listBriefCards: async () => ({
+      cards: await mapStoredBriefs(briefCardFor),
+      ...(await ringThresholds()),
+    }),
 
     setStageOverride: async ({ threadId, stage }) => {
       const stored = await readBrief(threadId);

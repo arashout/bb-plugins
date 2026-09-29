@@ -113,6 +113,7 @@ describe("registrations", () => {
       expect.arrayContaining([
         "getBrief",
         "listRowSignals",
+        "listBriefCards",
         "setStageOverride",
         "refresh",
       ]),
@@ -489,6 +490,67 @@ describe("summarizing", () => {
       },
     ]);
   });
+
+  it("emits a board card per stored brief, prose and model stage included", async () => {
+    // The board's sibling of the signal above: same scan, more of the brief, and
+    // `modelStage` — the one fact resolving throws away, which is what makes a
+    // drop onto the summarizer's own choice a *cleared* pin rather than a new one.
+    current = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(current.bb);
+
+    await current.harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    const cards = await waitFor(async () => {
+      const result = (await current!.harness.behavior.callRpc(
+        "listBriefCards",
+        null,
+      )) as { cards: unknown[] };
+      return result.cards.length > 0 ? result.cards : null;
+    });
+    expect(cards).toEqual([
+      expect.objectContaining({
+        threadId: "thr_1",
+        stage: "review",
+        modelStage: "review",
+        status: "waiting-on-me",
+        stageOverride: null,
+        statusOverride: null,
+        nextStep: SUMMARY.nextStep,
+        blockedOn: "",
+      }),
+    ]);
+    // The four fields the card face never shows stay off the wire: the board
+    // asks `getBrief` for the one card you expand.
+    expect(cards?.[0]).not.toHaveProperty("goal");
+    expect(cards?.[0]).not.toHaveProperty("currentState");
+    expect(cards?.[0]).not.toHaveProperty("constraints");
+  });
+
+  it("reports the pinned stage on a card and remembers the model's", async () => {
+    current = host({ fetch: fakeCompletion(SUMMARY) });
+    await plugin(current.bb);
+
+    await current.harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    await waitFor(async () => {
+      const result = (await current!.harness.behavior.callRpc("getBrief", {
+        threadId: "thr_1",
+      })) as BriefState;
+      return result.state === "ready" ? result : null;
+    });
+    await current.harness.behavior.callRpc("setStageOverride", {
+      threadId: "thr_1",
+      stage: "planning",
+    });
+
+    const result = (await current.harness.behavior.callRpc(
+      "listBriefCards",
+      null,
+    )) as { cards: { stage: string; modelStage: string; stageOverride: string | null }[] };
+    expect(result.cards[0]).toMatchObject({
+      stage: "planning",
+      stageOverride: "planning",
+      modelStage: "review",
+    });
+  });
 });
 
 describe("the auto-archive sweep", () => {
@@ -620,12 +682,14 @@ describe("the auto-archive sweep", () => {
     // the sweep is not about to do.
     const { bb, harness } = archiveHost({ threads: [] });
     await plugin(bb);
-    const result = (await harness.behavior.callRpc("listRowSignals", null)) as {
-      staleAfterMs: number;
-      archiveAfterMs: number;
-    };
-    expect(result.staleAfterMs).toBe(24 * 60 * 60 * 1000);
-    expect(result.archiveAfterMs).toBe(48 * 60 * 60 * 1000);
+    for (const method of ["listRowSignals", "listBriefCards"]) {
+      const result = (await harness.behavior.callRpc(method, null)) as {
+        staleAfterMs: number;
+        archiveAfterMs: number;
+      };
+      expect(result.staleAfterMs).toBe(24 * 60 * 60 * 1000);
+      expect(result.archiveAfterMs).toBe(48 * 60 * 60 * 1000);
+    }
     await harness.lifecycle.dispose();
   });
 });

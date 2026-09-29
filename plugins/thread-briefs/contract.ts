@@ -326,6 +326,42 @@ export const refresherStateSchema = z
   .strict();
 export type RefresherState = z.infer<typeof refresherStateSchema>;
 
+/**
+ * One card on the board page: the brief facts a card shows, and nothing else.
+ *
+ * A sibling of {@link rowSignalSchema} rather than an extension of it, because
+ * the two surfaces want different amounts: the sidebar draws a glyph and would
+ * pay for prose it never renders on every row of every window, and the board
+ * needs `nextStep` on every card but reads `goal`, `currentState` and
+ * `constraints` only for the one card you expand — which `getBrief` already
+ * answers, per thread, on demand.
+ *
+ * `status` is the *stored* status. `working` is live thread state that never
+ * reaches a stored row, so the board folds it in per card off the sidebar view
+ * it already holds, exactly as the row glyphs do.
+ *
+ * `modelStage` is here and not on {@link resolvedBriefSchema} because only the
+ * board needs it: dropping a card on the stage the summarizer already judged
+ * clears the pin instead of setting one, and that comparison is impossible from
+ * the effective stage alone.
+ */
+export const briefCardSchema = z
+  .object({
+    threadId: z.string(),
+    stage: briefStageSchema,
+    /** The summarizer's own judgement, whatever the effective stage is. */
+    modelStage: briefStageSchema,
+    status: storedBriefStatusSchema,
+    stageOverride: briefStageSchema.nullable(),
+    statusOverride: storedBriefStatusSchema.nullable(),
+    nextStep: z.string(),
+    nextStepActor: nextStepActorSchema.optional(),
+    blockedOn: z.string(),
+    lastSummarizedAt: z.number(),
+  })
+  .strict();
+export type BriefCard = z.infer<typeof briefCardSchema>;
+
 /** The per-row signal the sidebar draws: one glyph, no prose. */
 export const rowSignalSchema = z
   .object({
@@ -370,6 +406,25 @@ export const rpcContract = defineRpcContract({
          * about to do. The client needs `archiveAfterMs` only to decide whether
          * the label may say so.
          */
+        staleAfterMs: z.number(),
+        archiveAfterMs: z.number(),
+      })
+      .strict(),
+  },
+  /**
+   * One card per stored brief, for the board page.
+   *
+   * Same shape of call as `listRowSignals` and for the same reason: one kv scan,
+   * no per-thread lookups, and the client joins the result to the sidebar's
+   * live thread view for titles, projects, pins, `working` and staleness. The
+   * thresholds ride along so the board's grey treatment and the sweep cannot
+   * come to disagree.
+   */
+  listBriefCards: {
+    input: z.null(),
+    output: z
+      .object({
+        cards: z.array(briefCardSchema),
         staleAfterMs: z.number(),
         archiveAfterMs: z.number(),
       })

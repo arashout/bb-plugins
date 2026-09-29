@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
@@ -35,12 +42,14 @@ import {
   doneRingIcon,
   DONE_RING_ICON,
   rowDecoration,
-  STAGE_LABELS,
   STALE_DONE_RING_ICON,
   stageRingIcon,
   STATUS_LABELS,
   summarizedAgo,
 } from "./brief.js";
+import { Field, StageControl, StatusControl } from "./controls.js";
+import { useNow } from "./clock.js";
+import { BoardPage, BOARD_PANEL_ID, BOARD_PATH } from "./board-page.js";
 
 type Decoration = {
   icon: string;
@@ -72,15 +81,32 @@ const STALE_TICK_MS = 60_000;
  */
 const store = {
   decorations: new Map<string, Decoration>(),
+  /**
+   * How many threads are waiting on you right now, for the board's sidebar
+   * accessory.
+   *
+   * Published from here rather than fetched again because the count needs
+   * exactly what {@link BriefSync} has already assembled — the briefs off the
+   * wire and the live `working` fold — and the accessory is mounted in every
+   * sidebar, in every window. A second `listRowSignals` per window on every
+   * `briefs-changed` to draw one number would be the most expensive badge in
+   * bb. Before the first load it is null, which renders nothing; so does zero,
+   * so there is no state where the reading is wrong, only one where it is late.
+   */
+  waitingOnMe: null as number | null,
   listeners: new Set<() => void>(),
 };
 
-function publishDecorations(next: Map<string, Decoration>) {
-  store.decorations = next;
+function publish(next: {
+  decorations: Map<string, Decoration>;
+  waitingOnMe: number;
+}) {
+  store.decorations = next.decorations;
+  store.waitingOnMe = next.waitingOnMe;
   for (const listener of store.listeners) listener();
 }
 
-function subscribeDecorations(listener: () => void): () => void {
+function subscribe(listener: () => void): () => void {
   store.listeners.add(listener);
   return () => {
     store.listeners.delete(listener);
@@ -196,7 +222,16 @@ function BriefSync() {
 
   useEffect(() => {
     const next = new Map<string, Decoration>();
+    let waitingOnMe = 0;
     for (const signal of signals) {
+      // The same live fold the decoration below makes, counted before it: a
+      // thread whose agent is running is `working`, and is not waiting on you.
+      if (
+        !workingIds.has(signal.threadId) &&
+        signal.status === "waiting-on-me"
+      ) {
+        waitingOnMe += 1;
+      }
       // A thread with no row in the sidebar has no cursor to age, so it simply
       // never greys: the one place this can happen is a thread the current
       // window is not showing, which has no glyph to draw either.
@@ -222,7 +257,7 @@ function BriefSync() {
       );
       if (decoration !== null) next.set(signal.threadId, decoration);
     }
-    publishDecorations(next);
+    publish({ decorations: next, waitingOnMe });
   }, [
     attentionByThreadId,
     now,
@@ -338,134 +373,6 @@ const RING_ICONS = [
 ];
 
 // ------------------------------------------------------------------ the panel
-
-function Field({ label, value }: { label: string; value: string }) {
-  if (value.trim() === "") return null;
-  return (
-    <div className="space-y-0.5">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
-      <div className="text-sm leading-snug text-foreground">{value}</div>
-    </div>
-  );
-}
-
-function StageControl({
-  brief,
-  onPick,
-}: {
-  brief: ResolvedBrief;
-  onPick: (stage: BriefStage | null) => void;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        Stage
-      </div>
-      <div className="flex flex-wrap gap-1">
-        {BRIEF_STAGES.map((stage) => {
-          const isActive = brief.stage === stage;
-          const isManual = brief.stageOverride === stage;
-          return (
-            <button
-              key={stage}
-              type="button"
-              aria-pressed={isActive}
-              // Picking the stage that is already manually set clears the
-              // override and hands the judgement back to the summarizer.
-              onClick={() => onPick(isManual ? null : stage)}
-              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs ${
-                isActive
-                  ? "border-border bg-card font-medium text-foreground"
-                  : "border-transparent text-muted-foreground hover:bg-card"
-              }`}
-            >
-              {/*
-                Each option next to its own ring, which is where the sidebar's
-                glyph is learned: four labelled rings in a row say what a single
-                ring on a row cannot.
-              */}
-              <Icon
-                name={stageRingIcon(stage)}
-                className="h-3 w-3 shrink-0"
-                aria-hidden
-              />
-              {STAGE_LABELS[stage]}
-              {isManual ? " ·" : ""}
-            </button>
-          );
-        })}
-      </div>
-      {brief.stageOverride !== null ? (
-        <div className="text-[11px] text-muted-foreground">
-          Set by hand · clears on the next turn
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The manual status, in the same shape as the stage control below it.
- *
- * Status is otherwise derived from the brief's own prose, which has no way to
- * learn that a `nextStep` addressed to you was carried out somewhere the
- * transcript cannot see — reload a client, confirm a rollout, check a glyph.
- * Doing it leaves no trace to summarize, so without this the thread is
- * "Waiting on you" for good. Dragging its sidebar row elsewhere does not help:
- * sections are keyed on this status, so the next reconcile files it straight
- * back.
- *
- * No rings beside the options, unlike the stage control. The row glyph draws
- * the *stage*, and only `done` gets a status treatment at all (tone, and the
- * closed ring in place of the stage), so three labelled rings here would be two
- * identical glyphs and a claim that status is what the row shows.
- */
-function StatusControl({
-  brief,
-  onPick,
-}: {
-  brief: ResolvedBrief;
-  onPick: (status: StoredBriefStatus | null) => void;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        Status
-      </div>
-      <div className="flex flex-wrap gap-1">
-        {STORED_BRIEF_STATUSES.map((status) => {
-          const isActive = brief.status === status;
-          const isManual = brief.statusOverride === status;
-          return (
-            <button
-              key={status}
-              type="button"
-              aria-pressed={isActive}
-              // Picking the status that is already pinned clears the override
-              // and hands the judgement back to the derivation.
-              onClick={() => onPick(isManual ? null : status)}
-              className={`inline-flex items-center rounded border px-1.5 py-0.5 text-xs ${
-                isActive
-                  ? "border-border bg-card font-medium text-foreground"
-                  : "border-transparent text-muted-foreground hover:bg-card"
-              }`}
-            >
-              {STATUS_LABELS[status]}
-              {isManual ? " ·" : ""}
-            </button>
-          );
-        })}
-      </div>
-      {brief.statusOverride !== null ? (
-        <div className="text-[11px] text-muted-foreground">
-          Set by hand · clears on the next turn
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 function BriefBody({
   now,
@@ -587,27 +494,18 @@ function BriefBody({
         </div>
       )}
 
-      <StatusControl brief={brief} onPick={onPickStatus} />
-      <StageControl brief={brief} onPick={onPick} />
+      <StatusControl
+        status={brief.status}
+        statusOverride={brief.statusOverride}
+        onPick={onPickStatus}
+      />
+      <StageControl
+        stage={brief.stage}
+        stageOverride={brief.stageOverride}
+        onPick={onPick}
+      />
     </div>
   );
-}
-
-/**
- * Wall-clock time, re-read on an interval, for the "summarized N ago" line.
- *
- * Every other value in the panel changes by a realtime event; this one changes
- * by nothing happening, which is the case a render-time `Date.now()` cannot
- * see. Without the tick a brief written two hours ago reads "just now" for as
- * long as the tab is left open — worse than saying nothing.
- */
-function useNow(intervalMs: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(timer);
-  }, [intervalMs]);
-  return now;
 }
 
 /**
@@ -722,6 +620,43 @@ function BriefHeaderAction({
       <Icon name="ListTodo" className="h-3.5 w-3.5" />
       {isCompactViewport ? null : <span>Brief</span>}
     </button>
+  );
+}
+
+// ------------------------------------------------------ the sidebar accessory
+
+/**
+ * How many threads are waiting on you, at the trailing edge of the board's own
+ * sidebar row.
+ *
+ * The reason to open the board, on the thing you click to open it. It costs no
+ * request: {@link BriefSync} has already folded the briefs against the live
+ * thread list to draw the row glyphs, so the count is read out of the same store
+ * the content script reads. `useSyncExternalStore` rather than an effect because
+ * the store is written outside React and this must not lag a frame behind the
+ * glyphs beside it.
+ *
+ * Nothing is drawn at zero. An accessory is clipped to about 4rem by 1.25rem and
+ * shares the row's trailing column with the host's own options button, so the
+ * only badge worth that space is one that means "there is something here".
+ */
+function WaitingBadge() {
+  const waitingOnMe = useSyncExternalStore(
+    subscribe,
+    () => store.waitingOnMe,
+    () => null,
+  );
+  if (waitingOnMe === null || waitingOnMe === 0) return null;
+  const label = `${waitingOnMe} thread${waitingOnMe === 1 ? "" : "s"} waiting on you`;
+  return (
+    <span
+      role="status"
+      aria-label={label}
+      title={label}
+      className="rounded-full bg-amber-500/15 px-1.5 font-mono text-[10.5px] leading-4 tabular-nums text-amber-700 dark:text-amber-300"
+    >
+      {waitingOnMe}
+    </span>
   );
 }
 
@@ -864,6 +799,22 @@ export default definePluginApp((app) => {
 
   app.slots.experimental_appOverlay({ id: "brief-sync", component: BriefSync });
 
+  // The board. A nav panel rather than anything sidebar-shaped: bb gives it the
+  // whole main area, a route of its own, and a host-owned sidebar item beside
+  // Plugins and Skills that the user can reorder, hide or bind a shortcut to,
+  // none of which is this plugin's code. See {@link BoardPage}.
+  app.slots.navPanel({
+    id: BOARD_PANEL_ID,
+    title: "Briefs",
+    // Two columns rather than the plugin's own ListTodo: the sidebar item has to
+    // say "board", and the branding icon is already what the thread-header
+    // button and the refresher card wear.
+    icon: "Columns3",
+    path: BOARD_PATH,
+    component: BoardPage,
+    experimental_sidebarAccessory: WaitingBadge,
+  });
+
   app.slots.threadPanelAction({
     id: PANEL_ACTION_ID,
     title: "Thread brief",
@@ -927,7 +878,7 @@ export default definePluginApp((app) => {
         applied = new Map(next);
       };
 
-      const unsubscribe = subscribeDecorations(apply);
+      const unsubscribe = subscribe(apply);
       apply();
 
       signal.addEventListener("abort", unsubscribe, { once: true });
