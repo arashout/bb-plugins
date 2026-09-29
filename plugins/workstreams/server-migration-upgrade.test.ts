@@ -13,6 +13,7 @@ import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
 import { PR_MERGES_MIGRATION, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION }
   from "./inventory-store.js";
+import { LINEAR_SEED_MIGRATION } from "./linear-seed.js";
 import { LINEAR_DETAIL_MIGRATION } from "./linearsync.js";
 import { PR_HOLD_MIGRATIONS } from "./pr-hold-store.js";
 import { RUNS_MIGRATION } from "./runstore.js";
@@ -226,8 +227,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends deck batches after PR merge sightings", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 63 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 63 ORDER BY id").all())
       .toEqual([{ id: 63, hash: statementHash(DECK_BATCH_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends Linear seed provenance after deck batches", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 64 ORDER BY id").all())
+      .toEqual([{ id: 64, hash: statementHash(LINEAR_SEED_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

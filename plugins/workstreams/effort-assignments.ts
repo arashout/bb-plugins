@@ -18,7 +18,7 @@ export const EFFORT_ASSIGNMENT_MIGRATIONS = [
 ];
 /** Append-only: server.ts adds this after the classification audit (id 61). */
 export const EFFORT_RULE_MIGRATION = `CREATE TABLE IF NOT EXISTS effort_rules (id TEXT PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL, effort_id TEXT, created_at INTEGER NOT NULL)`;
-export type AssignmentSource = "assign" | "new-effort" | "one-off" | "rule";
+export type AssignmentSource = "assign" | "new-effort" | "one-off" | "rule" | "seed";
 
 const failure = z.object({ ok: z.literal(false), error: z.string() });
 const ruleInput = z.object({ kind: z.enum(RULE_KINDS), value: z.string().max(200), effortKey: z.string().min(1).max(500).nullable() }).strict();

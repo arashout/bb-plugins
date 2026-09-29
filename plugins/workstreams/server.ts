@@ -30,6 +30,7 @@ import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
 import { DECK_CHANGED, type DeckPile, type RowActed } from "./deck-shared.js";
+import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
   type AssignmentSource } from "./effort-assignments.js";
@@ -587,6 +588,7 @@ export const rpcContract = defineRpcContract({
    */
   deck_get: { input: z.object({ seen: deckSeenSchema.optional() }).strict(), output: deckViewSchema },
   ...deckBatchContract,
+  ...linearSeedContract,
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -680,6 +682,7 @@ export const MIGRATIONS = [
   EFFORT_RULE_MIGRATION,
   PR_MERGES_MIGRATION,
   DECK_BATCH_MIGRATION,
+  LINEAR_SEED_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -858,6 +861,7 @@ export default async function plugin(bb: BbPluginApi) {
   const effortWork = createEffortWorkStore(db);
   const piles = createEffortPileStore(db);
   const assignments = createAssignmentStore(db, effortStore);
+  const seeds = createSeedStore(db);
   /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
   const v2Pointer = (effortId: string | null | undefined): string | null => {
     const effort = effortId ? effortStore.get(effortId) : null;
@@ -3859,6 +3863,52 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
+  /** The Linear seed's proposals, from your open PRs as the inventory files them and the Linear details the board stores. Reads nothing new. */
+  async function seedPreview() {
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const prs = (await inventoryGet()).groups.flatMap((group) => group.rows.flatMap((row) => {
+      const pr = inventory.get(row.prUrl)?.pr;
+      return pr ? [{ prUrl: row.prUrl, repo: row.repo, number: row.number, title: row.title, tickets: prTickets(pr, pattern), effort: group.effort }] : [];
+    }));
+    return { keyed: (await linearKeys()).length > 0, proposals: seedProposals({ prs, linear: linear.read([...new Set(prs.flatMap((pr) => pr.tickets))]),
+      efforts: effortStore.list().map((effort) => ({ id: effort.id, name: effort.name, seededFrom: seeds.get(effort.id)?.id ?? null })) }) };
+  }
+  /**
+   * Seed an effort from each project you picked, read again now. Each takes only its PRs that no effort owns, through classifyInto's guards
+   * with an audit row per PR, and records the project it came from. It never claims tickets and never reads Linear again: a later PR on the
+   * project is suggested for it, and joins on your click.
+   */
+  async function seedCreate(projectIds: readonly string[], requestId: string) {
+    const created: { projectId: string; actionId: string; effort: { id: string; key: string; name: string }; added: number }[] = [];
+    const skipped: { projectId: string; name: string; reason: string }[] = [];
+    for (const projectId of new Set(projectIds)) {
+      const proposal = (await seedPreview()).proposals.find((item) => item.projectId === projectId);
+      const skip = (reason: string) => skipped.push({ projectId, name: proposal?.name ?? projectId, reason });
+      if (!proposal) { skip("None of your open PRs is in this project now."); continue; }
+      const seeded = proposal.matches.find((match) => match.by === "seed");
+      if (seeded) { skip(`Already seeded as ${seeded.name}.`); continue; }
+      const sourceKey = `linear-seed:${requestId}:${projectId}`;
+      if (effortStore.source(sourceKey)) { skip("Already created. Refresh the deck."); continue; }
+      const name = adminName(proposal.name);
+      const error = adminNameError(name, null);
+      if (error) { skip(error); continue; }
+      const free = proposal.prs.filter((pr) => !pr.effort).map((pr) => pr.prUrl);
+      if (!free.length) { skip("Each of its PRs is in an effort already."); continue; }
+      const made: { effort?: EstablishedEffort } = {};
+      const result = await classifyInto(() => {
+        made.effort = effortStore.establish({ sourceKey, name, goal: proposal.goal, projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" });
+        seeds.record(made.effort.id, { kind: "linear-project", id: projectId, name: proposal.name });
+        return made.effort;
+      }, "seed", free);
+      if (result.ok) created.push({ projectId, actionId: result.actionId, effort: result.effort, added: result.added });
+      else {
+        if (made.effort && effortStore.discard(made.effort.id)) seeds.remove(made.effort.id);
+        skip(result.error);
+      }
+    }
+    return { ok: true as const, created, skipped };
+  }
+
   /** Rules place only into an effort that takes work, and never onto a v2 roster, which changes only through explicit membership. */
   const rulesPlaceInto = (effortId: string) => { const effort = effortStore.get(effortId);
     return !!effort && !effort.archivedAt && piles.get(effort).pile !== "done" && !v2Pointer(effort.id); };
@@ -5620,6 +5670,7 @@ export default async function plugin(bb: BbPluginApi) {
             advance.list().some((batch) => batch.jobs.some((job) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.path, job.prUrl))))
             throw new Error("Affected work became active or uncertain. Reopen the merge preview after it settles.");
           prepareAdminSync(result.preview.source, result.preview.destination, result.threadDetails);
+          seeds.move(result.preview.source.id, result.preview.destination.id);
           return effortStore.merge(result.preview.source.id, result.preview.destination.id);
         })();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -5688,8 +5739,8 @@ export default async function plugin(bb: BbPluginApi) {
     classify_undo: async ({ actionId }) => {
       try {
         const { effortId, source } = assignments.undo(actionId);
-        // Undoing a new effort removes it, unless it has since gained work, threads, or a roster of its own.
-        if (source === "new-effort" && effortWork.execution(effortId).revision === 0) effortStore.discard(effortId);
+        // Undoing a new or seeded effort removes it, unless it has since gained work, threads, or a roster of its own.
+        if ((source === "new-effort" || source === "seed") && effortWork.execution(effortId).revision === 0 && effortStore.discard(effortId)) seeds.remove(effortId);
       } catch (error) { return { ok: false as const, error: (error as Error).message }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       inventoryChanged();
@@ -5697,6 +5748,8 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     effort_reopen: ({ effortKey }) => movePile(effortKey, "reopen"),
+    linear_seed_preview: () => seedPreview(),
+    linear_seed_create: ({ projectIds, requestId }) => seedCreate(projectIds, requestId),
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
     thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {
       intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
