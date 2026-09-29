@@ -1,5 +1,5 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr } from "./contract.js";
 import { ONE_OFFS_SOURCE } from "./effort-assignments.js";
 import type { SuggestionGroup } from "./effort-classify.js";
@@ -230,5 +230,107 @@ describe("suggestions over RPC", () => {
       // #320 shares ABC-900 with the done Quill export, which takes no new work.
       ["none", [317, 320], [[], []]],
     ]);
+  });
+});
+
+describe("Standing rules", () => {
+  const later = () => new Date(Date.now() + 60_000).toISOString();
+  /**
+   * You author #313 (on OPS-40, opened long ago), #316, and #311, which Vault audits owns and which is also on OPS-40: a high-confidence
+   * suggestion puts #313 in Vault audits. Shelf order owns #314.
+   */
+  async function setupRules() {
+    const authored = [{ ...pr(313, "Update the footer year"), headRefName: "reader/ops-40-footer" }, pr(314, "ABC-341 Group shelves by genre"),
+      pr(316, "Remove an unused import"), { ...pr(311, "Rotate vault audit keys"), headRefName: "ops-40-keys" }];
+    const env = await setup(authored);
+    const vault = env.efforts.establish({ sourceKey: "pr:311", name: "Vault audits", goal: "Audit the vault", projectId: "", coordinatorState: "none",
+      members: { tickets: [], prUrls: [url(311)] } });
+    const audit = () => env.bb.storage.database().prepare(`SELECT source, rule_id AS ruleId, ref, undone_at AS undoneAt, action_id AS actionId
+      FROM effort_assignments ORDER BY seq`).all() as { source: string; ruleId: string | null; ref: string; undoneAt: number | null; actionId: string }[];
+    const refresh = async () => expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    return { ...env, authored, vault, audit, refresh };
+  }
+
+  it("moves nothing on a suggestion alone, and a rule you add places only PRs opened after it, each with an audit row", async () => {
+    const env = await setupRules();
+    const suggested = (await env.call("classify_get", null)).groups.find((group: SuggestionGroup) => group.prs.some((row) => row.number === 313));
+    expect(suggested).toMatchObject({ key: `effort:${env.vault.id}:high` });
+    await env.refresh();
+    expect(await env.grouped()).toMatchObject({ "No effort": [313, 316] });
+    const added = await env.call("classify_rule_add", { kind: "ticket-prefix", value: "ops", effortKey: env.vault.key, now: false });
+    expect(added).toEqual({ ok: true, rule: { id: expect.any(String), kind: "ticket-prefix", value: "OPS", effortId: env.vault.id, createdAt: expect.any(Number) },
+      actions: [] });
+    env.authored.push({ ...pr(322, "Rotate reader tokens"), headRefName: "reader/ops-44-rotate", createdAt: later() });
+    await env.refresh();
+    await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 322] }));
+    // #313 matches too, but was open before the rule: it waits for your click.
+    expect((await env.grouped())["No effort"]).toEqual([313, 316]);
+    expect(env.audit()).toEqual([{ source: "rule", ruleId: added.rule.id, ref: url(322), undoneAt: null, actionId: expect.any(String) }]);
+    expect((await env.call("classify_get", null)).rules).toEqual([{ ...added.rule, effortName: "Vault audits", hits: 1 }]);
+  });
+
+  it("places what a new rule matches today when you ask, as one undoable action, after showing exactly what will move", async () => {
+    const env = await setupRules();
+    expect(await env.call("classify_rule_preview", { kind: "ticket-prefix", value: "ops", effortKey: env.vault.key })).toEqual({ ok: true, prUrls: [url(313)] });
+    expect(await env.call("classify_rule_preview", { kind: "ticket-prefix", value: "OPS-4", effortKey: env.vault.key }))
+      .toEqual({ ok: false, error: "Enter a ticket prefix such as ABC." });
+    expect(await env.grouped()).toMatchObject({ "No effort": [313, 316] });
+    const added = await env.call("classify_rule_add", { kind: "ticket-prefix", value: "OPS", effortKey: env.vault.key, now: true });
+    expect(added.actions).toEqual([{ ok: true, actionId: expect.any(String), effort: { id: env.vault.id, key: env.vault.key, name: "Vault audits" }, added: 1 }]);
+    expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 313], "No effort": [316] });
+    expect(await env.call("classify_undo", { actionId: added.actions[0].actionId })).toEqual({ ok: true });
+    expect(await env.grouped()).toMatchObject({ "Vault audits": [311], "No effort": [313, 316] });
+  });
+
+  it("never places a PR again after you undo a rule's placement of it", async () => {
+    const env = await setupRules();
+    await env.call("classify_rule_add", { kind: "ticket-prefix", value: "OPS", effortKey: env.vault.key, now: false });
+    env.authored.push({ ...pr(322, "Rotate reader tokens"), headRefName: "reader/ops-44-rotate", createdAt: later() });
+    await env.refresh();
+    await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 322] }));
+    expect(await env.call("classify_undo", { actionId: env.audit()[0]!.actionId })).toEqual({ ok: true });
+    env.authored.push({ ...pr(324, "Expire reader tokens"), headRefName: "ops-45-expire", createdAt: later() });
+    await env.refresh();
+    await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 324] }));
+    expect((await env.grouped())["No effort"]).toEqual([313, 316, 322]);
+  });
+
+  // A v2 roster changes only through explicit membership, so no rule adds to it, even by following a stacked base.
+  it("never places a PR onto a v2 roster, and refuses a rule that names one", async () => {
+    const env = await setupRules();
+    for (const rule of [{ kind: "ticket-prefix", value: "OPS", effortKey: env.vault.key }, { kind: "stack", value: "", effortKey: null },
+      { kind: "branch", value: "reader/shelf-*", effortKey: env.shelf.key }]) expect(await env.call("classify_rule_add", { ...rule, now: false })).toMatchObject({ ok: true });
+    env.bb.storage.database().prepare("INSERT INTO effort_execution (effort_id, mode, revision, updated_at) VALUES (?, 'v2', 1, 0)").run(env.vault.id);
+    env.authored.push({ ...pr(322, "Rotate reader tokens"), headRefName: "reader/ops-44-rotate", createdAt: later() },
+      { ...pr(323, "Audit key expiry"), baseRefName: "ops-40-keys", createdAt: later() }, { ...pr(326, "Shelf tags"), headRefName: "reader/shelf-tags", createdAt: later() });
+    await env.refresh();
+    // Shelf order's rule ran on the same pass.
+    await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Shelf order": [314, 326] }));
+    expect((await env.grouped())["No effort"]).toEqual([313, 316, 322, 323]);
+    expect(await env.call("classify_rule_add", { kind: "repo", value: "folio", effortKey: env.vault.key, now: false }))
+      .toEqual({ ok: false, error: "Its roster runs v2 work, so a rule can't add to it." });
+  });
+
+  it("files a stacked PR with its base's effort under a stack rule", async () => {
+    const env = await setupRules();
+    env.authored.push({ ...pr(323, "Shelf drag handles"), baseRefName: "reader/change314", createdAt: later() });
+    await env.refresh();
+    expect(await env.call("classify_rule_add", { kind: "stack", value: "", effortKey: null, now: true })).toMatchObject({ ok: true,
+      actions: [{ effort: { name: "Shelf order" }, added: 1 }] });
+    expect(await env.grouped()).toMatchObject({ "Shelf order": [314, 323] });
+  });
+
+  it("refuses rules it can't apply as written, and removing one leaves the PRs it placed", async () => {
+    const env = await setupRules();
+    const add = (input: object) => env.call("classify_rule_add", { now: false, ...input });
+    expect(await add({ kind: "stack", value: "", effortKey: env.shelf.key })).toMatchObject({ ok: false, error: expect.stringContaining("A stack rule names no effort") });
+    expect(await add({ kind: "ticket-prefix", value: "OPS-4", effortKey: env.vault.key })).toEqual({ ok: false, error: "Enter a ticket prefix such as ABC." });
+    createEffortPileStore(env.bb.storage.database()).move(env.shelf, "complete");
+    expect(await add({ kind: "repo", value: "folio", effortKey: env.shelf.key })).toEqual({ ok: false, error: "Choose an effort that isn't archived or done." });
+    const rule = (await env.call("classify_rule_add", { kind: "branch", value: "reader/ops-*", effortKey: env.vault.key, now: true })).rule;
+    expect(await add({ kind: "branch", value: "Reader/OPS-*", effortKey: env.vault.key })).toEqual({ ok: false, error: "That rule already exists." });
+    expect(await env.call("classify_rule_remove", { ruleId: rule.id })).toEqual({ ok: true });
+    expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 313] });
+    expect((await env.call("classify_get", null)).rules).toEqual([]);
   });
 });

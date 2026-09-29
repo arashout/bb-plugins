@@ -81,6 +81,29 @@ export function prTickets(pr: Pick<ClassifyPr, "title" | "headRefName">, pattern
   return ticketsIn(`${pr.title}\n${pr.headRefName ?? ""}`, new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`));
 }
 
+/** Standing rules you add: a ticket prefix, part of a branch name (`*` for any text), or a repository names an effort; a stack rule files a stacked PR with its base. */
+export const RULE_KINDS = ["ticket-prefix", "branch", "repo", "stack"] as const;
+export const ruleSchema = z.object({ id: z.string(), kind: z.enum(RULE_KINDS), value: z.string(), effortId: z.string().nullable(), createdAt: z.number() }).strict();
+export type Rule = z.infer<typeof ruleSchema>;
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+function ruleMatches(rule: Rule, pr: Pick<ClassifyPr, "repo" | "title" | "headRefName">, baseEffortId: string | null): boolean {
+  const branch = (pr.headRefName ?? "").toLowerCase();
+  switch (rule.kind) {
+    // `OPS` matches OPS-43 and ops43 in any case, but not the "ops2" inside "stops2".
+    case "ticket-prefix": return new RegExp(`(?<![\\p{L}\\p{N}])${escape(rule.value)}-?\\d`, "iu").test(`${pr.title}\n${branch}`);
+    case "branch": return rule.value.includes("*") ? new RegExp(`^${rule.value.split("*").map(escape).join(".*")}$`, "iu").test(branch) : branch.includes(rule.value.toLowerCase());
+    case "repo": return rule.value.includes("/") ? pr.repo.toLowerCase() === rule.value : pr.repo.toLowerCase().split("/")[1] === rule.value;
+    case "stack": return baseEffortId !== null;
+  }
+}
+
+/** The rule that places one PR: the first match when every matching rule names the same effort (a stack rule names its base's), else null. */
+export function ruleFor(rules: readonly Rule[], pr: Pick<ClassifyPr, "repo" | "title" | "headRefName">, baseEffortId: string | null): Rule | null {
+  const matches = rules.filter((rule) => ruleMatches(rule, pr, baseEffortId));
+  return new Set(matches.map((rule) => rule.effortId ?? baseEffortId)).size === 1 ? matches[0]! : null;
+}
+
 function index<T>(entries: Iterable<readonly [string, T]>): Map<string, Set<T>> {
   const map = new Map<string, Set<T>>();
   for (const [key, value] of entries) map.set(key, (map.get(key) ?? new Set()).add(value));

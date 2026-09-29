@@ -4,7 +4,7 @@
 // exactly what the action added, and only while that effort still owns all of it.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { suggestionGroupSchema } from "./effort-classify.js";
+import { RULE_KINDS, ruleSchema, suggestionGroupSchema, type Rule } from "./effort-classify.js";
 import type { EffortStore, EstablishedEffort } from "./effort-store.js";
 import type { RunDb } from "./runstore.js";
 
@@ -16,9 +16,12 @@ export const EFFORT_ASSIGNMENT_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS effort_assignments (seq INTEGER PRIMARY KEY AUTOINCREMENT, action_id TEXT NOT NULL, at INTEGER NOT NULL, source TEXT NOT NULL, effort_id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, rule_id TEXT, undone_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS effort_assignments_action ON effort_assignments (action_id)`,
 ];
+/** Append-only: server.ts adds this after the classification audit (id 61). */
+export const EFFORT_RULE_MIGRATION = `CREATE TABLE IF NOT EXISTS effort_rules (id TEXT PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL, effort_id TEXT, created_at INTEGER NOT NULL)`;
 export type AssignmentSource = "assign" | "new-effort" | "one-off" | "rule";
 
 const failure = z.object({ ok: z.literal(false), error: z.string() });
+const ruleInput = z.object({ kind: z.enum(RULE_KINDS), value: z.string().max(200), effortKey: z.string().min(1).max(500).nullable() }).strict();
 const prUrls = z.array(z.string().max(500)).min(1).max(100);
 /** Only tickets the chosen PRs' titles or branches carry, with every open PR of yours on them chosen too, and none another effort's PRs carry. */
 const tickets = z.array(z.string().min(1).max(300)).max(50).optional();
@@ -28,7 +31,20 @@ export const classifyActionResultSchema = z.discriminatedUnion("ok", [failure, z
   added: z.number() }).strict()]);
 export const classifyContract = {
   /** Read-only: a suggestion for each open PR of yours that no effort owns, grouped for accepting together. */
-  classify_get: { input: z.null(), output: z.object({ groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable() }).strict() },
+  classify_get: { input: z.null(), output: z.object({ groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable(),
+    /** Your standing rules, with how many PRs each placed in the last 7 days. */
+    rules: z.array(ruleSchema.extend({ effortName: z.string().nullable(), hits: z.number() }).strict()) }).strict() },
+  /**
+   * Add a standing rule. After each read it places open PRs of yours that no effort owns and that were opened after the rule; `now` also places
+   * every PR it matches today, as one undoable action per effort. A stack rule names no effort or value.
+   */
+  classify_rule_add: { input: ruleInput.extend({ now: z.boolean() }).strict(),
+    output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), rule: ruleSchema,
+      actions: z.array(classifyActionResultSchema.options[1]) }).strict()]) },
+  /** Read-only: the open PRs this rule would place if you added it with `now`, to show before you add it. A PR stacked on one of them may follow. */
+  classify_rule_preview: { input: ruleInput, output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), prUrls: z.array(z.string()) }).strict()]) },
+  /** Remove a rule. PRs it placed stay where they are. */
+  classify_rule_remove: { input: z.object({ ruleId: z.string().uuid() }).strict(), output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true) }).strict()]) },
   /** Put open PRs of yours that no effort owns into an effort, with any of their tickets you choose, so later PRs on those tickets join it too. */
   classify_assign: { input: z.object({ effortKey: z.string().min(1).max(500), prUrls, tickets }).strict(), output: classifyActionResultSchema },
   /** Start an effort from open PRs of yours that no effort owns. Undoing it removes the effort again. */
@@ -58,6 +74,25 @@ export function createAssignmentStore(db: Db, efforts: EffortStore, now = Date.n
         return { actionId, effort: result.effort, added: result.claimed.prUrls.length };
       })();
     },
+    rules: (): Rule[] => (db.prepare(`SELECT id, kind, value, effort_id AS effortId, created_at AS createdAt FROM effort_rules ORDER BY created_at, id`).all())
+      .map((row) => ruleSchema.parse(row)),
+    addRule(input: Pick<Rule, "kind" | "value" | "effortId">): Rule {
+      const rule: Rule = { id: randomUUID(), ...input, createdAt: now() };
+      db.prepare(`INSERT INTO effort_rules (id, kind, value, effort_id, created_at) VALUES (?, ?, ?, ?, ?)`).run(rule.id, rule.kind, rule.value, rule.effortId, rule.createdAt);
+      return rule;
+    },
+    removeRule(id: string): boolean {
+      if (!db.prepare(`SELECT 1 FROM effort_rules WHERE id = ?`).get(id)) return false;
+      db.prepare(`DELETE FROM effort_rules WHERE id = ?`).run(id);
+      return true;
+    },
+    /** PRs whose placement by a rule you undid: rules leave them to you. */
+    undoneByRules: (): Set<string> => new Set((db.prepare(`SELECT ref FROM effort_assignments WHERE source = 'rule' AND kind = 'prUrl' AND undone_at IS NOT NULL`)
+      .all() as { ref: string }[]).map((row) => row.ref)),
+    /** PRs each rule placed since then, not counting undone placements. */
+    ruleHits: (since: number): Map<string, number> => new Map((db.prepare(`SELECT rule_id AS ruleId, COUNT(*) AS hits FROM effort_assignments
+      WHERE rule_id IS NOT NULL AND kind = 'prUrl' AND undone_at IS NULL AND at >= ? GROUP BY rule_id`).all(since) as { ruleId: string; hits: number }[])
+      .map((row) => [row.ruleId, row.hits])),
     /** Returns the effort the action added to and how, so the caller can finish a new effort's undo. */
     undo(actionId: string): { effortId: string; source: AssignmentSource } {
       return db.transaction(() => {

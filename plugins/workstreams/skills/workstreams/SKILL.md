@@ -750,6 +750,21 @@ the audit records one row per PR or ticket it added. `classify_undo` reverses th
 owns everything it added. Undoing a new effort also removes the effort, unless
 it has since gained other work, a coordinator, or a v2 roster.
 
+Standing rules are the only automatic placement, and only the user adds them.
+`classify_rule_add` takes a `kind` and `value`: `ticket-prefix` (`OPS` matches
+OPS-43 and ops43 in a title or branch), `branch` (part of a branch name, or a
+pattern with `*` over the whole name), or `repo` (`inkwell/folio` or `folio`),
+each naming an effort; or `stack`, with no value or effort, which files a
+stacked PR with its base's effort. After each read, a rule places PRs no effort
+owns that were opened after the rule was added, one audited action per rule and
+effort. `now` also places every PR the rule matches today, and
+`classify_rule_preview` lists those PRs before the rule is added. When matching
+rules name different efforts, nothing moves. Rules never place a PR onto a v2
+roster, which changes only through explicit membership, and a rule can't name a
+v2 effort. A PR whose rule placement was undone stays where the undo left it.
+`classify_get` lists the rules with the PRs each placed in the last 7 days, and
+`classify_rule_remove` removes one and leaves its PRs in place.
+
 ## Effort rosters (v2)
 
 An effort can move to its v2 roster: one permanently numbered row per PR the

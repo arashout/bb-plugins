@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_THREAD_PRS, suggestEfforts, type ClassifyInput, type ClassifyPr } from "./effort-classify.js";
+import { MAX_THREAD_PRS, ruleFor, suggestEfforts, type ClassifyInput, type ClassifyPr, type Rule } from "./effort-classify.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const pr = (repo: string, number: number, title: string, headRefName: string, extra: Partial<ClassifyPr> = {}): ClassifyPr =>
@@ -130,5 +130,37 @@ describe("effort suggestions", () => {
     expect(groups.find((group) => group.key === "new:Reading streaks")).toMatchObject({ reason: "Board group, no effort yet", tickets: [] });
     expect(groups.find((group) => group.target?.kind === "new" && group.target.name === "Batch shelf sync")).toMatchObject({ reason: "Stacked PRs, no effort yet",
       prs: [{ number: 420, signals: [] }, { number: 421, signals: [{ kind: "stack", effortId: null, text: "stacked on atlas #420" }] }] });
+  });
+});
+
+describe("standing rules", () => {
+  const rule = (kind: Rule["kind"], value: string, effortId: string | null): Rule => ({ id: `${kind}:${value}`, kind, value, effortId, createdAt: 0 });
+  /** The effort the rules put a PR in: a stack rule's is its base's. */
+  const placed = (rules: Rule[], title: string, headRefName: string, repo = "inkwell/quill", base: string | null = null) => {
+    const match = ruleFor(rules, { repo, title, headRefName }, base);
+    return match ? match.effortId ?? base : null;
+  };
+
+  it("matches a ticket prefix in the title or branch, in any case and without its dash, but never inside a word", () => {
+    const vault = [rule("ticket-prefix", "OPS", "vault")];
+    expect(placed(vault, "Log vault token use", "reader/ops-43-token-log")).toBe("vault");
+    expect(placed(vault, "OPS43 Log vault token use", "token-log")).toBe("vault");
+    expect(placed(vault, "Stops-2 retries", "stops-2-retries")).toBeNull();
+  });
+
+  it("matches part of a branch, a * pattern over the whole branch, and a repository by full name or name", () => {
+    expect(placed([rule("branch", "streak", "streaks")], "Count reading streak days", "reader/Streak-count")).toBe("streaks");
+    expect(placed([rule("branch", "billing/*", "seat")], "Seat ledger", "billing/seat-ledger")).toBe("seat");
+    expect(placed([rule("branch", "billing/*", "seat")], "Seat ledger", "reader/billing/seat-ledger")).toBeNull();
+    expect(placed([rule("repo", "inkwell/quill", "tools")], "Upgrade lint config", "lint")).toBe("tools");
+    expect(placed([rule("repo", "quill", "tools")], "Upgrade lint config", "lint")).toBe("tools");
+    expect(placed([rule("repo", "quill", "tools")], "Upgrade lint config", "lint", "inkwell/folio")).toBeNull();
+  });
+
+  it("files a stacked PR with its base's effort, and places nothing when matching rules name different efforts", () => {
+    expect(placed([rule("stack", "", null)], "Show pickup hours", "pickup-hours", "inkwell/spine", "pickup")).toBe("pickup");
+    expect(placed([rule("stack", "", null)], "Show pickup hours", "pickup-hours", "inkwell/spine", null)).toBeNull();
+    expect(placed([rule("ticket-prefix", "OPS", "vault"), rule("repo", "quill", "tools")], "Log vault token use", "ops-43")).toBeNull();
+    expect(placed([rule("ticket-prefix", "OPS", "vault"), rule("repo", "quill", "vault")], "Log vault token use", "ops-43")).toBe("vault");
   });
 });

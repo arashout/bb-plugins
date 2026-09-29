@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
-import { EFFORT_ASSIGNMENT_MIGRATIONS } from "./effort-assignments.js";
+import { EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION } from "./effort-assignments.js";
 import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
 import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
@@ -203,8 +203,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends the classification audit after effort piles", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 59 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id BETWEEN 59 AND 60 ORDER BY id").all())
       .toEqual(EFFORT_ASSIGNMENT_MIGRATIONS.map((statement, index) => ({ id: 59 + index, hash: statementHash(statement) })));
+    await harness.lifecycle.dispose();
+  });
+  it("appends standing rules after the classification audit", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 61 ORDER BY id").all())
+      .toEqual([{ id: 61, hash: statementHash(EFFORT_RULE_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

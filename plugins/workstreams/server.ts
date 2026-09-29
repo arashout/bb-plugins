@@ -27,8 +27,9 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
-import { prTickets, suggestEfforts, type ClassifyPr } from "./effort-classify.js";
-import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, ONE_OFFS, ONE_OFFS_SOURCE, type AssignmentSource } from "./effort-assignments.js";
+import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
+import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
+  type AssignmentSource } from "./effort-assignments.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
@@ -667,6 +668,7 @@ export const MIGRATIONS = [
   PR_OBSERVATION_CLOSED_MIGRATION,
   EFFORT_PILE_MIGRATION,
   ...EFFORT_ASSIGNMENT_MIGRATIONS,
+  EFFORT_RULE_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1140,7 +1142,7 @@ export default async function plugin(bb: BbPluginApi) {
     } finally {
       inventoryRefreshing = false;
       if (!disposal.signal.aborted) { bb.realtime.publish(BOARD_CHANGED, { scanning }); inventoryChanged(); }
-      if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
+      if (!scanning) queueMicrotask(() => { void reconcileAllThreadIntents(); applyRules().catch(() => undefined); });
     }
   }
 
@@ -1269,7 +1271,7 @@ export default async function plugin(bb: BbPluginApi) {
       } finally {
         inventoryRefreshing = false;
         if (!disposal.signal.aborted) { bb.realtime.publish(BOARD_CHANGED, { scanning }); inventoryChanged(); }
-        if (!scanning) queueMicrotask(() => void reconcileAllThreadIntents());
+        if (!scanning) queueMicrotask(() => { void reconcileAllThreadIntents(); applyRules().catch(() => undefined); });
       }
     })();
     return polling;
@@ -1472,6 +1474,7 @@ export default async function plugin(bb: BbPluginApi) {
       void syncThreads();
       queueMicrotask(() => void reconcileAllThreadIntents());
       queueMicrotask(() => void dispatchOne());
+      queueMicrotask(() => applyRules().catch(() => undefined));
       return true;
     } catch (error) {
       // A reload killing the scan is a cancellation: no error, no warning.
@@ -3823,6 +3826,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const url of prs.keys()) for (const link of work.linksForPr(url, false))
       if (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket") linked.set(link.threadId, (linked.get(link.threadId) ?? new Set()).add(url));
     const tickets = [...prs.values()].flatMap((pr) => prTickets(pr, pattern));
+    const hits = assignments.ruleHits(Date.now() - 7 * 24 * 60 * 60_000);
     return {
       groups: suggestEfforts({ prs: [...prs.values()], pattern,
         efforts: current.efforts.filter((effort) => !effort.archivedAt && effort.id !== oneOffs?.id && piles.get(effort).pile !== "done")
@@ -3832,7 +3836,68 @@ export default async function plugin(bb: BbPluginApi) {
         threads: [...linked].map(([id, urls]) => { const facts = threadFacts.get(id); return { id, title: (facts?.title ?? facts?.titleFallback ?? id).slice(0, 200), prUrls: [...urls] }; }),
         ticketTitles: new Map([...linear.read(tickets)].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : [])) }),
       oneOffsId: oneOffs?.id ?? null,
+      rules: assignments.rules().map((rule) => ({ ...rule, effortName: rule.effortId ? effortStore.get(rule.effortId)?.name ?? null : null,
+        hits: hits.get(rule.id) ?? 0 })),
     };
+  }
+
+  /** Rules place only into an effort that takes work, and never onto a v2 roster, which changes only through explicit membership. */
+  const rulesPlaceInto = (effortId: string) => { const effort = effortStore.get(effortId);
+    return !!effort && !effort.archivedAt && piles.get(effort).pile !== "done" && !v2Pointer(effort.id); };
+  /** One pass of rules over open PRs of yours that no effort owns, batched by rule and effort. `all` places PRs opened before a rule too. */
+  async function ruleBatches(rules: readonly Rule[], all: boolean, undone: ReadonlySet<string>) {
+    const owners = new Map((await inventoryGet()).groups.flatMap((group) => group.rows.map((row) => [row.prUrl, group.effort?.id ?? null] as const)));
+    const entries = inventory.read().entries;
+    const batches = new Map<string, { rule: Rule; effortId: string; prUrls: string[] }>();
+    for (const entry of entries) {
+      const url = prWorkItemKey(entry.pr.url);
+      if (owners.get(url) !== null || undone.has(url)) continue;
+      const base = stackParent(entry, entries);
+      const baseEffortId = base ? owners.get(prWorkItemKey(base.pr.url)) ?? null : null;
+      const rule = ruleFor(rules.filter((candidate) => all || Date.parse(entry.pr.createdAt ?? "") > candidate.createdAt),
+        { repo: entry.repo, title: entry.pr.title, headRefName: entry.pr.headRefName }, baseEffortId);
+      const effortId = rule?.effortId ?? baseEffortId;
+      if (!rule || !effortId || !rulesPlaceInto(effortId)) continue;
+      const key = `${rule.id}\n${effortId}`;
+      batches.set(key, { rule, effortId, prUrls: [...batches.get(key)?.prUrls ?? [], url] });
+    }
+    return [...batches.values()];
+  }
+  /** A rule as you wrote it, normalized, or why it can't apply as written. */
+  function ruleDraft({ kind, value, effortKey }: { kind: Rule["kind"]; value: string; effortKey: string | null }) {
+    const effort = effortKey === null ? null : effortStore.get(effortKey);
+    const normalized = kind === "ticket-prefix" ? value.trim().toUpperCase() : value.trim().toLowerCase();
+    const error = kind === "stack" ? (effort || normalized ? "A stack rule names no effort or value: a stacked PR joins its base's effort." : null)
+      : effort && v2Pointer(effort.id) ? "Its roster runs v2 work, so a rule can't add to it."
+      : !effort || !rulesPlaceInto(effort.id) ? "Choose an effort that isn't archived or done."
+      : kind === "ticket-prefix" && !/^[A-Z]{2,10}$/u.test(normalized) ? "Enter a ticket prefix such as ABC."
+      : kind === "branch" && !/^[\w./*-]{1,100}$/u.test(normalized) ? "Enter part of a branch name, with * for any text."
+      : kind === "repo" && !/^[\w.-]+(?:\/[\w.-]+)?$/u.test(normalized) ? "Enter a repository such as inkwell/folio, or its name." : null;
+    return error ? { ok: false as const, error } : { ok: true as const, rule: { kind, value: normalized, effortId: effort?.id ?? null } };
+  }
+  let applyingRules: Promise<unknown> = Promise.resolve();
+  /**
+   * Your standing rules place open PRs of yours that no effort owns, as one audited action per rule and effort. After a read, a rule places only
+   * PRs opened after you added it, and never one whose placement by a rule you undid; `added` places everything a new rule matches, as you
+   * asked. A stacked PR can follow its base on the next pass.
+   */
+  function applyRules(added?: Rule) {
+    const run = applyingRules.then(async () => {
+      const actions: Extract<Awaited<ReturnType<typeof classifyInto>>, { ok: true }>[] = [];
+      const rules = (added ? [added] : assignments.rules()).filter((rule) => rule.effortId === null || rulesPlaceInto(rule.effortId));
+      const undone = added ? new Set<string>() : assignments.undoneByRules();
+      for (let pass = 0; rules.length > 0 && pass < 5; pass++) {
+        let placed = false;
+        for (const { rule, effortId, prUrls } of await ruleBatches(rules, !!added, undone)) {
+          const result = await classifyInto(() => effortStore.get(effortId), "rule", prUrls, [], rule.id);
+          if (result.ok) { actions.push(result); placed = true; } else bb.log.warn(`standing rule ${rule.kind} ${rule.value}: ${result.error}`);
+        }
+        if (!placed) break;
+      }
+      return actions;
+    });
+    applyingRules = run.catch((error) => bb.log.warn(`standing rules: ${String(error).slice(0, 300)}`));
+    return run;
   }
 
   async function adminThreads(source: NonNullable<ReturnType<typeof adminRecord>>,
@@ -5485,6 +5550,26 @@ export default async function plugin(bb: BbPluginApi) {
         members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "new-effort", prUrls, tickets);
       if (!result.ok && made.effort) effortStore.discard(made.effort.id);
       return result;
+    },
+    classify_rule_preview: async (input) => {
+      const draft = ruleDraft(input);
+      if (!draft.ok) return draft;
+      const batches = await ruleBatches([{ id: "preview", createdAt: Date.now(), ...draft.rule }], true, new Set());
+      return { ok: true as const, prUrls: batches.flatMap((batch) => batch.prUrls) };
+    },
+    classify_rule_add: async ({ now, ...input }) => {
+      const draft = ruleDraft(input);
+      if (!draft.ok) return draft;
+      if (assignments.rules().some((rule) => rule.kind === draft.rule.kind && rule.value === draft.rule.value && rule.effortId === draft.rule.effortId))
+        return { ok: false as const, error: "That rule already exists." };
+      const rule = assignments.addRule(draft.rule);
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return { ok: true as const, rule, actions: now ? await applyRules(rule) : [] };
+    },
+    classify_rule_remove: ({ ruleId }) => {
+      if (!assignments.removeRule(ruleId)) return { ok: false as const, error: "That rule is already gone." };
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      return { ok: true as const };
     },
     classify_one_off: ({ prUrls }) => classifyInto(() => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
       projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "one-off", prUrls),
