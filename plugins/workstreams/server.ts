@@ -27,6 +27,7 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
+import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, ONE_OFFS, ONE_OFFS_SOURCE, type AssignmentSource } from "./effort-assignments.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
@@ -573,6 +574,7 @@ export const rpcContract = defineRpcContract({
   },
   ...effortV2Contract,
   ...effortPilesContract,
+  ...classifyContract,
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -662,6 +664,7 @@ export const MIGRATIONS = [
   PR_OBSERVATION_ERROR_MIGRATION,
   PR_OBSERVATION_CLOSED_MIGRATION,
   EFFORT_PILE_MIGRATION,
+  ...EFFORT_ASSIGNMENT_MIGRATIONS,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -838,6 +841,7 @@ export default async function plugin(bb: BbPluginApi) {
   const effortStore = createEffortStore(db);
   const effortWork = createEffortWorkStore(db);
   const piles = createEffortPileStore(db);
+  const assignments = createAssignmentStore(db, effortStore);
   /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
   const v2Pointer = (effortId: string | null | undefined): string | null => {
     const effort = effortId ? effortStore.get(effortId) : null;
@@ -3740,6 +3744,8 @@ export default async function plugin(bb: BbPluginApi) {
     const effort = adminRecord(effortKey);
     if (!effort || effort.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
+    if ((move === "hold" || move === "complete") && effortStore.sourceKey(effort.id) === ONE_OFFS_SOURCE)
+      return { ok: false as const, error: "One-offs stays active: each one-off merges on its own." };
     if ((move === "hold" || move === "complete") && effortWork.execution(effort.id).mode === "v2")
       return { ok: false as const, error: "Its roster runs v2 work. Switch it back to legacy before you hold or complete it." };
     if ((move === "hold" || move === "complete") && dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
@@ -3749,6 +3755,31 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       return { ok: true as const, pile };
     } catch (error) { return { ok: false as const, error: (error as Error).message }; }
+  }
+
+  /**
+   * One explicit classification: open PRs of yours that no effort owns (the inventory's "No effort" rows), and optionally their tickets,
+   * join an effort that isn't done, as one undoable action. `destination` runs only once the PRs check out, so a refused first use creates nothing.
+   */
+  async function classifyInto(destination: () => EstablishedEffort | null, source: AssignmentSource, prUrls: readonly string[], tickets: readonly string[] = [],
+    ruleId?: string) {
+    const unowned = new Set((await inventoryGet()).groups.find((group) => group.effort === null)?.rows.map((row) => row.prUrl));
+    const keys = [...new Set(prUrls.map(prWorkItemKey))];
+    const taken = keys.filter((url) => !unowned.has(url)).map((url) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; });
+    if (taken.length) return { ok: false as const, error: `${taken.join(", ")} ${taken.length === 1 ? "isn't" : "aren't"} unclassified now. Refresh and try again.` };
+    const effort = destination();
+    if (!effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+    if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
+    if (piles.get(effort).pile === "done") return { ok: false as const, error: "Reopen this effort first." };
+    if (dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
+      return { ok: false as const, error: "Turn off automatic dispatch for this effort before adding work." };
+    try {
+      const { actionId, effort: updated, added } = assignments.assign({ effortId: effort.id, source, prUrls: keys, tickets, ruleId });
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
+      await syncV2Targets();
+      return { ok: true as const, actionId, effort: { id: updated.id, key: updated.key, name: updated.name }, added };
+    } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
   }
 
   async function adminThreads(source: NonNullable<ReturnType<typeof adminRecord>>,
@@ -5388,6 +5419,15 @@ export default async function plugin(bb: BbPluginApi) {
         threads: [...threads].map(([id, title]) => ({ id, title })) } };
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
+    classify_one_off: ({ prUrls }) => classifyInto(() => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
+      projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "one-off", prUrls),
+    classify_undo: async ({ actionId }) => {
+      try { assignments.undo(actionId); } catch (error) { return { ok: false as const, error: (error as Error).message }; }
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
+      await syncV2Targets();
+      return { ok: true as const };
+    },
     effort_reopen: ({ effortKey }) => movePile(effortKey, "reopen"),
     thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
     thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {

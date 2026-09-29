@@ -716,6 +716,16 @@ effort returns to legacy, and automatic dispatch for an effort turns off,
 before it is held or completed; dispatch turns on only for an active effort.
 Archiving and merging work as before.
 
+## Classifying PRs
+
+Only the user classifies PRs. Each action takes open PRs of theirs that no
+effort owns (the inventory's "No effort" rows) and refuses the whole action if
+any of them has an owner now. `classify_one_off` puts PRs in **One-offs**, the
+one effort for standalone PRs, which the first use creates. One-offs stays on
+the active pile. Each action returns an `actionId`, and the audit records one
+row per PR or ticket it added. `classify_undo` reverses the action while its
+effort still owns everything it added.
+
 ## Effort rosters (v2)
 
 An effort can move to its v2 roster: one permanently numbered row per PR the

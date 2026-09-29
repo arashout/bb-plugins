@@ -344,6 +344,19 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
         return { effort: changed ? write({ ...destination, members: merged }) : destination, claimed, conflict: false };
       })();
     },
+    /** Drop tickets and PRs from the effort that owns them, as an undo does; anything another effort owns now stays put. */
+    release(effortId: string, members: EffortMembers): EstablishedEffort {
+      return db.transaction(() => {
+        const current = getRecord(effortId);
+        if (!current || current.mergedInto) throw new Error("The effort changed. Refresh before undoing.");
+        const prs = new Set(members.prUrls.map((url) => canonicalPrUrl(url) ?? url.toLowerCase()));
+        for (const row of db.prepare(`SELECT ref FROM effort_members WHERE kind = 'prUrl' AND effort_id = ?`).all(current.id) as { ref: string }[])
+          if (prs.has(canonicalPrUrl(row.ref) ?? row.ref.toLowerCase())) db.prepare(`DELETE FROM effort_members WHERE kind = 'prUrl' AND ref = ?`).run(row.ref);
+        for (const ticket of members.tickets) db.prepare(`DELETE FROM effort_members WHERE kind = 'ticket' AND ref = ? AND effort_id = ?`).run(ticket, current.id);
+        return write({ ...current, members: { ...current.members, tickets: current.members.tickets.filter((ticket) => !members.tickets.includes(ticket)),
+          prUrls: current.members.prUrls.filter((url) => !prs.has(canonicalPrUrl(url) ?? url.toLowerCase())) } });
+      })();
+    },
     save,
     recordWorker(effortId: string, threadId: string, prUrl: string, role: "pr" | "followup"): void {
       const effort = get(effortId);
