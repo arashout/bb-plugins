@@ -53,7 +53,7 @@ const MAP_KEYS: [string, string][] = [
 ];
 
 const BOTH_KEYS: [string, string][] = [
-  ["v", "Cycle through Inventory, Map, Pipeline, Work, and Efforts"],
+  ["v", "Next view; in Efforts and All PRs, switch between the two"],
   ["?", "Open this panel"],
 ];
 

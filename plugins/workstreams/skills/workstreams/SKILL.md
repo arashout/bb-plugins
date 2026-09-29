@@ -669,8 +669,9 @@ authored PRs every `inventoryPollSeconds`. PRs you don't author show their
 checkout's facts or their roster's last read, until the board's latest read
 finds them merged or closed.
 
-The Workstreams panel opens on this inventory. Map, Pipeline, Work, Efforts,
-and each effort's roster stay one tab or link away.
+The Workstreams panel shows this inventory as **All PRs**, one tab from the
+effort deck it opens on. Map, Pipeline, Work, Manage efforts, and each effort's
+roster stay one tab or link away.
 
 ```
 bb workstreams inventory [--attention draft|reviewer|nudge] [--json]
@@ -766,6 +767,12 @@ v2 effort. A PR whose rule placement was undone stays where the undo left it.
 `classify_rule_remove` removes one and leaves its PRs in place.
 
 ## Effort deck
+
+The Workstreams panel opens on the deck: one effort card at a time, flipped
+with `[` and `]` or picked with `1`-`9`, with Unclassified last and On hold
+and Done piles beside the strip. Every write there opens a confirm that lists
+each PR, then waits 8 seconds with Undo; merges run only from the fresh merge
+preview. Press `?` for its keys or `⌘K` for every action.
 
 `deck_get` returns the effort deck from one board read, and the `deck-changed`
 realtime event fires after each inventory read or action, pile move, effort

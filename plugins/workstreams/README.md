@@ -367,8 +367,8 @@ PR row menus include **Put on hold** with an optional reason; held PRs keep thei
 
 The scanner and Anthropic naming call live in `host.ts`. `server.ts` handles
 settings, local storage, refresh, enrichment, actions, and the CLI. The grouping
-and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts the PR inventory, Map,
-Pipeline, and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
+and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts the effort deck, the PR
+inventory (All PRs), Map, Pipeline, and the legacy Board. `pipeline.ts` derives Pipeline stages and actions from
 scanned facts.
 `contract.ts` defines the host RPC schema, `work-conversation.ts` stores exact
 conversation scopes, and `skills/workstreams/SKILL.md`
