@@ -357,6 +357,17 @@ export function createEffortStore(db: EffortDb, now = Date.now) {
           prUrls: current.members.prUrls.filter((url) => !prs.has(canonicalPrUrl(url) ?? url.toLowerCase())) } });
       })();
     },
+    /** Remove an effort that holds nothing and never coordinated anything: the undo of creating it. */
+    discard(effortId: string): boolean {
+      return db.transaction(() => {
+        const current = getRecord(effortId);
+        if (!current || current.mergedInto || current.coordinatorThreadId || current.members.tickets.length || current.members.prUrls.length ||
+          current.members.checkoutPaths?.length || db.prepare(`SELECT 1 FROM effort_members WHERE effort_id = ?`).get(current.id) ||
+          this.repoControllers(current.id).length || this.workersForEffort(current.id).length || this.listAll().some((other) => other.mergedInto === current.id)) return false;
+        db.prepare(`DELETE FROM established_efforts WHERE id = ?`).run(current.id);
+        return true;
+      })();
+    },
     save,
     recordWorker(effortId: string, threadId: string, prUrl: string, role: "pr" | "followup"): void {
       const effort = get(effortId);

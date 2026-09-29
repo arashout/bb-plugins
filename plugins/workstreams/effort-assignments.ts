@@ -20,6 +20,8 @@ export type AssignmentSource = "assign" | "new-effort" | "one-off" | "rule";
 
 const failure = z.object({ ok: z.literal(false), error: z.string() });
 const prUrls = z.array(z.string().max(500)).min(1).max(100);
+/** Only tickets the chosen PRs' titles or branches carry, with every open PR of yours on them chosen too, and none another effort's PRs carry. */
+const tickets = z.array(z.string().min(1).max(300)).max(50).optional();
 export const classifyActionResultSchema = z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), actionId: z.string(),
   effort: z.object({ id: z.string(), key: z.string(), name: z.string() }).strict(),
   /** PRs the action put in the effort; tickets it added don't count. */
@@ -27,6 +29,11 @@ export const classifyActionResultSchema = z.discriminatedUnion("ok", [failure, z
 export const classifyContract = {
   /** Read-only: a suggestion for each open PR of yours that no effort owns, grouped for accepting together. */
   classify_get: { input: z.null(), output: z.object({ groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable() }).strict() },
+  /** Put open PRs of yours that no effort owns into an effort, with any of their tickets you choose, so later PRs on those tickets join it too. */
+  classify_assign: { input: z.object({ effortKey: z.string().min(1).max(500), prUrls, tickets }).strict(), output: classifyActionResultSchema },
+  /** Start an effort from open PRs of yours that no effort owns. Undoing it removes the effort again. */
+  classify_new_effort: { input: z.object({ name: z.string().max(500), goal: z.string().max(4_000), prUrls, tickets, requestId: z.string().uuid() }).strict(),
+    output: classifyActionResultSchema },
   /** Put open PRs of yours that no effort owns into One-offs, which the first use creates. */
   classify_one_off: { input: z.object({ prUrls }).strict(), output: classifyActionResultSchema },
   /** Reverse one classification action while its effort still owns everything the action added. */

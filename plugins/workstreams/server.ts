@@ -3767,14 +3767,29 @@ export default async function plugin(bb: BbPluginApi) {
     ruleId?: string) {
     const unowned = new Set((await inventoryGet()).groups.find((group) => group.effort === null)?.rows.map((row) => row.prUrl));
     const keys = [...new Set(prUrls.map(prWorkItemKey))];
-    const taken = keys.filter((url) => !unowned.has(url)).map((url) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; });
+    const label = (url: string) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; };
+    const taken = keys.filter((url) => !unowned.has(url)).map(label);
     if (taken.length) return { ok: false as const, error: `${taken.join(", ")} ${taken.length === 1 ? "isn't" : "aren't"} unclassified now. Refresh and try again.` };
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const carried = new Set(keys.flatMap((url) => { const pr = inventory.get(url)?.pr; return pr ? prTickets(pr, pattern) : []; }));
+    const foreign = tickets.filter((ticket) => !carried.has(ticket));
+    if (foreign.length) return { ok: false as const, error: `These PRs don't carry ${foreign.join(", ")}.` };
+    const work = readWorkContext(await board(), pattern, false, prFacts.reads());
     const effort = destination();
     if (!effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
     if (piles.get(effort).pile === "done") return { ok: false as const, error: "Reopen this effort first." };
     if (dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
       return { ok: false as const, error: "Turn off automatic dispatch for this effort before adding work." };
+    // A ticket brings every PR that names it. Each open PR of yours on it must be chosen too, and none may be another effort's:
+    // a PR whose tickets two efforts own belongs to neither.
+    for (const item of work.items.values()) {
+      const ticket = tickets.find((candidate) => item.tickets.includes(candidate));
+      if (!ticket || keys.includes(item.key)) continue;
+      const owner = work.ownerForPr(item.key);
+      if (owner && owner.id !== effort.id) return { ok: false as const, error: `${label(item.key)} carries ${ticket} and is in ${owner.name}. Leave ${ticket} out.` };
+      if (!owner && unowned.has(item.key)) return { ok: false as const, error: `${ticket} is also on ${label(item.key)}. Choose it too, or leave ${ticket} out.` };
+    }
     try {
       const { actionId, effort: updated, added } = assignments.assign({ effortId: effort.id, source, prUrls: keys, tickets, ruleId });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -5458,10 +5473,27 @@ export default async function plugin(bb: BbPluginApi) {
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
     classify_get: () => classifyGet(),
+    classify_assign: ({ effortKey, prUrls, tickets }) => classifyInto(() => effortStore.get(effortKey), "assign", prUrls, tickets),
+    classify_new_effort: async ({ name, goal, prUrls, tickets, requestId }) => {
+      const trimmed = adminName(name);
+      const sourceKey = `classify-created:${requestId}`;
+      if (effortStore.source(sourceKey)) return { ok: false as const, error: "This effort was already created. Refresh the deck." };
+      const error = adminNameError(trimmed, null);
+      if (error) return { ok: false as const, error };
+      const made: { effort?: EstablishedEffort } = {};
+      const result = await classifyInto(() => made.effort = effortStore.establish({ sourceKey, name: trimmed, goal: goal.trim(), projectId: "",
+        members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "new-effort", prUrls, tickets);
+      if (!result.ok && made.effort) effortStore.discard(made.effort.id);
+      return result;
+    },
     classify_one_off: ({ prUrls }) => classifyInto(() => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
       projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "one-off", prUrls),
     classify_undo: async ({ actionId }) => {
-      try { assignments.undo(actionId); } catch (error) { return { ok: false as const, error: (error as Error).message }; }
+      try {
+        const { effortId, source } = assignments.undo(actionId);
+        // Undoing a new effort removes it, unless it has since gained work, threads, or a roster of its own.
+        if (source === "new-effort" && effortWork.execution(effortId).revision === 0) effortStore.discard(effortId);
+      } catch (error) { return { ok: false as const, error: (error as Error).message }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       inventoryChanged();
       await syncV2Targets();

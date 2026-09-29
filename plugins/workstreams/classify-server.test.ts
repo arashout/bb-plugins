@@ -39,8 +39,107 @@ async function setup(authored: Pr[] = DEFAULT_AUTHORED) {
   const call = (method: string, input: unknown) => harness.callRpc(method as never, input as never) as Promise<any>;
   const grouped = async () => Object.fromEntries((await call("inventory_get", {}) as InventoryView).groups
     .map((group) => [group.effort?.name ?? "No effort", group.rows.map((row) => row.number)]));
-  return { bb, efforts, shelf, call, grouped };
+  return { bb, harness, efforts, shelf, call, grouped };
 }
+
+describe("Assigning PRs to an effort", () => {
+  // You author #313 and #321 on ABC-350 (a lowercase key in their branches) and #316; Shelf order owns #314 through ABC-341.
+  const authored = [{ ...pr(313, "Update the footer year"), headRefName: "reader/abc-350-footer" }, pr(314, "ABC-341 Group shelves by genre"),
+    pr(316, "Remove an unused import"), { ...pr(321, "Footer links"), headRefName: "reader/abc-350-links" }];
+
+  it("assigns PRs, and with their ticket, every later PR on that ticket joins without another click", async () => {
+    const prs = [...authored];
+    const env = await setup(prs);
+    expect(await env.call("classify_assign", { effortKey: env.shelf.key, prUrls: [url(316)] })).toMatchObject({ ok: true, added: 1, effort: { name: "Shelf order" } });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314, 316], "No effort": [313, 321] });
+    // A ticket brings every PR on it, so each open one must be in the selection: nothing moves that you didn't choose.
+    expect(await env.call("classify_assign", { effortKey: env.shelf.key, prUrls: [url(313)], tickets: ["ABC-350"] }))
+      .toEqual({ ok: false, error: "ABC-350 is also on inkwell/folio #321. Choose it too, or leave ABC-350 out." });
+    const withTicket = await env.call("classify_assign", { effortKey: env.shelf.key, prUrls: [url(313), url(321)], tickets: ["ABC-350"] });
+    expect(withTicket).toMatchObject({ ok: true, added: 2 });
+    prs.push({ ...pr(325, "Footer social links"), headRefName: "reader/abc-350-social" });
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(await env.grouped()).toEqual({ "Shelf order": [313, 314, 316, 321, 325] });
+    // Undo takes back the ticket too, so the later #325 is to sort again.
+    await env.call("classify_undo", { actionId: withTicket.actionId });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314, 316], "No effort": [313, 321, 325] });
+  });
+
+  // #314 is in Shelf order through ABC-341 and also names ABC-350. Another effort owning ABC-350 would give #314 two owners, which leaves it in neither.
+  it("refuses a ticket that a PR in another effort carries, and a refused new effort is removed again", async () => {
+    const env = await setup(authored.map((entry) => entry.number === 314 ? pr(314, "ABC-341 ABC-350 Group shelves by genre") : entry));
+    const pickup = env.efforts.establish({ sourceKey: "ticket:ABC-330", name: "Store pickup", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: ["ABC-330"], prUrls: [] } });
+    const refusal = { ok: false, error: "inkwell/folio #314 carries ABC-350 and is in Shelf order. Leave ABC-350 out." };
+    expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313), url(321)], tickets: ["ABC-350"] })).toEqual(refusal);
+    const count = env.efforts.listAll().length;
+    expect(await env.call("classify_new_effort", { name: "Footer refresh", goal: "", prUrls: [url(313), url(321)], tickets: ["ABC-350"],
+      requestId: "66666666-6666-4666-8666-666666666666" })).toEqual(refusal);
+    expect(env.efforts.listAll().length).toBe(count);
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316, 321] });
+    expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313), url(321)] })).toMatchObject({ ok: true, added: 2 });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "Store pickup": [313, 321], "No effort": [316] });
+  });
+
+  it("refuses tickets the PRs don't carry, PRs another effort owns, and an effort that is done, and changes nothing", async () => {
+    const env = await setup(authored);
+    expect(await env.call("classify_assign", { effortKey: env.shelf.key, prUrls: [url(316)], tickets: ["ABC-350"] }))
+      .toEqual({ ok: false, error: "These PRs don't carry ABC-350." });
+    const pickup = env.efforts.establish({ sourceKey: "ticket:ABC-330", name: "Store pickup", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: ["ABC-330"], prUrls: [] } });
+    expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313), url(314)] }))
+      .toEqual({ ok: false, error: "inkwell/folio #314 isn't unclassified now. Refresh and try again." });
+    createEffortPileStore(env.bb.storage.database()).move(pickup, "complete");
+    expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313)] })).toEqual({ ok: false, error: "Reopen this effort first." });
+    // Automatic dispatch works its effort's PRs unasked, and an archived effort is out of use.
+    const vault = env.efforts.establish({ sourceKey: "ticket:ABC-360", name: "Vault audits", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: ["ABC-360"], prUrls: [] } });
+    env.bb.storage.database().prepare("INSERT OR REPLACE INTO dispatch_policy (id, mode, effort_key) VALUES (1, 'auto', ?)").run(vault.key);
+    expect(await env.call("classify_assign", { effortKey: vault.key, prUrls: [url(313)] }))
+      .toEqual({ ok: false, error: "Turn off automatic dispatch for this effort before adding work." });
+    env.efforts.setArchived(vault.id, true);
+    expect(await env.call("classify_assign", { effortKey: vault.key, prUrls: [url(313)] })).toEqual({ ok: false, error: "Restore this effort first." });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316, 321] });
+  });
+
+  it("starts a new effort from a selection, and undoing it removes the effort so its name is free again", async () => {
+    const env = await setup(authored);
+    const requestId = "22222222-2222-4222-8222-222222222222";
+    const created = await env.call("classify_new_effort", { name: " Footer  refresh ", goal: "A footer readers can use", prUrls: [url(313), url(321)],
+      tickets: ["ABC-350"], requestId });
+    expect(created).toMatchObject({ ok: true, added: 2, effort: { name: "Footer refresh" } });
+    expect(env.efforts.get(created.effort.id)).toMatchObject({ goal: "A footer readers can use", members: { tickets: ["ABC-350"] } });
+    expect(await env.grouped()).toEqual({ "Footer refresh": [313, 321], "Shelf order": [314], "No effort": [316] });
+    expect(await env.call("classify_new_effort", { name: "Footer refresh", goal: "", prUrls: [url(316)], requestId }))
+      .toEqual({ ok: false, error: "This effort was already created. Refresh the deck." });
+    expect(await env.call("classify_undo", { actionId: created.actionId })).toEqual({ ok: true });
+    expect(env.efforts.get(created.effort.id)).toBeNull();
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316, 321] });
+    expect(await env.call("classify_new_effort", { name: "Footer refresh", goal: "", prUrls: [url(313)], requestId: "33333333-3333-4333-8333-333333333333" }))
+      .toMatchObject({ ok: true, effort: { name: "Footer refresh" } });
+  });
+
+  // Undo removes a new effort only while nothing has made it real since: a v2 roster of its own keeps it.
+  it("keeps a new effort that has moved to its roster when you undo its creation", async () => {
+    const env = await setup(authored);
+    const created = await env.call("classify_new_effort", { name: "Footer refresh", goal: "", prUrls: [url(316)], requestId: "77777777-7777-4777-8777-777777777777" });
+    env.bb.storage.database().prepare("INSERT INTO effort_execution (effort_id, mode, revision, updated_at) VALUES (?, 'v2', 1, 0)").run(created.effort.id);
+    expect(await env.call("classify_undo", { actionId: created.actionId })).toEqual({ ok: true });
+    expect(env.efforts.get(created.effort.id)).toMatchObject({ name: "Footer refresh", members: { prUrls: [] } });
+    expect(await env.grouped()).toMatchObject({ "No effort": [313, 316, 321] });
+  });
+
+  it("creates no effort when the name is taken or a PR has an owner", async () => {
+    const env = await setup(authored);
+    const count = () => env.efforts.listAll().length;
+    const before = count();
+    expect(await env.call("classify_new_effort", { name: "shelf ORDER", goal: "", prUrls: [url(313)], requestId: "44444444-4444-4444-8444-444444444444" }))
+      .toEqual({ ok: false, error: "An effort with that name already exists." });
+    expect(await env.call("classify_new_effort", { name: "Shelving", goal: "", prUrls: [url(314)], requestId: "55555555-5555-4555-8555-555555555555" }))
+      .toMatchObject({ ok: false });
+    expect(count()).toBe(before);
+  });
+});
 
 describe("One-offs", () => {
   it("creates One-offs on first use, reuses it after, and undoes a mark back to No effort", async () => {

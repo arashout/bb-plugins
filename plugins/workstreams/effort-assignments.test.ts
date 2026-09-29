@@ -1,13 +1,13 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS } from "./effort-assignments.js";
-import { createEffortStore, EFFORT_MIGRATIONS } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 
 function setup() {
   const db = new Database(":memory:");
-  for (const statement of [...EFFORT_MIGRATIONS, ...EFFORT_ASSIGNMENT_MIGRATIONS]) db.prepare(statement).run();
+  for (const statement of [...EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, ...EFFORT_ASSIGNMENT_MIGRATIONS]) db.prepare(statement).run();
   const efforts = createEffortStore(db);
   const assignments = createAssignmentStore(db, efforts, () => 5_000);
   const effort = (name: string, members: { tickets: string[]; prUrls: string[]; checkoutPaths?: string[] }) => efforts.establish({ sourceKey: `test:${name}`,
@@ -57,6 +57,24 @@ describe("classification assignments", () => {
     // The audit keeps the action, marked undone, and a second undo finds nothing to reverse.
     expect(audit()).toMatchObject([{ ref: url("spine", 151), undoneAt: 5_000 }, { ref: "ABC-331", undoneAt: 5_000 }]);
     expect(() => assignments.undo(actionId)).toThrow("Nothing to undo.");
+  });
+
+  // Undoing a new effort removes it, but never an effort that has since become real: members, a coordinator, or another merged into it.
+  it("discards only an effort that holds and coordinated nothing", () => {
+    const { efforts, pickup, shelf } = setup();
+    const empty = () => efforts.establish({ sourceKey: `test:${Math.random()}`, name: "Footer refresh", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: [], prUrls: [] } });
+    expect(efforts.discard(shelf.id)).toBe(false);
+    const coordinated = efforts.save({ ...empty(), coordinatorThreadId: "thr-footer", coordinatorState: "ready" });
+    expect(efforts.discard(coordinated.id)).toBe(false);
+    const survivor = empty();
+    efforts.merge(efforts.establish({ sourceKey: "test:merged", name: "Old footer", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: [], prUrls: [] } }).id, survivor.id);
+    expect(efforts.discard(survivor.id)).toBe(false);
+    const unused = empty();
+    expect(efforts.discard(unused.id)).toBe(true);
+    expect(efforts.getRecord(unused.id)).toBeNull();
+    expect(efforts.get(pickup.id)).not.toBeNull();
   });
 
   it("refuses an undo once any of its work moved to another effort, and releases nothing", () => {

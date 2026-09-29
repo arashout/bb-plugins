@@ -733,11 +733,22 @@ confidence for accepting together.
 
 Only the user classifies PRs. Each action takes open PRs of theirs that no
 effort owns (the inventory's "No effort" rows) and refuses the whole action if
-any of them has an owner now. `classify_one_off` puts PRs in **One-offs**, the
-one effort for standalone PRs, which the first use creates. One-offs stays on
-the active pile. Each action returns an `actionId`, and the audit records one
-row per PR or ticket it added. `classify_undo` reverses the action while its
-effort still owns everything it added.
+any of them has an owner now.
+
+- `classify_assign` puts PRs in an effort that isn't done. Optional `tickets`,
+  which must be tickets those PRs carry, join too, so later PRs on them belong
+  to the effort without another click. Every open PR of the user's on those
+  tickets must be in the selection, and a ticket that a PR in another effort
+  carries is refused, since a PR whose tickets two efforts own belongs to
+  neither.
+- `classify_new_effort` starts an effort from PRs, with a name and goal.
+- `classify_one_off` puts PRs in **One-offs**, the one effort for standalone
+  PRs, which the first use creates. One-offs stays on the active pile.
+
+Each action returns an `actionId` and `added`, the number of PRs it moved, and
+the audit records one row per PR or ticket it added. `classify_undo` reverses the action while its effort still
+owns everything it added. Undoing a new effort also removes the effort, unless
+it has since gained other work, a coordinator, or a v2 roster.
 
 ## Effort rosters (v2)
 
