@@ -116,35 +116,49 @@ export function planFetch(
   return { byKey, unowned };
 }
 
-/** One aliased query for a batch: `t0: issue(id: "ABC-1") { ... } t1: ...`. */
+/** One aliased query for a batch: `t0: issue(id: "ABC-1") { ... } t1: ...`. Initiatives are capped so a batch stays well inside Linear's query cost. */
 export function detailQuery(batch: readonly string[]): string {
-  const fields =
-    "identifier title description state { name type } project { id name } parent { identifier title } labels { nodes { name } } url updatedAt";
+  const fields = "identifier title description state { name type } " +
+    "project { id name description targetDate initiatives(first: 5) { nodes { id name } } } parent { identifier title } labels { nodes { name } } " +
+    "assignee { name displayName } cycle { number name endsAt } dueDate url updatedAt";
   return `query {${batch.map((ticket, slot) => ` t${slot}: issue(id: ${JSON.stringify(ticket)}) { ${fields} }`).join("")} }`;
 }
 
-/** What the board keeps about one ticket. Every field past the identifier may be missing. */
+/**
+ * What the board keeps about one ticket. Every field past the identifier may be missing. The optional fields came with the Linear seed
+ * (A16): a key read always sets them, and an agent answer or a row cached before them has none.
+ */
 export type LinearDetail = {
   identifier: string;
   title: string | null;
   description: string | null;
   state: { name: string; type: string | null } | null;
-  project: { id: string | null; name: string } | null;
+  project: { id: string | null; name: string; description?: string | null; targetDate?: string | null; initiatives?: { id: string; name: string }[] } | null;
   parent: { identifier: string | null; title: string | null } | null;
   labels: string[];
+  assignee?: string | null;
+  cycle?: { number: number; name: string | null; endsAt: string | null } | null;
+  /** The ticket's own due date, as Linear's calendar date (2026-10-17). */
+  dueDate?: string | null;
   url: string | null;
   updatedAt: string | null;
   source: "key" | "agent";
 };
+/** A key read cached before the seed's fields: refetched on the next sync rather than after its TTL. */
+export const missingSeedFields = (detail: LinearDetail | null) => detail !== null && !("cycle" in detail);
 
 const issueSchema = z.object({
   identifier: z.string(),
   title: z.string().nullish(),
   description: z.string().nullish(),
   state: z.object({ name: z.string(), type: z.string().nullish() }).nullish(),
-  project: z.object({ id: z.string().nullish(), name: z.string() }).nullish(),
+  project: z.object({ id: z.string().nullish(), name: z.string(), description: z.string().nullish(), targetDate: z.string().nullish(),
+    initiatives: z.object({ nodes: z.array(z.object({ id: z.string(), name: z.string() })) }).nullish() }).nullish(),
   parent: z.object({ identifier: z.string().nullish(), title: z.string().nullish() }).nullish(),
   labels: z.object({ nodes: z.array(z.object({ name: z.string() })) }).nullish(),
+  assignee: z.object({ name: z.string().nullish(), displayName: z.string().nullish() }).nullish(),
+  cycle: z.object({ number: z.number(), name: z.string().nullish(), endsAt: z.string().nullish() }).nullish(),
+  dueDate: z.string().nullish(),
   url: z.string().nullish(),
   updatedAt: z.string().nullish(),
 });
@@ -185,12 +199,17 @@ export function parseDetails(batch: readonly string[], payload: unknown): Map<st
       title: value.title ?? null,
       description: value.description === null || value.description === undefined ? null : value.description.slice(0, DESCRIPTION_CHARS),
       state: value.state === null || value.state === undefined ? null : { name: value.state.name, type: value.state.type ?? null },
-      project: value.project === null || value.project === undefined ? null : { id: value.project.id ?? null, name: value.project.name },
+      project: value.project === null || value.project === undefined ? null : { id: value.project.id ?? null, name: value.project.name,
+        description: value.project.description?.slice(0, DESCRIPTION_CHARS) ?? null, targetDate: value.project.targetDate ?? null,
+        initiatives: (value.project.initiatives?.nodes ?? []).map((initiative) => ({ id: initiative.id, name: initiative.name })) },
       parent:
         value.parent === null || value.parent === undefined
           ? null
           : { identifier: value.parent.identifier ?? null, title: value.parent.title ?? null },
       labels: (value.labels?.nodes ?? []).map((label) => label.name).slice(0, 20),
+      assignee: value.assignee?.displayName ?? value.assignee?.name ?? null,
+      cycle: value.cycle ? { number: value.cycle.number, name: value.cycle.name ?? null, endsAt: value.cycle.endsAt ?? null } : null,
+      dueDate: value.dueDate ?? null,
       url: value.url ?? null,
       updatedAt: value.updatedAt ?? null,
       source: "key",

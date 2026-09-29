@@ -8,6 +8,7 @@ import {
   LINEAR_TEAMS_TTL_MS,
   WORKSPACE_QUERY,
   detailQuery,
+  missingSeedFields,
   parseDetails,
   parseWorkspace,
   planFetch,
@@ -171,7 +172,7 @@ export function createLinearSync(deps: LinearSyncDeps) {
         // An agent-sourced row for a ticket a key now covers is replaced: the key is authoritative.
         const stale = owned.filter((ticket) => {
           const row = rows.get(ticket);
-          return row === undefined || row.source !== "key" || row.fetchedAt < cutoff;
+          return row === undefined || row.source !== "key" || row.fetchedAt < cutoff || missingSeedFields(row.detail);
         });
         for (let start = 0; start < stale.length; start += LINEAR_BATCH) {
           const batch = stale.slice(start, start + LINEAR_BATCH);

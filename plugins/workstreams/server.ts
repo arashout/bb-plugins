@@ -1463,8 +1463,10 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set("linearTeamNames", teams.names);
       }
       await readLinkbackComments(pattern, result.units, hostId, signal);
-      // A Linear outage keeps the previous cache and is logged once; it never fails a scan.
-      await linear.sync(keys, ticketsOf(await findTickets(pattern, result.units), result.units), signal);
+      // A Linear outage keeps the previous cache and is logged once; it never fails a scan. Tickets on your open PRs are read too, so a PR
+      // with no checkout still gets its Linear detail; only prefixes a key's workspace owns are ever sent.
+      await linear.sync(keys, [...new Set([...ticketsOf(await findTickets(pattern, result.units), result.units),
+        ...inventory.read().entries.flatMap((entry) => prTickets(entry.pr, pattern))])], signal);
 
       // The first scan after a load waits for the thread list: threads seed the grouping.
       if (!threadsSynced) await syncThreads();

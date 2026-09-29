@@ -76,7 +76,8 @@ describe("the batched detail query", () => {
     expect(query).toContain('t0: issue(id: "ABC-101")');
     expect(query).toContain('t1: issue(id: "ABC-102")');
     expect(query.match(/issue\(/gu)).toHaveLength(2);
-    for (const field of ["title", "description", "state { name type }", "project { id name }", "parent { identifier title }", "labels { nodes { name } }", "url", "updatedAt"]) {
+    for (const field of ["title", "description", "state { name type }", "project { id name description targetDate initiatives(first: 5) { nodes { id name } } }",
+      "parent { identifier title }", "labels { nodes { name } }", "assignee { name displayName }", "cycle { number name endsAt }", "dueDate", "url", "updatedAt"]) {
       expect(query).toContain(field);
     }
   });
@@ -89,9 +90,13 @@ describe("the batched detail query", () => {
           title: "Gift card balances",
           description: "x".repeat(2_000),
           state: { name: "In Progress", type: "started" },
-          project: { id: "p1", name: "Checkout polish" },
+          project: { id: "p1", name: "Checkout polish", description: "y".repeat(900), targetDate: "2026-10-17",
+            initiatives: { nodes: [{ id: "i1", name: "Holiday season" }] } },
           parent: { identifier: "ABC-100", title: "Gift cards" },
           labels: { nodes: [{ name: "frontend" }] },
+          assignee: { name: "Dana Reyes", displayName: "dana" },
+          cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" },
+          dueDate: "2026-10-10",
           url: "https://linear.app/inkwell/issue/ABC-101",
           updatedAt: "2026-09-01T00:00:00.000Z",
         },
@@ -101,9 +106,14 @@ describe("the batched detail query", () => {
     const found = details?.get("ABC-101");
     expect(found?.title).toBe("Gift card balances");
     expect(found?.description).toHaveLength(DESCRIPTION_CHARS);
-    expect(found?.project).toEqual({ id: "p1", name: "Checkout polish" });
+    // The project's summary is a seeded effort's goal, so it is kept, capped like a description.
+    expect(found?.project).toEqual({ id: "p1", name: "Checkout polish", description: "y".repeat(DESCRIPTION_CHARS), targetDate: "2026-10-17",
+      initiatives: [{ id: "i1", name: "Holiday season" }] });
     expect(found?.parent).toEqual({ identifier: "ABC-100", title: "Gift cards" });
     expect(found?.labels).toEqual(["frontend"]);
+    expect(found).toMatchObject({ assignee: "dana", cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" }, dueDate: "2026-10-10" });
+    // A key read always states them, so an absent assignee or cycle reads as none rather than as a row to refetch.
+    expect(parseDetails(["ABC-2"], { data: { t0: { identifier: "ABC-2" } } })?.get("ABC-2")).toMatchObject({ assignee: null, cycle: null, dueDate: null });
     expect(found?.source).toBe("key");
     expect(details?.get("ABC-404")).toBeNull();
     expect(parseDetails(["ABC-1"], { errors: [] })).toBeNull();

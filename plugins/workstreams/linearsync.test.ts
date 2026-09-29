@@ -133,6 +133,20 @@ describe("Linear sync", () => {
     expect(sync.read(["ABC-1"]).get("ABC-1")?.title).toBe("Title of ABC-1");
   });
 
+  // The live cache held key reads from before the seed's fields; waiting out their 12-hour TTL would leave cards and the seed without them.
+  it("refetches a key row cached before assignee, cycle, and dates on the next sync, but not a ticket Linear has no issue for", async () => {
+    const { sync, calls } = setup();
+    const older = { identifier: "ABC-1", title: "Cached", description: null, state: null, project: null, parent: null, labels: [], url: null, updatedAt: null, source: "key" as const };
+    sync.store([{ ticket: "ABC-1", detail: older }, { ticket: "ABC-404", detail: null }], "key");
+    await sync.sync([KEY_A], ["ABC-1", "ABC-404"], signal);
+    expect(issueCalls(calls)).toHaveLength(1);
+    expect(issueCalls(calls)[0]?.query).toContain('"ABC-1"');
+    expect(issueCalls(calls)[0]?.query).not.toContain('"ABC-404"');
+    expect(sync.read(["ABC-1"]).get("ABC-1")).toMatchObject({ title: "Title of ABC-1", cycle: null });
+    await sync.sync([KEY_A], ["ABC-1"], signal);
+    expect(issueCalls(calls)).toHaveLength(1);
+  });
+
   it("retries a missing alias after a partial GraphQL response instead of caching it as no issue", async () => {
     let attempt = 0;
     const { sync, calls, db, logs } = setup({ detailResponse: () => {
