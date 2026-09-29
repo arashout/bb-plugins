@@ -67,7 +67,9 @@ export type DeckLine = {
   row: DeckRow | null;
 };
 /** What a view knows beyond deck_get: when each row was last marked seen, and what a refused or cut-off write said. */
-export type LineContext = { now: number; seenAt: Readonly<Record<string, number>>; details?: ReadonlyMap<string, string> };
+export type LineContext = { now: number; seenAt: Readonly<Record<string, number>>; details?: ReadonlyMap<string, string>;
+  /** PRs a read saw merge, so a row that left says so. */
+  merged?: ReadonlySet<string> };
 
 function info(row: DeckRow, section: string, unsorted: boolean): DeckLine["info"] {
   if (unsorted) return { text: row.status, tone: null };
@@ -102,13 +104,13 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
     const failed = acted.state === "refused" || acted.state === "unknown";
     trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: context.details?.get(item.prUrl) ?? null,
       text: acted.state === "refused" ? "Not sent" : acted.state === "unknown" ? "May not have sent" : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
-  } else if (item.ghost) trail = { kind: "ghost", text: "Left" };
+  } else if (item.ghost) trail = { kind: "ghost", text: context.merged?.has(item.prUrl) ? "Merged" : "Left" };
   else if (item.change) trail = { kind: "change", text: `→ ${item.change.now}` };
   else if (row?.thread && section === "work") trail = { kind: "thread", text: row.thread.title, threadId: row.thread.id };
   return {
     prUrl: item.prUrl, ref: row ? refOf(row) : settled!.ref, title: row?.title ?? settled!.title,
     stacked: row?.stackedOn != null ? `${short(row.repo)} #${row.stackedOn}` : null, section, tone, needs, dim, ghost: item.ghost,
-    dot: item.ghost ? "Left since you looked. Clears on Mark seen." : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
+    dot: item.ghost ? `${context.merged?.has(item.prUrl) ? "Merged" : "Left"} since you looked. Clears on Mark seen.` : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
       : item.arrived ? "New since you looked" : null,
     info: row ? info(row, section, unsorted) : null, signals, age: shownAge,
     hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
@@ -150,7 +152,7 @@ const ACTIVITY: Record<DeckCard["activity"][number]["kind"], string> = { merged:
 export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at: Readonly<Record<string, number>> },
   context: Omit<LineContext, "seenAt">): CardScreen {
   const { now } = context;
-  const lineContext = { ...context, seenAt: seen.at };
+  const lineContext = { ...context, seenAt: seen.at, merged: new Set(card.activity.filter((item) => item.kind === "merged").map((item) => item.prUrl)) };
   const current = card.sections.flatMap((section) => section.rows);
   const shown = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => deckLine(item, card.pile, lineContext));
   const byPr = new Map(shown.map((line) => [line.prUrl, line]));

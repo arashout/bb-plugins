@@ -60,6 +60,9 @@ describe("an effort card", () => {
     const seen = { rows: { [SHELF]: cardSnapshot(before.active.find((item) => item.id === SHELF)!).filter((row) => row.prUrl !== url("folio", 343)) }, at: {} };
     const after = inkwellDeck({}, (row) => row.number === 341 ? { effort: null } : {});
     expect(lines(card(after, SHELF, seen)).merge).toEqual(["folio #340", "folio #341 · dim ghost [Left]", "folio #342", "folio #343 dot"]);
+    // A read that saw it merge says so.
+    const merged = inkwellDeck({ merges: [{ url: url("folio", 341), at: NOW - 60_000, effortId: SHELF }] }, (row) => row.number === 341 ? { effort: null } : {});
+    expect(lines(card(merged, SHELF, seen)).merge[1]).toBe("folio #341 · dim ghost [Merged]");
   });
 
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {
