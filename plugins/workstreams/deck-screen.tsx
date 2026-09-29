@@ -602,8 +602,9 @@ export function CompleteBody({ screen, busy, error, onComplete, onCancel }: { sc
   </div>;
 }
 
-export type RuleDraft = { kind: "ticket-prefix" | "branch" | "repo" | "stack"; value: string; effortId: string; now: boolean };
-export const RULE_WORDS: Record<RuleDraft["kind"], string> = { "ticket-prefix": "Ticket prefix", branch: "Branch", repo: "Repo", stack: "Stacked on a PR in an effort" };
+export type RuleDraft = { kind: "ticket-prefix" | "branch" | "repo" | "stack" | "linear-project"; value: string; effortId: string; now: boolean };
+export const RULE_WORDS: Record<RuleDraft["kind"], string> = { "ticket-prefix": "Ticket prefix", branch: "Branch", repo: "Repo", stack: "Stacked on a PR in an effort",
+  "linear-project": "Linear project" };
 /** A standing rule places new PRs on every read; `now` also moves the open PRs it matches today, which the preview counts. */
 export function RuleBody({ draft, efforts, matches, busy, error, onDraft, onAdd, onCancel }: { draft: RuleDraft; efforts: readonly { id: string; name: string }[];
   matches: number | null; busy: boolean; error: string | null; onDraft(draft: RuleDraft): void; onAdd(): void; onCancel(): void }) {
@@ -613,7 +614,8 @@ export function RuleBody({ draft, efforts, matches, busy, error, onDraft, onAdd,
       <select aria-label="Rule kind" value={draft.kind} onChange={(event) => onDraft({ ...draft, kind: event.target.value as RuleDraft["kind"] })} className={field}>
         {Object.entries(RULE_WORDS).map(([kind, word]) => <option key={kind} value={kind}>{word}</option>)}</select>
       {draft.kind === "stack" ? null : <input aria-label="Rule value" value={draft.value} onChange={(event) => onDraft({ ...draft, value: event.target.value })}
-        placeholder={draft.kind === "branch" ? "billing/*" : draft.kind === "repo" ? "inkwell/folio" : "ABC"} className={cn(field, "w-36 font-mono")} />}
+        placeholder={draft.kind === "branch" ? "billing/*" : draft.kind === "repo" ? "inkwell/folio" : draft.kind === "linear-project" ? "Reading lists" : "ABC"}
+        className={cn(field, "w-36", draft.kind !== "linear-project" && "font-mono")} />}
       {draft.kind === "stack" ? "with its base" : <>in <select aria-label="Effort" value={draft.effortId} onChange={(event) => onDraft({ ...draft, effortId: event.target.value })} className={field}>
         {efforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.name}</option>)}</select></>}
     </div>

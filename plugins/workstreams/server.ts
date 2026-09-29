@@ -3848,15 +3848,18 @@ export default async function plugin(bb: BbPluginApi) {
     for (const url of prs.keys()) for (const link of work.linksForPr(url, false))
       if (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket") linked.set(link.threadId, (linked.get(link.threadId) ?? new Set()).add(url));
     const tickets = [...prs.values()].flatMap((pr) => prTickets(pr, pattern));
+    const details = linear.read([...new Set([...tickets, ...current.efforts.flatMap((effort) => effort.members.tickets)])]);
     const hits = assignments.ruleHits(Date.now() - 7 * 24 * 60 * 60_000);
     return {
       groups: suggestEfforts({ prs: [...prs.values()], pattern,
         efforts: current.efforts.filter((effort) => !effort.archivedAt && effort.id !== oneOffs?.id && piles.get(effort).pile !== "done")
-          .map((effort) => ({ id: effort.id, name: effort.name, tickets: effort.members.tickets })),
+          .map((effort) => { const seed = seeds.get(effort.id); return { id: effort.id, name: effort.name, tickets: effort.members.tickets,
+            seededFrom: seed && { id: seed.id, name: seed.name } }; }),
         groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !group.key.startsWith("ticket:") && !effortStore.get(group.key))
           .map((group) => ({ key: group.key, name: group.name, prUrls: group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [prWorkItemKey(unit.pr.url)] : [])) })),
         threads: [...linked].map(([id, urls]) => { const facts = threadFacts.get(id); return { id, title: (facts?.title ?? facts?.titleFallback ?? id).slice(0, 200), prUrls: [...urls] }; }),
-        ticketTitles: new Map([...linear.read(tickets)].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : [])) }),
+        ticketTitles: new Map([...details].flatMap(([ticket, detail]) => detail.title ? [[ticket, detail.title] as const] : [])),
+        projects: new Map([...details].flatMap(([ticket, detail]) => detail.project?.id ? [[ticket, { id: detail.project.id, name: detail.project.name }] as const] : [])) }),
       oneOffsId: oneOffs?.id ?? null,
       rules: assignments.rules().map((rule) => ({ ...rule, effortName: rule.effortId ? effortStore.get(rule.effortId)?.name ?? null : null,
         hits: hits.get(rule.id) ?? 0 })),
@@ -3916,6 +3919,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function ruleBatches(rules: readonly Rule[], all: boolean, undone: ReadonlySet<string>) {
     const owners = new Map((await inventoryGet()).groups.flatMap((group) => group.rows.map((row) => [row.prUrl, group.effort?.id ?? null] as const)));
     const entries = inventory.read().entries;
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const projectsOf = (pr: Pr) => [...linear.read(prTickets(pr, pattern)).values()].flatMap((detail) => detail.project ? [detail.project.name] : []);
     const batches = new Map<string, { rule: Rule; effortId: string; prUrls: string[] }>();
     for (const entry of entries) {
       const url = prWorkItemKey(entry.pr.url);
@@ -3923,7 +3928,7 @@ export default async function plugin(bb: BbPluginApi) {
       const base = stackParent(entry, entries);
       const baseEffortId = base ? owners.get(prWorkItemKey(base.pr.url)) ?? null : null;
       const rule = ruleFor(rules.filter((candidate) => all || Date.parse(entry.pr.createdAt ?? "") > candidate.createdAt),
-        { repo: entry.repo, title: entry.pr.title, headRefName: entry.pr.headRefName }, baseEffortId);
+        { repo: entry.repo, title: entry.pr.title, headRefName: entry.pr.headRefName, projects: projectsOf(entry.pr) }, baseEffortId);
       const effortId = rule?.effortId ?? baseEffortId;
       if (!rule || !effortId || !rulesPlaceInto(effortId)) continue;
       const key = `${rule.id}\n${effortId}`;
@@ -3934,13 +3939,15 @@ export default async function plugin(bb: BbPluginApi) {
   /** A rule as you wrote it, normalized, or why it can't apply as written. */
   function ruleDraft({ kind, value, effortKey }: { kind: Rule["kind"]; value: string; effortKey: string | null }) {
     const effort = effortKey === null ? null : effortStore.get(effortKey);
-    const normalized = kind === "ticket-prefix" ? value.trim().toUpperCase() : value.trim().toLowerCase();
+    // A Linear project keeps its name as you typed it; it matches in any case.
+    const normalized = kind === "ticket-prefix" ? value.trim().toUpperCase() : kind === "linear-project" ? value.trim().replace(/\s+/gu, " ") : value.trim().toLowerCase();
     const error = kind === "stack" ? (effort || normalized ? "A stack rule names no effort or value: a stacked PR joins its base's effort." : null)
       : effort && v2Pointer(effort.id) ? "Its roster runs v2 work, so a rule can't add to it."
       : !effort || !rulesPlaceInto(effort.id) ? "Choose an effort that isn't archived or done."
       : kind === "ticket-prefix" && !/^[A-Z]{2,10}$/u.test(normalized) ? "Enter a ticket prefix such as ABC."
       : kind === "branch" && !/^[\w./*-]{1,100}$/u.test(normalized) ? "Enter part of a branch name, with * for any text."
-      : kind === "repo" && !/^[\w.-]+(?:\/[\w.-]+)?$/u.test(normalized) ? "Enter a repository such as inkwell/folio, or its name." : null;
+      : kind === "repo" && !/^[\w.-]+(?:\/[\w.-]+)?$/u.test(normalized) ? "Enter a repository such as inkwell/folio, or its name."
+      : kind === "linear-project" && !normalized ? "Enter a Linear project's name." : null;
     return error ? { ok: false as const, error } : { ok: true as const, rule: { kind, value: normalized, effortId: effort?.id ?? null } };
   }
   let applyingRules: Promise<unknown> = Promise.resolve();

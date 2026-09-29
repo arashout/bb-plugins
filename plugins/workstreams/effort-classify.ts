@@ -8,6 +8,7 @@
 // group. Each signal from owned work points the cohort at an effort, and each
 // kind counts once per effort:
 //   ticket 3  a ticket in the title or branch (any case) that an effort or one of its PRs carries
+//   project 3 a ticket in the Linear project the effort was seeded from, or that most of its tickets are in
 //   stack  3  stacked on a PR the effort owns
 //   thread 2  a linked thread also works on the effort's PRs
 //   group  2  the board's derived group also holds the effort's PRs
@@ -24,7 +25,7 @@ import { displayTitle } from "./workstreams.js";
 
 export const CONFIDENCES = ["low", "medium", "high"] as const;
 export type Confidence = (typeof CONFIDENCES)[number];
-const WEIGHT = { ticket: 3, stack: 3, thread: 2, group: 2, prefix: 1, area: 1 } as const;
+const WEIGHT = { ticket: 3, project: 3, stack: 3, thread: 2, group: 2, prefix: 1, area: 1 } as const;
 export const SIGNAL_KINDS = Object.keys(WEIGHT) as (keyof typeof WEIGHT)[];
 type SignalKind = keyof typeof WEIGHT;
 /** A thread linking more PRs than this is a hub, such as a housekeeping thread, and says nothing about any one of them. */
@@ -61,19 +62,24 @@ export type ClassifyPr = {
 };
 export type ClassifyInput = {
   prs: readonly ClassifyPr[];
-  /** Efforts a PR may join: not done, archived, or One-offs. A PR another effort owns gives no signal. */
-  efforts: readonly { id: string; name: string; tickets: readonly string[] }[];
+  /**
+   * Efforts a PR may join: not done, archived, or One-offs. A PR another effort owns gives no signal. `seededFrom` is the Linear project
+   * the effort was seeded from.
+   */
+  efforts: readonly { id: string; name: string; tickets: readonly string[]; seededFrom?: { id: string; name: string } | null }[];
   /** The board's derived effort-level groups that no saved effort backs. */
   groups: readonly { key: string; name: string; prUrls: readonly string[] }[];
   /** Each thread with the PRs it links through its own work, not through a checkout it shares with other branches. */
   threads: readonly { id: string; title: string; prUrls: readonly string[] }[];
   /** Linear titles by ticket, to name a proposed effort. */
   ticketTitles: ReadonlyMap<string, string>;
+  /** Each ticket's Linear project, where a key read named it. */
+  projects?: ReadonlyMap<string, { id: string; name: string }>;
   pattern: RegExp;
 };
 
-const REASONS: Record<SignalKind, string> = { ticket: "shared ticket", stack: "stacked on its PRs", thread: "linked thread", group: "board group",
-  prefix: "same ticket prefix", area: "same code area" };
+const REASONS: Record<SignalKind, string> = { ticket: "shared ticket", project: "Linear project", stack: "stacked on its PRs", thread: "linked thread",
+  group: "board group", prefix: "same ticket prefix", area: "same code area" };
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** Tickets a PR's title or branch names, in any case: branches carry lowercase keys. */
@@ -81,13 +87,18 @@ export function prTickets(pr: Pick<ClassifyPr, "title" | "headRefName">, pattern
   return ticketsIn(`${pr.title}\n${pr.headRefName ?? ""}`, new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`));
 }
 
-/** Standing rules you add: a ticket prefix, part of a branch name (`*` for any text), or a repository names an effort; a stack rule files a stacked PR with its base. */
-export const RULE_KINDS = ["ticket-prefix", "branch", "repo", "stack"] as const;
+/**
+ * Standing rules you add: a ticket prefix, part of a branch name (`*` for any text), a repository, or a Linear project by name names an
+ * effort; a stack rule files a stacked PR with its base.
+ */
+export const RULE_KINDS = ["ticket-prefix", "branch", "repo", "stack", "linear-project"] as const;
 export const ruleSchema = z.object({ id: z.string(), kind: z.enum(RULE_KINDS), value: z.string(), effortId: z.string().nullable(), createdAt: z.number() }).strict();
 export type Rule = z.infer<typeof ruleSchema>;
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
-function ruleMatches(rule: Rule, pr: Pick<ClassifyPr, "repo" | "title" | "headRefName">, baseEffortId: string | null): boolean {
+/** What a rule reads of a PR: `projects` names the Linear projects of its tickets. */
+export type RulePr = Pick<ClassifyPr, "repo" | "title" | "headRefName"> & { projects?: readonly string[] };
+function ruleMatches(rule: Rule, pr: RulePr, baseEffortId: string | null): boolean {
   const branch = (pr.headRefName ?? "").toLowerCase();
   switch (rule.kind) {
     // `OPS` matches OPS-43 and ops43 in any case, but not the "ops2" inside "stops2".
@@ -95,11 +106,12 @@ function ruleMatches(rule: Rule, pr: Pick<ClassifyPr, "repo" | "title" | "headRe
     case "branch": return rule.value.includes("*") ? new RegExp(`^${rule.value.split("*").map(escape).join(".*")}$`, "iu").test(branch) : branch.includes(rule.value.toLowerCase());
     case "repo": return rule.value.includes("/") ? pr.repo.toLowerCase() === rule.value : pr.repo.toLowerCase().split("/")[1] === rule.value;
     case "stack": return baseEffortId !== null;
+    case "linear-project": return (pr.projects ?? []).some((name) => name.toLocaleLowerCase() === rule.value.toLocaleLowerCase());
   }
 }
 
 /** The rule that places one PR: the first match when every matching rule names the same effort (a stack rule names its base's), else null. */
-export function ruleFor(rules: readonly Rule[], pr: Pick<ClassifyPr, "repo" | "title" | "headRefName">, baseEffortId: string | null): Rule | null {
+export function ruleFor(rules: readonly Rule[], pr: RulePr, baseEffortId: string | null): Rule | null {
   const matches = rules.filter((rule) => ruleMatches(rule, pr, baseEffortId));
   return new Set(matches.map((rule) => rule.effortId ?? baseEffortId)).size === 1 ? matches[0]! : null;
 }
@@ -129,6 +141,15 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
   const threadsOf = index(input.threads.filter((thread) => thread.prUrls.length <= MAX_THREAD_PRS).flatMap((thread) => thread.prUrls.map((url) => [url, thread] as const)));
   const groupsOf = index(input.groups.flatMap((group) => group.prUrls.map((url) => [url, group] as const)));
   const ownersOf = (urls: readonly string[]) => new Set(urls.flatMap((url) => { const other = prs.get(url); const id = other && owner(other); return id ? [id] : []; }));
+  // An effort's Linear project: the one it was seeded from, else the one more than half of its tickets with a known project are in.
+  const projects = input.projects ?? new Map<string, { id: string; name: string }>();
+  const byProject = index(input.efforts.flatMap((effort) => {
+    if (effort.seededFrom) return [[effort.seededFrom.id, effort.id] as const];
+    const known = [...new Set([...effort.tickets, ...owned.flatMap(([pr, id]) => id === effort.id ? tickets.get(pr.url)! : [])])]
+      .flatMap((ticket) => projects.get(ticket)?.id ?? []);
+    const top = [...new Set(known)].find((id) => known.filter((other) => other === id).length * 2 > known.length);
+    return top ? [[top, effort.id] as const] : [];
+  }));
 
   function signals(pr: ClassifyPr): Signal[] {
     const out: Signal[] = [];
@@ -136,6 +157,10 @@ export function suggestEfforts(input: ClassifyInput): SuggestionGroup[] {
       if (!out.some((signal) => signal.kind === kind && signal.effortId === effortId)) out.push({ kind, effortId, text });
     };
     for (const ticket of tickets.get(pr.url)!) for (const id of byTicket.get(ticket) ?? []) push("ticket", id, `ticket ${ticket}`);
+    for (const ticket of tickets.get(pr.url)!) {
+      const project = projects.get(ticket);
+      for (const id of project ? byProject.get(project.id) ?? [] : []) push("project", id, `Linear project “${project!.name}”`);
+    }
     const parent = base.get(pr.url);
     const parentOwner = parent && owner(parent);
     if (parent && parentOwner) push("stack", parentOwner, `stacked on ${ref(parent)}`);

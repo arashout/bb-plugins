@@ -147,6 +147,22 @@ describe("Seed from Linear", () => {
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     expect(env.efforts.get(made.effort.id)).toMatchObject({ name: "Reading lists", goal: "Readers keep lists of books to read next." });
     expect(await env.grouped()).toMatchObject({ "Reading lists": [313, 314], "No effort": [321, 322, 325] });
+    // It is suggested, with high confidence, for the effort seeded from its project.
+    expect((await env.call("classify_get", null)).groups).toContainEqual(expect.objectContaining({ target: { kind: "effort", effortId: made.effort.id,
+      name: "Reading lists" }, confidence: "high", prs: [expect.objectContaining({ number: 325, signals: expect.arrayContaining([{ kind: "project",
+        effortId: made.effort.id, text: "Linear project “Reading lists”" }]) })] }));
+  });
+
+  it("lets a standing rule place PRs by Linear project, in any case", async () => {
+    const env = await seeded();
+    const lists = env.efforts.establish({ sourceKey: "lists", name: "Lists", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    expect(await env.call("classify_rule_preview", { kind: "linear-project", value: " reading  LISTS ", effortKey: lists.key }))
+      .toEqual({ ok: true, prUrls: [url(313), url(314)] });
+    expect(await env.call("classify_rule_add", { kind: "linear-project", value: "Reading lists", effortKey: lists.key, now: true }))
+      .toMatchObject({ ok: true, rule: { kind: "linear-project", value: "Reading lists" }, actions: [{ added: 2 }] });
+    expect(await env.grouped()).toMatchObject({ Lists: [313, 314] });
+    expect(await env.call("classify_rule_preview", { kind: "linear-project", value: "  ", effortKey: lists.key }))
+      .toEqual({ ok: false, error: "Enter a Linear project's name." });
   });
 
   it("undoes a seed as one action: the effort and its provenance go, and the project can be seeded again", async () => {

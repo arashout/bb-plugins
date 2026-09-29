@@ -133,6 +133,32 @@ describe("effort suggestions", () => {
   });
 });
 
+describe("the Linear project signal", () => {
+  // Lists was seeded from Reading lists. Two of Shelf order's three tickets are in the Shelf order project, so that is its project; Store
+  // pickup's two tickets are in two projects, so it has none.
+  const projects = new Map([["ABC-341", { id: "proj-shelves", name: "Shelf order" }], ["ABC-342", { id: "proj-shelves", name: "Shelf order" }],
+    ["ABC-343", { id: "proj-hours", name: "Store hours" }], ["ABC-360", { id: "proj-pickup", name: "Store pickup" }], ["ABC-361", { id: "proj-lists", name: "Reading lists" }],
+    ["ABC-370", { id: "proj-lists", name: "Reading lists" }], ["ABC-371", { id: "proj-shelves", name: "Shelf order" }], ["ABC-372", { id: "proj-pickup", name: "Store pickup" }]]);
+  const input = (loose: ClassifyPr[]): ClassifyInput => ({ ...inkwell(), projects, prs: [
+    pr("folio", 314, "ABC-341 Group shelves by genre", "shelf-genre", { effortId: "shelf" }), pr("folio", 315, "ABC-342 Sort shelves", "shelf-sort", { effortId: "shelf" }),
+    pr("spine", 160, "ABC-360 Reserve at a store", "reserve", { effortId: "pickup" }), ...loose],
+    efforts: [{ id: "lists", name: "Reading lists", tickets: [], seededFrom: { id: "proj-lists", name: "Reading lists" } },
+      { id: "shelf", name: "Shelf order", tickets: ["ABC-343"] }, { id: "pickup", name: "Store pickup", tickets: ["ABC-361"] }] });
+
+  it("suggests the effort seeded from a PR's Linear project, or the one most of whose tickets are in it, with high confidence", () => {
+    const groups = suggestEfforts(input([pr("folio", 501, "Reorder a reading list", "abc-370-reorder"), pr("folio", 502, "Shelve by author", "abc-371-author")]));
+    expect(groups.map((group) => [group.target, group.confidence, group.reason, group.prs.map((item) => [item.number, item.signals.map((signal) => signal.text)])])).toEqual([
+      [{ kind: "effort", effortId: "lists", name: "Reading lists" }, "high", "Linear project", [[501, ["Linear project “Reading lists”"]]]],
+      [{ kind: "effort", effortId: "shelf", name: "Shelf order" }, "high", "Linear project", [[502, ["Linear project “Shelf order”"]]]],
+    ]);
+  });
+
+  it("points at no effort whose tickets split between projects, so one ticket never decides an effort's project", () => {
+    const [group] = suggestEfforts(input([pr("folio", 503, "Print pickup slips", "abc-372-slips")]));
+    expect(group!.prs[0]!.signals.filter((signal) => signal.kind === "project")).toEqual([]);
+  });
+});
+
 describe("standing rules", () => {
   const rule = (kind: Rule["kind"], value: string, effortId: string | null): Rule => ({ id: `${kind}:${value}`, kind, value, effortId, createdAt: 0 });
   /** The effort the rules put a PR in: a stack rule's is its base's. */
@@ -155,6 +181,13 @@ describe("standing rules", () => {
     expect(placed([rule("repo", "inkwell/quill", "tools")], "Upgrade lint config", "lint")).toBe("tools");
     expect(placed([rule("repo", "quill", "tools")], "Upgrade lint config", "lint")).toBe("tools");
     expect(placed([rule("repo", "quill", "tools")], "Upgrade lint config", "lint", "inkwell/folio")).toBeNull();
+  });
+
+  it("matches a Linear project of the PR's tickets by name, in any case", () => {
+    const lists = [rule("linear-project", "Reading lists", "lists")];
+    expect(ruleFor(lists, { repo: "inkwell/folio", title: "Reorder a list", headRefName: "abc-370", projects: ["reading Lists"] }, null)?.effortId).toBe("lists");
+    expect(ruleFor(lists, { repo: "inkwell/folio", title: "Reorder a list", headRefName: "abc-370", projects: ["Reading rooms"] }, null)).toBeNull();
+    expect(ruleFor(lists, { repo: "inkwell/folio", title: "Reorder a list", headRefName: "abc-370" }, null)).toBeNull();
   });
 
   it("files a stacked PR with its base's effort, and places nothing when matching rules name different efforts", () => {
