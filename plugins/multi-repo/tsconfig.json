@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "paths": { "@/*": ["./*"] },
+    "noEmit": true,
+    "skipLibCheck": false
+  },
+  "include": [
+    "paths.ts",
+    "repos.ts",
+    "layout.ts",
+    "shared.ts",
+    "contract.ts",
+    "git.ts",
+    "lock.ts",
+    "cache.ts",
+    "source.ts",
+    "workspace.ts",
+    "discovery.ts",
+    "diff-parse.ts",
+    "diff.ts",
+    "gh-parse.ts",
+    "gh.ts",
+    "host.ts",
+    "server.ts",
+    "repos-panel.tsx",
+    "changes-panel.tsx",
+    "app.tsx",
+    "*.test.ts",
+    "*.test.tsx"
+  ]
+}
