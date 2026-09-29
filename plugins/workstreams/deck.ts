@@ -6,7 +6,7 @@
 // sums each card from its rows, merges, Linear details, and threads.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
-import { ACTED_MS, DECK_SECTIONS, needsYou, type DeckSection, type RowActed } from "./deck-shared.js";
+import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, needsYou, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
 import type { InventoryRow } from "./inventory-view.js";
@@ -46,7 +46,8 @@ export const deckRowSchema = z.object({
   managed: z.string().nullable(),
   /** When GitHub last answered for it; `failed` when its last read didn't. */
   checkedAt: z.string().nullable(), failed: z.boolean(),
-  acted: z.object({ kind: z.string(), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number() }).strict().nullable(),
+  acted: z.object({ kind: z.enum(BATCH_KINDS), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number(), batchId: z.string().nullable() })
+    .strict().nullable(),
 }).strict();
 export type DeckRow = z.infer<typeof deckRowSchema>;
 
@@ -271,10 +272,19 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   };
 }
 
+/** Every row as the deck draws it, with the facts it came from and its card's pile. */
+export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (Placed & { pile: DeckPile })[] {
+  const parents = new Map(input.rows.map((row) => [`${row.repo.toLowerCase()}#${row.number}`, row]));
+  const piles = new Map(input.efforts.map((effort) => [effort.id, effort.pile.pile]));
+  return input.rows.flatMap((row) => {
+    const pile = row.effort ? piles.get(row.effort.id) : "unclassified";
+    return pile ? [{ row: deckRow(row, parents, input.now), input: row, pile }] : [];
+  });
+}
+
 /** The whole deck from one read. */
 export function deckView(input: DeckInput): DeckView {
-  const parents = new Map(input.rows.map((row) => [`${row.repo.toLowerCase()}#${row.number}`, row]));
-  const placed = input.rows.map((row) => ({ row: deckRow(row, parents, input.now), input: row }));
+  const placed = deckRows(input);
   const of = (effortId: string | null) => placed.filter(({ input: row }) => (row.effort?.id ?? null) === effortId);
   const cards = input.efforts.filter((effort) => effort.pile.pile !== "done").map((effort) => card(effort, of(effort.id), input));
   const active = cards.filter((item) => item.pile === "active")

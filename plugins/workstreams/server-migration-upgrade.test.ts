@@ -2,6 +2,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
+import { DECK_BATCH_MIGRATION } from "./deck-batch.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
 import { EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION } from "./effort-assignments.js";
 import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
@@ -218,8 +219,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends PR merge sightings after standing rules", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 62 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 62 ORDER BY id").all())
       .toEqual([{ id: 62, hash: statementHash(PR_MERGES_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends deck batches after PR merge sightings", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 63 ORDER BY id").all())
+      .toEqual([{ id: 63, hash: statementHash(DECK_BATCH_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

@@ -1,0 +1,124 @@
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeckBatches, DECK_BATCH_MIGRATION, planBatch, type PlanRow } from "./deck-batch.js";
+import type { DeckSection } from "./deck-shared.js";
+
+const HEAD = "c".repeat(40);
+let next = 600;
+const row = (section: DeckSection, patch: Partial<PlanRow["row"]> = {}, facts: Partial<Omit<PlanRow, "row">> = {}): PlanRow => {
+  const number = next++;
+  return { row: { prUrl: `https://github.com/inkwell/quill/pull/${number}`, repo: "inkwell/quill", number, title: `ABC-${number} Print hold slips`, section,
+    suggested: ["kai"], nudge: section === "nudge" ? ["mira"] : [], notes: section === "confirm" ? 1 : 0, acted: null, hold: null, ...patch },
+  pile: "active", head: HEAD, fingerprint: section === "confirm" ? "f".repeat(64) : null, shown: { requested: [], reviewed: [{ login: "otto", state: "COMMENTED" }] },
+  ...facts };
+};
+const brief = (plan: ReturnType<typeof planBatch>) => ({ items: plan.items.map((item) => `${item.kind} ${item.ref}: ${item.what}`),
+  skipped: plan.skipped.map((skip) => `${skip.ref}: ${skip.reason}`) });
+
+describe("planning a deck batch", () => {
+  it("plans Advance as every safe move in the effort, confirm through mark ready, and leaves merges and a thread's work to their own paths", () => {
+    next = 600;
+    const rows = [row("ready"), row("merge"), row("request"), row("work"), row("nudge"), row("confirm"), row("flight"), row("blocked")];
+    expect(brief(planBatch("advance", rows, { selected: false }))).toEqual({ items: ["confirm quill #605: Confirm 1 comment handled",
+      "nudge quill #604: Nudge @mira", "request quill #602: Request @kai", "ready quill #600: Mark ready"], skipped: [] });
+  });
+
+  it("asks the reviewers you pick on every PR in a request, and keeps what each row showed so the request can check it", () => {
+    next = 610;
+    const plan = planBatch("request", [row("request"), row("request", { suggested: [] })], { selected: false, reviewers: ["dana", "lee"] });
+    expect(plan.items.map((item) => [item.ref, item.reviewers, item.shown])).toEqual([
+      ["quill #610", ["dana", "lee"], { requested: [], reviewed: [{ login: "otto", state: "COMMENTED" }] }],
+      ["quill #611", ["dana", "lee"], { requested: [], reviewed: [{ login: "otto", state: "COMMENTED" }] }]]);
+  });
+
+  it("names why each selected PR can't take the write, so the confirm lists what won't happen as well as what will", () => {
+    next = 620;
+    const rows = [row("nudge"), row("nudge", {}, { pile: "held" }), row("nudge", {}, { pile: "unclassified" }), row("merge"),
+      row("nudge", { acted: { kind: "nudge", state: "queued", at: 1, batchId: "b" } }), row("blocked", { hold: { reason: "Counter redesign", since: 1 } }),
+      row("request", { suggested: [] }), row("ready", {}, { head: null }), row("nudge", { nudge: [] })];
+    expect(brief(planBatch("advance", rows, { selected: true }))).toEqual({ items: ["nudge quill #620: Nudge @mira"], skipped: [
+      "quill #621: Its effort is on hold.", "quill #622: Sort it into an effort first.", "quill #623: Merges go through the merge preview.",
+      "quill #624: A write on it is waiting or just ran.", "quill #625: On hold. Release it first.", "quill #626: No reviewer to suggest. Pick one.",
+      "quill #627: Not read in full yet. Refresh it first.", "quill #628: No reviewer needs a nudge now."] });
+    // A selection for one kind names the move a row needs instead.
+    expect(brief(planBatch("ready", [row("nudge")], { selected: true })).skipped).toEqual(["quill #629: Its next move is a nudge."]);
+  });
+
+});
+
+describe("sending a deck batch", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const store = () => {
+    const db = new Database(":memory:");
+    db.exec(DECK_BATCH_MIGRATION);
+    const sent: string[] = [];
+    const hang = { next: false };
+    const deps = { db, now: Date.now, changed: () => undefined, piles: async () => () => "active" as const, run: async (item: { prUrl: string }) => {
+      sent.push(item.prUrl);
+      if (hang.next) { hang.next = false; return await new Promise<never>(() => undefined); }
+      return { ok: true as const, detail: "Wrote ready." };
+    } };
+    const batch = (load: ReturnType<typeof createDeckBatches>, ...rows: PlanRow[]) => load.plan("ready", null, planBatch("ready", rows, { selected: false })).batchId!;
+    return { db, sent, hang, deps, batch };
+  };
+  // A reload loads the replacement, which re-arms each waiting batch, before it disposes the old load, which may still take an Undo.
+  it("sends each item once when a replacement load overlaps the old one inside the window, and keeps an Undo the old load took", async () => {
+    vi.useFakeTimers();
+    next = 640;
+    const db = new Database(":memory:");
+    db.exec(DECK_BATCH_MIGRATION);
+    const sent: string[] = [];
+    const deps = { db, now: Date.now, changed: () => undefined, piles: async () => () => "active" as const,
+      run: async (item: { prUrl: string }) => { sent.push(item.prUrl); return { ok: true as const, detail: "Wrote ready." }; } };
+    const old = createDeckBatches(deps), replacement = createDeckBatches(deps);
+    const [undone, kept] = [row("ready"), row("ready")].map((item) => old.plan("ready", null, planBatch("ready", [item], { selected: false })).batchId!);
+    for (const id of [undone, kept]) expect(await old.start(id!)).toMatchObject({ ok: true });
+    replacement.resume();
+    expect(old.undo(undone!)).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(sent).toEqual(["https://github.com/inkwell/quill/pull/641"]);
+    expect([replacement.get(undone!)?.state, replacement.get(kept!)?.state]).toEqual(["cancelled", "done"]);
+    db.close();
+  });
+
+  it("finishes what a reload's old load started or was sending after this load resumed, once that load is gone, and never sends twice", async () => {
+    vi.useFakeTimers();
+    next = 650;
+    const { db, sent, hang, deps, batch } = store();
+    const old = createDeckBatches(deps), replacement = createDeckBatches(deps);
+    const cut = batch(old, row("ready"), row("ready"));
+    expect(await old.start(cut)).toMatchObject({ ok: true });
+    replacement.resume();
+    // The old load wins the send, and GitHub never answers its first write.
+    hang.next = true;
+    await vi.advanceTimersByTimeAsync(8_000);
+    // Still loaded, it takes a start the replacement never saw, then goes before that batch's window ends.
+    const late = batch(old, row("ready"));
+    expect(await old.start(late)).toMatchObject({ ok: true });
+    old.dispose();
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(sent).toEqual([650, 651, 652].map((number) => `https://github.com/inkwell/quill/pull/${number}`));
+    expect([replacement.get(cut), replacement.get(late)].map((item) => [item?.state, item?.items.map((entry) => entry.state)]))
+      .toEqual([["done", ["unknown", "sent"]], ["done", ["sent"]]]);
+    replacement.dispose();
+    db.close();
+  });
+
+  it("sends nothing of a batch the plugin was closed through past its window, and refuses each PR so its row asks you again", async () => {
+    vi.useFakeTimers();
+    next = 660;
+    const { db, sent, deps, batch } = store();
+    const closed = createDeckBatches(deps);
+    const id = batch(closed, row("ready"));
+    expect(await closed.start(id)).toMatchObject({ ok: true });
+    closed.dispose();
+    await vi.advanceTimersByTimeAsync(3 * 86_400_000);
+    const reopened = createDeckBatches(deps);
+    reopened.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent).toEqual([]);
+    expect(reopened.get(id)).toMatchObject({ state: "done", items: [{ state: "refused", detail: expect.stringContaining("The plugin wasn't running when this was due") }] });
+    reopened.dispose();
+    db.close();
+  });
+});

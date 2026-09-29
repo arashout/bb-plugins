@@ -27,8 +27,9 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
-import { deckSeenSchema, deckView, deckViewSchema, type DeckView } from "./deck.js";
-import { DECK_CHANGED } from "./deck-shared.js";
+import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
+import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
+import { DECK_CHANGED, type RowActed } from "./deck-shared.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
   type AssignmentSource } from "./effort-assignments.js";
@@ -153,7 +154,7 @@ import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
 import { executeMerge, type WriteResult } from "./direct.js";
-import { githubRateLimit, prTarget } from "./ghactions.js";
+import { githubRateLimit, prTarget, REVIEWER } from "./ghactions.js";
 import { trackTransitions, toLifecycle, unitLifecycle, type Transition } from "./workstreams.js";
 import { TypeSafeClient, choice, score } from "@typesafe-ai/sdk";
 import { RUNS_MIGRATION, createRunStore } from "./runstore.js";
@@ -585,6 +586,7 @@ export const rpcContract = defineRpcContract({
    * each PR's row seen: a row whose write landed counts again only once seen at or after it.
    */
   deck_get: { input: z.object({ seen: deckSeenSchema.optional() }).strict(), output: deckViewSchema },
+  ...deckBatchContract,
 });
 
 export type Board = z.infer<typeof boardSchema>;
@@ -677,6 +679,7 @@ export const MIGRATIONS = [
   ...EFFORT_ASSIGNMENT_MIGRATIONS,
   EFFORT_RULE_MIGRATION,
   PR_MERGES_MIGRATION,
+  DECK_BATCH_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -5327,8 +5330,10 @@ export default async function plugin(bb: BbPluginApi) {
       warnings: current.prInventory.warnings }, only);
   }
 
-  /** The effort deck from one board read: each unarchived effort's card on its pile, and the Unclassified deck. See deck.ts. */
-  async function deckGet(seen: Readonly<Record<string, number>> = {}): Promise<DeckView> {
+  /** An inventory action as the deck batch kind that runs it. */
+  const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm" } as const;
+  /** Everything the effort deck reads, from one board read. See deck.ts. */
+  async function deckInput(seen: Readonly<Record<string, number>> = {}): Promise<DeckInput> {
     const current = await board();
     const view = await inventoryGet(undefined, current);
     const pattern = compilePattern((await settings.get()).ticketPattern);
@@ -5346,13 +5351,18 @@ export default async function plugin(bb: BbPluginApi) {
       return effortWork.decisions(effort.id).flatMap((decision) => decision.body.targets.map((target) => [prWorkItemKey(target.target),
         { n: decision.n, question: decision.body.question, since: asked.get(decision.id) ?? null }] as const));
     }));
+    const batches = deckBatches.acted();
     const rows = view.groups.flatMap((group) => group.rows.map((row) => {
       const pr = inventory.get(row.prUrl)?.pr ?? scanned.get(row.prUrl) ?? null;
+      // The newer of a deck batch's write and a click on the PR's inventory row.
+      const clicked: RowActed | null = row.lastAction && { kind: DECK_KIND[row.lastAction.action], state: row.lastAction.ok ? "sent" : "refused",
+        at: row.lastAction.at, batchId: null };
+      const batched = batches.get(row.prUrl) ?? null;
       return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [], decision: decisions.get(row.prUrl) ?? null,
-        acted: row.lastAction && { kind: row.lastAction.action, state: row.lastAction.ok ? "sent" as const : "refused" as const, at: row.lastAction.at } };
+        acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
     }));
     const { groups, oneOffsId } = await classifyGet(current);
-    return deckView({ now: Date.now(), rows, unclassified: { groups, oneOffsId },
+    return { now: Date.now(), rows, unclassified: { groups, oneOffsId },
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
         parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work) })),
@@ -5360,7 +5370,27 @@ export default async function plugin(bb: BbPluginApi) {
       linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
         updatedAt: facts.updatedAt }])),
-      read: { checkedAt: view.checkedAt, refreshing: view.refreshing }, seen: new Map(Object.entries(seen)) });
+      read: { checkedAt: view.checkedAt, refreshing: view.refreshing }, seen: new Map(Object.entries(seen)) };
+  }
+  const deckGet = async (seen?: Readonly<Record<string, number>>): Promise<DeckView> => deckView(await deckInput(seen));
+  /** What a deck batch would do per PR, from the rows the deck shows; see deck-batch.ts. A request's reviewers must be GitHub logins. */
+  async function deckBatchPlan({ kind, effortId, prUrls, reviewers, seen = {} }: z.infer<typeof deckBatchContract.deck_batch_plan.input>) {
+    if (!effortId && !prUrls) return { ok: false as const, error: "Choose an effort or PRs." };
+    const invalid = (reviewers ?? []).filter((login) => !REVIEWER.test(login));
+    if (invalid.length) return { ok: false as const, error: `Not a GitHub login: ${invalid.join(", ")}.` };
+    const effort = effortId ? effortStore.get(effortId) : null;
+    if (effortId && !effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+    if (effort && piles.get(effort).pile !== "active") return { ok: false as const, error: "Resume or reopen this effort first." };
+    const wanted = prUrls && new Set(prUrls.map(prWorkItemKey));
+    const rows = deckRows(await deckInput()).filter(({ input }) => (!effort || input.effort?.id === effort.id) && (!wanted || wanted.has(input.prUrl)));
+    const seenAt = new Map(Object.entries(seen));
+    const planned = planBatch(kind, rows.map(({ row, input, pile }) => ({ row, pile, seenAt: seenAt.get(row.prUrl), head: input.head,
+      fingerprint: input.feedbackFingerprint, shown: input.reviewers })), { selected: !!wanted, reviewers });
+    for (const url of wanted ?? []) if (!rows.some(({ row }) => row.prUrl === url)) {
+      const target = prTarget(url);
+      planned.skipped.push({ prUrl: url, ref: target ? `${target.name} #${target.number}` : url, reason: effort ? "Not an open PR in this effort." : "Not an open PR on the deck." });
+    }
+    return { ok: true as const, ...deckBatches.plan(kind, effort?.id ?? null, planned), skipped: planned.skipped };
   }
 
   const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]),
@@ -5423,6 +5453,24 @@ export default async function plugin(bb: BbPluginApi) {
       return next;
     },
   });
+
+  /** Deck batches send through the inventory's guarded actions, one PR at a time, after their Undo window. See deck-batch.ts. */
+  const deckBatches = createDeckBatches({ db, now: Date.now, changed: deckChanged,
+    run: (item) => item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
+      : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
+      : item.kind === "request" ? inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!)
+      : inventoryActions.confirmHandled(item.prUrl, item.headOid!, item.fingerprint!),
+    // As the deck files each PR: an archived effort's PRs pause with the done efforts'.
+    piles: async () => {
+      const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+      return (prUrl) => {
+        const owner = work.ownerForPr(prUrl);
+        const effort = owner && effortStore.get(owner.id);
+        return !effort ? "unclassified" : effort.archivedAt ? "done" : piles.get(effort).pile;
+      };
+    } });
+  deckBatches.resume();
+  bb.onDispose(() => deckBatches.dispose());
 
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     ...effortV2.handlers,
@@ -5591,6 +5639,10 @@ export default async function plugin(bb: BbPluginApi) {
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
     classify_get: () => classifyGet(),
     deck_get: ({ seen }) => deckGet(seen),
+    deck_batch_plan: (input) => deckBatchPlan(input),
+    deck_batch_start: ({ batchId }) => deckBatches.start(batchId),
+    deck_batch_undo: ({ batchId }) => deckBatches.undo(batchId),
+    deck_batch_get: ({ batchId }) => deckBatches.get(batchId),
     classify_assign: ({ effortKey, prUrls, tickets }) => classifyInto(() => effortStore.get(effortKey), "assign", prUrls, tickets),
     classify_new_effort: async ({ name, goal, prUrls, tickets, requestId }) => {
       const trimmed = adminName(name);

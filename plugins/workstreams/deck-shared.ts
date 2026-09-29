@@ -3,7 +3,7 @@
 // reaching a server module (A12.1): the deck read model, batch actions, the
 // deck, and the All PRs table all count with it.
 
-/** Realtime: the server publishes it after each inventory read or action, pile move, and thread change. */
+/** Realtime: the server publishes it after each inventory read or action, pile move, thread change, and batch step. */
 export const DECK_CHANGED = "deck-changed";
 
 /**
@@ -16,8 +16,17 @@ const YOURS = new Set<DeckSection>(["merge", "confirm", "nudge", "request", "rea
 
 /** The pile a row's card is on; Unclassified rows are "to sort". */
 export type DeckPile = "active" | "held" | "done" | "unclassified";
-/** What you last did to a row: a write waiting out its Undo window or running, sent, refused, or cut off by a restart mid-send. */
-export type RowActed = { kind: string; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number };
+/** The batches a section button runs, in the order Advance runs them. Each is one GitHub write or your confirmation per PR: never a merge. */
+export const BATCH_KINDS = ["confirm", "nudge", "request", "ready"] as const;
+export type BatchKind = (typeof BATCH_KINDS)[number];
+/** How long a confirmed batch waits for Undo before it sends anything. */
+export const SEND_DELAY_MS = 8_000;
+
+/**
+ * What you last did to a row, from the deck or its inventory row: a write waiting out its Undo window or running, sent, refused, or cut
+ * off by a restart mid-send. `batchId` names the deck batch it belongs to, which Undo cancels while it waits.
+ */
+export type RowActed = { kind: BatchKind; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number; batchId: string | null };
 /** How long a write you made marks its row. An older one is history, so the row counts again whether or not you marked it seen. */
 export const ACTED_MS = 86_400_000;
 

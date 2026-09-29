@@ -56,22 +56,22 @@ describe("the effort deck", () => {
   it("stops counting a row you acted on while its write waits, and once it lands until you mark the view seen; a refusal stays yours", () => {
     const row = { section: "nudge" as const };
     expect(needsYou({ ...row, acted: null }, "active")).toBe(true);
-    expect(needsYou({ ...row, acted: { kind: "nudge", state: "queued", at: 5 } }, "active")).toBe(false);
-    expect(needsYou({ ...row, acted: { kind: "nudge", state: "sending", at: 5 } }, "active")).toBe(false);
-    expect([4, 5].map((seenAt) => counted({ acted: { kind: "nudge", state: "sent", at: 5 } }, seenAt))).toEqual([false, true]);
-    expect(needsYou({ ...row, acted: { kind: "nudge", state: "refused", at: 5 } }, "active", 0)).toBe(true);
+    expect(needsYou({ ...row, acted: { kind: "nudge", state: "queued", at: 5, batchId: null } }, "active")).toBe(false);
+    expect(needsYou({ ...row, acted: { kind: "nudge", state: "sending", at: 5, batchId: null } }, "active")).toBe(false);
+    expect([4, 5].map((seenAt) => counted({ acted: { kind: "nudge", state: "sent", at: 5, batchId: null } }, seenAt))).toEqual([false, true]);
+    expect(needsYou({ ...row, acted: { kind: "nudge", state: "refused", at: 5, batchId: null } }, "active", 0)).toBe(true);
     expect(["held", "done", "unclassified"].map((pile) => needsYou({ ...row, acted: null }, pile as never))).toEqual([false, false, false]);
     expect(needsYou({ section: "blocked", acted: null }, "active")).toBe(false);
-    const view = deckView(input({}, (entry) => entry.number === 340 ? { acted: { kind: "merge", state: "queued", at: INVENTORY_NOW } } : {}));
+    const view = deckView(input({}, (entry) => entry.number === 340 ? { acted: { kind: "ready", state: "queued", at: INVENTORY_NOW, batchId: null } } : {}));
     expect(cardOf(view, INVENTORY_EFFORTS.shelf.id)).toMatchObject({ needsYou: 4, sections: [{ key: "merge", needsYou: 3 }, { key: "work", needsYou: 1 }] });
     // A write that landed stays out of the count until the view says it marked the row seen after it, so a caller that says nothing never
     // counts, or plans, the same move twice.
-    expect(needsYou({ ...row, acted: { kind: "nudge", state: "sent", at: 5 } }, "active")).toBe(false);
-    const landed = (entry: DeckRowInput) => entry.number === 340 ? { acted: { kind: "merge", state: "sent" as const, at: INVENTORY_NOW - 60_000 } } : {};
+    expect(needsYou({ ...row, acted: { kind: "nudge", state: "sent", at: 5, batchId: null } }, "active")).toBe(false);
+    const landed = (entry: DeckRowInput) => entry.number === 340 ? { acted: { kind: "ready" as const, state: "sent" as const, at: INVENTORY_NOW - 60_000, batchId: null } } : {};
     expect(cardOf(deckView(input({}, landed)), INVENTORY_EFFORTS.shelf.id).needsYou).toBe(4);
     expect(cardOf(deckView(input({ seen: new Map([[url("folio", 340), INVENTORY_NOW]]) }, landed)), INVENTORY_EFFORTS.shelf.id).needsYou).toBe(5);
     // A day on, the write is history: the row counts again, seen or not.
-    const old = (entry: DeckRowInput) => entry.number === 340 ? { acted: { kind: "merge", state: "sent" as const, at: INVENTORY_NOW - DAY } } : {};
+    const old = (entry: DeckRowInput) => entry.number === 340 ? { acted: { kind: "ready" as const, state: "sent" as const, at: INVENTORY_NOW - DAY, batchId: null } } : {};
     expect(cardOf(deckView(input({}, old)), INVENTORY_EFFORTS.shelf.id).needsYou).toBe(5);
   });
 
