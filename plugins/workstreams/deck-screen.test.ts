@@ -108,6 +108,10 @@ describe("the effort deck's markup", () => {
     // The deepest edge's room is kept below the stack, so the sections start after it and nothing overlaps them.
     expect(html).toMatch(/<div class="mb-2.5" style="padding-bottom:27px"><div data-deck-stack="true"/u);
     expect(html.indexOf("data-deck-top")).toBeLessThan(html.indexOf('data-deck-card="effort-shelf-order"'));
+    // A flip fades the rows as one, and draws the card it takes away in the ghost, which is empty until then and never read aloud. The ghost
+    // spans the top card and is clipped at its bottom edge only, so a taller card taken away can't paint over the rows below.
+    expect(html.indexOf("data-deck-rows")).toBeLessThan(html.indexOf("data-deck-sec="));
+    expect(html).toMatch(/<div data-deck-ghost="true" aria-hidden="true" class="[^"]*\binset-0\b[^"]*" style="clip-path:inset\(-60px -60px 0 -60px\)"><\/div>/u);
     // The last effort's next card is Unclassified; Unclassified's wraps to the first effort; a pile of two has one card behind.
     expect(html.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("effort-store-pickup");
     expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("unc");
@@ -117,6 +121,11 @@ describe("the effort deck's markup", () => {
     const two = pane(view, SHELF, { chips: stripChips([SHELF], cards, { toSort: 4, changed: 0 }, SHELF) });
     expect(two.match(/data-deck-layer=/gu)).toHaveLength(1);
     expect(two).toMatch(/style="padding-bottom:16px"/u);
+  });
+
+  it("says the card a flip landed on in one polite status line, and nothing until then", () => {
+    expect(pane(inkwellDeck(), SHELF)).toMatch(/<p role="status" data-deck-announce="true" class="sr-only"><\/p>/u);
+    expect(pane(inkwellDeck(), SHELF, { announce: "Shelf order" })).toMatch(/<p role="status" data-deck-announce="true" class="sr-only">Shelf order<\/p>/u);
   });
 
   it("draws each pile as a tiny stack of cards, and an empty pile as an outline", () => {

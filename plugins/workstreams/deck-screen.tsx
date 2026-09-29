@@ -145,7 +145,9 @@ function PileCards({ empty }: { empty: boolean }) {
 
 /**
  * The deck as a stack of cards: the one shown on top, over the next few a flip forward reaches, each lower, to the right, smaller, and darker,
- * with the next one's name on its edge, which flips to it.
+ * with the next one's name on its edge, which flips to it. A flip draws the card it takes away in the ghost, over or under the top one
+ * (deck-flip.ts); the ghost is otherwise empty. It's clipped at the top card's bottom edge, so a taller card taken away never hangs over the
+ * edges or rows below, while its slide and tilt still show above and to the sides.
  */
 function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; children: ReactNode }) {
   return <div className="mb-2.5" style={{ paddingBottom: LAYERS[behind.length]!.y }}>
@@ -159,7 +161,8 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
           className="absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 rounded-b-[14px] px-4 text-[11px] leading-none text-muted-foreground hover:text-foreground">
           <Dot color={chip.color} hollow={chip.unc} /><span className="truncate">{chip.name}</span></button> : null}
       </div>; })}
-      <div data-deck-top className="relative z-[5] rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
+      <div data-deck-top className="relative z-[5] origin-bottom rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
+      <div data-deck-ghost aria-hidden className="pointer-events-none absolute inset-0" style={{ clipPath: "inset(-60px -60px 0 -60px)" }} />
     </div>
   </div>;
 }
@@ -478,8 +481,10 @@ export function Unclassified({ screen, rules, state, run, stuck, behind }: { scr
         </div> : null}
       </div>
     </section></Stack>
-    {screen.groups.map((group) => <Group key={group.key} group={group} state={state} run={run} stuck={stuck} />)}
-    {screen.groups.length ? null : <p className="py-8 text-center text-[12px] text-muted-foreground">Nothing to sort. New PRs land here only when no rule or signal places them.</p>}
+    <div data-deck-rows>
+      {screen.groups.map((group) => <Group key={group.key} group={group} state={state} run={run} stuck={stuck} />)}
+      {screen.groups.length ? null : <p className="py-8 text-center text-[12px] text-muted-foreground">Nothing to sort. New PRs land here only when no rule or signal places them.</p>}
+    </div>
   </>;
 }
 
@@ -787,6 +792,8 @@ export type DeckPaneProps = {
   state: RowState; tiles: ReadonlySet<string>; open: ReadonlySet<string>; pile: "hold" | "done" | null;
   /** The card's own header has scrolled away, so its one-line bar shows and section headers stick below it. */
   stuck: boolean;
+  /** The card a flip landed on, said once to screen readers; empty otherwise. */
+  announce?: string;
   on: Availability; hints: readonly [string, string][]; flash: { text: string; undo: boolean } | null;
   batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[] };
   run: Run; onPalette(): void; onHelp(): void; onUndo(): void;
@@ -807,12 +814,13 @@ export function DeckPane(props: DeckPaneProps) {
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-[1260px] px-2 pb-10 pt-3 @min-[720px]:px-4">
         {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} /></Stack>
-          <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></>
+          <div data-deck-rows><CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></div></>
           : unc ? <Unclassified screen={unc} rules={props.rules} state={props.state} run={props.run} stuck={stuck} behind={behind} />
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>
     <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} unc={!card && !!unc} run={props.run} />
     <HintBar hints={props.hints} flash={props.flash} onPalette={props.onPalette} onHelp={props.onHelp} onUndo={props.onUndo} />
+    <p role="status" data-deck-announce className="sr-only">{props.announce}</p>
   </div>;
 }

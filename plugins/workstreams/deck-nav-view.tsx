@@ -20,12 +20,12 @@ import { availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, type DeckCommand, type RuleDraft,
   type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
+import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
 import type { SeedProposal } from "./linear-seed";
 
 type OtherView = "prs" | "map" | "pipeline" | "work" | "efforts";
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-const EASE = "cubic-bezier(.2,.8,.2,1)";
 /** The last deck read, so coming back to the deck draws it at once instead of "Reading…" (PLACE-LOSS #1). */
 let cachedDeck: DeckView | null = null;
 
@@ -100,7 +100,12 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const scrollFocus = useRef(false);
   const lastFocusElement = useRef<Element | null>(null);
   const opener = useRef<FocusKey>({});
-  const flip = useRef(0);
+  /** The flip the next render lands, with the card it takes away, and the flips so far, which know when the last one started. */
+  const landing = useRef<{ direction: 1 | -1; motion: FlipMotion; ghost: HTMLElement | null } | null>(null);
+  const [flips] = useState(flipper);
+  /** The card a flip landed on, for screen readers, once the flips stop. */
+  const [announce, setAnnounce] = useState("");
+  const announceTimer = useRef<number | null>(null);
   const [stuck, setStuck] = useState(false);
   const [activeRow, setActiveRow] = useState<string | null>(null);
   const [accepted, setAccepted] = useState<Accepted>(new Map());
@@ -212,26 +217,37 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     // A flip lands focus itself, on the card's own saved row (the effect below).
     if ((!active || active === document.body) && lastFocus.current && gone && !dialog && !batch.open && !merging && shown.current === cur) focusBack(lastFocus.current);
   });
-  // A flip lands on the card's saved place, and the card slides in from the side you flipped toward.
+  // A flip lands on the card's saved place, then plays its motion over the stack (deck-flip.ts).
   useLayoutEffect(() => {
     if (!view || shown.current === cur) return;
     const first = shown.current === null;
     shown.current = cur;
+    // A flip still playing ends first, so what follows measures where things sit, not where it draws them.
+    if (viewRef.current) settleFlip(viewRef.current);
     setSlack(0);
     const saved = viewPlace(cur);
     if (scrollerRef.current) scrollerRef.current.scrollTop = saved.scrollTop;
     restoreAnchor(saved.anchor);
     liveAnchor.current = saved.anchor;
-    const direction = flip.current;
-    flip.current = 0;
-    if (!first && direction && !reduced()) viewRef.current?.animate([{ opacity: 0, transform: `translateX(${direction * 24}px)` }, { opacity: 1, transform: "none" }],
-      { duration: 180, easing: EASE });
-    // A flip from the strip keeps focus in the strip; any other flip, or arriving from another view, lands on what you can see.
-    const strip = document.activeElement?.closest?.("nav[aria-label=Efforts]");
+    const flipped = landing.current;
+    landing.current = null;
+    // Focus lands before the motion starts, for the same reason. A flip from the strip keeps focus in the strip; any other flip, or
+    // arriving from another view, lands on what you can see.
+    const before = document.activeElement;
+    const strip = before?.closest?.("nav[aria-label=Efforts]");
     if (strip) rootRef.current?.querySelector<HTMLElement>(`[data-deck-chip="${CSS.escape(cur)}"]`)?.focus({ preventScroll: true });
     else if (!first || !document.activeElement || document.activeElement === document.body) landFocus(saved);
     chipsRef.current?.querySelector(`[data-deck-chip="${CSS.escape(cur)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (first) return;
+    if (flipped && viewRef.current) playFlip(viewRef.current, flipped);
+    // Screen readers hear the card once, after the last of a run of flips, and not at all when focus moved onto its heading or chip, which say it.
+    const said = focusNamesCard(before, document.activeElement);
+    const name = card ? card.card.name : "Unclassified";
+    setAnnounce("");
+    if (announceTimer.current !== null) window.clearTimeout(announceTimer.current);
+    announceTimer.current = said ? null : window.setTimeout(() => setAnnounce(name), FLIP_MS);
   });
+  useEffect(() => () => { if (announceTimer.current !== null) window.clearTimeout(announceTimer.current); }, []);
   // The pane resizing holds the row you were on in place, and keeps the current chip in view.
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -253,8 +269,11 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     const handler = () => {
       const melted = meltSlack({ scrollTop: scroller.scrollTop, slack: slack.current });
       if (melted.slack !== slack.current) { setSlack(melted.slack); scroller.scrollTop = melted.scrollTop; }
-      const heading = viewRef.current?.querySelector("[data-deck-focus=heading]");
-      setStuck(!!heading && heading.getBoundingClientRect().bottom < scroller.getBoundingClientRect().top + 2);
+      // Where the heading is laid out, not where a flip draws it, so a flip's motion never reads as a scroll.
+      const heading = viewRef.current?.querySelector<HTMLElement>("[data-deck-focus=heading]") ?? null;
+      let bottom = heading?.offsetHeight ?? 0;
+      for (let element = heading; element && element !== scroller; element = element.offsetParent as HTMLElement | null) bottom += element.offsetTop;
+      setStuck(!!heading && bottom < scroller.scrollTop + 2);
       if (onScroll.current !== null) window.clearTimeout(onScroll.current);
       onScroll.current = window.setTimeout(() => {
         const saved = viewPlace(curRef.current);
@@ -326,12 +345,14 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   };
   const closeDialog = () => setDialog(null);
   const returnFocus = () => { pendingFocus.current = null; window.requestAnimationFrame(() => focusBack(opener.current)); };
-  const go = (id: string, direction?: number) => {
-    if (id === cur) return;
+  /** A flip lands on its card now; the card it takes away is copied first, for its motion to take away after the swap. */
+  const go = (to: { step: 1 | -1 } | { id: string }) => {
+    const next = flips(ring, cur, to, performance.now(), reduced());
+    if (!next) return;
     viewPlace(cur).scrollTop = scrollerRef.current?.scrollTop ?? 0;
     viewPlace(cur).anchor = captureAnchor();
-    flip.current = direction ?? (ring.indexOf(id) >= ring.indexOf(cur) ? 1 : -1);
-    place.cur = id;
+    landing.current = { direction: next.direction, motion: next.motion, ghost: next.motion.kind !== "none" && viewRef.current ? ghostOf(viewRef.current) : null };
+    place.cur = next.id;
     setActiveRow(null);
     persist();
     bump();
@@ -409,8 +430,11 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     const pileElement = rootRef.current?.querySelector<HTMLElement>(`[data-deck-pile="${move === "hold" ? "hold" : "done"}"]`);
     if (leaving && cardElement && pileElement && !reduced()) {
       const from = cardElement.getBoundingClientRect(), to = pileElement.getBoundingClientRect();
-      await cardElement.animate([{ transform: "none", opacity: 1 }, { transform: `translate(${to.left - from.left - from.width / 2}px, ${to.top - from.top}px) scale(0.08) rotate(${move === "hold" ? -6 : 6}deg)`,
-        opacity: 0.2 }], { duration: 300, easing: "cubic-bezier(.5,0,.2,1)", fill: "forwards" }).finished.catch(() => undefined);
+      // It shrinks about its middle, where a flip scales it about its bottom edge.
+      const origin = "50% 50%";
+      await cardElement.animate([{ transformOrigin: origin, transform: "none", opacity: 1 },
+        { transformOrigin: origin, transform: `translate(${to.left - from.left - from.width / 2}px, ${to.top - from.top}px) scale(0.08) rotate(${move === "hold" ? -6 : 6}deg)`, opacity: 0.2 }],
+        { duration: 300, easing: "cubic-bezier(.5,0,.2,1)", fill: "forwards" }).finished.catch(() => undefined);
     }
     let result: { ok: true } | { ok: false; error: string };
     try {
@@ -433,7 +457,8 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
       const nextOrder = order.filter((id) => id !== effort.id);
       place.cur = nextOrder[Math.min(Math.max(0, index), nextOrder.length - 1)] ?? "unc";
     } else place.cur = effort.id;
-    flip.current = 1;
+    // The card it lands on rises out of the stack; the one that left already flew to its pile.
+    if (place.cur !== cur) landing.current = { direction: 1, motion: flipMotion(reduced(), null), ghost: null };
     persist();
     bump();
     load();
@@ -497,9 +522,9 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   function runAction(id: DeckActionId, line?: DeckLine, n?: number) {
     const row = line ?? focused;
     switch (id) {
-      case "next": case "prev": { const index = ring.indexOf(cur); const step = id === "next" ? 1 : -1; go(ring[(index + step + ring.length) % ring.length]!, step); return; }
-      case "jump": { const target = n ? ring[n - 1] : undefined; if (target) go(target); return; }
-      case "unclassified": go("unc"); return;
+      case "next": case "prev": go({ step: id === "next" ? 1 : -1 }); return;
+      case "jump": { const target = n ? ring[n - 1] : undefined; if (target) go({ id: target }); return; }
+      case "unclassified": go({ id: "unc" }); return;
       case "view": onView("prs"); return;
       case "seen": markSeen(); return;
       case "hold-pile": setPile("hold"); return;
@@ -579,7 +604,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const run = (command: DeckCommand) => {
     switch (command.kind) {
       case "action": runAction(command.id, command.line); return;
-      case "go": go(command.id); return;
+      case "go": go({ id: command.id }); return;
       case "view": onView(command.view); return;
       case "select": toggleSelect(command.prUrl, command.shift); return;
       case "expand": here.expanded = toggleIn(here.expanded, command.prUrl); persist(); bump(); return;
@@ -651,7 +676,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     // The palette's action runs once its dialog has handed focus back, so a confirm it opens takes focus from there.
     window.setTimeout(() => {
       if (item.action) runAction(item.action.id);
-      else if (item.target?.kind === "go") go(item.target.id);
+      else if (item.target?.kind === "go") go({ id: item.target.id });
       else if (item.target) run({ kind: item.target.kind, id: item.target.id });
     }, 0);
   };
@@ -664,7 +689,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   const moveTargets = [...order.flatMap((id) => { const item = cards.get(id); return item ? [{ id, name: item.card.name, color: item.color, open: item.card.stats.open }] : []; })];
 
   return <>
-    <DeckPane chips={chips} cur={cur} card={card} unc={card ? null : unc} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile}
+    <DeckPane chips={chips} cur={cur} card={card} unc={card ? null : unc} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus }} tiles={new Set(here.tiles)} open={new Set(here.open)} stuck={stuck}
