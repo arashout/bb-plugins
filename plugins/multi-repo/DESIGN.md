@@ -9,10 +9,12 @@ A standalone BB plugin that gives a project **a set of git repos** and every thr
 **Explicitly out of scope — this plugin is standalone:**
 
 - **No fork of bb.** Nothing here requires a core change. One possible core improvement is noted in [Out of scope](#out-of-scope) purely so the option is recorded; the design does not depend on it and must not be built assuming it.
-- **No bb-internal packages.** `bb-environment-provider-host` (which exposes `runGit`, `detectGitRepo`, `readDefaultBranchRefs`, and the git ref mutation lock) is `"private": true` and reachable only from plugins bundled inside the bb repo. This plugin ships its own git process wrapper.
+- **No bb-internal packages.** `bb-environment-provider-host` (which exposes `runGit`, `detectGitRepo`, `readDefaultBranchRefs`, and the git ref mutation lock) is `"private": true` and reachable only from plugins bundled inside the bb repo. This plugin ships its own git argument layer.
+
+  It does **not** need its own process layer. `@get-bb/plugin-sdk/host` publishes `experimental_spawnPortableOutputProcess` — documented as being "for host-local plugin operations such as git" — plus `experimental_sanitizeInheritedChildProcessEnv` (`packages/plugin-sdk/src/host.ts:46-56`). Build argument construction, exit-code handling and output parsing on top of those; do not reimplement spawning.
 - **No dependency on other plugins in this repo.** No shared code with `kubernetes-provider`, `thread-briefs`, or `workstreams`. It must work on a stock bb install with only the bundled plugins present.
 
-Core references below were verified against bb at commit `611e34892` (2026-09-24). They are the evidence that this design works without core changes; re-check them when upgrading bb.
+Core references below were verified against bb at commit `611e34892` (2026-09-24) and re-verified line by line on 2026-09-29. They are the evidence that this design works without core changes; re-check them when upgrading bb.
 
 ---
 
@@ -106,7 +108,7 @@ Per repo, in order:
 2. **Local mirror** — a checkout on this machine has a matching `origin`: `git clone --bare <that-path>` hardlinks objects (instant, no network), then `git remote set-url origin <real-url>` and fetch the delta.
 3. **Network** — `git clone --bare <real-url>`.
 
-Discovery for step 2 uses bb's own registry of local checkouts: `bb.sdk.projects.list()` returns every project with its `sources[]` (path per host), so the plugin can enumerate every checkout bb knows about on this machine and read each one's `origin`. Add the project-source directory's siblings and one configurable extra search root.
+Discovery for step 2 uses bb's own registry of local checkouts: `bb.sdk.projects.list()` returns every project with its `sources[]` — `projectResponseSchema` is `projectSchema.extend({ sources })` (`packages/server-contract/src/api/projects.ts:432-435`) and each source is a `local_path` carrying `{ hostId, path }` (`packages/domain/src/project.ts:31-40`). One call enumerates every checkout bb knows about on this machine, and the plugin reads each one's `origin`. Add the project-source directory's siblings and one configurable extra search root.
 
 Two rules:
 
@@ -114,6 +116,8 @@ Two rules:
 - **Always fetch from the real remote after mirroring.** A local checkout carries stale refs and local-only branches.
 
 Cache repos are alternates targets, so set `gc.auto=0` and `gc.pruneExpire=never` on them; repack with `git gc --no-prune`.
+
+**The lock is the plugin's to build.** Nothing in the published SDK is a mutex: `experimental_retainWorker()` returns an `ExperimentalHostWorkerLease`, which only keeps a host worker alive past the current call (`packages/plugin-sdk/src/host-contract.ts:102-134`), and the ref-mutation lock in `bb-environment-provider-host/locks` is private. Budget a real cross-process file lock — concurrent thread creation against one cache entry is the expected case, not a rare one.
 
 Freshness: fetch-if-stale with a short TTL at `create()`, plus a background refresh on a `bb.background` cron. Never fetch synchronously on every thread start.
 
@@ -127,19 +131,32 @@ Declares `requires: { projectCheckout: true }`, which guarantees a non-null `con
 2. **Refresh** the project-source checkout (fetch-if-stale), then parse and validate `repos.json`.
 3. **Seed by discovery** if the repo set is empty — propose repos found on this machine rather than producing an empty workspace.
 4. **Populate the cache** per repo (§5), under a file lock. Concurrent thread creation against one cache entry is normal, not an edge case.
-5. **Materialize the workspace**: create the root; clone each repo plus `.bb`; rewrite each work repo's `origin` to its real remote; create the shared thread branch in each work repo. `.bb` stays on its default branch.
+5. **Materialize the workspace**: claim the root with `context.experimental_claimPath(root)` before writing to it, create it, clone each repo plus `.bb`, rewrite each work repo's `origin` to its real remote, and create the shared thread branch in each work repo. `.bb` stays on its default branch.
 6. **Precompute the layout** table and write it to plugin storage keyed by environment (see §8).
 7. Return `{ status: "created", path: <root>, ownsPath: true, resource: { workspaces: [...] } }`.
+
+The result type also allows an optional `mergeBaseBranch`. Leave it unset: it is a single value on a flattened environment row and this workspace has one merge base per repo, so §9 computes merge bases itself. Setting it would publish one repo's base branch as if it spoke for all of them.
 
 Report progress with `report.step` / `report.log` throughout. A cold start is a full network clone per repo and will read as hung otherwise.
 
 ### `remove()`
 
-Enumerate every directory under the workspace root and remove each. Write a `<dir>.completed` marker per repo during `create()` so a partially provisioned workspace is recoverable per repo rather than all-or-nothing.
+Kill first, then delete. `experimental_killProcessesWithCwdUnder` (`@get-bb/plugin-sdk/host`) is published for exactly this — "for a provider tearing down a workspace it made" (`packages/plugin-sdk/src/host.ts:38-44`) — and it SIGTERMs then SIGKILLs anything whose cwd sits under the root. Without it, removal races a language server or watcher still holding a repo.
+
+Then enumerate every directory under the workspace root and remove each. Write a `<dir>.completed` marker per repo during `create()` so a partially provisioned workspace is recoverable per repo rather than all-or-nothing.
 
 ### Branching
 
-Generate the thread branch name once and use it in **every** work repo, so PRs across repos correlate by head ref. Fall back per repo on collision; the symmetry is a convenience, not an invariant.
+Take the branch name from `context.suggestedBranchName` (`packages/plugin-sdk/src/environment-provider.ts:61`) rather than generating one — it is already bb's name for this thread, so plugin branches read like native ones. Use that single name in **every** work repo, so PRs across repos correlate by head ref. Fall back per repo on collision; the symmetry is a convenience, not an invariant.
+
+### Policy
+
+Take both defaults, deliberately (`packages/plugin-sdk/src/environment-provider.ts:98-104`):
+
+- `pathKeys: "per-thread"` — a rebuild deliberately uses a fresh key "to avoid dead paths," so a rebuild re-clones every repo. That is the correct trade against serving a half-torn-down workspace, and the object cache keeps the cost local rather than networked.
+- `retireGraceMs` — the five-minute default is right. Keeping these workspaces indefinitely would accumulate a full checkout set per thread on the machine's disk.
+
+`ownsPath: true` is what makes both of these bb's problem rather than the plugin's.
 
 ### Failure policy
 
@@ -168,7 +185,11 @@ Every write happens in the canonical repo, initiated by the plugin's host entry,
 
 `bb.agents.contributeInstructions` supplies a dynamic instruction block. Two constraints to design around (`packages/plugin-sdk/src/backend-contract.ts:1656-1671`): the provider is **synchronous** and sits on the thread-start path, and output is truncated at 4096 characters. It therefore cannot shell out to git.
 
-Precompute the layout at `create()` — a compact table of `dir → path → branch → remote` — store it, and have the callback read and format it. Always accurate, never stale.
+Precompute the layout at `create()` — a compact table of `dir → path → branch → remote` — store it, and have the callback read and format it. No git in the callback, and no truncation risk for a repo set of any sane size.
+
+**It is not live, and one path makes that visible.** The contract is explicit: "A live provider session keeps the instructions it was constructed with — a changed contribution takes effect when the provider session is next constructed... never mid-session" (`packages/plugin-sdk/src/backend-contract.ts:1658-1663`). So a repo added by `workspace_add_repo` mid-thread will **not** appear in this block, even though its files are on disk.
+
+The tool result is the only channel that reaches a live session, so `workspace_add_repo` must return the new repo's `dir`, absolute path and branch in its result text rather than telling the agent to consult the layout. The block is authoritative at thread start and stale only with respect to that one tool — which is precisely the tool that can repair it.
 
 ### Human intent
 
@@ -202,7 +223,7 @@ This is the expensive part of a diff UI and it comes free.
 
 | Component | Rough size |
 |---|---|
-| Git process wrapper + repo/branch detectors | 150–200 |
+| Git argument layer + repo/branch detectors (spawning comes from the SDK) | 100–150 |
 | Diff data layer — merge base, name-status/numstat, per-file patch, untracked files | 400–500 |
 | PR layer — `gh` field parsing and normalizers, actions, polling and caching | ~400 |
 | Panel UI — repo grouping, file list, selection, per-repo header | 500–700 |
@@ -213,7 +234,7 @@ Defer bb's hardening until it's needed: diff tiering and pagination, list virtua
 
 Surfaces: `ui.threadPanelAction` for the panel, `ui.fileOpener` to claim workspace file-open targets so timeline file links route in rather than dead-ending.
 
-**Estimate: ~1,700–2,200 LOC.**
+**Estimate: ~1,650–2,150 LOC, for §9 only.** It excludes provisioning, the cache, and the file lock from §5 — milestones 4 and 5 are where an estimate like this usually breaks, so treat it as a floor.
 
 ## 10. Packaging
 
@@ -223,7 +244,7 @@ One plugin, one package — `plugins/multi-repo/`:
 {
   "name": "bb-plugin-multi-repo",
   "type": "module",
-  "engines": { "bb": ">=0.43", "bbPluginSdk": ">=0.5.24" },
+  "engines": { "bb": ">=0.0", "bbPluginSdk": ">=0.5.24" },
   "bb": {
     "name": "Multi-repo workspace",
     "description": "Give a project a set of git repos and every thread a checkout of each.",
@@ -240,7 +261,7 @@ One plugin, one package — `plugins/multi-repo/`:
 
 Three entry points in one package, because `bb.storage` and RPC routes are namespaced per plugin and the panel needs the provider's layout records. Splitting provisioning from UI would mean cross-plugin state access.
 
-The published `@get-bb/plugin-sdk` exports everything required: `./environment-provider`, `./host`, `./app`, `./testing`. UI primitives (React, Radix, clsx, and similar) are ordinary dev dependencies bundled at build time.
+The `bb` floor is `">=0.0"`, matching every bundled plugin; the only one that declares more is `browser-automation` at `">=0.41"`, and there is no 0.43 in the tree to pin to. The SDK floor is the real constraint — `@get-bb/plugin-sdk` is at `0.5.24` — and it carries everything required: `./environment-provider`, `./host`, `./app`, `./testing`. UI primitives (React, Radix, clsx, and similar) are ordinary dev dependencies bundled at build time.
 
 **Install:** `bb plugin install <path-or-git-source>`. No other plugin needs to be present and no bb fork is involved.
 
