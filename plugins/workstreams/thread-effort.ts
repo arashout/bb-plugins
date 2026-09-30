@@ -41,7 +41,9 @@ export const threadEffortContextSchema = z.discriminatedUnion("ok", [
     threadEffort: z.object({ key: z.string(), name: z.string() }).nullable(),
     inheritanceNotice: z.string().nullable(),
     /** Only thread_effort_context reads it; a change returns the context without it. */
-    picker: threadEffortPickerSchema.optional() }),
+    picker: threadEffortPickerSchema.optional(),
+    /** What a change returns for thread_effort_undo to take it back. */
+    undoId: z.string().optional() }),
 ]);
 export type ThreadEffortContext = z.infer<typeof threadEffortContextSchema>;
 export type ThreadEffortReady = Extract<ThreadEffortContext, { ok: true }>;

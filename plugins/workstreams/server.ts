@@ -394,6 +394,12 @@ export const rpcContract = defineRpcContract({
   card_effort_context: { input: cardEffortTargetSchema, output: cardEffortContextSchema },
   card_effort_move: { input: z.object({ target: cardEffortTargetSchema, destinationKey: z.string().min(1).max(500), expectedScope: z.string().min(1).max(100_000) }).strict(), output: cardEffortContextSchema },
   thread_effort_link_pr: { input: z.object({ threadId: z.string().min(1).max(200), prUrl: z.string().min(1).max(500) }).strict(), output: threadEffortContextSchema },
+  /**
+   * Take back the thread's last effort change (set, create, link, or move) by the `undoId` it returned: the thread's effort and linked PR as
+   * they were, work it moved back where it was, work it brought in let go, and an effort it created removed while still empty. Refuses,
+   * changing nothing, once anything it touched changed since.
+   */
+  thread_effort_undo: { input: z.object({ threadId: z.string().min(1).max(200), undoId: z.string().uuid() }).strict(), output: threadEffortContextSchema },
   advance_preview: { input: z.object({ prUrls: z.array(z.string().max(500)).min(1).max(100) }).strict(), output: advancePreviewSchema },
   advance_start: { input: z.object({ token: z.string().uuid() }).strict(), output: advanceBatchSchema },
   advance_get: { input: z.null(), output: z.array(advanceBatchSchema) },
@@ -2193,6 +2199,16 @@ export default async function plugin(bb: BbPluginApi) {
   const intentLocks = new Map<string, Promise<void>>();
   const intentChanging = new Set<string>();
   const intentRecheck = new Set<string>();
+  /**
+   * Each thread's last effort change, which thread_effort_undo takes back, and the work its intent brought in since (see reconcileThreadIntent),
+   * which that Undo lets go. A later change replaces the Undo, and neither outlasts a restart.
+   */
+  type ThreadUndo = { id: string; at: number; intent?: { prior: string | null; next: string | null }; link?: { prior: string | null; next: string };
+    moved?: { destinationId: string; back: { ownerId: string | null; members: EffortMembers }[] }; created?: string };
+  const THREAD_UNDO_MS = 5 * 60_000;
+  const threadUndos = new Map<string, ThreadUndo>();
+  const intentClaims = new Map<string, { at: number; effortId: string; members: EffortMembers }[]>();
+  const offerUndo = (threadId: string, undo: Omit<ThreadUndo, "id">) => { const id = crypto.randomUUID(); threadUndos.set(threadId, { ...undo, id }); return id; };
   const intentIds = () => (db.prepare(`SELECT thread_id FROM thread_work_intent_ids`).all() as { thread_id: string }[]).map((row) => row.thread_id);
   const hasIntent = (threadId: string) => db.prepare(`SELECT 1 FROM thread_work_intent_ids WHERE thread_id = ?`).get(threadId) !== undefined;
   async function serialIntent<T>(threadId: string, action: () => Promise<T>): Promise<T> {
@@ -3700,6 +3716,70 @@ export default async function plugin(bb: BbPluginApi) {
       effortName: card.effortName, linkedThreadIds: card.linkedThreadIds, hold, hierarchyWarning };
   }
 
+  const intentOf = async (threadId: string) => {
+    const { workEffortId } = await bb.sdk.threads.getPluginMetadata({ threadId });
+    return typeof workEffortId === "string" ? workEffortId : null;
+  };
+  const withUndo = (context: z.infer<typeof threadEffortContextSchema>, undoId: string) => context.ok ? { ...context, undoId } : context;
+
+  /** See thread_effort_undo. Every check runs before the first write, so a refusal changes nothing. */
+  async function undoThreadEffort(threadId: string, undoId: string): Promise<z.infer<typeof threadEffortContextSchema>> {
+    const undo = threadUndos.get(threadId);
+    const refuse = (error: string) => ({ ok: false as const, error });
+    if (!undo || undo.id !== undoId || Date.now() - undo.at > THREAD_UNDO_MS) return refuse("Undo no longer applies.");
+    const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
+    const intent = typeof metadata.workEffortId === "string" ? metadata.workEffortId : null;
+    const link = typeof metadata.linkedPrUrl === "string" ? canonicalPrUrl(metadata.linkedPrUrl) : null;
+    if ((undo.intent && intent !== undo.intent.next) || (undo.link && link !== undo.link.next))
+      return refuse("This thread's effort changed since, so Undo no longer applies.");
+    const claims = (intentClaims.get(threadId) ?? []).filter((claim) => claim.at >= undo.at);
+    const holds = (effortId: string, members: EffortMembers) => [...members.tickets.map((ref) => ["ticket", ref] as const),
+      ...members.prUrls.map((ref) => ["prUrl", ref] as const), ...(members.checkoutPaths ?? []).map((ref) => ["checkoutPath", ref] as const)]
+      .every(([kind, ref]) => effortStore.owner(kind, ref)?.id === effortId);
+    if (claims.some((claim) => !holds(claim.effortId, claim.members)) || (undo.moved && undo.moved.back.some((item) => !holds(undo.moved!.destinationId, item.members))))
+      return refuse("This work moved since, so Undo no longer applies.");
+    if (undo.moved?.back.some((item) => item.ownerId !== null && (!effortStore.get(item.ownerId) || effortStore.get(item.ownerId)!.archivedAt)))
+      return refuse("An effort this work came from changed, so Undo no longer applies.");
+    // A forward change's guards: nothing goes into a done effort, and no effort under automatic dispatch changes.
+    const receiving = [...(undo.moved?.back ?? []).flatMap((item) => item.ownerId ?? []), ...undo.intent?.prior ? [undo.intent.prior] : []];
+    if (receiving.some((id) => { const effort = effortStore.get(id); return effort && piles.get(effort).pile === "done"; }))
+      return refuse("An effort this goes back to is done, so Undo no longer applies.");
+    const policy = dispatch.policy();
+    if (policy.mode === "auto" && [...receiving, ...claims.map((claim) => claim.effortId), ...undo.moved ? [undo.moved.destinationId] : []]
+      .some((id) => effortStore.get(id)?.key === policy.effort_key))
+      return refuse("Automatic dispatch is on for an effort this changes, so Undo no longer applies.");
+    intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+    try {
+      for (const claim of claims) effortStore.release(claim.effortId, claim.members);
+      for (const item of undo.moved?.back ?? []) {
+        if (item.ownerId) effortStore.transfer(item.ownerId, item.members);
+        else effortStore.release(undo.moved!.destinationId, item.members);
+      }
+    } catch (error) { return refuse(String(error).slice(0, 400)); }
+    if (undo.intent) {
+      const prior = undo.intent.prior;
+      await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: prior } });
+      if (prior === null) { db.prepare(`DELETE FROM thread_work_intent_ids WHERE thread_id = ?`).run(threadId); intentNotes.delete(threadId); }
+      else db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
+    }
+    if (undo.link) {
+      await bb.sdk.threads.updatePluginMetadata({ threadId, set: { linkedPrUrl: undo.link.prior } });
+      threadPrUrls.set(threadId, [...new Set([undo.link.prior, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null]
+        .filter((url): url is string => url !== null))]);
+      prFreshnessLinks.add("");
+      announceThreads();
+    }
+    // An effort the change created goes again, unless it has since gained work, threads, or a roster of its own.
+    if (undo.created && effortWork.execution(undo.created).revision === 0) effortStore.discard(undo.created);
+    intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
+    threadUndos.delete(threadId);
+    intentClaims.set(threadId, (intentClaims.get(threadId) ?? []).filter((claim) => claim.at < undo.at));
+    bb.realtime.publish(BOARD_CHANGED, { scanning });
+    deckChanged();
+    await syncV2Targets();
+    return threadEffortContext(threadId);
+  }
+
   async function reconcileThreadIntent(threadId: string, duringSet = false): Promise<void> {
     if (disposal.signal.aborted || !hasIntent(threadId)) return;
     if (intentChanging.has(threadId) && !duringSet) { intentRecheck.add(threadId); return; }
@@ -3759,12 +3839,15 @@ export default async function plugin(bb: BbPluginApi) {
     for (const cohort of cohorts) {
       const guard = { ...cohort.guard, checkoutPaths: [...new Set(cohort.guard.prUrls.flatMap((url) => work.get(prWorkItemKey(url))?.paths ?? []))] };
       const result = effortStore.claimUnowned(effort.key, cohort.members, guard);
+      if (result.claimed.tickets.length + result.claimed.prUrls.length > 0) intentClaims.set(threadId, [...(intentClaims.get(threadId) ?? [])
+        .filter((claim) => Date.now() - claim.at < THREAD_UNDO_MS), { at: Date.now(), effortId: result.effort.id, members: result.claimed }]);
       claimed ||= result.claimed.tickets.length + result.claimed.prUrls.length > 0;
       if (result.conflict) conflicts++;
     }
     note(conflicts ? `${conflicts} linked PR ${conflicts === 1 ? "group has" : "groups have"} work assigned to another effort. Review linked work to move it.` : null);
     if (claimed) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       await syncV2Targets();
     }
   }
@@ -5892,18 +5975,22 @@ export default async function plugin(bb: BbPluginApi) {
         effortStore.list().some((effort) => normalized(effort.name) === normalized(trimmed))) {
         return { ok: false as const, error: "An effort with that name already exists. Choose it from the list or enter another name." };
       }
+      const prior = await intentOf(threadId);
       const effort = effortStore.establish({ sourceKey, name: trimmed, goal: "", projectId: thread.projectId,
         coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+      const at = Date.now();
       try {
         await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
       } catch (error) {
         return { ok: false as const, error: `The effort was created, but the thread assignment failed. Choose it from the picker: ${String(error).slice(0, 200)}` };
       }
+      const undoId = offerUndo(threadId, { at, intent: { prior, next: effort.id }, created: effort.id });
       intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
       db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       await reconcileThreadIntent(threadId, true);
-      return threadEffortContext(threadId);
+      return withUndo(await threadEffortContext(threadId), undoId);
     }),
     thread_effort_suggest: async ({ threadId }) => {
       const context = await threadEffortContext(threadId);
@@ -5936,6 +6023,11 @@ export default async function plugin(bb: BbPluginApi) {
       if (threadEffortAssignmentScope(context, destinationKey) !== expectedScope) {
         return { ok: false as const, error: "The thread effort or destination changed. Reopen the effort picker." };
       }
+      const chosen = destinationKey === null ? null : effortStore.source(destinationKey);
+      if (chosen && piles.get(chosen).pile === "done") return { ok: false as const, error: "Reopen this effort first." };
+      const prior = await intentOf(threadId);
+      const at = Date.now();
+      let next: string | null = null;
       if (destinationKey === null) {
         await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: null } });
         intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
@@ -5956,13 +6048,16 @@ export default async function plugin(bb: BbPluginApi) {
           return { ok: false as const, error: "Turn off automatic dispatch for this effort before assigning a thread." };
         }
         await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
+        next = effort.id;
         intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
         db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
         if (!established) await syncV2Targets();
       }
+      const undoId = offerUndo(threadId, { at, intent: { prior, next } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       if (destinationKey !== null) await reconcileThreadIntent(threadId, true);
-      return threadEffortContext(threadId);
+      return withUndo(await threadEffortContext(threadId), undoId);
     }),
     thread_effort_move: async ({ threadId, sourceIds, destinationKey, expectedScope }) => {
       const context = await threadEffortContext(threadId);
@@ -5988,14 +6083,31 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "That PR links to another ticket in this thread. Select both tickets before moving them." };
       }
       const established = effortStore.source(destinationKey);
+      if (established && piles.get(established).pile === "done") return { ok: false as const, error: "Reopen this effort first." };
       const initial = JSON.parse(destination.scope) as { members: EffortMembers };
-      try { effortStore.transfer(destinationKey, { tickets: [...movingTickets], prUrls: [...movingPrs], checkoutPaths: [...movingPaths] },
+      // Where each moving piece was, so Undo can put it back.
+      const back = new Map<string | null, EffortMembers>();
+      const was = (kind: "ticket" | "prUrl" | "checkoutPath", ref: string) => {
+        const ownerId = effortStore.owner(kind, ref)?.id ?? null;
+        const members = back.get(ownerId) ?? { tickets: [], prUrls: [], checkoutPaths: [] };
+        (kind === "ticket" ? members.tickets : kind === "prUrl" ? members.prUrls : members.checkoutPaths!).push(ref);
+        back.set(ownerId, members);
+      };
+      for (const ticket of movingTickets) was("ticket", ticket);
+      for (const url of movingPrs) was("prUrl", url);
+      for (const path of movingPaths) was("checkoutPath", path);
+      const at = Date.now();
+      let moved: EstablishedEffort;
+      try { moved = effortStore.transfer(destinationKey, { tickets: [...movingTickets], prUrls: [...movingPrs], checkoutPaths: [...movingPaths] },
         established ? undefined : { name: destination.name, members: initial.members }); }
       catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
+      const undoId = offerUndo(threadId, { at, moved: { destinationId: moved.id, back: [...back].filter(([ownerId]) => ownerId !== moved.id)
+        .map(([ownerId, members]) => ({ ownerId, members })) }, ...established ? {} : { created: moved.id } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
+      deckChanged();
       await syncV2Targets();
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
-      return threadEffortContext(threadId);
+      return withUndo(await threadEffortContext(threadId), undoId);
     },
     card_effort_context: (target) => cardEffortContext(target),
     card_effort_move: async ({ target, destinationKey, expectedScope }) => {
@@ -6026,14 +6138,17 @@ export default async function plugin(bb: BbPluginApi) {
       if (!context.ok) return context;
       const canonical = canonicalPrUrl(prUrl);
       if (!canonical || !context.linkablePrs.some((pr) => pr.url === canonical)) return { ok: false as const, error: "Choose a tracked PR from the picker." };
+      const at = Date.now();
       await bb.sdk.threads.updatePluginMetadata({ threadId, set: { linkedPrUrl: canonical } });
+      const undoId = offerUndo(threadId, { at, link: { prior: context.linkedPrUrl, next: canonical } });
       db.prepare(`INSERT OR IGNORE INTO thread_pr_link_ids (thread_id) VALUES (?)`).run(threadId);
       threadPrUrls.set(threadId, [...new Set([...(threadPrUrls.get(threadId) ?? []), canonical])]);
       prFreshnessLinks.add("");
       announceThreads();
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
-      return threadEffortContext(threadId);
+      return withUndo(await threadEffortContext(threadId), undoId);
     },
+    thread_effort_undo: ({ threadId, undoId }) => serialIntent(threadId, () => undoThreadEffort(threadId, undoId)),
     inventory_get: ({ attention }) => inventoryGet(attention),
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),

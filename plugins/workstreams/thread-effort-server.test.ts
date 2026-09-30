@@ -1,7 +1,8 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawUnit } from "./contract.js";
 import { parsePrList } from "./gh.js";
+import { createEffortPileStore } from "./effort-piles.js";
 import { createEffortStore } from "./effort-store.js";
 import { createRunStore } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
@@ -588,4 +589,177 @@ it("refuses a mixed-owner move while either exact owner has automatic dispatch e
     destinationKey: ticketOwner.key, expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], ticketOwner.key) }))
     .toMatchObject({ ok: false, error: expect.stringContaining("automatic dispatch") });
   expect(store.owner("prUrl", a)?.id).toBe(prOwner.id);
+});
+
+describe("Undo for a thread's effort change", () => {
+  const establish = (env: Awaited<ReturnType<typeof setup>>, sourceKey: string, name: string, members: { tickets: string[]; prUrls: string[]; checkoutPaths?: string[] } =
+    { tickets: [], prUrls: [] }) => env.store.establish({ sourceKey, name, goal: "", projectId: "proj", coordinatorState: "none", members });
+  const pick = async (env: Awaited<ReturnType<typeof setup>>, destinationKey: string | null) => {
+    const context = await env.context();
+    return await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey,
+      expectedScope: threadEffortAssignmentScope(context, destinationKey) }) as ThreadEffortReady;
+  };
+  const undo = (env: Awaited<ReturnType<typeof setup>>, undoId: string | undefined) => env.harness.callRpc("thread_effort_undo", { threadId: "thread", undoId: undoId! });
+
+  it("puts the thread's effort back and lets go the work the pick brought in", async () => {
+    const env = await setup({ environmentPath: "/p/folio-42" });
+    const editorial = establish(env, "editorial", "Editorial review");
+    const picked = await pick(env, editorial.key);
+    expect([env.store.owner("prUrl", a)?.id, env.store.owner("ticket", "ABC-101")?.id]).toEqual([editorial.id, editorial.id]);
+    expect(await undo(env, picked.undoId)).toMatchObject({ ok: true, threadEffort: null });
+    expect(env.metadata.get("thread")).toMatchObject({ workEffortId: null });
+    expect([env.store.owner("prUrl", a), env.store.owner("ticket", "ABC-101")]).toEqual([null, null]);
+    // The thread has no effort again, so the next pass brings nothing back in, and the Undo is spent.
+    await env.harness.runCli(["refresh"]);
+    expect(env.store.owner("prUrl", a)).toBeNull();
+    expect(await undo(env, picked.undoId)).toEqual({ ok: false, error: "Undo no longer applies." });
+  });
+
+  it("takes back Remove from effort without moving any work", async () => {
+    const env = await setup({ environmentPath: "/p/folio-42" });
+    const editorial = establish(env, "editorial", "Editorial review");
+    await pick(env, editorial.key);
+    const removed = await pick(env, null);
+    expect(removed.threadEffort).toBeNull();
+    expect(env.store.owner("prUrl", a)?.id).toBe(editorial.id);
+    expect(await undo(env, removed.undoId)).toMatchObject({ ok: true, threadEffort: { key: editorial.key } });
+    expect(env.store.owner("prUrl", a)?.id).toBe(editorial.id);
+  });
+
+  it("removes an effort the thread created, once the work it brought in is let go", async () => {
+    const env = await setup({ environmentPath: "/p/folio-42" });
+    const preview = await env.context();
+    const created = await env.harness.callRpc("thread_effort_create", { threadId: "thread", name: "Manuscript review", requestId: createRequestId,
+      expectedScope: threadEffortAssignmentScope(preview, null) }) as ThreadEffortReady;
+    const effort = env.store.source(created.threadEffort!.key)!;
+    expect(env.store.owner("prUrl", a)?.id).toBe(effort.id);
+    expect(await undo(env, created.undoId)).toMatchObject({ ok: true, threadEffort: null });
+    expect(env.store.get(effort.id)).toBeNull();
+    expect(env.store.owner("prUrl", a)).toBeNull();
+  });
+
+  it("refuses, changing nothing, once the work moved or a later change replaced the Undo, and never lets go work another effort took", async () => {
+    const env = await setup({ environmentPath: "/p/folio-42" });
+    const editorial = establish(env, "editorial", "Editorial review"), other = establish(env, "other", "Other review");
+    const first = await pick(env, editorial.key);
+    env.store.transfer(other.key, { tickets: ["ABC-101"], prUrls: [a] });
+    expect(await undo(env, first.undoId)).toEqual({ ok: false, error: "This work moved since, so Undo no longer applies." });
+    expect(env.metadata.get("thread")?.workEffortId).toBe(editorial.id);
+    expect(env.store.owner("prUrl", a)?.id).toBe(other.id);
+    const second = await pick(env, other.key);
+    expect(await undo(env, first.undoId)).toEqual({ ok: false, error: "Undo no longer applies." });
+    // The second pick brought nothing in, since Other review already had #42: its Undo only puts the thread back.
+    expect(await undo(env, second.undoId)).toMatchObject({ ok: true, threadEffort: { key: editorial.key } });
+    expect(env.store.owner("prUrl", a)?.id).toBe(other.id);
+  });
+
+  it("refuses once the thread's effort changed some other way", async () => {
+    const env = await setup();
+    const editorial = establish(env, "editorial", "Editorial review");
+    const picked = await pick(env, editorial.key);
+    env.metadata.set("thread", { ...env.metadata.get("thread"), workEffortId: null });
+    expect(await undo(env, picked.undoId)).toEqual({ ok: false, error: "This thread's effort changed since, so Undo no longer applies." });
+  });
+
+  it("puts each piece of a move back with the effort it came from", async () => {
+    const { harness, context, store } = await setup();
+    const ticketOwner = store.establish({ sourceKey: "ticket-owner", name: "Editorial", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: ["ABC-101"], prUrls: [] } });
+    const prOwner = store.establish({ sourceKey: "pr-owner", name: "Review", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: [], prUrls: [a], checkoutPaths: ["/p/folio-42"] } });
+    const destination = store.establish({ sourceKey: "target", name: "Manuscripts", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a });
+    const preview = await context();
+    const moved = await harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"], destinationKey: destination.key,
+      expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], destination.key) }) as ThreadEffortReady;
+    expect([store.owner("ticket", "ABC-101")?.id, store.owner("prUrl", a)?.id, store.owner("checkoutPath", "/p/folio-42")?.id])
+      .toEqual([destination.id, destination.id, destination.id]);
+    expect(await harness.callRpc("thread_effort_undo", { threadId: "thread", undoId: moved.undoId! })).toMatchObject({ ok: true });
+    expect([store.owner("ticket", "ABC-101")?.id, store.owner("prUrl", a)?.id, store.owner("checkoutPath", "/p/folio-42")?.id])
+      .toEqual([ticketOwner.id, prOwner.id, prOwner.id]);
+    expect(store.get(destination.id)?.members).toMatchObject({ tickets: [], prUrls: [] });
+  });
+
+  const moveHere = async (env: Awaited<ReturnType<typeof setup>>, destinationKey: string) => {
+    await env.harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a });
+    const preview = await env.context();
+    return await env.harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"], destinationKey,
+      expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], destinationKey) }) as ThreadEffortReady;
+  };
+
+  it("refuses a move's Undo once another effort took the moved work, and leaves it there", async () => {
+    const env = await setup();
+    establish(env, "review", "Review", { tickets: ["ABC-101"], prUrls: [a] });
+    const manuscripts = establish(env, "manuscripts", "Manuscripts"), other = establish(env, "other", "Other review");
+    const moved = await moveHere(env, manuscripts.key);
+    env.store.transfer(other.key, { tickets: ["ABC-101"], prUrls: [a] });
+    expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "This work moved since, so Undo no longer applies." });
+    expect([env.store.owner("ticket", "ABC-101")?.id, env.store.owner("prUrl", a)?.id]).toEqual([other.id, other.id]);
+  });
+
+  it("refuses a move's Undo once the effort the work came from is archived", async () => {
+    const env = await setup();
+    const review = establish(env, "review", "Review", { tickets: ["ABC-101"], prUrls: [a] }), manuscripts = establish(env, "manuscripts", "Manuscripts");
+    const moved = await moveHere(env, manuscripts.key);
+    env.store.setArchived(review.id, true);
+    expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "An effort this work came from changed, so Undo no longer applies." });
+    expect(env.store.owner("prUrl", a)?.id).toBe(manuscripts.id);
+  });
+
+  it("keeps a forward change's guards: nothing goes back into a done effort or changes an effort under automatic dispatch", async () => {
+    const env = await setup();
+    const review = establish(env, "review", "Review", { tickets: ["ABC-101"], prUrls: [a] }), manuscripts = establish(env, "manuscripts", "Manuscripts");
+    const moved = await moveHere(env, manuscripts.key);
+    await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: review.key });
+    expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "Automatic dispatch is on for an effort this changes, so Undo no longer applies." });
+    await env.harness.callRpc("dispatch_set", { mode: "off", effortKey: review.key });
+    createEffortPileStore(env.db).move(review, "complete");
+    expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "An effort this goes back to is done, so Undo no longer applies." });
+    expect(env.store.owner("prUrl", a)?.id).toBe(manuscripts.id);
+    // Undoing Remove would put the thread back in the effort it left, which is done now.
+    const picked = await pick(env, manuscripts.key);
+    expect(picked.threadEffort?.key).toBe(manuscripts.key);
+    const removed = await pick(env, null);
+    createEffortPileStore(env.db).move(manuscripts, "complete");
+    expect(await undo(env, removed.undoId)).toEqual({ ok: false, error: "An effort this goes back to is done, so Undo no longer applies." });
+    expect(env.metadata.get("thread")?.workEffortId).toBeNull();
+  });
+
+  it("tells an open deck at once when a pick or a move changes what its cards hold", async () => {
+    const env = await setup({ environmentPath: "/p/folio-42" });
+    const editorial = establish(env, "editorial", "Editorial review"), manuscripts = establish(env, "manuscripts", "Manuscripts");
+    const heard = () => env.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "deck-changed").length;
+    let before = heard();
+    await pick(env, editorial.key);
+    expect(heard()).toBeGreaterThan(before);
+    const preview = await env.context();
+    before = heard();
+    await env.harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"], destinationKey: manuscripts.key,
+      expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], manuscripts.key) });
+    expect(env.store.owner("prUrl", a)?.id).toBe(manuscripts.id);
+    expect(heard()).toBeGreaterThan(before);
+  });
+
+  it("puts the thread's previous linked PR back", async () => {
+    const { harness, metadata } = await setup();
+    await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a });
+    const relinked = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: b }) as ThreadEffortReady;
+    expect(relinked.linkedPrUrl).toBe(b);
+    expect(await harness.callRpc("thread_effort_undo", { threadId: "thread", undoId: relinked.undoId! })).toMatchObject({ ok: true, linkedPrUrl: a });
+    expect(metadata.get("thread")?.linkedPrUrl).toBe(a);
+  });
+});
+
+it("refuses to put a thread or its linked work in a done effort", async () => {
+  const env = await setup();
+  const done = env.store.establish({ sourceKey: "done", name: "Store hours", goal: "", projectId: "proj", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+  createEffortPileStore(env.db).move(done, "complete");
+  const preview = await env.context();
+  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: done.key,
+    expectedScope: threadEffortAssignmentScope(preview, done.key) })).toEqual({ ok: false, error: "Reopen this effort first." });
+  const linked = await env.harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a }) as ThreadEffortReady;
+  expect(await env.harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"], destinationKey: done.key,
+    expectedScope: threadEffortMoveScope(linked, ["ticket:ABC-101"], done.key) })).toEqual({ ok: false, error: "Reopen this effort first." });
+  expect(env.metadata.get("thread")?.workEffortId).toBeUndefined();
+  expect(env.store.owner("prUrl", a)).toBeNull();
 });
