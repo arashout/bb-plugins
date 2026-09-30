@@ -228,6 +228,46 @@ describe("the inventory before its first read", () => {
   });
 });
 
+describe("selecting Your turn PRs to address together", () => {
+  const selectedPane = (selected: ReadonlySet<string>, view: InventoryView = VIEW) => renderToStaticMarkup(createElement(InventoryPane, {
+    screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS, selected, onSelect: noop, onSelectAll: noop,
+    onAddress: noop, onClear: noop }));
+  const boxes = (html: string) => [...html.matchAll(/aria-label="Select (inkwell\/[^"]+)"/gu)].map((match) => match[1]);
+
+  // Only Your turn's rows take a checkbox, so Address selected never reaches a PR with nothing waiting on you.
+  it("offers a checkbox on each Your turn row and a box for the whole list, and none on other rows", () => {
+    const html = selectedPane(new Set());
+    expect(boxes(html)).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
+    expect(html).toContain('aria-label="Select every Your turn PR"');
+    // Nothing selected, nothing to address: the bar stays away.
+    expect(html).not.toContain('data-inventory-action="address"');
+    // Without the handlers, as before, the rows draw no checkbox.
+    expect(boxes(pane())).toEqual([]);
+  });
+
+  it("shows the selection with Address selected (N) and its key, and Clear", () => {
+    const picked = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/folio/pull/301"]);
+    const html = selectedPane(picked);
+    expect(rowOf(html, "inkwell/quill#210")).toContain('data-inventory-selected="true"');
+    expect(rowOf(html, "inkwell/quill#211")).not.toContain("data-inventory-selected");
+    expect(text(html)).toContain("2 selected Address selected (2) b Clear esc");
+    expect(html).toMatch(/data-inventory-action="address" title="Lists each PR first, then sends after 8 s with Undo\. Nothing merges\."/u);
+    // Every row selected: the list's box reads as clearing them.
+    expect(selectedPane(new Set(yourTurnRows(VIEW, NOW).map((line) => line.prUrl)))).toContain('aria-label="Clear the selection"');
+  });
+
+  // A batch thread holds it now: it's off Your turn and can't be picked again, and the row links the thread doing the work.
+  it("lists a PR a batch thread holds under Other open PRs as Addressing, with a link to the thread", () => {
+    const view = patched((row) => row.number === 210 ? { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } }
+      : row.number === 211 ? { addressing: { threadId: null, title: null } } : null);
+    const html = selectedPane(new Set(), view);
+    expect(boxes(html)).toEqual(["inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
+    expect(text(rowOf(html, "inkwell/quill#210"))).toContain("Addressing · batch thread");
+    expect(rowOf(html, "inkwell/quill#210")).toMatch(/data-inventory-addressing[^>]*>Addressing · <button type="button"/u);
+    expect(text(rowOf(html, "inkwell/quill#211"))).toContain("Addressing · starting its batch thread");
+  });
+});
+
 describe("keyboard safety", () => {
   // All PRs offers no merge at all; the deck's Merge… opens the same fresh preview, whose Merge button refuses Enter and Space.
   it("never merges from All PRs, and a row's merge only opens the fresh preview, whose Merge refuses Enter", () => {

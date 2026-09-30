@@ -424,6 +424,35 @@ describe("what the keys act on", () => {
     expect([refreshable.refresh.on, refreshable["hold-pr"].on]).toEqual([true, false]);
   });
 
+  // Address selected takes what you picked and nothing by focus alone: the key, the hint bar, and ⌘K offer it only with Your turn rows
+  // selected, on a live card, or in All PRs' selection.
+  it("offers Address selected, and b, only while the selection holds Your turn rows", () => {
+    const pickup = card(inkwellDeck(), PICKUP);
+    const rows = pickup.sections.flatMap((section) => section.lines);
+    const turn = rows.filter((line) => line.row?.yourTurn);
+    const other = rows.filter((line) => line.row && !line.row.yourTurn);
+    expect(turn.length && other.length).toBeTruthy();
+    const on = (patch: Partial<KeyContext>, screen: CardScreen = pickup) => availability(context(screen, patch)).address;
+    expect(on({ selected: turn })).toEqual({ on: true, why: "" });
+    expect(on({ focused: turn[0]! })).toEqual({ on: false, why: "select Your turn rows first" });
+    expect(on({ selected: other })).toEqual({ on: false, why: "select Your turn rows first" });
+    expect(hintKeys(context(pickup, { selected: turn }), availability(context(pickup, { selected: turn })))).toContainEqual(["b", "address selected"]);
+    // A held card's rows wait with it.
+    expect(on({ selected: turn }, { ...pickup, card: { ...pickup.card, pile: "held" } })).toEqual({ on: false, why: "this card is paused" });
+    const items = paletteItems(availability(context(pickup, { selected: turn })), [], { held: [], done: [] }, PICKUP, true);
+    expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected…", keys: ["b"], on: true });
+    // All PRs: x selects the focused Your turn row, ⇧X all of Your turn, and b addresses the selection.
+    const prs = (patch: NonNullable<KeyContext["prs"]>) => ({ ...context(pickup), view: "prs" as const, cur: null, prs: patch });
+    const none = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0 });
+    expect([availability(none).select.on, availability(none)["select-section"].on, availability(none).address]).toEqual([true, true,
+      { on: false, why: "select Your turn rows first" }]);
+    expect(hintKeys(none, availability(none))).toContainEqual(["x", "select"]);
+    const two = prs({ row: true, thread: false, moves: new Set(), selectable: false, turn: 5, picked: 2 });
+    expect([availability(two).select.on, availability(two).address.on, availability(two).clear.on]).toEqual([false, true, true]);
+    expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["esc", "clear"]]);
+    expect(availability(prs({ row: false, thread: false, moves: new Set(), turn: 0, picked: 0 }))["select-section"]).toEqual({ on: false, why: "nothing is on Your turn" });
+  });
+
   // "3 need you" and "2 blocked" in a card's header each show those rows alone. Acting on one there must not pull it out from under you.
   it("cuts a card to the rows a header count names, and keeps one that stops matching until you show all", () => {
     const pickup = card(inkwellDeck(), PICKUP);

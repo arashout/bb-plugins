@@ -13,6 +13,8 @@
 // c opens one PR's review notes, where confirming them handled is a click, or
 // ⌘↵ only when something since the approval shows them handled. f asks each
 // PR's thread for its fix through the same listing and window; it never merges.
+// b takes the selected Your turn PRs to one batch thread, or each to its own
+// thread, through the same listing and window; it never merges either.
 
 export const KEY_GROUPS = ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"] as const;
 export type KeyGroup = (typeof KEY_GROUPS)[number];
@@ -22,7 +24,7 @@ export type KeyGroup = (typeof KEY_GROUPS)[number];
  */
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
-  | "held" | "tiles" | "notes" | "only-needs" | "only-blocked" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "fix" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
+  | "held" | "tiles" | "notes" | "only-needs" | "only-blocked" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "fix" | "address" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
 /** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine, and "⇧H" is Shift with h. */
 export type DeckAction = { id: DeckActionId; group: KeyGroup; title: string; keys: readonly string[]; effect: KeyEffect };
@@ -51,6 +53,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "ready", group: "Act", title: "Mark ready…", keys: ["y"], effect: "confirm" },
   { id: "release", group: "Act", title: "Release the hold…", keys: ["l"], effect: "confirm" },
   { id: "fix", group: "Act", title: "Ask threads to fix…", keys: ["f"], effect: "confirm" },
+  { id: "address", group: "Act", title: "Address selected…", keys: ["b"], effect: "confirm" },
   { id: "undo", group: "Act", title: "Undo the last action", keys: ["z"], effect: "local" },
   { id: "hold-pr", group: "Act", title: "Hold or release the PR…", keys: [], effect: "dialog" },
   { id: "refresh", group: "Act", title: "Refresh the PR from GitHub", keys: [], effect: "local" },

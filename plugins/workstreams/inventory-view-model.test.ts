@@ -7,7 +7,7 @@ import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW
 import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
-import { actionCall, askKind, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+import { actionCall, askKind, onYourTurn, pickRows, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
   type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
@@ -404,6 +404,25 @@ describe("the PR inventory screen view model", () => {
     for (const pile of ["held", "done", "archived"] as const) expect(askKind({ ...find("quill #211"), effortPile: pile })).toBeNull();
   });
 
+  // Address takes exactly the rows you picked: a click toggles one, Shift takes the run from the last one you clicked, in the order drawn.
+  it("toggles a clicked row, and takes a Shift-click's range from the last row clicked", () => {
+    const order = ["a", "b", "c", "d", "e"];
+    expect([...pickRows(order, new Set(), "b", false, null)]).toEqual(["b"]);
+    expect([...pickRows(order, new Set(["b"]), "b", false, "b")]).toEqual([]);
+    expect([...pickRows(order, new Set(["b"]), "d", true, "b")]).toEqual(["b", "c", "d"]);
+    // Upward works the same, and adds to what's already picked.
+    expect([...pickRows(order, new Set(["e"]), "a", true, "c")].sort()).toEqual(["a", "b", "c", "e"]);
+    // With no row clicked yet, Shift toggles the one row; a picked row that left the list drops out.
+    expect([...pickRows(order, new Set(["z"]), "c", true, null)]).toEqual(["c"]);
+  });
+
+  // A batch thread holding the PR is working on its feedback: the row isn't your turn, and offers no ask of its own.
+  it("takes a row a batch thread holds off Your turn, and offers no ask on it", () => {
+    const held = find("quill #211", withRow("quill #211", { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } }));
+    expect([held.addressing, onYourTurn(held), askKind(held)]).toEqual([{ threadId: "thr-batch" }, false, null]);
+    expect(onYourTurn(find("quill #211"))).toBe(true);
+  });
+
   it("explains the two lists and why Nudge is conditional", () => {
     const words = new Map(INVENTORY_HOW.rows);
     expect(INVENTORY_HOW.intro).toContain("Your turn lists your PRs where a reviewer's feedback waits on you");
@@ -413,6 +432,7 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Your turn")).toContain("Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
     expect(words.has("Back to me")).toBe(false);
     expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
+    expect(words.get("Address selected")).toContain("one batch thread, or each PR's own");
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

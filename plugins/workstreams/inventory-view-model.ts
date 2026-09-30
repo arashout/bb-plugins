@@ -24,6 +24,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   rows: [
     ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments. Open thread goes to its thread."],
     ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo. Only on a PR with a thread."],
+    ["Address selected", "Select Your turn rows with x, a click, or Shift for a range. It lists each PR's feedback for one batch thread, or each PR's own, for you to confirm. It starts 8 s later unless you Undo, and never merges."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
@@ -325,6 +326,21 @@ export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "thre
  */
 export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing">): boolean => line.yourTurn !== null &&
   line.effortPile !== "held" && !line.addressing && !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active));
+
+/**
+ * The selection after a click on one of `order`'s rows: Shift adds every row from the last one you clicked through this one, in the order
+ * drawn; otherwise the click toggles this row. Rows no longer in `order` drop out.
+ */
+export function pickRows(order: readonly string[], picked: ReadonlySet<string>, prUrl: string, shift: boolean, anchor: string | null): Set<string> {
+  const next = new Set(order.filter((item) => picked.has(item)));
+  const from = anchor === null ? -1 : order.indexOf(anchor);
+  if (shift && from >= 0) {
+    const [a, b] = [from, order.indexOf(prUrl)].sort((x, y) => x - y);
+    for (const item of order.slice(a, b + 1)) next.add(item);
+  } else if (next.has(prUrl)) next.delete(prUrl);
+  else next.add(prUrl);
+  return next;
+}
 
 /** Your turn's rows, which the badge counts and the list shows. */
 export const yourTurnRows = (view: InventoryView, now: number): InventoryLine[] =>

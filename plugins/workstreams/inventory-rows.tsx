@@ -12,6 +12,9 @@ export type SimpleRowsProps = {
   onNudge(line: InventoryLine, action: LineAction): void;
   /** Open the deck's listing confirm asking the PR's thread to address its feedback; nothing sends before you confirm it. */
   onAsk(line: InventoryLine): void;
+  /** Your turn rows you selected for Address, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. */
+  selected?: ReadonlySet<string>;
+  onSelect?(line: InventoryLine, shift: boolean): void;
 };
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500";
 
@@ -29,8 +32,12 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const turn = props.kind === "turn" ? line.yourTurn : null;
           const ask = turn ? askKind(line) : null;
           const info = turn ? `${turn.text}${turn.age ? ` · ${turn.age}` : ""}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
-          return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} tabIndex={-1}
-            className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", FOCUS)}>
+          const picked = !!turn && !!props.selected?.has(line.prUrl);
+          const batch = line.addressing;
+          return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
+            className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]", FOCUS)}>
+            {turn && props.onSelect ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`} onChange={() => undefined}
+              onClick={(event) => props.onSelect!(line, event.shiftKey)} className="size-3.5 shrink-0 accent-sky-600" /> : null}
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
                 {/* The PR number never truncates: a long repository name gives way first, as on the deck's rows. */}
@@ -39,7 +46,11 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                   <span className="min-w-0 truncate">{line.slug}</span><span className="shrink-0">#{line.number}</span></button>
                 <span className="min-w-0 truncate font-medium" title={line.title}>{line.title}</span>
               </div>
-              <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>
+              {/* A batch thread's claim holds it: say so, and link the thread doing the work. */}
+              {batch ? <p data-inventory-addressing className="mt-0.5 truncate text-[11px] text-muted-foreground">Addressing · {batch.threadId
+                ? <button type="button" onClick={() => props.onOpenThread(batch.threadId!)} className={cn("rounded-sm hover:underline", FOCUS)}>batch thread</button>
+                : "starting its batch thread"}</p>
+                : <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>}
               {line.last ? <p role="status" className={cn("text-[11px]", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
             </div>
             {turn && thread ? <button type="button" onClick={() => props.onOpenThread(thread)} className={cn("shrink-0 rounded-sm text-[11px] text-muted-foreground hover:underline", FOCUS)}>Open thread</button> : null}

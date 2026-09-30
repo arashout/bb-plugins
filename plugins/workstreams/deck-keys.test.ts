@@ -32,9 +32,13 @@ describe("the deck's key registry", () => {
     expect([ACTION.release.effect, actionForKey({ key: "l" })?.id]).toEqual(["confirm", "release"]);
     // f asks each PR's thread for its fix, which pushes code, so it lists every PR first and waits out the same window.
     expect([ACTION.fix.effect, actionForKey({ key: "f" })?.id]).toEqual(["confirm", "fix"]);
+    // b hands the selected Your turn PRs to a thread that pushes and replies, so it lists them first and waits out the same window, and
+    // a held b opens one listing.
+    expect([ACTION.address.effect, actionForKey({ key: "b" })?.id, actionForKey({ key: "b", repeat: true }), actionForKey({ key: "b", metaKey: true })])
+      .toEqual(["confirm", "address", null, null]);
     // Nothing else reaches a write: every other action moves, changes the view, or opens a dialog.
     expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "preview").map((action) => action.id).sort())
-      .toEqual([...writes, "release", "fix"].sort());
+      .toEqual([...writes, "release", "fix", "address"].sort());
   });
 
   it("repeats only row movement while a key is held, so a held a or n can't open two confirms", () => {

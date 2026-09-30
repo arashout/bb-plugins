@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObjec
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import type { DeckWrite } from "./deck-shared";
+import type { AddressMode } from "./deck-batch";
 import { ACTION, actionForKey, typingTarget, type DeckActionId } from "./deck-keys";
 import { SECTIONS, type Availability } from "./deck-view-model";
 import { ConfirmBody, type ConfirmPlan } from "./deck-screen";
@@ -36,7 +37,9 @@ export function DeckDialog({ open, title, sub, wide, bare, closeKey, onClose, on
 
 const VERB: Record<DeckWrite | "advance", string> = { nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release", ask: "Ask", fix: "Ask",
   address: "Address", advance: "Run" };
-type Pending = { plan: ConfirmPlan; batchId: string; request: { kind: DeckWrite | "advance"; effortId: string | null; prUrls: string[] | null }; reviewer: string;
+/** `batchId` is null only for an Address listing that leaves every PR out, which it still shows, with why. */
+type Pending = { plan: ConfirmPlan; batchId: string | null; request: { kind: DeckWrite | "advance"; effortId: string | null; prUrls: string[] | null; mode?: AddressMode };
+  reviewer: string;
   /** The reviewer field as the listing was planned: another name typed there sends nothing until it plans again. */
   planned: string };
 
@@ -55,26 +58,36 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
   const latest = useRef(options);
   latest.current = options;
 
-  const plan = useCallback(async (kind: DeckWrite | "advance", effortId: string | null, prUrls: string[] | null, reviewer = "") => {
+  const plan = useCallback(async (kind: DeckWrite | "advance", effortId: string | null, prUrls: string[] | null, reviewer = "", mode?: AddressMode) => {
     const { say } = latest.current;
     const reviewers = reviewer.trim() ? reviewer.split(/[\s,]+/u).map((login) => login.replace(/^@/u, "")).filter(Boolean) : undefined;
+    // Address lists its choice of thread, One batch thread first.
+    const address = kind === "address" ? mode ?? "batch" : undefined;
     const result = await rpc.call("deck_batch_plan", { kind, ...effortId ? { effortId } : {}, ...prUrls ? { prUrls } : {}, ...reviewers ? { reviewers } : {},
-      seen: latest.current.seenAt() }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
+      ...address ? { mode: address } : {}, seen: latest.current.seenAt() }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
     const open = pending !== null;
     if (!result.ok) { if (open) setError(result.error); else say(result.error); return; }
-    if (!result.batchId) { const first = result.skipped[0]; const why = first ? `${first.ref}: ${first.reason}` : "Nothing to send here."; if (open) setError(why); else say(why); return; }
+    // Address shows what it leaves out, and why, even when that's every PR: the other choice may take them.
+    if (!result.batchId && !(address && result.skipped.length)) {
+      const first = result.skipped[0]; const why = first ? `${first.ref}: ${first.reason}` : "Nothing to send here."; if (open) setError(why); else say(why); return;
+    }
     // One PR's listing names it: Advance from a row reads "Advance folio #340".
     const one = prUrls?.length === 1 ? result.items[0]?.ref ?? result.skipped[0]?.ref : undefined;
     const scope = one ?? (effortId ? latest.current.scopeName(effortId) ?? "this effort" : `${prUrls?.length ?? 0} PR${prUrls?.length === 1 ? "" : "s"}`);
     if (!open) latest.current.onOpen();
     setError(null); setBusy(false);
-    setPending({ batchId: result.batchId, request: { kind, effortId, prUrls }, reviewer, planned: reviewer, plan: {
+    const n = result.items.length;
+    const thread = result.thread && `“Address feedback on ${n} PR${n === 1 ? "" : "s"}” starts ${result.thread.under ? `under “${result.thread.under}”` : "with no parent"}`;
+    setPending({ batchId: result.batchId, request: { kind, effortId, prUrls, ...address ? { mode: address } : {} }, reviewer, planned: reviewer, plan: {
       title: kind === "advance" ? `Advance ${scope}` : kind === "release" ? `Release · ${scope}` : kind === "ask" ? `Ask its thread · ${scope}`
         : kind === "fix" ? `Ask threads to fix · ${scope}` : kind === "address" ? `Address feedback · ${scope}` : `${SECTIONS[kind].title} · ${scope}`,
       sub: kind === "advance" ? `${result.items.length} action${result.items.length === 1 ? "" : "s"}, listed in full. Nothing else changes.`
         : kind === "release" ? "Each hold, listed in full. Batches and Advance can act on these again."
         : kind === "ask" ? "The listed thread gets the approval-feedback recipe. Nothing is confirmed."
-        : kind === "fix" ? "Each PR's thread gets its own fix; a PR with none gets a new worker. Nothing merges." : "Each PR's one write, listed in full.",
+        : kind === "fix" ? "Each PR's thread gets its own fix; a PR with none gets a new worker. Nothing merges."
+        : address === "batch" ? `${thread ?? "One new thread starts"} and holds each PR until it's done. Nothing merges.`
+        : address === "each" ? "Each PR's own thread gets its feedback. Nothing merges." : "Each PR's one write, listed in full.",
+      ...address ? { mode: address } : {},
       when: kind === "release" ? "Releases" : "Sends",
       verb: VERB[kind], items: result.items, skipped: result.skipped, request: kind === "request" || (kind === "advance" && result.items.some((item) => item.kind === "request")),
       excluded: kind === "advance" ? "Not included: merges (preview them with m) and code work, which each PR's thread does." : null } });
@@ -82,7 +95,7 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
 
   const dirty = !!pending && pending.reviewer.trim() !== pending.planned.trim();
   const start = useCallback(async () => {
-    if (!pending || busy) return;
+    if (!pending || busy || !pending.batchId) return;
     // ⌘↵ after typing another reviewer plans again rather than send a listing that asks someone else.
     if (dirty) { void plan(pending.request.kind, pending.request.effortId, pending.request.prUrls, pending.reviewer); return; }
     const { say, setUndo, load } = latest.current;
@@ -121,7 +134,8 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
   const element = <DeckDialog open={pending !== null} title={pending?.plan.title ?? ""} sub={pending?.plan.sub} onClose={() => setPending(null)} onReturn={options.onReturn}
     onConfirmKey={() => void start()}>
     {pending ? <ConfirmBody plan={pending.plan} busy={busy} error={error} reviewer={pending.reviewer} dirty={dirty} onReviewer={(value) => setPending({ ...pending, reviewer: value })}
-      onReplan={() => void plan(pending.request.kind, pending.request.effortId, pending.request.prUrls, pending.reviewer)} onConfirm={() => void start()}
+      onReplan={() => void plan(pending.request.kind, pending.request.effortId, pending.request.prUrls, pending.reviewer, pending.request.mode)} onConfirm={() => void start()}
+      onMode={(mode) => { if (mode !== pending.request.mode) void plan(pending.request.kind, pending.request.effortId, pending.request.prUrls, "", mode); }}
       onCancel={() => setPending(null)} /> : null}
   </DeckDialog>;
   return { plan, details, open: pending !== null, element };

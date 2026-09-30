@@ -59,13 +59,21 @@ describe("the deck's write safety", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
-    // All PRs exposes only Open thread, Ask its thread, and eligible Nudge buttons. Its keys move focus; n and f, its keys that write, open
-    // the same listing confirm as the deck's, as Ask its thread does. Its Nudge button stays one click, its only direct call besides the read.
+    // The deck's Address selected, and b, open the listing confirm for the selection, and only while the selection has Your turn rows.
+    const nav = source("deck-nav-view.tsx");
+    expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.plan\("address", card\.card\.id, selected\.map\(\(item\) => item\.prUrl\)\); return;/u);
+    expect(source("deck-screen.tsx")).toContain('onClick={() => run({ kind: "action", id: "address" })}');
+    // All PRs exposes only Open thread, Ask its thread, Address selected, and eligible Nudge buttons. Its keys move focus or select; n, f,
+    // and b, its keys that write, open the same listing confirm as the deck's, as Ask its thread and Address selected do. Its Nudge button
+    // stays one click, its only direct call besides the read.
     const inventory = source("inventory-screen.tsx");
     expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
     expect(inventory).toMatch(/const ask = \(line: InventoryLine\) => \{ const kind = askKind\(line\); if \(kind\) void batch\.plan\(kind, null, \[line\.prUrl\]\); \};/u);
     expect(inventory).toMatch(/case "fix": if \(focused && fix\) ask\(focused\); return;/u);
-    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(2);
+    expect(inventory).toMatch(/const address = \(\) => \{ if \(selected\.length\) void batch\.plan\("address", null, selected\.map\(\(line\) => line\.prUrl\)\); \};/u);
+    expect(inventory).toMatch(/case "address": address\(\); return;/u);
+    expect(inventory).toContain("onClick={onAddress}");
+    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(3);
     expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge"]);
     // Review notes and merges are the deck's alone: no key or button here confirms or merges.
     expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);

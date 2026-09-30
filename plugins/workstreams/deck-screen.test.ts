@@ -483,6 +483,38 @@ describe("the deck's dialogs", () => {
       onReplan: noop, onConfirm: noop, onCancel: noop }))).toContain("Plan again");
   });
 
+  // Address lists each PR's feedback and where it's worked, with the choice of one batch thread or each PR's own, before anything starts.
+  it("lists Address's PRs with their feedback and the thread choice, and starts nothing it leaves out", () => {
+    const address: ConfirmPlan = { title: "Address feedback · 2 PRs", sub: "", verb: "Address", request: false, excluded: null, mode: "batch",
+      items: [{ prUrl: "u1", ref: "folio #42", title: "Keep manuscripts in order", kind: "address", what: "Batch thread", notes: 0, feedback: "Approval comment from @mira",
+        where: "No checkout: a clean clone" }, { prUrl: "u2", ref: "folio #43", title: "Order reads", kind: "address", what: "Batch thread", notes: 0,
+        feedback: "Changes requested by @otto", where: "In folio-abc-43" }],
+      skipped: [{ prUrl: "u3", ref: "folio #45", reason: "On hold. Release it first." }] };
+    const render = (plan: ConfirmPlan) => renderToStaticMarkup(createElement(ConfirmBody, { plan, busy: false, error: null, reviewer: "", dirty: false, onReviewer: noop,
+      onReplan: noop, onConfirm: noop, onCancel: noop, onMode: noop }));
+    const html = render(address);
+    expect(html).toMatch(/role="radiogroup" aria-label="Where it runs"/u);
+    expect([...html.matchAll(/role="radio" aria-checked="(true|false)" data-deck-mode="(\w+)"[^>]*>([^<]+)</gu)].map((match) => [match[2], match[1], match[3]]))
+      .toEqual([["batch", "true", "One batch thread"], ["each", "false", "Each PR in its own thread"]]);
+    expect(text(html)).toContain("Batch thread folio #42 Keep manuscripts in order Approval comment from @mira · No checkout: a clean clone");
+    expect(text(html)).toContain("Changes requested by @otto · In folio-abc-43");
+    expect(text(html)).toContain("Left out: folio #45 On hold. Release it first.");
+    expect(html).toMatch(/data-deck-confirm[^>]*>Address 2<kbd/u);
+    // Every PR left out: the listing still says why, and there's nothing to confirm.
+    expect(render({ ...address, mode: "each", items: [] })).toMatch(/<button type="button" data-deck-confirm="true" disabled=""/u);
+    // Other listings offer no choice.
+    expect(render(plan)).not.toContain("radiogroup");
+  });
+
+  // The deck's selection bar offers Address selected beside Advance, counting only the Your turn rows it would take, with its key.
+  it("offers Address selected (N) on the deck's selection bar only when it counts Your turn rows", () => {
+    const state = { selected: new Set([url("quill", 210), url("quill", 211)]), expanded: new Set<string>(), focus: null };
+    const bar = (address: number) => { const html = pane(inkwellDeck(), INVENTORY_EFFORTS.pickup.id, { state, batch: { kinds: [], address } }); return html.slice(html.indexOf('aria-label="Selection"')); };
+    expect(text(bar(2))).toContain("2 selected Address selected (2) b");
+    expect(bar(2)).toMatch(/data-deck-address="true" title="Lists each PR first, then sends after 8 s with Undo\. Nothing merges\."/u);
+    expect(bar(0)).not.toContain("data-deck-address");
+  });
+
   it("won't send a request listing someone other than the reviewer you typed until it plans again", () => {
     const html = renderToStaticMarkup(createElement(ConfirmBody, { plan: { ...plan, request: true }, busy: false, error: null, reviewer: "dana", dirty: true,
       onReviewer: noop, onReplan: noop, onConfirm: noop, onCancel: noop }));
