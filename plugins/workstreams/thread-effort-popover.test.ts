@@ -43,7 +43,8 @@ describe("the thread's effort chip", () => {
 
   it("names a service fallback with a hollow dot and its Needs you, which opens its card, and a thread with no effort without a count", () => {
     const service = bar({ chip: { kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 2, card: "service:inkwell/folio" } });
-    expect(service).toMatch(/border-dashed/u);
+    // The same hollow amber dot the deck gives a service card.
+    expect(service).toMatch(/border-dashed[^"]*" style="border-color:#d3a35a"/u);
     expect(text(service)).toBe("folio · service 2 ⌄");
     expect(service).toContain("folio · service, 2 need you. Open its card");
     expect(text(bar({ chip: { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null } }))).toBe("No effort ⌄");

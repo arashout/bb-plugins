@@ -591,7 +591,8 @@ export const rpcContract = defineRpcContract({
   ...effortPilesContract,
   ...classifyContract,
   /**
-   * Read-only: the effort deck. Every unarchived effort's card on its pile, and the Unclassified deck. `seen` is when the view last marked
+   * Read-only: the effort deck. Every unarchived effort's card on its pile, a service card per repository for what no effort has, and Loose
+   * threads, so every open PR and thread is on a card. `seen` is when the view last marked
    * each PR's row seen: a row whose write landed counts again only once seen at or after it.
    */
   deck_get: { input: z.object({ seen: deckSeenSchema.optional() }).strict(), output: deckViewSchema },
@@ -3968,7 +3969,7 @@ export default async function plugin(bb: BbPluginApi) {
     const keys = [...new Set(prUrls.map(prWorkItemKey))];
     const label = (url: string) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; };
     const taken = keys.filter((url) => !unowned.has(url)).map(label);
-    if (taken.length) return { ok: false as const, error: `${taken.join(", ")} ${taken.length === 1 ? "isn't" : "aren't"} unclassified now. Refresh and try again.` };
+    if (taken.length) return { ok: false as const, error: `${taken.join(", ")} ${taken.length === 1 ? "is" : "are"} in an effort now. Refresh and try again.` };
     const pattern = compilePattern((await settings.get()).ticketPattern);
     const carried = new Set(keys.flatMap((url) => { const pr = inventory.get(url)?.pr; return pr ? prTickets(pr, pattern) : []; }));
     const foreign = tickets.filter((ticket) => !carried.has(ticket));

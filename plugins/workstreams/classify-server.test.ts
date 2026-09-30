@@ -88,7 +88,7 @@ describe("Assigning PRs to an effort", () => {
     const pickup = env.efforts.establish({ sourceKey: "ticket:ABC-330", name: "Store pickup", goal: "", projectId: "", coordinatorState: "none",
       members: { tickets: ["ABC-330"], prUrls: [] } });
     expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313), url(314)] }))
-      .toEqual({ ok: false, error: "inkwell/folio #314 isn't unclassified now. Refresh and try again." });
+      .toEqual({ ok: false, error: "inkwell/folio #314 is in an effort now. Refresh and try again." });
     createEffortPileStore(env.bb.storage.database()).move(pickup, "complete");
     expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313)] })).toEqual({ ok: false, error: "Reopen this effort first." });
     // Automatic dispatch works its effort's PRs unasked, and an archived effort is out of use.
@@ -157,7 +157,7 @@ describe("One-offs", () => {
   it("marks only PRs no effort owns, and a refused first use creates nothing", async () => {
     const env = await setup();
     expect(await env.call("classify_one_off", { prUrls: [url(313), url(314)] }))
-      .toEqual({ ok: false, error: "inkwell/folio #314 isn't unclassified now. Refresh and try again." });
+      .toEqual({ ok: false, error: "inkwell/folio #314 is in an effort now. Refresh and try again." });
     expect(env.efforts.source(ONE_OFFS_SOURCE)).toBeNull();
     expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316] });
   });

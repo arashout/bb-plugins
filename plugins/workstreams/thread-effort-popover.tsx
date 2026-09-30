@@ -10,7 +10,7 @@ import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { ThreadEffortPicker } from "./thread-effort";
 import { moveAlsoText, type PickerItem, type PickerMode } from "./thread-effort-picker";
-import { effortColor } from "./deck-view-model";
+import { effortColor, SERVICE_COLOR } from "./deck-view-model";
 import { Kbd, RING } from "./deck-screen";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
@@ -20,7 +20,8 @@ type Linked = ThreadEffortPicker["linked"][number];
 const NEEDS = "min-w-4 rounded-full bg-amber-500/10 px-1.5 text-center text-[10.5px] font-semibold tabular-nums text-amber-800 dark:text-amber-200";
 
 function Dot({ chip }: { chip: Pick<Chip, "kind" | "effortId" | "oneOff"> }) {
-  const color = chip.effortId ? effortColor(chip.effortId, chip.oneOff) : "#8f8e8a";
+  // A service card's hollow amber dot, as the deck draws it; gray for no effort.
+  const color = chip.effortId ? effortColor(chip.effortId, chip.oneOff) : chip.kind === "service" ? SERVICE_COLOR : "#8f8e8a";
   return <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", !chip.effortId && "border border-dashed")}
     style={chip.effortId ? { background: color } : { borderColor: color }} />;
 }

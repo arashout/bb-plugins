@@ -21,7 +21,7 @@ const held = (every: number, repeats: number) => presses("shelf", [[0, 1], ...Ar
 
 describe("the deck as a stack", () => {
   // What lies behind the top card is what ] reaches next, so the stack never shows a card a flip forward wouldn't land on.
-  it("puts the next three cards behind the one shown, in the order ] reaches them, wrapping past Unclassified to the first effort", () => {
+  it("puts the next three cards behind the one shown, in the order ] reaches them, wrapping past the last card to the first", () => {
     expect(ids(behind(RING, "shelf"))).toEqual(["pickup", "one-offs", "unc"]);
     expect(ids(behind(RING, "one-offs"))).toEqual(["unc", "shelf", "pickup"]);
     expect(ids(behind(RING, "unc"))).toEqual(["shelf", "pickup", "one-offs"]);
@@ -37,7 +37,7 @@ describe("the deck as a stack", () => {
 describe("flipping through the deck", () => {
   // Where a flip lands never waits on its motion, so a burst can't lose or queue a press, and the motion never trails the key.
   it("ends a held ] on the card its presses reach, playing the first press and skipping the repeats rather than queueing them", () => {
-    // Seven presses from Shelf order around a ring of four end on Unclassified.
+    // Seven presses from Shelf order around a ring of four end on the last card.
     const trail = held(33, 5);
     expect(trail.at(-1)).toBe("unc none 0");
     expect(trail.slice(0, 3)).toEqual(["pickup slide 200", "one-offs slide 200", "unc none 0"]);
@@ -58,7 +58,7 @@ describe("flipping through the deck", () => {
 
   it("moves forward on ] and back on [, wrapping either way, and a jump moves toward where its card sits", () => {
     const at = { now: 0, last: null, reduced: false };
-    // Past Unclassified, ] still reads as forward: the first effort rises out of the stack.
+    // Past the last card, ] still reads as forward: the first effort rises out of the stack.
     expect(flip(IDS, "unc", { step: 1 }, at)).toMatchObject({ id: "shelf", direction: 1 });
     expect(flip(IDS, "shelf", { step: -1 }, at)).toMatchObject({ id: "unc", direction: -1 });
     expect(flip(IDS, "shelf", { id: "one-offs" }, at)).toMatchObject({ id: "one-offs", direction: 1 });
