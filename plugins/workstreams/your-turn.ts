@@ -1,13 +1,13 @@
 // Your turn: your open PRs where a reviewer's feedback waits on your move,
 // from facts the inventory already keeps. Changes someone asked for that you
-// haven't asked them to review again, an approval whose comments aren't
-// verified handled, review threads someone else opened that are still open,
-// and a reviewer's comments newer than your last push and your last reply.
-// A draft, a PR you hold, and a PR waiting only on CI or on reviewers are not
-// your turn. Pure: the server computes it per row; the badge and the list
-// only count and show it.
+// haven't asked them to review again, attention's approval-comments reason,
+// review threads someone else opened that are still open, and a reviewer's
+// comments newer than your last push and your last reply. A draft, a PR you
+// hold, and a PR waiting only on CI or on reviewers are not your turn. Pure:
+// the server computes it per row; the badge and the list only count and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
+import type { AttentionReason } from "./pr-attention.js";
 import { awaitingRerequest } from "./pr-gates.js";
 
 /**
@@ -32,8 +32,7 @@ export const yourTurnSchema = z.object({
 }).strict();
 export type YourTurn = z.infer<typeof yourTurnSchema>;
 
-export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewDecision" | "reviewRequests" | "latestReviews" | "approvalFeedback" |
-  "approvalFeedbackVerified" | "headCommittedAt" | "reviewFeedback">;
+export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "headCommittedAt" | "reviewFeedback">;
 
 const time = (value: string | null | undefined): number | null => {
   const at = value ? Date.parse(value) : Number.NaN;
@@ -49,18 +48,19 @@ export function commentsSince(pr: Pick<Pr, "headCommittedAt" | "reviewFeedback">
   return at > Math.max(pushed, time(pr.reviewFeedback!.repliedAt) ?? Number.NEGATIVE_INFINITY) ? { login: comment.login, at } : null;
 }
 
-/** Whether reviewer feedback waits on you on this PR, and which. `held`: you hold the PR, which parks it until you release it. */
-export function yourTurn(pr: YourTurnFacts, held: boolean): YourTurn | null {
+/**
+ * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention, whose approval-comments reason asks only once
+ * nothing else holds the merge, so an approval waiting on CI waits with it. `held`: you hold the PR, which parks it until you release it.
+ */
+export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since">[], held: boolean): YourTurn | null {
   if (held || pr.state !== "OPEN" || pr.isDraft) return null;
   const parts: { kind: YourTurnKind; text: string; since: number | null }[] = [];
   // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours.
   const changes = awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
   if (changes.length) parts.push({ kind: "changes", text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
     since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
-  if (pr.reviewDecision === "APPROVED" && pr.approvalFeedback?.status === "present" && pr.approvalFeedbackVerified !== true) {
-    const approved = pr.latestReviews.filter((review) => review.state === "APPROVED").map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY);
-    parts.push({ kind: "approval", text: "Approved with comments", since: approved.length ? Math.max(...approved) : null });
-  }
+  const approval = reasons.find((reason) => reason.kind === "approval-comments");
+  if (approval) parts.push({ kind: "approval", text: "Approved with comments", since: approval.since });
   const open = pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
   const comment = commentsSince(pr);

@@ -119,7 +119,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
     feedbackFingerprint: pr?.approvalFeedback?.fingerprint ?? null,
     attention: [...input.reasons],
-    yourTurn: input.authored && pr ? yourTurn(pr, input.hold !== null) : null,
+    yourTurn: input.authored && pr ? yourTurn(pr, input.reasons, input.hold !== null) : null,
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
