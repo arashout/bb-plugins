@@ -864,7 +864,7 @@ whose ticket it carries.
 
 Every write from the deck is a batch the user confirms, and each step is only
 on their click. `deck_batch_plan` takes a `kind` (`nudge`, `request`,
-`ready`, `release`, or `advance`) and an `effortId`, `prUrls`, or both. It
+`ready`, `release`, `ask`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
 covers the Needs you rows of that kind. The deck's per-row Advance is
@@ -878,7 +878,14 @@ asks the `reviewers` given, else each PR's first suggested reviewer. It takes
 `seen` as `deck_get` does, so a row whose write landed isn't planned again
 until the view marks it seen. `release` covers the effort's held PRs: it lifts
 each hold after the same window and writes nothing to GitHub, so it runs on any
-pile, and Advance never includes it.
+pile, and Advance never includes it. `ask` takes one PR in `prUrls` whose
+approval notes wait on the user, and sends its thread (the one working on it,
+else the one it started in) the approval-feedback recipe; it confirms nothing.
+A PR with no thread gets a new one in its checkout, beneath its effort's
+repository controller (or its repository's parent when no effort owns it),
+only when that parent already exists: Ask never stores an effort or starts a
+coordinator, controller, or parent, so without one the PR is skipped with why.
+`what` names where it goes. Advance never includes it.
 
 `deck_batch_start` confirms a plan within 10 minutes of it, while each of its
 PRs is on the active pile (a release needn't be). The batch sends 8 seconds later (`dispatchAt`)

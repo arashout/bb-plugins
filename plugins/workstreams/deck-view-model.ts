@@ -35,7 +35,8 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
 export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { nudge: "nudge", request: "request", ready: "ready", release: "release" };
 const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "held" };
 const ACTED: Record<ActedKind, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
-  request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"] };
+  request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"],
+  ask: ["Asking its thread…", "Asked its thread"] };
 /** A held row Release can take: still held, and nothing you did to it waits for Mark seen. */
 const releasable = (line: Pick<DeckLine, "row" | "dim">) => !line.dim && !!line.row?.hold;
 /** Muted effort colors, picked by the effort's id so a card keeps its color across reads and sessions. */

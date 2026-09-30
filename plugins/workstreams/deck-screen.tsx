@@ -622,7 +622,7 @@ export type ConfirmPlan = { title: string; sub: string; verb: string; items: rea
   skipped: readonly Pick<Skipped, "prUrl" | "ref" | "reason">[]; excluded: string | null; request: boolean;
   /** What happens after the window, as its footer says it: "Sends", or "Releases" for a release. */
   when?: string };
-const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray" };
+const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray", ask: "violet" };
 
 /**
  * The listing confirm: nothing is written until you press its button (or ⌘↵), and then only after SEND_DELAY_MS, which Undo cancels.

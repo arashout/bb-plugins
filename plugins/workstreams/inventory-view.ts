@@ -16,6 +16,8 @@ import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstrea
 import { prTarget } from "./ghactions.js";
 
 export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
+/** Every action a row records, as inventory-actions.ts takes them. */
+export const INVENTORY_ACTIONS = ["mark-ready", "request-review", "nudge", "confirm-handled", "ask-thread"] as const;
 export type InventoryQuestion = (typeof INVENTORY_QUESTIONS)[number];
 
 const threadSchema = z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict();
@@ -43,7 +45,7 @@ export const inventoryRowSchema = z.object({
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
   suggestedReviewers: z.array(z.string()),
   /** What the last inventory action on the PR did, or why it was refused. */
-  lastAction: z.object({ at: z.number(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]), ok: z.boolean(), detail: z.string(),
+  lastAction: z.object({ at: z.number(), action: z.enum(INVENTORY_ACTIONS), ok: z.boolean(), detail: z.string(),
     reviewers: z.array(z.string()) }).strict().nullable(),
 }).strict();
 export type InventoryRow = z.infer<typeof inventoryRowSchema>;
@@ -80,8 +82,8 @@ export type InventoryRowInput = {
 
 const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
 
-export function inventoryRow(input: InventoryRowInput): InventoryRow {
-  const { pr, observation, managed, stackedOn } = input;
+/** The thread a PR's work started in, and the one working on it now or last, as its row and its Open thread name them. */
+export function rowThreads(input: Pick<InventoryRowInput, "links" | "attemptThread" | "threads">): InventoryRow["threads"] {
   const thread = (id: string | null | undefined): InventoryRow["threads"]["origin"] => {
     const known = id ? input.threads.get(id) : undefined;
     return id && known ? { id, title: (known.title ?? known.titleFallback ?? id).slice(0, 200), active: known.status === "active" } : null;
@@ -93,6 +95,11 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
   const executor = input.attemptThread ?? input.links.filter((link) => known(link) && link.sources.some((source) => EXECUTORS.has(source)))
     .sort((a, b) => Number(input.threads.get(b.threadId)!.status === "active") - Number(input.threads.get(a.threadId)!.status === "active") ||
       input.threads.get(b.threadId)!.updatedAt - input.threads.get(a.threadId)!.updatedAt)[0]?.threadId;
+  return { origin: thread(origin?.threadId), executor: thread(executor) };
+}
+
+export function inventoryRow(input: InventoryRowInput): InventoryRow {
+  const { pr, observation, managed, stackedOn } = input;
   const stage = pr === null ? null : stageFor(prLifecycle(pr), pr, stackedOn);
   const target = prTarget(input.prUrl);
   return {
@@ -108,7 +115,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
-    threads: { origin: thread(origin?.threadId), executor: thread(executor) },
+    threads: rowThreads(input),
     managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
     suggestedReviewers: [...input.suggestedReviewers],
     lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,

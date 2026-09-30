@@ -242,7 +242,8 @@ function lastOf(row: InventoryRow, outcome: Outcome | undefined, now: number): I
   const last = outcome && (!server || outcome.at >= server.at) ? outcome : server;
   if (!last) return null;
   const when = `${age(last.at, now)} ago`;
-  return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${WORD[last.action]} ${last.action === "refresh" ? "failed" : "refused"} ${when}: ${last.text}` };
+  const word = last.action === "ask-thread" ? "Ask its thread" : WORD[last.action];
+  return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${word} ${last.action === "refresh" ? "failed" : "refused"} ${when}: ${last.text}` };
 }
 
 export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, context: { now: number; limitedUntil: number | null;

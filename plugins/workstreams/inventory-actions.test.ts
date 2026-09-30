@@ -30,6 +30,7 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; evidence?: Approv
   const records: ActionRecord[] = [];
   const writes: PrWrite[] = [];
   const confirmed: unknown[][] = [];
+  const asked: unknown[][] = [];
   let hold: PrHold | null = null, writer: string | null = null, effortHold: string | null = null, locked = false;
   const { listed = true, fresh = pr() } = options;
   const deps: InventoryActionDeps = {
@@ -44,10 +45,11 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; evidence?: Approv
     write: vi.fn(async (request: PrWrite) => { log.push("write"); writes.push(request); return { ok: true as const, detail: "Done." }; }),
     handling: async () => { log.push("notes"); return { ok: true as const, headOid: HEAD, fingerprint: FEEDBACK.fingerprint, sources: [], evidence: options.evidence ?? NONE }; },
     confirm: (...args) => { log.push("confirm"); confirmed.push(args); },
+    ask: async (prUrl, notes) => { log.push(locked ? "ask while locked" : "ask"); asked.push([prUrl, notes]); return { ok: true as const, detail: "Asked its thread." }; },
     record: async (entry) => { records.push(entry); },
     ...options.deps,
   };
-  return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed,
+  return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed, asked,
     hold: (value: PrHold | null) => { hold = value; }, writer: (value: string | null) => { writer = value; },
     effortHold: (value: string | null) => { effortHold = value; }, lock: () => { locked = true; } };
 }
@@ -222,6 +224,31 @@ describe("inventory actions", () => {
       expect(env.log).toEqual(["read"]);
       expect(env.records).toMatchObject([{ action: "confirm-handled", ok: false, detail: error }]);
     }
+  });
+
+  // Asking is the confirm's answer to notes nobody answered: the thread does the work, and nothing is confirmed.
+  it("asks the PR's thread to address the notes the row showed, after its lock is released, and confirms nothing", async () => {
+    const env = setup({ fresh: commented() });
+    expect(await env.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: true, detail: "Asked its thread." });
+    // The send takes the PR's lock itself, so the action lets go of it first.
+    expect(env.log).toEqual(["read", "ask"]);
+    expect(env.asked).toEqual([[URL, { headOid: HEAD, feedback: FEEDBACK }]]);
+    expect([env.confirmed, env.writes]).toEqual([[], []]);
+    expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "ask-thread", ok: true, detail: "Asked its thread.", reviewers: [] }]);
+  });
+
+  it("asks no thread under a hold, or once the head, the notes, or their verification moved", async () => {
+    const held = setup({ fresh: commented() });
+    held.hold({ reason: "Store layout first", heldAt: 0 });
+    expect(await held.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("On hold") });
+    for (const [fresh, error] of [[commented({ headRefOid: "b".repeat(40) }), "New commits landed"],
+      [commented({ approvalFeedback: { ...FEEDBACK, fingerprint: "e".repeat(64) } }), "notes changed"],
+      [commented({ approvalFeedbackVerified: true }), "already verified"]] as const) {
+      const env = setup({ fresh });
+      expect(await env.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+      expect(env.asked).toEqual([]);
+    }
+    expect(held.asked).toEqual([]);
   });
 
   it("records a write GitHub refused, and doesn't read back what didn't change", async () => {

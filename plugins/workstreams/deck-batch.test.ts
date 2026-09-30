@@ -56,6 +56,28 @@ describe("planning a deck batch", () => {
 
 });
 
+describe("planning an ask", () => {
+  // The confirm's answer to notes nobody answered: the PR's thread is asked, through the listing and its Undo window, and nothing is confirmed.
+  it("asks the thread of each chosen PR whose next move is its notes, bound to the head and notes it showed, and never in Advance", () => {
+    next = 690;
+    const rows = [row("confirm", { notes: 2 }), row("nudge"), row("confirm", { hold: { reason: "Counter redesign", since: 1 } }), row("confirm", {}, { fingerprint: null }),
+      row("confirm", { acted: { kind: "ask", state: "queued", at: 1, batchId: "b" } }), row("confirm", {}, { pile: "held" })];
+    expect(brief(planBatch("ask", rows, { selected: true }))).toEqual({ items: ["ask quill #690: Ask its thread to address 2 notes"], skipped: [
+      "quill #691: Its approval has no notes waiting.", "quill #692: On hold. Release it first.", "quill #693: Not read in full yet. Refresh it first.",
+      "quill #694: A write on it is waiting or just ran.", "quill #695: Its effort is on hold."] });
+    expect(planBatch("ask", rows.slice(0, 1), { selected: true }).items[0]).toMatchObject({ headOid: HEAD, fingerprint: "f".repeat(64), notes: 2 });
+    expect(brief(planBatch("advance", rows, { selected: false })).items).toEqual(["nudge quill #691: Nudge @mira"]);
+  });
+
+  it("names where the ask goes, and leaves the PR out with why when it can go nowhere yet", () => {
+    next = 700;
+    const plan = (ask: { to: string } | { why: string }) => brief(planBatch("ask", [row("confirm", {}, { ask })], { selected: true }));
+    expect(plan({ to: "Start a thread under Counter redesign" }).items).toEqual(["ask quill #700: Start a thread under Counter redesign to address 1 note"]);
+    expect(plan({ why: "This PR has no thread, and nothing to start one under yet." })).toEqual({ items: [],
+      skipped: ["quill #701: This PR has no thread, and nothing to start one under yet."] });
+  });
+});
+
 describe("planning a release", () => {
   it("lists each held PR on the card, never a PR that isn't held, and leaves a release out of Advance", () => {
     next = 640;

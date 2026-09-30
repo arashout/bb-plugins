@@ -215,3 +215,18 @@ export function buildWorkOrder(input: WorkOrderInput): { marker: string; role: M
     ].join("\n\n"),
   };
 }
+
+/**
+ * The approval-feedback recipe as a message to a PR's own thread, from the confirm when nothing since the approval shows its notes
+ * handled: address them, or say why the code already does, on the PR where the confirm can see it. It grants nothing a thread message
+ * doesn't, and never a merge.
+ */
+export function approvalFeedbackAsk(input: { headOid: string; notes: number }): string {
+  const steps = (recipe("address_review_feedback") as WorkerRecipe).instructions;
+  return [
+    `Address the approval's ${input.notes === 1 ? "note" : `${input.notes} notes`} on this PR (head ${input.headOid.slice(0, 7)}): the review bodies and any threads the approval opened. Nothing since the approval shows them handled yet.`,
+    steps.map((step, index) => `${index + 1}. ${step}`).join("\n"),
+    `${FEEDBACK_WORK.address} ${DRAFT_RULE}`,
+    "Leave a commit, a reply on the PR, or resolved threads so Workstreams can see the notes were handled. Do not merge or deploy.",
+  ].join("\n\n");
+}

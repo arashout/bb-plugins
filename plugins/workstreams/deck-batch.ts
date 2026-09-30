@@ -11,6 +11,8 @@
 // that leaves its effort, is refused instead of sent. Release (A17.3) lifts
 // your holds the same way: listed, then after the window, and never by Advance.
 // It writes nothing to GitHub, so it runs on any pile, as holding a PR does.
+// Ask sends one PR's own thread the approval-feedback recipe, from that PR's
+// review notes when nothing since the approval shows them handled; never Advance.
 //
 // A batch lives in one row. Undo and dispatch each claim it from `scheduled`
 // in one statement, so exactly one wins, even while a reload's replacement
@@ -40,11 +42,11 @@ const LEGACY_CONFIRM = "Review notes are confirmed one PR at a time now, after r
 const itemSchema = z.object({
   /** `confirm` only in a batch planned before confirmations became per PR. */
   prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(ACTED_KINDS),
-  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Release". */
+  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Release", "Ask “Spine labels” to address 2 notes". */
   what: z.string(),
   /** Whom a nudge or request asks. */
   reviewers: z.array(z.string()),
-  /** The head Mark ready and a confirmation bind to, and the approval comments a confirmation covers. */
+  /** The head Mark ready and an ask bind to, and the approval notes an ask covers. */
   headOid: z.string().nullable(), fingerprint: z.string().nullable(), notes: z.number(),
   /** The reviewers the row showed, which a request checks before it asks. */
   shown: z.object({ requested: z.array(z.string()), reviewed: z.array(z.object({ login: z.string(), state: z.string() }).strict()) }).strict().nullable(),
@@ -92,7 +94,9 @@ export const deckBatchContract = {
 
 /** A deck row with its pile, when you last marked it seen, and the facts its write binds to, as the row showed them. */
 export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
-  pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers };
+  pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers;
+  /** Ask's destination, as the listing names it ("Ask “Spine labels”", "Start a thread under Store pickup"), or why it has none. */
+  ask?: { to: string } | { why: string } };
 
 const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
@@ -107,7 +111,8 @@ const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}
 export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[], options: { selected: boolean; reviewers?: readonly string[] }):
   { items: Omit<BatchItem, "state" | "detail" | "at">[]; skipped: Skipped[] } {
   if (kind === "release") return planRelease(rows, options.selected);
-  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
+  if (kind === "ask") return planAsk(rows);
+  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind as BatchKind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
   for (const { row, pile, seenAt, head, shown } of rows) {
     const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
@@ -133,6 +138,23 @@ export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[],
     }
   }
   return { items: items.sort((a, b) => kinds.indexOf(a.kind as BatchKind) - kinds.indexOf(b.kind as BatchKind)), skipped };
+}
+
+/** Ask: each chosen PR whose next move is its review notes, bound to the head and notes its row showed. */
+function planAsk(rows: readonly PlanRow[]): ReturnType<typeof planBatch> {
+  const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
+  for (const { row, pile, seenAt, head, fingerprint, ask } of rows) {
+    const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
+    const skip = (reason: string) => skipped.push({ prUrl: row.prUrl, ref, reason });
+    if (row.hold) { skip("On hold. Release it first."); continue; }
+    if (row.section !== "confirm") { skip("Its approval has no notes waiting."); continue; }
+    if (!needsYou(row, pile, seenAt)) { skip(PILE_WHY[pile] ?? "A write on it is waiting or just ran."); continue; }
+    if (!head || !fingerprint) { skip("Not read in full yet. Refresh it first."); continue; }
+    if (ask && "why" in ask) { skip(ask.why); continue; }
+    items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "ask", what: `${ask?.to ?? "Ask its thread"} to address ${row.notes === 1 ? "1 note" : `${row.notes} notes`}`,
+      reviewers: [], headOid: head, fingerprint, notes: row.notes, shown: null });
+  }
+  return { items, skipped };
 }
 
 /** Release: each held PR, on any pile, unless a release of it is already waiting or sending. */

@@ -6,9 +6,11 @@
 // under a hold (the PR's or its effort's), a v2 claim or another writer, and
 // when the facts the step depends on changed since the row was shown. A
 // confirmation also reads what came after the approval, and without evidence
-// that its notes were handled it records only when you confirm anyway. Every
-// outcome is recorded, refusals included. Merge is not here: the row opens the
-// existing fresh merge preview, and nothing merges outside it.
+// that its notes were handled it records only when you confirm anyway. Asking
+// the PR's thread to address the notes instead sends it the approval-feedback
+// recipe, on the same guards. Every outcome is recorded, refusals included.
+// Merge is not here: the row opens the existing fresh merge preview, and
+// nothing merges outside it.
 import type { ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { evidenceText, handled, type ApprovalEvidence, type ApprovalHandling } from "./approval-evidence.js";
 import type { Pr, PrWrite } from "./contract.js";
@@ -16,7 +18,7 @@ import { REVIEWER } from "./ghactions.js";
 import type { AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
 
-export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled";
+export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "ask-thread";
 export type ActionResult = { ok: true; detail: string } | { ok: false; error: string };
 export type ActionRecord = { at: number; prUrl: string; action: InventoryAction; ok: boolean; detail: string; reviewers: string[] };
 /** The reviewers a row showed: those asked, and those who reviewed, with their latest review's state. */
@@ -42,11 +44,16 @@ export type InventoryActionDeps = {
   handling(prUrl: string): Promise<ApprovalHandling>;
   /** Record your verification of this approval feedback on this head, with your provenance and the evidence you confirmed on. */
   confirm(prUrl: string, headOid: string, feedback: ApprovalFeedbackSnapshot, evidence: ApprovalEvidence): void;
+  /**
+   * Send the PR's own thread the approval-feedback recipe for these notes, starting one under its effort's parent only when it has none.
+   * Called without the PR's lock, which the send takes itself.
+   */
+  ask(prUrl: string, notes: { headOid: string; feedback: ApprovalFeedbackSnapshot }): Promise<ActionResult>;
   record(entry: ActionRecord): Promise<void>;
 };
 
 type Step = { write: PrWrite; reviewers?: string[] } | { confirm: { headOid: string; feedback: ApprovalFeedbackSnapshot; evidence: ApprovalEvidence } }
-  | { refuse: string };
+  | { ask: { headOid: string; feedback: ApprovalFeedbackSnapshot } } | { refuse: string };
 const logins = (values: readonly string[]) => [...new Set(values.map((login) => login.toLowerCase()))].sort().join(", ");
 const mentions = (values: readonly string[]) => values.map((login) => `@${login}`).join(", ");
 /** Who a nudge re-requests: every reviewer an overdue request or an answered change request names. */
@@ -85,8 +92,10 @@ export function createInventoryActions(deps: InventoryActionDeps) {
     if (!deps.listed(prUrl)) return refuse("That PR isn't one of your open PRs in the inventory. Refresh it and try again.");
     const guarded = heldOrClaimed(prUrl) ?? await deps.effortHold(prUrl);
     if (guarded) return refuse(guarded);
-    const release = deps.lock(prUrl);
-    if (!release) return refuse("Another action on this PR is still running; nothing was written.");
+    const lock = deps.lock(prUrl);
+    if (!lock) return refuse("Another action on this PR is still running; nothing was written.");
+    let held = true;
+    const release = () => { if (held) { held = false; lock(); } };
     try {
       const read = await deps.read(prUrl);
       if (!read.ok) return refuse(`GitHub couldn't be read, so nothing was written: ${read.error}`);
@@ -97,6 +106,8 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       const step = await decide(read.pr);
       if ("refuse" in step) return refuse(step.refuse);
       // GitHub doesn't change, so there's nothing to read back.
+      // The thread send takes the PR's lock and checks every writer again itself.
+      if ("ask" in step) { release(); return finish(await deps.ask(prUrl, step.ask)); }
       if ("confirm" in step) {
         const { headOid, feedback, evidence } = step.confirm;
         deps.confirm(prUrl, headOid, feedback, evidence);
@@ -158,6 +169,14 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (notes.headOid !== headOid || notes.fingerprint !== fingerprint) return { refuse: "The approval's notes or head changed while they were read. Read them again; nothing was written." };
       if (!handled(notes.evidence) && !anyway) return { refuse: `${evidenceText(notes.evidence)}. Ask its thread to address it, or confirm anyway; nothing was written.` };
       return { confirm: { headOid, feedback, evidence: notes.evidence } };
+    }),
+    /** Ask the PR's thread to address the approval's notes the row showed, while fresh facts still show them unverified on that head. */
+    askThread: (prUrl: string, headOid: string, fingerprint: string) => act("ask-thread", prUrl, (fresh) => {
+      if (fresh.headRefOid !== headOid) return { refuse: "New commits landed since you read the notes. Read them again; nothing was sent." };
+      const feedback = fresh.approvalFeedback;
+      if (feedback?.status !== "present" || feedback.fingerprint !== fingerprint) return { refuse: "The approval's notes changed since you read them. Read them again; nothing was sent." };
+      if (fresh.approvalFeedbackVerified === true) return { refuse: "These notes are already verified on this head; nothing was sent." };
+      return { ask: { headOid, feedback } };
     }),
   };
 }

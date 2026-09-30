@@ -58,7 +58,8 @@ import { createRepoControllerService } from "./repo-controller.js";
 import { cardThreadPrompt, type CardThreadSnapshot } from "./card-thread.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldFor, prHoldsSchema } from "./pr-holds.js";
-import { INVENTORY_QUESTIONS, inventoryRow, inventoryRowSchema, inventoryText, inventoryView, inventoryViewSchema, type InventoryQuestion, type InventoryView }
+import { INVENTORY_ACTIONS, INVENTORY_QUESTIONS, inventoryRow, inventoryRowSchema, inventoryText, inventoryView, inventoryViewSchema, rowThreads, type InventoryQuestion,
+  type InventoryView }
   from "./inventory-view.js";
 import { createInventoryActions, suggestReviewers, type ActionRecord } from "./inventory-actions.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, prAttention, type AttentionClock } from "./pr-attention.js";
@@ -151,6 +152,7 @@ import {
   withinPath,
 } from "./threads.js";
 import { startThread } from "./spawn.js";
+import { approvalFeedbackAsk } from "./effort-recipes.js";
 import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
 import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
@@ -4901,6 +4903,16 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const launchingCheckouts = new Set<string>();
+  /** The effort, placement scope, and repository a thread started in this checkout is placed by, as the spawn below reads them. */
+  async function spawnPlacement(path: string, ticket: string) {
+    const raw = readUnits().find((unit) => unit.path === path);
+    const effort = (raw?.pr ? effortStore.owner("prUrl", raw.pr.url) : null) ?? effortStore.owner("ticket", ticket)
+      ?? effortStore.owner("checkoutPath", path);
+    const scope = raw?.pr ? await effortScope(raw.pr.url) ?? (effort ? scopeOfEstablished(effort) : null)
+      : await checkoutScope(path) ?? (effort ? scopeOfEstablished(effort) : null);
+    const repo = raw?.pr ? prTarget(raw.pr.url)?.slug : raw?.githubRepo ?? null;
+    return { raw, effort, scope, repo };
+  }
   const agentSdkFor = (beforeSpawn?: () => void): AgentSdk => ({
     projects: { list: () => bb.sdk.projects.list() },
     threads: {
@@ -4912,13 +4924,14 @@ export default async function plugin(bb: BbPluginApi) {
           const active = await activeCheckoutThread(path, args.environment.hostId, (offset) => bb.sdk.threads.list({ archived: false, includeHidden: true, limit: 100, offset }));
           if (active) throw new Error(`Thread ${active} is already working in this checkout. Wait for it or stop it before starting another writer.`);
           beforeSpawn?.();
-          const raw = readUnits().find((unit) => unit.path === path);
-          let effort = (raw?.pr ? effortStore.owner("prUrl", raw.pr.url) : null) ?? effortStore.owner("ticket", args.pluginMetadata.ticket)
-            ?? effortStore.owner("checkoutPath", path);
-          const scope = raw?.pr ? await effortScope(raw.pr.url) ?? (effort ? scopeOfEstablished(effort) : null)
-            : await checkoutScope(path) ?? (effort ? scopeOfEstablished(effort) : null);
-          const repo = raw?.pr ? prTarget(raw.pr.url)?.slug : raw?.githubRepo ?? null;
+          const found = await spawnPlacement(path, args.pluginMetadata.ticket);
+          const { raw, scope, repo } = found;
+          let effort = found.effort;
           if (effort && raw?.pr && !repo) throw new Error("The tracked PR URL is invalid. Refresh before launching work.");
+          // A chosen parent must already be where this thread goes, so a spawn refused below never establishes an effort or starts its threads.
+          if (args.parentThreadId && storedPlacementParent(repo ?? null, scope) !== args.parentThreadId) {
+            throw new Error("The selected parent is not this effort's repository controller. Reopen the action preview.");
+          }
           const placement = await resolvePlacement(repo ?? null, args.projectId, args.environment.hostId, scope);
           effort = placement.effort ?? effort;
           const routedParentId = placement.parentThreadId;
@@ -5613,7 +5626,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** An inventory action as the deck batch kind that runs it. */
-  const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm" } as const;
+  const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm", "ask-thread": "ask" } as const;
   /** Everything the effort deck reads, from one board read. See deck.ts. */
   async function deckInput(seen: Readonly<Record<string, number>> = {}, ghosts: readonly string[] = []): Promise<DeckInput> {
     const current = await board();
@@ -5664,6 +5677,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** What a deck batch would do per PR, from the rows the deck shows; see deck-batch.ts. A request's reviewers must be GitHub logins. */
   async function deckBatchPlan({ kind, effortId, prUrls, reviewers, seen = {} }: z.infer<typeof deckBatchContract.deck_batch_plan.input>) {
     if (!effortId && !prUrls) return { ok: false as const, error: "Choose an effort or PRs." };
+    if (kind === "ask" && new Set(prUrls?.map(prWorkItemKey)).size !== 1) return { ok: false as const, error: "Ask one PR's thread at a time." };
     const invalid = (reviewers ?? []).filter((login) => !REVIEWER.test(login));
     if (invalid.length) return { ok: false as const, error: `Not a GitHub login: ${invalid.join(", ")}.` };
     // A service card is only the deck's: its PRs are the ones no effort owns in its repository.
@@ -5675,8 +5689,12 @@ export default async function plugin(bb: BbPluginApi) {
     const wanted = prUrls && new Set(prUrls.map(prWorkItemKey));
     const rows = deckRows(await deckInput()).filter(({ input, cardId }) => (!effortId || cardId === (effort?.id ?? effortId)) && (!wanted || wanted.has(input.prUrl)));
     const seenAt = new Map(Object.entries(seen));
+    // Ask names where it goes, and creates nothing to get there.
+    const route = kind === "ask" ? await askRoute(prWorkItemKey(prUrls![0]!)) : null;
+    const ask = route && (route.kind === "none" ? { why: route.why }
+      : { to: route.kind === "thread" ? `Ask “${route.title}”` : `Start a thread under ${route.under}` });
     const planned = planBatch(kind, rows.map(({ row, input, pile }) => ({ row, pile, seenAt: seenAt.get(row.prUrl), head: input.head,
-      fingerprint: input.feedbackFingerprint, shown: input.reviewers })), { selected: !!wanted, reviewers });
+      fingerprint: input.feedbackFingerprint, shown: input.reviewers, ...ask ? { ask } : {} })), { selected: !!wanted, reviewers });
     for (const url of wanted ?? []) if (!rows.some(({ row }) => row.prUrl === url)) {
       const target = prTarget(url);
       planned.skipped.push({ prUrl: url, ref: target ? `${target.name} #${target.number}` : url, reason: effortId ? "Not an open PR on this card." : "Not an open PR on the deck." });
@@ -5684,7 +5702,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { ok: true as const, ...deckBatches.plan(kind, effort?.id ?? (service ? effortId! : null), planned), skipped: planned.skipped };
   }
 
-  const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]),
+  const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(INVENTORY_ACTIONS),
     ok: z.boolean(), detail: z.string(), reviewers: z.array(z.string()) })).catch([]);
   /** What each inventory action did, newest first: the last 200 clicks, refusals included. */
   const actionRecords = async (): Promise<ActionRecord[]> => actionRecordsSchema.parse((await bb.storage.kv.get<unknown>("inventoryActions")) ?? []);
@@ -5717,6 +5735,46 @@ export default async function plugin(bb: BbPluginApi) {
     if (hostId === null) return { ok: false, error: "No primary BB host is available to read GitHub." };
     try { return await host.call("approvalHandling", { prUrl }, { hostId, signal: disposal.signal, timeoutMs: HOST_ACTION_TIMEOUT_MS }); }
     catch (error) { return { ok: false, error: String(error).slice(0, 300) }; }
+  }
+  type AskRoute = { kind: "thread"; id: string; title: string }
+    | { kind: "new"; under: string; path: string; ticket: string; parentThreadId: string } | { kind: "none"; why: string };
+  /**
+   * Where Ask sends, creating nothing: the thread the PR's row names (the one working on it, else the one it started in), else a new thread
+   * in its checkout beneath the parent the board places PR threads under (its effort's repository controller, or its repository's parent
+   * when no effort owns it), and only once that parent exists. Asking never stores an effort or starts a coordinator, controller, or parent.
+   */
+  async function askRoute(prUrl: string): Promise<AskRoute> {
+    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const work = readWorkContext(await board(), pattern, false, prFacts.reads());
+    const { executor, origin } = rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
+      attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null });
+    const thread = executor ?? origin;
+    if (thread) return { kind: "thread", id: thread.id, title: thread.title };
+    const known = knownPr(prUrl);
+    if (!known?.path) return { kind: "none", why: "This PR has no thread or checkout yet." };
+    const path = known.path;
+    const units = readUnits();
+    const raw = units.find((unit) => unit.path === path)!;
+    const ticket = (await findTickets(pattern, units))(raw)?.ticket ?? raw.dirName;
+    const { scope, repo } = await spawnPlacement(path, ticket);
+    const parentThreadId = storedPlacementParent(repo ?? null, scope);
+    if (!parentThreadId) return { kind: "none", why: "This PR has no thread, and nothing to start one under yet." };
+    return { kind: "new", under: scope?.name ?? known.repo, path, ticket, parentThreadId };
+  }
+  /** A new thread in the PR's checkout, sent the approval-feedback recipe, beneath the parent its route found. */
+  async function startApprovalThread(prUrl: string, message: string, route: Extract<AskRoute, { kind: "new" }>): Promise<{ ok: true; detail: string } | { ok: false; error: string }> {
+    const known = knownPr(prUrl);
+    if (!known) return { ok: false, error: "This PR is no longer on the board; nothing was sent." };
+    const prompt = `Workstreams row: ${known.repo} #${known.pr.number} — ${known.pr.title}\nPR: ${prWorkItemKey(prUrl)}\nCheckout: ${route.path}\n\n${message}`;
+    try {
+      const model = await modelFor("code");
+      const result = await withPrWriter(route.path, prWorkItemKey(prUrl), () => startThread({ projects: { list: () => bb.sdk.projects.list() },
+        threads: { spawn: (args) => agentSdk.threads.spawn(args) } }, { path: route.path, ticket: route.ticket }, prompt, model, route.parentThreadId));
+      if (!result.ok) return result;
+      startedFor.set(result.threadId, result.ticket);
+      announceThreads();
+      return { ok: true, detail: `Started a thread under ${route.under} to address the notes.` };
+    } catch (error) { return { ok: false, error: `The thread couldn't start, so nothing was sent: ${String(error).slice(0, 300)}` }; }
   }
   /** One audit row per confirmation you record or revoke, with what it covered. */
   const auditConfirmation = (prUrl: string, action: "confirm" | "revoke", body: Record<string, unknown>) =>
@@ -5771,6 +5829,16 @@ export default async function plugin(bb: BbPluginApi) {
       auditConfirmation(prUrl, "confirm", { headOid, fingerprint: record.fingerprint, evidence });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
     },
+    // The recipe goes to the thread the PR's row names through the guarded thread send; only a PR with no thread gets a new one, and only
+    // beneath a parent that already exists. See askRoute.
+    ask: async (prUrl, { headOid, feedback }) => {
+      const message = approvalFeedbackAsk({ headOid, notes: feedback.sourceIds.length });
+      const route = await askRoute(prUrl);
+      if (route.kind === "none") return { ok: false, error: `${route.why} Open a thread for it first; nothing was sent.` };
+      if (route.kind === "new") return startApprovalThread(prUrl, message, route);
+      const sent = await rpcHandlers.thread_message({ prUrl, threadId: route.id, message });
+      return sent.ok ? { ok: true, detail: `Asked “${route.title}” to address the notes.` } : sent;
+    },
     record: (entry) => {
       const next = recording.then(async () => {
         await bb.storage.kv.set("inventoryActions", [entry, ...await actionRecords()].slice(0, 200));
@@ -5800,6 +5868,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** Deck batches send through the inventory's guarded actions, one PR at a time, after their Undo window. See deck-batch.ts. */
   const deckBatches = createDeckBatches({ db, now: Date.now, changed: deckChanged,
     run: (item) => item.kind === "release" ? releaseHold(item.prUrl)
+      : item.kind === "ask" ? inventoryActions.askThread(item.prUrl, item.headOid!, item.fingerprint!)
       : item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
       : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
       : inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!),

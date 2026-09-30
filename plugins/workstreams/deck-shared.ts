@@ -36,10 +36,11 @@ export const cardTier = (id: string) => id === LOOSE_ID ? 2 : id.startsWith(SERV
 export const BATCH_KINDS = ["nudge", "request", "ready"] as const;
 export type BatchKind = (typeof BATCH_KINDS)[number];
 /**
- * Every write the deck confirms in a listing and sends after its Undo window: Advance's kinds, and Release, which lifts your hold on a PR
- * (plan amendment A17.3). Release is never part of Advance: only you release a hold.
+ * Every write the deck confirms in a listing and sends after its Undo window: Advance's kinds; Release, which lifts your hold on a PR
+ * (plan amendment A17.3); and Ask, which sends a PR's own thread the approval-feedback recipe from that PR's review notes. Neither is
+ * ever part of Advance: only you release a hold, and only you ask a thread, one PR at a time.
  */
-export const DECK_WRITES = [...BATCH_KINDS, "release"] as const;
+export const DECK_WRITES = [...BATCH_KINDS, "release", "ask"] as const;
 export type DeckWrite = (typeof DECK_WRITES)[number];
 /** What a row can say you did: a deck write, or a confirmation of its review notes, which only that PR's own confirm records. */
 export const ACTED_KINDS = [...DECK_WRITES, "confirm"] as const;
