@@ -169,8 +169,7 @@ export function createApprovalFeedbackStore(db: RunDb) {
       if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) {
         throw new Error("Only approval feedback read on a known head can be confirmed");
       }
-      const seen = handled(evidence) ? `You confirmed this approval feedback handled; since the approval: ${evidenceText(evidence).replace(/ since this approval$/u, "")}.`
-        : `You confirmed this approval feedback handled without evidence: ${evidenceText(evidence)}.`;
+      const seen = `You confirmed this approval feedback handled${handled(evidence) ? "" : " without evidence"}. ${evidenceText(evidence)}.`;
       return store.save(prUrl, "inventory", { attemptId: `confirmed-${at}`, headOid, fingerprint: snapshot.fingerprint, blockers: [],
         findings: snapshot.sourceIds.map((sourceId) => ({ sourceId, resolution: "already-satisfied" as const, evidence: seen,
           validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user", evidence });

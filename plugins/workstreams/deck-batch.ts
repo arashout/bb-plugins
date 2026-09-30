@@ -112,7 +112,7 @@ export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[],
   { items: Omit<BatchItem, "state" | "detail" | "at">[]; skipped: Skipped[] } {
   if (kind === "release") return planRelease(rows, options.selected);
   if (kind === "ask") return planAsk(rows);
-  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind as BatchKind];
+  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
   for (const { row, pile, seenAt, head, shown } of rows) {
     const ref = `${row.repo.split("/").at(-1)} #${row.number}`;

@@ -88,10 +88,10 @@ describe("approval feedback verification", () => {
     const confirmed = store.confirm(url, snapshot, head, 5_000, none);
     expect(store.get(url)).toEqual(confirmed);
     expect(confirmed).toMatchObject({ provenance: { kind: "user", evidence: none }, threadId: "inventory", headOid: head, fingerprint: snapshot.fingerprint,
-      verifiedAt: 5_000, findings: [{ sourceId: review.id, evidence: "You confirmed this approval feedback handled without evidence: No commits, reply, or resolved threads since this approval.",
+      verifiedAt: 5_000, findings: [{ sourceId: review.id, evidence: "You confirmed this approval feedback handled without evidence. No commits, reply, or resolved threads since this approval.",
         validation: { outcome: "not-needed", detail: "Your confirmation; no check ran." } }] });
     expect(store.confirm(url, snapshot, head, 5_500, { ...none, commits: 2 }).findings[0]!.evidence)
-      .toBe("You confirmed this approval feedback handled; since the approval: 2 commits.");
+      .toBe("You confirmed this approval feedback handled. 2 commits since this approval.");
     store.confirm(url, snapshot, head, 5_000, none);
     expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
     expect(feedbackVerificationState(snapshot, "b".repeat(40), store.get(url))).toBe("head-changed");

@@ -111,8 +111,9 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if ("confirm" in step) {
         const { headOid, feedback, evidence } = step.confirm;
         deps.confirm(prUrl, headOid, feedback, evidence);
-        return finish({ ok: true, detail: handled(evidence) ? `Confirmed the approval's comments handled on ${headOid.slice(0, 7)}: ${evidenceText(evidence)}.`
-          : `Confirmed the approval's comments handled on ${headOid.slice(0, 7)} without evidence: ${evidenceText(evidence).toLowerCase()}.` });
+        const seen = evidenceText(evidence);
+        return finish({ ok: true, detail: handled(evidence) ? `Confirmed the approval's comments handled on ${headOid.slice(0, 7)}: ${seen}.`
+          : `Confirmed the approval's comments handled on ${headOid.slice(0, 7)} without evidence. ${seen}.` });
       }
       const result = await deps.write(step.write);
       // Read it once more so its row shows what the write did.

@@ -166,12 +166,14 @@ describe("inventory actions", () => {
       error: "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written." });
     expect(env.confirmed).toEqual([]);
     expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint, true)).toEqual({ ok: true,
-      detail: "Confirmed the approval's comments handled on aaaaaaa without evidence: no commits, reply, or resolved threads since this approval." });
+      detail: "Confirmed the approval's comments handled on aaaaaaa without evidence. No commits, reply, or resolved threads since this approval." });
     expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK, NONE]]);
     // A read GitHub cut short is no evidence either.
     const cut = setup({ fresh: commented(), evidence: { ...NONE, commits: 3, complete: false }, deps: { attention: earned } });
     expect(await cut.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("cut short") });
     expect(cut.confirmed).toEqual([]);
+    expect(await cut.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint, true)).toEqual({ ok: true,
+      detail: "Confirmed the approval's comments handled on aaaaaaa without evidence. GitHub's answer was cut short, so there's no evidence to show." });
   });
 
   it("confirms in one click on each kind of evidence: a commit, an author's reply, or the approval's threads resolved", async () => {
