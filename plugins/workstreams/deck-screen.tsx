@@ -269,7 +269,7 @@ function Section({ section, state, run, open, stuck, held }: { section: SectionS
     <span title={meta.help} aria-label={meta.help} className="size-4 shrink-0 rounded-full border border-border text-center text-[10px] leading-[14px] text-muted-foreground">?</span>
     {section.changed ? <span className="inline-flex items-center gap-1 text-[11.5px] text-sky-700 dark:text-sky-300"><Changed title="Changed since you looked" />{section.changed} changed</span> : null}
   </>;
-  return <section data-deck-sec={section.key} className="mt-0.5">
+  return <section data-deck-sec={section.key} className="mt-0.5 scroll-mt-10">
     <div className={cn("sticky z-[4] flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1", stuck ? "top-[34px]" : "top-0")}>
       {meta.fold ? <button type="button" data-deck-focus={`fold-${section.key}`} aria-expanded={!folded} onClick={() => run({ kind: "fold", key: section.key })}
         className={cn("flex min-w-0 items-center gap-2 rounded", RING)}>{header}</button> : header}
@@ -333,10 +333,16 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
     <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-0.5">
       <div className="min-w-0 flex-[1_1_300px]">
-        <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
-          <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
-          <span className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", TONE[screen.status.tone].text)}>{screen.status.text}</span>
-        </h1>
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
+            <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
+            <span className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", TONE[screen.status.tone].text)}>{screen.status.text}</span>
+          </h1>
+          {/* Held PRs are one press away on every card: the chip jumps to its Held section. */}
+          {screen.held ? <button type="button" data-deck-focus="held" onClick={() => run({ kind: "action", id: "held" })} title={`Go to the held PRs (${ACTION.held.keys[0]})`}
+            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] text-muted-foreground hover:text-foreground")}>Held · {screen.held}<Kbd>{ACTION.held.keys[0]}</Kbd></button>
+            : null}
+        </div>
         <p className="truncate text-[12px] text-muted-foreground" title={card.goal}>{card.goal || "No goal written yet."}{held && card.reason ? ` · held: ${card.reason}` : ""}</p>
       </div>
       <div className="flex flex-wrap gap-1.5">

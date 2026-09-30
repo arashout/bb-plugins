@@ -76,9 +76,12 @@ export const deckCardSchema = z.object({
     oldestWait: z.object({ prUrl: z.string(), ref: z.string(), text: z.string(), since: z.number() }).strict().nullable() }).strict(),
   /** Merged PRs a read saw against open ones, and how many of the active instruction's "done when" criteria hold. */
   progress: z.object({ merged: z.number(), open: z.number(), criteria: z.object({ validated: z.number(), needed: z.number() }).strict().nullable() }).strict(),
-  /** Up to three: the instruction's unmet "done when" criteria when it has some, else the oldest moves of yours, then the oldest waits. */
+  /**
+   * Up to three: the instruction's unmet "done when" criteria when it has some, else the oldest moves of yours, then the oldest waits. A
+   * held row is none of these until you release it.
+   */
   next: z.array(nextSchema),
-  /** Every row waiting on someone or something else, oldest first. */
+  /** Every row waiting on someone or something else, oldest first; a held row waits on you, under Held. */
   blocked: z.array(waitSchema.extend({ prUrl: z.string(), ref: z.string() }).strict()),
   /** What the stored Linear details say about its tickets; `known` 0 means no Linear data. Each tally counts tickets, most first. */
   linear: z.object({ tickets: z.number(), known: z.number(),
@@ -173,12 +176,13 @@ const urlRef = (url: string) => { const match = /\/([^/]+)\/pull\/(\d+)\/?$/u.ex
 const oldest = (a: number | null, b: number | null) => (a ?? Number.POSITIVE_INFINITY) - (b ?? Number.POSITIVE_INFINITY);
 
 /**
- * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write. Only a
- * parent, a decision, or a hold blocks: a review not yet due a nudge, running checks, and code work a thread is doing are in flight.
+ * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write, and files
+ * the row under Held alone. Only a parent or a decision blocks: a review not yet due a nudge, running checks, and code work a thread is
+ * doing are in flight.
  */
 function place(row: DeckRowInput, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
   const blocked = (waitsOn: NonNullable<DeckRow["waitsOn"]>) => ({ section: "blocked" as const, waitsOn });
-  if (row.hold) return blocked({ kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt });
+  if (row.hold) return { section: "held", waitsOn: { kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt } };
   if (row.decision) return blocked({ kind: "decision", on: `D${row.decision.n}`, what: row.decision.question, since: row.decision.since });
   const move = primary && MOVES[primary];
   if (move && !(move === "work" && row.threads.executor?.active)) return { section: move, waitsOn: null };
@@ -238,9 +242,12 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   const needs = all.filter(counts).length;
   const blocked = inSection("blocked").map((row) => ({ ...row.waitsOn!, prUrl: row.prUrl, ref: refOf(row) })).sort((a, b) => oldest(a.since, b.since));
   const flight = inSection("flight").length;
+  const held = inSection("held").length;
   const merges = input.merges.filter((merge) => merge.effortId === effort.id);
   const ages = rows.flatMap(({ input: row }) => time(row.pr?.createdAt) ?? []).map((at) => now - at).sort((a, b) => a - b);
-  const waits = all.filter((row) => row.section !== "flight").flatMap((row) => {
+  // A row you hold is parked, not waiting: it stays out of the oldest wait and the next steps until you release it.
+  const parked = (row: DeckRow) => row.section === "flight" || row.section === "held";
+  const waits = all.filter((row) => !parked(row)).flatMap((row) => {
     const since = row.waitsOn?.since ?? row.step?.since ?? null;
     return since === null ? [] : [{ prUrl: row.prUrl, ref: refOf(row), text: row.waitsOn?.what ?? row.step!.text, since }];
   }).sort((a, b) => a.since - b.since);
@@ -249,7 +256,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   const next = criteria.length
     ? criteria.filter((item) => item.status !== "satisfied").slice(0, 3).map((item) => ({ text: item.label, owner: item.next?.owner ?? null,
       prUrl: item.affected[0]?.target ?? null }))
-    : all.filter((row) => row.section !== "flight").sort((a, b) => DECK_SECTIONS.indexOf(a.section) - DECK_SECTIONS.indexOf(b.section) ||
+    : all.filter((row) => !parked(row)).sort((a, b) => DECK_SECTIONS.indexOf(a.section) - DECK_SECTIONS.indexOf(b.section) ||
       oldest(a.waitsOn?.since ?? a.step?.since ?? null, b.waitsOn?.since ?? b.step?.since ?? null)).slice(0, 3)
       .map((row) => ({ text: row.waitsOn?.what ?? row.step?.text ?? row.status, owner: row.waitsOn?.on ?? row.step?.owner ?? null, prUrl: row.prUrl }));
   const tickets = [...new Set([...effort.tickets, ...rows.flatMap(({ input: row }) => row.tickets)])].sort();
@@ -280,12 +287,13 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
       }),
       ...recent(time(row.pr?.headCommittedAt)) ? [{ kind: "pushed" as const, prUrl: row.prUrl, ref: refOf(row), who: null, at: time(row.pr?.headCommittedAt)! }] : []]),
   ].sort((a, b) => b.at - a.at).slice(0, 12);
-  const parts = [needs && `${needs} need you`, blocked.length && `${blocked.length} blocked`, flight && `${flight} in flight`].filter(Boolean);
+  const parts = [needs && `${needs} need you`, blocked.length && `${blocked.length} blocked`, flight && `${flight} in flight`, held && `${held} held`]
+    .filter(Boolean);
   return {
     id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, kind, repo, oneOff: effort.oneOff, pile,
     reason: effort.pile.reason, since: effort.pile.since,
     status: pile === "held" ? { tone: "held", text: effort.pile.reason ? `On hold: ${effort.pile.reason}` : "On hold" }
-      : { tone: needs ? "you" : blocked.length ? "waiting" : rows.length ? "moving" : "quiet", text: parts.join(" · ") || "No open PRs" },
+      : { tone: needs ? "you" : blocked.length || held ? "waiting" : rows.length ? "moving" : "quiet", text: parts.join(" · ") || "No open PRs" },
     needsYou: needs,
     stats: { open: rows.length, ready: inSection("merge").length, mergedWeek: merges.filter((merge) => recent(merge.at)).length,
       medianAgeMs: ages.length ? ages[Math.floor(ages.length / 2)]! : null, oldestWait: waits[0] ?? null },

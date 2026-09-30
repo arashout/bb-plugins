@@ -74,6 +74,19 @@ describe("the effort deck's markup", () => {
     expect(nudge).toMatch(/data-deck-focus="sec-nudge" aria-disabled="true"/u);
   });
 
+  it("puts a Held chip in the header of a card with held PRs, which jumps to its Held section of each PR with why and how long", () => {
+    const view = inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Waiting on the slip printer", heldAt: NOW - 2 * 86_400_000 } } : {});
+    const html = pane(view, INVENTORY_EFFORTS.pickup.id);
+    expect(button(html, "held")).toEqual({ text: "Held · 1 ⇧H", disabled: false });
+    const held = section(html, "held");
+    expect(text(held)).toContain("Held 1 ?");
+    expect(text(held)).toContain("quill #211 ABC-371 Print hold slips Waiting on the slip printer 2d");
+    // A card with nothing held draws no chip and no Held section.
+    const shelf = pane(view, SHELF);
+    expect(shelf).not.toContain('data-deck-focus="held"');
+    expect(shelf).not.toContain('data-deck-sec="held"');
+  });
+
   it("says on the row when its last read failed", () => {
     const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } } : {});
     const row = section(pane(view, SHELF), "merge").split("data-deck-row=").find((part) => part.includes("folio/pull/340"))!;
@@ -223,7 +236,7 @@ describe("the effort deck's markup", () => {
   });
 
   it("sizes rows, the hint bar, and the top bar by the pane's width, never the window's, so a narrow pane on a wide screen keeps its titles", () => {
-    const view = inkwellDeck({}, (row) => row.number === 210 ? { hold: { reason: "Vendor first", heldAt: NOW - 3_600_000 } } : {});
+    const view = inkwellDeck({}, (row) => row.number === 210 ? { decision: { n: 1, question: "Vendor first?", since: NOW - 3_600_000 } } : {});
     const html = pane(view, INVENTORY_EFFORTS.pickup.id);
     expect(html).not.toMatch(/(?:^|[\s"])(?:sm|md|lg|xl):/u);
     expect(html).toMatch(/data-deck-scroller="true" class="@container/u);

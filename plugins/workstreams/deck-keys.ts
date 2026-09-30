@@ -18,9 +18,9 @@ export type KeyGroup = (typeof KEY_GROUPS)[number];
  */
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
-  | "tiles" | "merge" | "confirm" | "nudge" | "request" | "ready" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
+  | "held" | "tiles" | "merge" | "confirm" | "nudge" | "request" | "ready" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
-/** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine. */
+/** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine, and "⇧H" is Shift with h. */
 export type DeckAction = { id: DeckActionId; group: KeyGroup; title: string; keys: readonly string[]; effect: KeyEffect };
 
 export const DECK_ACTIONS: readonly DeckAction[] = [
@@ -35,6 +35,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "advance", group: "Card", title: "Advance this effort…", keys: ["a"], effect: "confirm" },
   { id: "hold", group: "Card", title: "Hold the effort…", keys: ["h"], effect: "dialog" },
   { id: "complete", group: "Card", title: "Complete the effort…", keys: [], effect: "dialog" },
+  { id: "held", group: "Card", title: "Go to held PRs", keys: ["⇧H"], effect: "nav" },
   { id: "tiles", group: "Card", title: "Show or hide every tile's details", keys: ["i"], effect: "local" },
   { id: "merge", group: "Act", title: "Preview merge…", keys: ["m"], effect: "preview" },
   { id: "confirm", group: "Act", title: "Confirm review notes…", keys: ["c"], effect: "confirm" },
@@ -78,7 +79,7 @@ export function actionForKey(event: { key: string; shiftKey?: boolean; metaKey?:
   if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") return { id: "palette" };
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   if (/^[1-9]$/u.test(event.key)) return event.repeat ? null : { id: "jump", n: Number(event.key) };
-  const token = event.key === "X" && event.shiftKey ? "⇧X" : TOKEN[event.key] ?? event.key;
+  const token = event.shiftKey && /^[A-Z]$/u.test(event.key) ? `⇧${event.key}` : TOKEN[event.key] ?? event.key;
   const action = DECK_ACTIONS.find((candidate) => candidate.keys.includes(token));
   return action && (!event.repeat || REPEATS.has(action.id)) ? { id: action.id } : null;
 }

@@ -79,8 +79,7 @@ const url = (repo: string, number: number) => `https://github.com/inkwell/${repo
 const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs";
 const TONES: Tone[] = ["green", "violet", "blue", "amber", "red", "gray"];
 
-function pane(cur: string, patch: Partial<DeckPaneProps> = {}, selected: string[] = []) {
-  const view = inkwellDeck();
+function pane(cur: string, patch: Partial<DeckPaneProps> = {}, selected: string[] = [], view = inkwellDeck()) {
   const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
   const card = cards.get(cur) ?? null;
   const lines = (card?.sections.flatMap((section) => section.lines) ?? []).filter((line) => selected.includes(line.prUrl));
@@ -107,6 +106,7 @@ function everyBadge(): { where: string; badge: Badge }[] {
   const renders: [string, string][] = [
     ["Shelf order card", pane(SHELF)],
     ["One-offs card", pane(ONE_OFFS)],
+    ["a card with held PRs", pane(INVENTORY_EFFORTS.pickup.id, {}, [], inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Printer", heldAt: NOW } } : {}))],
     ["the sticky card bar", pane(ONE_OFFS, { stuck: true })],
     ["rows' details", pane(SHELF, { state: { selected: new Set(), expanded: new Set([url("folio", 340), url("folio", 330)]), focus: null } })],
     ["the batch bar", pane(ONE_OFFS, { batch: { kinds: TONES.map((tone, index) => ({ id: (["merge", "confirm", "nudge", "request", "ready", "undo"] as const)[index]!,

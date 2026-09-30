@@ -549,6 +549,15 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     next.scrollIntoView({ block: "nearest" });
   }
   const toggleIn = (list: string[], item: string) => list.includes(item) ? list.filter((value) => value !== item) : [...list, item];
+  /** A section's header at the top, under the card's bar, with focus on its first row you can act on, which flashes so the eye finds it. */
+  function jumpSection(key: string) {
+    const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-sec="${CSS.escape(key)}"]`);
+    if (!element) return;
+    element.scrollIntoView({ block: "start" });
+    const row = element.querySelector<HTMLElement>("[data-deck-row]:not([data-deck-dim])") ?? element.querySelector<HTMLElement>("[data-deck-row]");
+    row?.focus({ preventScroll: true });
+    if (row && !reduced()) row.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
+  }
 
   // ---- the one action runner: keys, buttons, the palette ---------------------
   function runAction(id: DeckActionId, line?: DeckLine, n?: number) {
@@ -569,6 +578,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       }
       case "hold": if (card) openDialog({ kind: "hold", id: card.card.id, effortKey: card.card.key, name: card.card.name, reason: "" }); return;
       case "complete": if (card) openDialog({ kind: "complete", id: card.card.id }); return;
+      case "held": jumpSection("held"); return;
       case "tiles": {
         const all = ["next", "blocked", "stats", "threads", "linear", "people", "recent"];
         here.tiles = all.every((tile) => here.tiles.includes(tile)) ? [] : all;

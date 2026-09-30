@@ -114,7 +114,7 @@ describe("the effort deck", () => {
     expect(cardOf(deckView(input({}, old)), INVENTORY_EFFORTS.shelf.id).needsYou).toBe(5);
   });
 
-  it("pauses a held effort, and files a held PR or one a decision holds under what it waits on", () => {
+  it("pauses a held effort, files a PR a decision holds under what it waits on, and a PR you hold under Held alone", () => {
     const view = deckView(input({ efforts: [effort("shelf", { pile: { effortId: INVENTORY_EFFORTS.shelf.id, pile: "held", reason: "Design review", since: 9 } }),
       effort("pickup")] }, (row) => row.number === 210 ? { hold: { reason: "Waiting on the counter redesign", heldAt: INVENTORY_NOW - DAY } }
       : row.number === 211 ? { decision: { n: 2, question: "Print slips per hold or per visit?", since: INVENTORY_NOW - 2 * DAY } } : {}));
@@ -122,12 +122,29 @@ describe("the effort deck", () => {
     expect(view.held).toMatchObject([{ name: "Shelf order", needsYou: 0, status: { tone: "held", text: "On hold: Design review" } }]);
     // Store pickup's one move of yours, and the seven on service cards.
     expect(view.counts).toMatchObject({ needsYou: 1 + 7, held: 1 });
-    // Oldest wait first: the stacked PRs since their push 3 days ago, then the decision, then the hold.
-    expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).blocked.map(({ ref, kind, on, what, since }) => [ref, kind, on, what, since])).toEqual([
+    const pickup = cardOf(view, INVENTORY_EFFORTS.pickup.id);
+    // Oldest wait first: the stacked PRs since their push 3 days ago, then the decision.
+    expect(pickup.blocked.map(({ ref, kind, on, what, since }) => [ref, kind, on, what, since])).toEqual([
       ["quill #212", "parent", "quill #210", "Merges after quill #210", INVENTORY_NOW - 3 * DAY],
       ["spine #156", "parent", "spine #155", "Merges after spine #155", INVENTORY_NOW - 3 * DAY],
-      ["quill #211", "decision", "D2", "Print slips per hold or per visit?", INVENTORY_NOW - 2 * DAY],
-      ["quill #210", "hold", "you", "On hold: Waiting on the counter redesign", INVENTORY_NOW - DAY]]);
+      ["quill #211", "decision", "D2", "Print slips per hold or per visit?", INVENTORY_NOW - 2 * DAY]]);
+    // The hold is in no other section, no next step, and not the oldest wait: it's parked until you release it, and Held says since when.
+    expect(pickup.sections.filter((section) => section.rows.some((row) => row.number === 210)).map((section) => section.key)).toEqual(["held"]);
+    expect(pickup.sections.find((section) => section.key === "held")!.rows.map((row) => [row.number, row.hold, row.waitsOn?.since]))
+      .toEqual([[210, { reason: "Waiting on the counter redesign", since: INVENTORY_NOW - DAY }, INVENTORY_NOW - DAY]]);
+    expect(pickup.next.some((item) => item.prUrl === url("quill", 210))).toBe(false);
+    expect(pickup.stats.oldestWait?.ref).not.toBe("quill #210");
+    expect(pickup.status.text).toBe("1 need you · 3 blocked · 1 held");
+  });
+
+  it("keeps a PR you hold out of the next steps and the oldest wait, even as its card's oldest or only row", () => {
+    const view = deckView(input({}, (row) => row.number === 210 || row.number === 410 ? { hold: { reason: "Parked", heldAt: INVENTORY_NOW - 10 * DAY } } : {}));
+    // Held ten days, quill #210 is older than any wait on Store pickup, and the oldest wait is still one that waits on someone else.
+    expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).stats.oldestWait?.ref).toBe("quill #212");
+    // atlas #410 is its service card's only PR: held, it leaves the card no next step and nothing waiting, and the status still counts it.
+    const atlas = view.active.find((card) => card.repo === "inkwell/atlas")!;
+    expect([atlas.next, atlas.stats.oldestWait, atlas.sections.map((section) => section.key), atlas.status])
+      .toEqual([[], null, ["held"], { tone: "waiting", text: "1 held" }]);
   });
 
   it("keeps a review not yet due a nudge, running checks, and code work a thread is doing in flight: nothing is yours yet, and nothing is blocked", () => {

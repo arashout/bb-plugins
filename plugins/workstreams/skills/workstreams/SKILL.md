@@ -801,9 +801,10 @@ one section by the move its inventory row leads with: `merge`, `confirm`,
 `nudge`, `request`, `ready`, or `work` (fixed in its thread) is the user's;
 `flight` needs no one yet (a review not yet due a nudge, running checks, or
 code work a thread is doing); `blocked` waits on something else, named in
-`waitsOn`: the PR it is stacked on, an open v2 decision, or a hold. A stacked
-PR in an approved stack is a merge, since the preview merges the stack in
-order.
+`waitsOn`: the PR it is stacked on or an open v2 decision; `held` is a PR on
+hold, with its `hold` reason and since when, and in no other section. A
+stacked PR in an approved stack is a merge, since the preview merges the stack
+in order.
 
 **Needs you** counts rows in the user's sections on the active pile, service
 cards included. Held and done efforts pause. A row the user acted
@@ -844,8 +845,8 @@ Each card gives a one-line `status`; `stats` (open PRs, ready to merge, merged
 in the last 7 days, median PR age, and the oldest wait); `progress` (merges a
 read saw against open PRs, and how many of the active v2 instruction's "done
 when" criteria hold); up to three `next` steps (the unmet "done when"
-criteria, else the oldest moves of the user's, then the oldest waits);
-`blocked`, oldest first; a `linear` rollup of the stored Linear details of its
+criteria, else the oldest moves of the user's, then the oldest waits, never a
+held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
 tickets (`known` 0 means no Linear data); `people` (reviewers the user waits
 on, and reviewers whose requested changes wait on the user); its parent and PR
 `threads`, read-only; the week's merges, reviews, and pushes; and its rows by

@@ -37,11 +37,15 @@ describe("the deck's key registry", () => {
     expect(actionForKey({ key: "3", repeat: true })).toBeNull();
   });
 
-  it("reads arrows, brackets, numbers, Shift-X, and ⌘K, and ignores other modified keys", () => {
+  it("reads arrows, brackets, numbers, Shift letters, and ⌘K, and ignores other modified keys", () => {
     expect(["]", "ArrowRight", "[", "ArrowLeft"].map((key) => actionForKey({ key })?.id)).toEqual(["next", "next", "prev", "prev"]);
     expect(actionForKey({ key: "4" })).toEqual({ id: "jump", n: 4 });
     expect(actionForKey({ key: "0" })).toBeNull();
     expect(actionForKey({ key: "X", shiftKey: true })).toEqual({ id: "select-section" });
+    expect(actionForKey({ key: "H", shiftKey: true })).toEqual({ id: "held" });
+    // Caps Lock types H without Shift: that's no key here, and neither is a Shift letter the registry doesn't name.
+    expect(actionForKey({ key: "H" })).toBeNull();
+    expect(actionForKey({ key: "Q", shiftKey: true })).toBeNull();
     expect(actionForKey({ key: "k", metaKey: true })).toEqual({ id: "palette" });
     expect(actionForKey({ key: "a", altKey: true })).toBeNull();
     expect(actionForKey({ key: "c", ctrlKey: true })).toBeNull();

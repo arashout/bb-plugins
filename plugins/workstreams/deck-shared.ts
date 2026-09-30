@@ -8,9 +8,10 @@ export const DECK_CHANGED = "deck-changed";
 
 /**
  * A row's section: the move it needs, in the order a card lists them. Each of the first six is yours; in-flight rows need nothing from
- * anyone yet, and blocked rows wait on someone or something else.
+ * anyone yet, blocked rows wait on someone or something else, and held rows wait until you release them (plan amendment A17.3): a hold
+ * files a row there and nowhere else.
  */
-export const DECK_SECTIONS = ["merge", "confirm", "nudge", "request", "ready", "work", "flight", "blocked"] as const;
+export const DECK_SECTIONS = ["merge", "confirm", "nudge", "request", "ready", "work", "flight", "blocked", "held"] as const;
 export type DeckSection = (typeof DECK_SECTIONS)[number];
 const YOURS = new Set<DeckSection>(["merge", "confirm", "nudge", "request", "ready", "work"]);
 

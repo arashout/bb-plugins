@@ -28,7 +28,8 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
   work: { title: "Work in threads", tone: "amber", action: null, button: null, help: "Conflicts, failing checks, and requested changes. Each is fixed in its PR's thread; o opens it." },
   flight: { title: "In flight", tone: "gray", action: null, button: null, fold: true, help: "In review under a business day, checks running, or a thread working on it. Nothing for you yet." },
-  blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR, an open decision, or a hold." },
+  blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR or an open decision." },
+  held: { title: "Held", tone: "gray", action: null, button: null, help: "PRs you held, with why and for how long. Nothing acts on one until you release it." },
 };
 /** The batch each act key plans. */
 export const KIND_OF: Partial<Record<DeckActionId, BatchKind>> = { confirm: "confirm", nudge: "nudge", request: "request", ready: "ready" };
@@ -91,6 +92,7 @@ function info(row: DeckRow, section: string): DeckLine["info"] {
     case "ready": return { text: "draft", tone: null };
     case "work": return { text: row.status, tone: /CI|check/iu.test(row.status) ? "red" : "amber" };
     case "blocked": return { text: row.waitsOn?.what ?? row.status, tone: "gray" };
+    case "held": return { text: row.hold?.reason || "No reason given", tone: "gray" };
     default: return { text: row.status, tone: "gray" };
   }
 }
@@ -187,6 +189,8 @@ export type CardScreen = {
   status: { text: string; tone: Tone };
   /** Needs you now, the PRs Advance plans (the safe moves drawn as needing you), and what Mark seen would settle. */
   needsYou: number; advance: string[]; changed: number; settleable: boolean;
+  /** Its PRs on hold now, which its header's Held chip counts and jumps to. */
+  held: number;
   next: { criteria: { validated: number; needed: number } | null; items: { text: string; owner: string | null; prUrl: string | null; ref: string | null }[] };
   blocked: { prUrl: string; ref: string; on: string; what: string; age: string | null; dot: boolean }[];
   stats: { open: number; mergedWeek: number; median: string; oldest: { text: string; title: string } | null; bar: { key: string; label: string; count: number; tone: Tone }[] };
@@ -207,7 +211,7 @@ export type CardScreen = {
 const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] }[] = [
   { key: "ready", label: "ready to merge", tone: "green", of: ["merge"] }, { key: "yours", label: "your other moves", tone: "blue", of: ["confirm", "nudge", "request", "ready"] },
   { key: "fix", label: "to fix", tone: "amber", of: ["work"] }, { key: "flight", label: "in flight", tone: "gray", of: ["flight"] },
-  { key: "blocked", label: "blocked", tone: "gray", of: ["blocked"] }];
+  { key: "blocked", label: "blocked", tone: "gray", of: ["blocked"] }, { key: "held", label: "held", tone: "gray", of: ["held"] }];
 const ACTIVITY: Record<DeckCard["activity"][number]["kind"], string> = { merged: "Merged", approved: "Approved", changes: "Changes asked on", pushed: "Pushed" };
 
 /** Where a suggestion points, as a row's chip says it. */
@@ -261,14 +265,16 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   const needsYou = shown.filter((line) => line.needs).length;
   const suggest = suggestGroups(card, shown, context.accepted ?? new Map());
   // Worded from the rows as drawn, so the header, the strip, and the sections agree while rows wait for Mark seen.
+  const held = counts(["held"]);
   const parts = [needsYou && `${needsYou} need you`, card.blocked.length && `${card.blocked.length} blocked`,
-    counts(["flight"]) && `${counts(["flight"])} in flight`].filter(Boolean);
+    counts(["flight"]) && `${counts(["flight"])} in flight`, held && `${held} held`].filter(Boolean);
   return {
     card, color: effortColor(card.id, card.oneOff),
     status: card.pile === "held" ? { text: card.status.text, tone: "gray" }
-      : { text: parts.join(" · ") || "No open PRs", tone: needsYou ? "amber" : card.blocked.length ? "blue" : current.length ? "green" : "gray" },
+      : { text: parts.join(" · ") || "No open PRs", tone: needsYou ? "amber" : card.blocked.length || held ? "blue" : current.length ? "green" : "gray" },
     needsYou,
     advance: shown.filter((line) => line.needs && ["confirm", "nudge", "request", "ready"].includes(line.section)).map((line) => line.prUrl),
+    held,
     changed: shown.filter((line) => line.dot !== null).length + threads.filter((thread) => thread.dot).length,
     // Only a landed write's dim is Mark seen's to settle: a waiting write isn't done, and a refused one never dimmed. So are rows and
     // suggestions you moved from here.
@@ -415,6 +421,7 @@ export function availability(context: KeyContext): Availability {
   const stays = card?.card.oneOff ? "One-offs stays active" : !effort ? "this card stays active" : "it's on hold";
   set("hold", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
   set("complete", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
+  set("held", !!card && card.held > 0, card ? "nothing here is on hold" : deck ? NO_CARD : "Efforts only");
   set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready"] as const) {
@@ -453,7 +460,7 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], moveHint, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
   if (focused) return pick(["row-next", "rows"], moveHint, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
-  return pick(["next", "flip"], ["row-next", "rows"], ["advance", "advance"], ["seen", "mark seen"], ["merge", "merge"]);
+  return pick(["next", "flip"], ["row-next", "rows"], ["advance", "advance"], ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
 }
 
 /** One palette entry: a registry action, or a go-to, resume, or reopen for one effort. */

@@ -144,6 +144,41 @@ describe("an effort card", () => {
   });
 });
 
+describe("held PRs on a card", () => {
+  const held = () => inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Waiting on the slip printer", heldAt: NOW - 2 * 86_400_000 } }
+    : row.number === 156 ? { hold: { reason: "", heldAt: NOW - 3_600_000 } } : {});
+
+  it("lists each held PR under Held with why and for how long, counts them for the header's chip, and in no other section", () => {
+    const pickup = card(held(), PICKUP);
+    expect(pickup.held).toBe(2);
+    const section = pickup.sections.find((item) => item.key === "held")!;
+    expect(section.lines.map((line) => [line.ref, line.info?.text, line.age, line.needs])).toEqual([["quill #211", "Waiting on the slip printer", "2d", false],
+      ["spine #156", "No reason given", "1h", false]]);
+    // Held comes last, after Blocked, and neither PR shows anywhere else on the card.
+    expect(pickup.sections.map((item) => item.key).at(-1)).toBe("held");
+    expect(pickup.sections.filter((item) => item.key !== "held").flatMap((item) => item.lines).map((line) => line.ref)).not.toEqual(
+      expect.arrayContaining(["quill #211"]));
+    expect(pickup.blocked.map((item) => item.ref)).toEqual(["quill #212"]);
+    expect(card(inkwellDeck(), PICKUP).held).toBe(0);
+  });
+
+  it("counts held PRs in the card's status, so a card whose open PRs are all held never reads as having none", () => {
+    const all = inkwellDeck({}, (row) => row.effort?.id === PICKUP ? { hold: { reason: "", heldAt: NOW - 3_600_000 } } : {});
+    expect(all.active.find((item) => item.id === PICKUP)!.status).toEqual({ tone: "waiting", text: "5 held" });
+    expect(card(all, PICKUP).status).toEqual({ text: "5 held", tone: "blue" });
+  });
+
+  it("offers ⇧H to reach them wherever a card has one, says so in the hint bar, and says why not on a card without", () => {
+    const pickup = card(held(), PICKUP);
+    const on = availability(context(pickup));
+    expect(on.held.on).toBe(true);
+    expect(hintKeys(context(pickup), on)).toContainEqual(["⇧H", "held"]);
+    const shelf = card(held(), SHELF);
+    expect([availability(context(shelf)).held.on, availability(context(shelf)).held.why]).toEqual([false, "nothing here is on hold"]);
+    expect(hintKeys(context(shelf), availability(context(shelf))).map(([key]) => key)).not.toContain("⇧H");
+  });
+});
+
 describe("a service card", () => {
   it("files its rows by the move they need, as an effort's are, counts them as Needs you, and names each row's suggestion", () => {
     const folio = card(inkwellDeck(), FOLIO);
