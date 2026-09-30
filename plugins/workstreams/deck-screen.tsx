@@ -210,6 +210,9 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
         line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)
         : "text-muted-foreground", line.dim && "opacity-50")}>{line.info.text}</span> : null}
       <span className={cn("w-7 shrink-0 text-right text-[11px] tabular-nums", line.hot ? TONE.amber.text : "text-muted-foreground")}>{line.age ?? ""}</span>
+      {line.inline ? <button type="button" tabIndex={-1} data-deck-inline={line.inline.id} title={line.inline.title}
+        onClick={() => run({ kind: "action", id: line.inline!.id, line })}
+        className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}>{line.inline.label}<Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></button> : null}
       <span className="flex min-w-12 shrink-0 items-center justify-end gap-1 text-[11.5px]">
         {trail?.kind === "acted" ? <>
           <span className={cn("max-w-44 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")} title={trail.title ?? trail.text}>{trail.text}</span>
@@ -250,7 +253,7 @@ function Details({ line, run }: { line: DeckLine; run: Run }) {
         {ACTION[move].title}<Kbd>{ACTION[move].keys[0]}</Kbd></button> : null}
       {row.thread ? <button type="button" onClick={() => run({ kind: "thread", id: row.thread!.id })} className={cn(BUTTON, "border-border")}>Open “{row.thread.title}”<Kbd>o</Kbd></button> : null}
       <button type="button" onClick={() => run({ kind: "action", id: "open-pr", line })} className={GHOST}>Open on GitHub ↗</button>
-      <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release hold" : "Hold PR…"}</button>
+      <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release…" : "Hold PR…"}</button>
       <button type="button" onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>Refresh</button>
     </div>
   </div>;
@@ -274,8 +277,8 @@ function Section({ section, state, run, open, stuck, held }: { section: SectionS
       {meta.fold ? <button type="button" data-deck-focus={`fold-${section.key}`} aria-expanded={!folded} onClick={() => run({ kind: "fold", key: section.key })}
         className={cn("flex min-w-0 items-center gap-2 rounded", RING)}>{header}</button> : header}
       <span className="flex-1" />
-      {section.action && !held ? <button type="button" data-deck-focus={`sec-${section.key}`} aria-disabled={section.action.enabled ? undefined : true}
-        title={section.action.enabled ? `Acts on this section's ${plural(section.count, "PR")}; the ${section.key === "merge" ? "preview" : "confirm"} lists each one`
+      {section.action && (!held || section.key === "held") ? <button type="button" data-deck-focus={`sec-${section.key}`} aria-disabled={section.action.enabled ? undefined : true}
+        title={section.action.enabled ? `Acts on this section's ${plural(section.action.count, "PR")}; the ${section.key === "merge" ? "preview" : "confirm"} lists each one`
           : section.action.why ?? undefined}
         onClick={() => { if (section.action!.enabled) run({ kind: "action", id: section.action!.id }); }}
         className={cn(BUTTON, TONE[meta.tone].button)}>{section.action.label}<Kbd>{section.action.key}</Kbd></button> : null}
@@ -584,8 +587,10 @@ export function HintBar({ hints, flash, onPalette, onHelp, onUndo }: { hints: re
 
 /** What a confirm lists: each PR's one write, every PR it leaves out and why, and what Advance never does. */
 export type ConfirmPlan = { title: string; sub: string; verb: string; items: readonly Pick<BatchItem, "prUrl" | "ref" | "title" | "kind" | "what" | "notes">[];
-  skipped: readonly Pick<Skipped, "prUrl" | "ref" | "reason">[]; excluded: string | null; request: boolean };
-const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue" };
+  skipped: readonly Pick<Skipped, "prUrl" | "ref" | "reason">[]; excluded: string | null; request: boolean;
+  /** What happens after the window, as its footer says it: "Sends", or "Releases" for a release. */
+  when?: string };
+const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray" };
 
 /**
  * The listing confirm: nothing is written until you press its button (or ⌘↵), and then only after SEND_DELAY_MS, which Undo cancels.
@@ -612,7 +617,7 @@ export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, on
       <button type="button" onClick={onReplan} disabled={!dirty || busy} className={cn(BUTTON, "border-border")}>Plan again</button></label> : null}
     {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
     <div className="flex items-center justify-end gap-2 border-t border-border/60 pt-2.5">
-      <span className="mr-auto text-[11.5px] text-muted-foreground">{dirty ? "Plan again first" : `Sends after ${seconds} s · Undo until then`}</span>
+      <span className="mr-auto text-[11.5px] text-muted-foreground">{dirty ? "Plan again first" : `${plan.when ?? "Sends"} after ${seconds} s · Undo until then`}</span>
       <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
       <button type="button" data-deck-confirm disabled={busy || dirty || plan.items.length === 0} onClick={onConfirm}
         className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Starting…" : `${plan.verb} ${plan.items.length}`}<Kbd inverted>⌘↵</Kbd></button>

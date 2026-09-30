@@ -7,7 +7,9 @@
 // refuses that PR only. Advance plans every safe batch in an effort: confirm
 // comments, nudges, review requests, and mark ready, never a merge or a
 // thread's work. A PR whose effort you hold or complete after confirming, or
-// that leaves its effort, is refused instead of sent.
+// that leaves its effort, is refused instead of sent. Release (A17.3) lifts
+// your holds the same way: listed, then after the window, and never by Advance.
+// It writes nothing to GitHub, so it runs on any pile, as holding a PR does.
 //
 // A batch lives in one row. Undo and dispatch each claim it from `scheduled`
 // in one statement, so exactly one wins, even while a reload's replacement
@@ -18,7 +20,7 @@
 // sends nothing more: you confirmed it for then, not for whenever it runs again.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ACTED_MS, BATCH_KINDS, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type RowActed } from "./deck-shared.js";
+import { ACTED_MS, BATCH_KINDS, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed } from "./deck-shared.js";
 import { deckSeenSchema, type DeckRow } from "./deck.js";
 import type { ActionResult, ShownReviewers } from "./inventory-actions.js";
 
@@ -32,8 +34,8 @@ const DAY_MS = 86_400_000;
 const LATE_MS = 60_000;
 
 const itemSchema = z.object({
-  prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(BATCH_KINDS),
-  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Confirm 2 comments handled". */
+  prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(DECK_WRITES),
+  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Confirm 2 comments handled", "Release". */
   what: z.string(),
   /** Whom a nudge or request asks. */
   reviewers: z.array(z.string()),
@@ -48,7 +50,7 @@ const itemSchema = z.object({
 export type BatchItem = z.infer<typeof itemSchema>;
 const skippedSchema = z.object({ prUrl: z.string(), ref: z.string(), reason: z.string() }).strict();
 export type Skipped = z.infer<typeof skippedSchema>;
-const bodySchema = z.object({ kind: z.enum([...BATCH_KINDS, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
+const bodySchema = z.object({ kind: z.enum([...DECK_WRITES, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
   skipped: z.array(skippedSchema) }).strict();
 export const deckBatchSchema = bodySchema.extend({
   id: z.string(), createdAt: z.number(),
@@ -63,15 +65,19 @@ const batchId = z.object({ batchId: z.string().uuid() }).strict();
 export const deckBatchContract = {
   /**
    * What a batch would do, per PR, and nothing yet: the needs-you rows of `kind` in the effort, or of every safe kind for `advance`, or
-   * just `prUrls` (in the effort, when both are given), where a PR that can't take the write is skipped with why. A request asks
-   * `reviewers`, else each PR's first suggested reviewer. `seen` is as deck_get takes it. A plan with items has a `batchId` to start.
+   * its held PRs for `release`, or just `prUrls` (in the effort, when both are given), where a PR that can't take the write is skipped
+   * with why. A request asks `reviewers`, else each PR's first suggested reviewer. `seen` is as deck_get takes it. A plan with items has
+   * a `batchId` to start.
    */
-  deck_batch_plan: { input: z.object({ kind: z.enum([...BATCH_KINDS, "advance"]), effortId: z.string().min(1).max(500).optional(),
+  deck_batch_plan: { input: z.object({ kind: z.enum([...DECK_WRITES, "advance"]), effortId: z.string().min(1).max(500).optional(),
     prUrls: z.array(z.string().max(500)).min(1).max(100).optional(), reviewers: z.array(z.string().max(140)).min(1).max(20).optional(),
     seen: deckSeenSchema.optional() }).strict(),
   output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), batchId: z.string().nullable(), items: z.array(itemSchema),
     skipped: z.array(skippedSchema) }).strict()]) },
-  /** Confirm a plan: it sends after SEND_DELAY_MS unless Undo cancels it first. Refused while any PR in it is off the active pile. */
+  /**
+   * Confirm a plan: it sends after SEND_DELAY_MS unless Undo cancels it first. Refused while any PR in it is off the active pile, except
+   * for a release.
+   */
   deck_batch_start: { input: batchId, output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), dispatchAt: z.number() }).strict()]) },
   /** Cancel a started batch before it sends; once it is sending, nothing more is undone. */
   deck_batch_undo: { input: batchId, output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true) }).strict()]) },
@@ -93,8 +99,9 @@ const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}
  * Each PR's write, in Advance's order, and why any PR it can't take is left out. Without a selection, rows that don't need a write of
  * these kinds are simply not in the plan.
  */
-export function planBatch(kind: BatchKind | "advance", rows: readonly PlanRow[], options: { selected: boolean; reviewers?: readonly string[] }):
+export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[], options: { selected: boolean; reviewers?: readonly string[] }):
   { items: Omit<BatchItem, "state" | "detail" | "at">[]; skipped: Skipped[] } {
+  if (kind === "release") return planRelease(rows, options.selected);
   const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
   for (const { row, pile, seenAt, head, fingerprint, shown } of rows) {
@@ -121,7 +128,20 @@ export function planBatch(kind: BatchKind | "advance", rows: readonly PlanRow[],
         shown: { requested: [...shown.requested], reviewed: shown.reviewed.map(({ login, state }) => ({ login, state })) } });
     }
   }
-  return { items: items.sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind)), skipped };
+  return { items: items.sort((a, b) => kinds.indexOf(a.kind as BatchKind) - kinds.indexOf(b.kind as BatchKind)), skipped };
+}
+
+/** Release: each held PR, on any pile, unless a release of it is already waiting or sending. */
+function planRelease(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof planBatch> {
+  const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
+  for (const { row } of rows) {
+    const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
+    const skip = (reason: string) => { if (selected) skipped.push({ prUrl: row.prUrl, ref, reason }); };
+    if (!row.hold) { skip("It isn't on hold."); continue; }
+    if (row.acted?.kind === "release" && (row.acted.state === "queued" || row.acted.state === "sending")) { skip("Its release is waiting to send."); continue; }
+    items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "release", what: "Release", reviewers: [], headOid: null, fingerprint: null, notes: 0, shown: null });
+  }
+  return { items, skipped };
 }
 
 type Db = { prepare(sql: string): { run(...params: unknown[]): unknown; get(...params: unknown[]): unknown; all(...params: unknown[]): unknown[] };
@@ -159,7 +179,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       skipped: batch.skipped }), id);
   })();
 
-  /** Send each item still pending, in order. A PR whose effort left the active pile since you confirmed is refused. */
+  /** Send each item still pending, in order. A PR whose effort left the active pile since you confirmed is refused, unless it's a release. */
   async function send(id: string): Promise<void> {
     sending.add(id);
     try {
@@ -173,7 +193,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
         try {
           const item = get(id)!.items[index]!;
           const pile = (await deps.piles())(item.prUrl);
-          result = pile === "active" ? await deps.run(item) : { ok: false, error: `${PILE_WHY[pile]} Nothing was written.` };
+          result = pile === "active" || item.kind === "release" ? await deps.run(item) : { ok: false, error: `${PILE_WHY[pile]} Nothing was written.` };
         } catch (error) { result = { ok: false, error: String(error).slice(0, 500) }; }
         // A reload closed this store mid-send: the next load finds the item sending and marks it unknown.
         if (disposed) return;
@@ -213,7 +233,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       if (batch.state !== "planned") return { ok: false, error: "This batch already started." };
       if (batch.createdAt < deps.now() - PLAN_TTL_MS) return { ok: false, error: "This plan is out of date. Review the batch again." };
       const pileOf = await deps.piles();
-      const paused = batch.items.find((item) => pileOf(item.prUrl) !== "active");
+      const paused = batch.items.find((item) => item.kind !== "release" && pileOf(item.prUrl) !== "active");
       if (paused) return { ok: false, error: `${paused.ref}: ${PILE_WHY[pileOf(paused.prUrl)]} Review the batch again.` };
       const dispatchAt = deps.now() + SEND_DELAY_MS;
       if ((db.prepare(`UPDATE deck_batches SET state = 'scheduled', dispatch_at = ? WHERE id = ? AND state = 'planned'`).run(dispatchAt, id) as { changes?: number })

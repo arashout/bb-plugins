@@ -590,7 +590,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         if (list.length) { opener.current = focusKey(document.activeElement); setMerging(list.map((item) => ({ target: item.prUrl, n: null }))); }
         return;
       }
-      case "confirm": case "nudge": case "request": case "ready": {
+      case "confirm": case "nudge": case "request": case "ready": case "release": {
         const list = line ? [line] : targets(id, context);
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
         return;
@@ -598,7 +598,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "undo": if (undo?.live()) { const run = undo; setUndo(null); setFlash(null); void run.run(); } return;
       case "hold-pr": {
         if (!row?.row) return;
-        if (row.row.hold) void rpc.call("pr_hold_set", { prUrl: row.prUrl, held: false }).then(() => { say(`Released ${row.ref}.`); load(); }, (cause: unknown) => say(message(cause)));
+        // A release lists the PR first and waits out its Undo window, as Release does from Held.
+        if (row.row.hold) runAction("release", row);
         else openDialog({ kind: "hold-pr", prUrl: row.prUrl, ref: row.ref, reason: "" });
         return;
       }

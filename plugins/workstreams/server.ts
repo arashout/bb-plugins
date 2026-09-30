@@ -5657,7 +5657,8 @@ export default async function plugin(bb: BbPluginApi) {
     const service = effortId?.startsWith(SERVICE_PREFIX) ?? false;
     const effort = effortId && !service ? effortStore.get(effortId) : null;
     if (effortId && !service && !effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
-    if (effort && piles.get(effort).pile !== "active") return { ok: false as const, error: "Resume or reopen this effort first." };
+    // A release writes nothing to GitHub, so it runs on any pile, as a hold does.
+    if (effort && kind !== "release" && piles.get(effort).pile !== "active") return { ok: false as const, error: "Resume or reopen this effort first." };
     const wanted = prUrls && new Set(prUrls.map(prWorkItemKey));
     const rows = deckRows(await deckInput()).filter(({ input, cardId }) => (!effortId || cardId === (effort?.id ?? effortId)) && (!wanted || wanted.has(input.prUrl)));
     const seenAt = new Map(Object.entries(seen));
@@ -5754,9 +5755,26 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  /** Hold or release a PR: the board and every view hear of it, and a v2 row pauses on the hold, or resumes on its release, now. */
+  async function setHold(prUrl: string, held: boolean, reason?: string) {
+    const holds = prHolds.set(prUrl, held, reason);
+    bb.realtime.publish(BOARD_CHANGED, { scanning });
+    inventoryChanged();
+    // A hold outlasts every instruction: a v2 row pauses on it, or resumes on release, now.
+    const row = effortWork.row(prUrl);
+    if (row) await effortV2.settle(row.effortId, "hold", new Set([row.target]));
+    return holds;
+  }
+  /** A release the deck confirmed: one someone lifted in the meantime is done already. */
+  async function releaseHold(prUrl: string): Promise<{ ok: true; detail: string }> {
+    if (!prHolds.get(prUrl)) return { ok: true, detail: "It was already released." };
+    await setHold(prUrl, false);
+    return { ok: true, detail: "Released." };
+  }
   /** Deck batches send through the inventory's guarded actions, one PR at a time, after their Undo window. See deck-batch.ts. */
   const deckBatches = createDeckBatches({ db, now: Date.now, changed: deckChanged,
-    run: (item) => item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
+    run: (item) => item.kind === "release" ? releaseHold(item.prUrl)
+      : item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
       : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
       : item.kind === "request" ? inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!)
       : inventoryActions.confirmHandled(item.prUrl, item.headOid!, item.fingerprint!),
@@ -5769,15 +5787,7 @@ export default async function plugin(bb: BbPluginApi) {
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
-    pr_hold_set: async ({ prUrl, held, reason }) => {
-      const holds = prHolds.set(prUrl, held, reason);
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-      inventoryChanged();
-      // A hold outlasts every instruction: a v2 row pauses on it, or resumes on release, now.
-      const row = effortWork.row(prUrl);
-      if (row) await effortV2.settle(row.effortId, "hold", new Set([row.target]));
-      return holds;
-    },
+    pr_hold_set: ({ prUrl, held, reason }) => setHold(prUrl, held, reason),
     advance_preview: ({ prUrls }) => advance.preview(prUrls),
     advance_start: ({ token }) => advance.start(token),
     conversation_get: (input) => conversationGet(input),

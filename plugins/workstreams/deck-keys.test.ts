@@ -26,8 +26,11 @@ describe("the deck's key registry", () => {
     expect(writes.map((id) => [id, ACTION[id].effect])).toEqual([["advance", "confirm"], ["merge", "preview"], ["confirm", "confirm"], ["nudge", "confirm"],
       ["request", "confirm"], ["ready", "confirm"]]);
     expect(["a", "m", "c", "n", "r", "y"].map((key) => actionForKey({ key })?.id)).toEqual([...writes]);
+    // Release lifts your hold through the same listing and Undo window, though it writes nothing to GitHub.
+    expect([ACTION.release.effect, actionForKey({ key: "l" })?.id]).toEqual(["confirm", "release"]);
     // Nothing else reaches a write: every other action moves, changes the view, or opens a dialog.
-    expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "preview").map((action) => action.id).sort()).toEqual([...writes].sort());
+    expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "preview").map((action) => action.id).sort())
+      .toEqual([...writes, "release"].sort());
   });
 
   it("repeats only row movement while a key is held, so a held a or n can't open two confirms", () => {

@@ -177,6 +177,32 @@ describe("held PRs on a card", () => {
     expect([availability(context(shelf)).held.on, availability(context(shelf)).held.why]).toEqual([false, "nothing here is on hold"]);
     expect(hintKeys(context(shelf), availability(context(shelf))).map(([key]) => key)).not.toContain("⇧H");
   });
+
+  it("releases from the row, the section, or l, each through the listing confirm, and only rows still held", () => {
+    const pickup = card(held(), PICKUP);
+    const section = pickup.sections.find((item) => item.key === "held")!;
+    expect(section.action).toMatchObject({ id: "release", label: "Release…", key: "l", count: 2, enabled: true });
+    expect(section.lines.map((line) => line.inline?.label)).toEqual(["Release", "Release"]);
+    const [slips, expired] = section.lines;
+    // l takes the focused held row, else every held row on the card; a focused row that isn't held doesn't narrow it.
+    expect(targets("release", { cur: pickup, focused: expired!, selected: [] }).map((line) => line.ref)).toEqual(["spine #156"]);
+    const other = pickup.sections[0]!.lines[0]!;
+    expect(targets("release", { cur: pickup, focused: other, selected: [] }).map((line) => line.ref)).toEqual(["quill #211", "spine #156"]);
+    expect(hintKeys(context(pickup, { focused: slips! }), availability(context(pickup, { focused: slips! })))).toContainEqual(["l", "release"]);
+    // A release waiting out its window dims its row, with Undo, and takes it out of the next one.
+    const queued = card(inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Printer", heldAt: NOW }, acted: { kind: "release", state: "queued", at: NOW, batchId: "b9" } }
+      : {}), PICKUP).sections.find((item) => item.key === "held")!;
+    expect(queued.lines[0]).toMatchObject({ dim: true, inline: null, trail: { kind: "acted", text: "Releasing…", undo: "b9" } });
+    expect([queued.action?.count, queued.action?.enabled]).toEqual([0, false]);
+    // A held effort's card writes nothing to GitHub, and a release writes nothing there either, so it still offers Release, and nothing else.
+    const paused = held();
+    const pausedCard = cardScreen({ ...paused.active.find((item) => item.id === PICKUP)!, pile: "held" }, none, { now: NOW });
+    const pausedHeld = pausedCard.sections.find((item) => item.key === "held")!;
+    expect([pausedHeld.lines.map((line) => line.inline?.id), pausedHeld.action?.enabled]).toEqual([["release", "release"], true]);
+    expect(pausedCard.sections.flatMap((item) => item.lines).filter((line) => line.inline?.id === "advance")).toEqual([]);
+    const pausedOn = availability(context(pausedCard));
+    expect([pausedOn.release.on, pausedOn.advance.on, pausedOn.nudge.on]).toEqual([true, false, false]);
+  });
 });
 
 describe("a service card", () => {

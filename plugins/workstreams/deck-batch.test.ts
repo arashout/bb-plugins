@@ -46,6 +46,27 @@ describe("planning a deck batch", () => {
 
 });
 
+describe("planning a release", () => {
+  it("lists each held PR on the card, never a PR that isn't held, and leaves a release out of Advance", () => {
+    next = 640;
+    const hold = { reason: "Counter redesign", since: 1 };
+    const rows = [row("held", { hold }), row("nudge"), row("held", { hold: { reason: "", since: 2 } })];
+    expect(brief(planBatch("release", rows, { selected: false }))).toEqual({ items: ["release quill #640: Release", "release quill #642: Release"], skipped: [] });
+    // Advance never lifts a hold: only Release does, and only on your click.
+    expect(brief(planBatch("advance", rows, { selected: false })).items).toEqual(["nudge quill #641: Nudge @mira"]);
+  });
+
+  it("says why a selected PR won't be released: not held, or its release already waiting; a paused effort's hold releases like any other", () => {
+    next = 650;
+    const hold = { reason: "Counter redesign", since: 1 };
+    const rows = [row("nudge"), row("held", { hold }, { pile: "held" }), row("held", { hold, acted: { kind: "release", state: "queued", at: 1, batchId: "b" } }),
+      row("held", { hold, acted: { kind: "release", state: "sent", at: 1, batchId: "b" } }), row("held", { hold }, { pile: "done" })];
+    // A release writes nothing to GitHub, so it runs on any pile, as holding a PR does.
+    expect(brief(planBatch("release", rows, { selected: true }))).toEqual({ items: ["release quill #651: Release", "release quill #653: Release",
+      "release quill #654: Release"], skipped: ["quill #650: It isn't on hold.", "quill #652: Its release is waiting to send."] });
+  });
+});
+
 describe("sending a deck batch", () => {
   afterEach(() => { vi.useRealTimers(); });
   const store = () => {

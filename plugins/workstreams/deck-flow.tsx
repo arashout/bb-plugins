@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import type { BatchKind } from "./deck-shared";
+import type { DeckWrite } from "./deck-shared";
 import { ACTION, actionForKey, typingTarget, type DeckActionId } from "./deck-keys";
 import { SECTIONS, type Availability } from "./deck-view-model";
 import { ConfirmBody, type ConfirmPlan } from "./deck-screen";
@@ -34,8 +34,9 @@ export function DeckDialog({ open, title, sub, wide, bare, closeKey, onClose, on
   </Dialog>;
 }
 
-const VERB: Record<BatchKind | "advance", string> = { confirm: "Confirm", nudge: "Nudge", request: "Request", ready: "Mark ready", advance: "Run" };
-type Pending = { plan: ConfirmPlan; batchId: string; request: { kind: BatchKind | "advance"; effortId: string | null; prUrls: string[] | null }; reviewer: string;
+const VERB: Record<DeckWrite | "advance", string> = { confirm: "Confirm", nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release",
+  advance: "Run" };
+type Pending = { plan: ConfirmPlan; batchId: string; request: { kind: DeckWrite | "advance"; effortId: string | null; prUrls: string[] | null }; reviewer: string;
   /** The reviewer field as the listing was planned: another name typed there sends nothing until it plans again. */
   planned: string };
 
@@ -54,7 +55,7 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
   const latest = useRef(options);
   latest.current = options;
 
-  const plan = useCallback(async (kind: BatchKind | "advance", effortId: string | null, prUrls: string[] | null, reviewer = "") => {
+  const plan = useCallback(async (kind: DeckWrite | "advance", effortId: string | null, prUrls: string[] | null, reviewer = "") => {
     const { say } = latest.current;
     const reviewers = reviewer.trim() ? reviewer.split(/[\s,]+/u).map((login) => login.replace(/^@/u, "")).filter(Boolean) : undefined;
     const result = await rpc.call("deck_batch_plan", { kind, ...effortId ? { effortId } : {}, ...prUrls ? { prUrls } : {}, ...reviewers ? { reviewers } : {},
@@ -66,8 +67,10 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
     if (!open) latest.current.onOpen();
     setError(null); setBusy(false);
     setPending({ batchId: result.batchId, request: { kind, effortId, prUrls }, reviewer, planned: reviewer, plan: {
-      title: kind === "advance" ? `Advance ${scope}` : `${SECTIONS[kind].title} · ${scope}`,
-      sub: kind === "advance" ? `${result.items.length} action${result.items.length === 1 ? "" : "s"}, listed in full. Nothing else changes.` : "Each PR's one write, listed in full.",
+      title: kind === "advance" ? `Advance ${scope}` : kind === "release" ? `Release · ${scope}` : `${SECTIONS[kind].title} · ${scope}`,
+      sub: kind === "advance" ? `${result.items.length} action${result.items.length === 1 ? "" : "s"}, listed in full. Nothing else changes.`
+        : kind === "release" ? "Each hold, listed in full. Batches and Advance can act on these again." : "Each PR's one write, listed in full.",
+      when: kind === "release" ? "Releases" : "Sends",
       verb: VERB[kind], items: result.items, skipped: result.skipped, request: kind === "request" || (kind === "advance" && result.items.some((item) => item.kind === "request")),
       excluded: kind === "advance" ? "Not included: merges (preview them with m) and code work, which each PR's thread does." : null } });
   }, [rpc, pending]);

@@ -858,7 +858,7 @@ whose ticket it carries.
 
 Every write from the deck is a batch the user confirms, and each step is only
 on their click. `deck_batch_plan` takes a `kind` (`confirm`, `nudge`,
-`request`, `ready`, or `advance`) and an `effortId`, `prUrls`, or both. It
+`request`, `ready`, `release`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
 covers the Needs you rows of that kind. `advance` covers every safe kind in
@@ -866,16 +866,18 @@ the effort, in the order confirm, nudge, request, and ready: never a merge,
 which only the fresh merge preview does, and never a thread's work. A request
 asks the `reviewers` given, else each PR's first suggested reviewer. It takes
 `seen` as `deck_get` does, so a row whose write landed isn't planned again
-until the view marks it seen.
+until the view marks it seen. `release` covers the effort's held PRs: it lifts
+each hold after the same window and writes nothing to GitHub, so it runs on any
+pile, and Advance never includes it.
 
 `deck_batch_start` confirms a plan within 10 minutes of it, while each of its
-PRs is on the active pile. The batch sends 8 seconds later (`dispatchAt`)
+PRs is on the active pile (a release needn't be). The batch sends 8 seconds later (`dispatchAt`)
 unless `deck_batch_undo` cancels it first. Its rows show `acted` as `queued`,
 with its `batchId`, while it waits. Each item then runs the inventory action
 for its kind, with the facts the plan bound: the action reads the PR again
 first, and refuses under a hold, a v2 claim, or another writer, or when those
 facts changed. A PR whose effort is held, done, or archived by then, or that
-left its effort, is refused too. A refusal refuses that PR only.
+left its effort, is refused too, except for a release. A refusal refuses that PR only.
 `deck_batch_get` returns each PR's result: `sent`, `refused` with why, or
 `unknown` when a restart cut it off mid-send, which is never sent again. A
 restart keeps a waiting batch's window and its cancel. A batch more than a

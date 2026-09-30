@@ -186,6 +186,63 @@ describe("deck batches on the server", () => {
     expect(await env.rpc("deck_batch_plan", { kind: "advance", effortId: env.effort.id })).toEqual({ ok: false, error: "Resume or reopen this effort first." });
   });
 
+  it("releases a hold only after its Undo window, keeps it when you Undo, and files the row under Held until then", async () => {
+    const env = await setup();
+    await env.rpc("pr_hold_set", { prUrl: url(503), held: true, reason: "Store layout first" });
+    const held = (await env.card()).sections.find((section) => section.key === "held")!;
+    expect(held.rows.map((row) => [row.number, row.hold?.reason])).toEqual([[503, "Store layout first"]]);
+    // Advance leaves a held PR alone; Release lists it.
+    expect((await plan(env, { kind: "advance" })).items.map((item) => item.ref)).not.toContain("folio #503");
+    const holds = () => env.db.prepare("SELECT pr_url FROM pr_holds").all();
+
+    const undone = await plan(env, { kind: "release" });
+    expect(undone.items.map((item) => [item.ref, item.kind, item.what])).toEqual([["folio #503", "release", "Release"]]);
+    expect(await env.rpc("deck_batch_start", { batchId: undone.batchId })).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await env.rpc("deck_batch_undo", { batchId: undone.batchId })).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(holds()).toHaveLength(1);
+
+    const released = await plan(env, { kind: "release", prUrls: [url(503)] });
+    await env.rpc("deck_batch_start", { batchId: released.batchId });
+    await vi.advanceTimersByTimeAsync(7_900);
+    // Waiting out its window, the hold stands and the row says so.
+    expect(holds()).toHaveLength(1);
+    expect((await env.card()).sections.find((section) => section.key === "held")!.rows[0]!.acted).toMatchObject({ kind: "release", state: "queued" });
+    await vi.advanceTimersByTimeAsync(200);
+    await settled(env, released.batchId);
+    expect((await env.batch(released.batchId)).items.map((item) => [item.state, item.detail])).toEqual([["sent", "Released."]]);
+    expect(holds()).toEqual([]);
+    // Released, it's a nudge again, and nothing went to GitHub. It counts once the view marks its row seen.
+    const rows = (await env.card()).sections.flatMap((section) => section.rows.map((row) => [row.number, section.key]));
+    expect(rows).toContainEqual([503, "nudge"]);
+    expect(env.writes).toEqual([]);
+  });
+
+  it("releases a hold while its effort is paused, from the card or from All PRs, since a release writes nothing to GitHub", async () => {
+    const env = await setup();
+    const holds = () => env.db.prepare("SELECT pr_url FROM pr_holds").all();
+    await env.rpc("pr_hold_set", { prUrl: url(503), held: true, reason: "Store layout first" });
+    await env.rpc("pr_hold_set", { prUrl: url(504), held: true });
+    // You can hold a PR on a paused effort, so you can release one there too; the effort's own hold still stops every other batch.
+    expect(await env.rpc("effort_hold", { effortKey: env.effort.id })).toMatchObject({ ok: true });
+    expect(await env.rpc("deck_batch_plan", { kind: "nudge", effortId: env.effort.id })).toEqual({ ok: false, error: "Resume or reopen this effort first." });
+    const fromCard = await plan(env, { kind: "release", prUrls: [url(503)] });
+    // All PRs plans a release with no effort.
+    const fromAll = await env.rpc("deck_batch_plan", { kind: "release", prUrls: [url(504)] }) as typeof fromCard;
+    expect([fromCard.items.map((item) => item.ref), fromCard.skipped, fromAll.items.map((item) => item.ref), fromAll.skipped])
+      .toEqual([["folio #503"], [], ["folio #504"], []]);
+    for (const batch of [fromCard, fromAll]) expect(await env.rpc("deck_batch_start", { batchId: batch.batchId })).toMatchObject({ ok: true });
+    // Completing the effort inside the window doesn't stop a release either.
+    expect(await env.rpc("effort_complete", { effortKey: env.effort.id })).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(8_000);
+    for (const batch of [fromCard, fromAll]) {
+      await settled(env, batch.batchId);
+      expect((await env.batch(batch.batchId)).items.map((item) => [item.state, item.detail])).toEqual([["sent", "Released."]]);
+    }
+    expect([holds(), env.writes]).toEqual([[], []]);
+  });
+
   it("stops offering a row's Undo once its batch starts sending, though that PR still waits its turn", async () => {
     const env = await setup();
     env.hang.prUrl = url(503);

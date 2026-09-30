@@ -32,6 +32,12 @@ export const cardTier = (id: string) => id === LOOSE_ID ? 2 : id.startsWith(SERV
 /** The batches a section button runs, in the order Advance runs them. Each is one GitHub write or your confirmation per PR: never a merge. */
 export const BATCH_KINDS = ["confirm", "nudge", "request", "ready"] as const;
 export type BatchKind = (typeof BATCH_KINDS)[number];
+/**
+ * Every write the deck confirms in a listing and sends after its Undo window: Advance's kinds, and Release, which lifts your hold on a PR
+ * (plan amendment A17.3). Release is never part of Advance: only you release a hold.
+ */
+export const DECK_WRITES = [...BATCH_KINDS, "release"] as const;
+export type DeckWrite = (typeof DECK_WRITES)[number];
 /** How long a confirmed batch waits for Undo before it sends anything. */
 export const SEND_DELAY_MS = 8_000;
 
@@ -39,7 +45,7 @@ export const SEND_DELAY_MS = 8_000;
  * What you last did to a row, from the deck or its inventory row: a write waiting out its Undo window or running, sent, refused, or cut
  * off by a restart mid-send. `batchId` names the deck batch it belongs to, which Undo cancels while it waits.
  */
-export type RowActed = { kind: BatchKind; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number; batchId: string | null };
+export type RowActed = { kind: DeckWrite; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number; batchId: string | null };
 /** How long a write you made marks its row. An older one is history, so the row counts again whether or not you marked it seen. */
 export const ACTED_MS = 86_400_000;
 

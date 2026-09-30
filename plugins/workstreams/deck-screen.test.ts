@@ -80,7 +80,12 @@ describe("the effort deck's markup", () => {
     expect(button(html, "held")).toEqual({ text: "Held · 1 ⇧H", disabled: false });
     const held = section(html, "held");
     expect(text(held)).toContain("Held 1 ?");
-    expect(text(held)).toContain("quill #211 ABC-371 Print hold slips Waiting on the slip printer 2d");
+    expect(text(held)).toContain("quill #211 ABC-371 Print hold slips Waiting on the slip printer 2d Release l");
+    expect(button(html, "sec-held")).toEqual({ text: "Release… l", disabled: false });
+    // A paused card still releases: a release writes nothing to GitHub.
+    const pickup = view.active.find((item) => item.id === INVENTORY_EFFORTS.pickup.id)!;
+    const paused = pane(view, pickup.id, { card: cardScreen({ ...pickup, pile: "held" }, none, { now: NOW }) });
+    expect(button(paused, "sec-held")).toEqual({ text: "Release… l", disabled: false });
     // A card with nothing held draws no chip and no Held section.
     const shelf = pane(view, SHELF);
     expect(shelf).not.toContain('data-deck-focus="held"');

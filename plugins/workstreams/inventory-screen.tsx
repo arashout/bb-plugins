@@ -260,13 +260,15 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
     prs: { row: !!focused, thread: !!focused?.actions.find((action) => action.id === "thread")?.enabled,
-      moves: new Set((focused?.actions ?? []).flatMap((action) => action.enabled && KEY_OF[action.id] ? [KEY_OF[action.id]!] : [])) } };
+      moves: new Set([...(focused?.actions ?? []).flatMap((action) => action.enabled && KEY_OF[action.id] ? [KEY_OF[action.id]!] : []),
+        ...focused?.hold ? ["release" as const] : []]) } };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
+  /** Hold asks for a reason first; a release lists the PR and waits out its Undo window, as it does in the deck. */
   const hold = (line: InventoryLine) => {
     if (!line.hold) { remember(); setHoldError(null); setDialog({ kind: "hold", line, reason: "" }); return; }
-    void rpc.call("pr_hold_set", { prUrl: line.prUrl, held: false }).then(() => { say(`Released ${line.repo} #${line.number}.`); load(); }, (cause: unknown) => say(message(cause)));
+    void batch.plan("release", null, [line.prUrl]);
   };
   const saveHold = () => {
     if (dialog?.kind !== "hold") return;
@@ -292,6 +294,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
       case "confirm": case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
       case "hold-pr": if (focused) hold(focused); return;
+      case "release": if (focused?.hold) hold(focused); return;
       case "refresh": { const refresh = action("refresh"); if (focused && refresh) void run(focused, refresh); return; }
       case "open-thread": { const thread = action("thread")?.threadId; if (thread) navigate.toThread(thread); return; }
       case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
