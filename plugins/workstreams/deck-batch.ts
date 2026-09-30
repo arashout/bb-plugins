@@ -16,6 +16,10 @@
 // Fix sends each PR in Work in threads its own fix (conflicts, CI, requested
 // changes) in its existing thread, or starts a worker for it only when it has
 // none, and only where its listing said; never Advance, and never a merge.
+// Address takes the Your turn PRs you selected: by default one new batch
+// thread for all of them, which claims each PR before it starts, so its items
+// send together; or each PR's own thread, through Ask and Fix, only for a PR
+// that has one. Never Advance, and never a merge.
 //
 // A batch lives in one row. Undo and dispatch each claim it from `scheduled`
 // in one statement, so exactly one wins, even while a reload's replacement
@@ -26,7 +30,7 @@
 // sends nothing more: you confirmed it for then, not for whenever it runs again.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ACTED_KINDS, ACTED_MS, BATCH_KINDS, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed }
+import { ACTED_KINDS, ACTED_MS, BATCH_KINDS, counted, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed }
   from "./deck-shared.js";
 import { deckSeenSchema, type DeckRow } from "./deck.js";
 import { FIX_KINDS, FIX_WORDS, type FixKind } from "./effort-recipes.js";
@@ -58,6 +62,8 @@ const itemSchema = z.object({
   headOid: z.string().nullable(), fingerprint: z.string().nullable(), notes: z.number(),
   /** What a fix asks its thread to do, and where, which it's refused rather than sent elsewhere once that changes. */
   fixes: z.array(z.enum(FIX_KINDS)).optional(), route: routeSchema.optional(),
+  /** Address: the feedback waiting on you, as its listing names it ("Approval comment from @mira · 3 open threads"), and where it's worked. */
+  feedback: z.string().optional(), where: z.string().optional(),
   /** The reviewers the row showed, which a request checks before it asks. */
   shown: z.object({ requested: z.array(z.string()), reviewed: z.array(z.object({ login: z.string(), state: z.string() }).strict()) }).strict().nullable(),
   state: z.enum(["pending", "sending", "sent", "refused", "unknown"]),
@@ -67,8 +73,14 @@ const itemSchema = z.object({
 export type BatchItem = z.infer<typeof itemSchema>;
 const skippedSchema = z.object({ prUrl: z.string(), ref: z.string(), reason: z.string() }).strict();
 export type Skipped = z.infer<typeof skippedSchema>;
+/** How Address sends: one new batch thread for every PR, or each PR's own thread. */
+export const ADDRESS_MODES = ["batch", "each"] as const;
+export type AddressMode = (typeof ADDRESS_MODES)[number];
+/** The one batch thread an Address listing starts: the project it's in, and the parent it goes under, by name, or none. */
+const threadSchema = z.object({ projectId: z.string(), parentThreadId: z.string().nullable(), under: z.string().nullable() }).strict();
+export type BatchThread = z.infer<typeof threadSchema>;
 const bodySchema = z.object({ kind: z.enum([...ACTED_KINDS, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
-  skipped: z.array(skippedSchema) }).strict();
+  skipped: z.array(skippedSchema), thread: threadSchema.optional() }).strict();
 export const deckBatchSchema = bodySchema.extend({
   id: z.string(), createdAt: z.number(),
   state: z.enum(["planned", "scheduled", "dispatching", "done", "cancelled"]),
@@ -88,9 +100,11 @@ export const deckBatchContract = {
    */
   deck_batch_plan: { input: z.object({ kind: z.enum([...DECK_WRITES, "advance"]), effortId: z.string().min(1).max(500).optional(),
     prUrls: z.array(z.string().max(500)).min(1).max(100).optional(), reviewers: z.array(z.string().max(140)).min(1).max(20).optional(),
-    seen: deckSeenSchema.optional() }).strict(),
+    seen: deckSeenSchema.optional(),
+    /** Address only: one batch thread (the default), or each PR's own thread. */
+    mode: z.enum(ADDRESS_MODES).optional() }).strict(),
   output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true), batchId: z.string().nullable(), items: z.array(itemSchema),
-    skipped: z.array(skippedSchema) }).strict()]) },
+    skipped: z.array(skippedSchema), thread: threadSchema.optional() }).strict()]) },
   /**
    * Confirm a plan: it sends after SEND_DELAY_MS unless Undo cancels it first. Refused while any PR in it is off the active pile, except
    * for a release.
@@ -103,12 +117,18 @@ export const deckBatchContract = {
 };
 
 /** A deck row with its pile, when you last marked it seen, and the facts its write binds to, as the row showed them. */
-export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
+export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold"> &
+    Partial<Pick<DeckRow, "managed">>;
   pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers;
   /** Ask's destination, as the listing names it ("Ask “Spine labels”", "Start a thread under Store pickup"), or why it has none. */
   ask?: { to: string } | { why: string };
   /** A fix's destination, named as Ask's is, with what its PR needs now; or why it has none. */
-  fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string } };
+  fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string };
+  /**
+   * Address: the feedback that waits on you, as its listing names it, or null when none does; why an agent, a v2 roster, or its claim keeps
+   * it; and its checkout's name, or null without one. Each PR in its own thread takes its Ask or Fix above, from its thread alone.
+   */
+  address?: { feedback: string | null; busy: string | null; checkout: string | null } };
 
 const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
@@ -120,12 +140,13 @@ const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}
  * Each PR's write, in Advance's order, and why any PR it can't take is left out. Without a selection, rows that don't need a write of
  * these kinds are simply not in the plan.
  */
-export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[], options: { selected: boolean; reviewers?: readonly string[] }):
+export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[], options: { selected: boolean; reviewers?: readonly string[]; mode?: AddressMode }):
   { items: Omit<BatchItem, "state" | "detail" | "at">[]; skipped: Skipped[] } {
   if (kind === "release") return planRelease(rows, options.selected);
   if (kind === "ask") return planAsk(rows);
   if (kind === "fix") return planFix(rows, options.selected);
-  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
+  if (kind === "address") return planAddress(rows, options.mode ?? "batch");
+  const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind as BatchKind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
   for (const { row, pile, seenAt, head, shown } of rows) {
     const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
@@ -190,6 +211,38 @@ function planFix(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof
   return { items, skipped };
 }
 
+/**
+ * Address: each chosen PR whose feedback waits on you, bound to the head its row showed, and why any other is left out: a hold, a paused
+ * effort, a v2 roster, an agent or claim already on it, or a write just sent. One batch thread takes every PR, in its checkout or a clean
+ * clone; each PR's own thread takes its Ask or Fix, only where it has a thread.
+ */
+function planAddress(rows: readonly PlanRow[], mode: AddressMode): ReturnType<typeof planBatch> {
+  const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
+  for (const plan of rows) {
+    const { row, pile, seenAt, head, address } = plan;
+    const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
+    const skip = (reason: string) => skipped.push({ prUrl: row.prUrl, ref, reason });
+    if (row.hold) { skip("On hold. Release it first."); continue; }
+    if (pile !== "active") { skip(PILE_WHY[pile]!); continue; }
+    if (row.managed) { skip("Its v2 roster runs it."); continue; }
+    if (address?.busy) { skip(address.busy); continue; }
+    if (!address?.feedback) { skip("No feedback waits on you."); continue; }
+    if (!counted(row, seenAt)) { skip("A write on it is waiting or just ran."); continue; }
+    if (!head) { skip("Not read in full yet. Refresh it first."); continue; }
+    if (mode === "batch") {
+      items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "address", what: "Batch thread", reviewers: [], headOid: head, fingerprint: null, notes: 0,
+        shown: null, feedback: address.feedback, where: address.checkout ? `In ${address.checkout}` : "No checkout: a clean clone" });
+      continue;
+    }
+    // Its own thread: the approval's notes through Ask, else its fixes through Fix, as the Ask its thread button sends them.
+    const own = row.section === "confirm" ? planAsk([plan]) : row.section === "work" ? planFix([plan], true)
+      : { items: [], skipped: [{ prUrl: row.prUrl, ref, reason: "Its thread has nothing to ask for now." }] };
+    items.push(...own.items.map((item) => ({ ...item, feedback: address.feedback! })));
+    skipped.push(...own.skipped);
+  }
+  return { items, skipped };
+}
+
 /** Release: each held PR, on any pile, unless a release of it is already waiting or sending. */
 function planRelease(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof planBatch> {
   const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
@@ -210,6 +263,11 @@ export type DeckBatchDeps = {
   now(): number;
   /** Run one item through the inventory action's guards, which read the PR again first. */
   run(item: BatchItem & { kind: DeckWrite }): Promise<ActionResult>;
+  /**
+   * Start one batch thread for these Address items, after reading each PR again and claiming it, and say what became of each, by PR. A PR
+   * left out gets no claim and nothing sent.
+   */
+  address?(batch: DeckBatch, items: readonly BatchItem[]): Promise<ReadonlyMap<string, ActionResult>>;
   /** Each PR's pile now, from one read: where its effort is, or active on its service card once no effort owns it. */
   piles(): Promise<(prUrl: string) => DeckPile>;
   changed(): void;
@@ -231,11 +289,11 @@ export function createDeckBatches(deps: DeckBatchDeps) {
   const claim = (id: string, from: DeckBatch["state"], to: DeckBatch["state"]) =>
     (db.prepare(`UPDATE deck_batches SET state = ? WHERE id = ? AND state = ?`).run(to, id, from) as { changes?: number }).changes === 1;
   /** Only the dispatcher that claimed the batch writes its items. */
-  const settle = (id: string, index: number, patch: Partial<BatchItem>) => db.transaction(() => {
+  const settle = (id: string, index: number | readonly number[], patch: Partial<BatchItem>) => db.transaction(() => {
     const batch = get(id)!;
-    batch.items[index] = { ...batch.items[index]!, ...patch };
+    for (const at of typeof index === "number" ? [index] : index) batch.items[at] = { ...batch.items[at]!, ...patch };
     db.prepare(`UPDATE deck_batches SET body = ? WHERE id = ?`).run(JSON.stringify({ kind: batch.kind, effortId: batch.effortId, items: batch.items,
-      skipped: batch.skipped }), id);
+      skipped: batch.skipped, ...batch.thread ? { thread: batch.thread } : {} }), id);
   })();
 
   /** Send each item still pending, in order. A PR whose effort left the active pile since you confirmed is refused, unless it's a release. */
@@ -246,6 +304,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
         if (disposed) return;
         const index = get(id)!.items.findIndex((item) => item.state === "pending");
         if (index === -1) break;
+        if (get(id)!.items[index]!.kind === "address") { await sendThread(id); continue; }
         settle(id, index, { state: "sending", at: deps.now() });
         deps.changed();
         let result: ActionResult;
@@ -264,6 +323,37 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       deps.changed();
     } finally { sending.delete(id); }
   }
+  /**
+   * One batch thread takes every pending Address item at once: each is marked sending before it starts, so a restart finds them all
+   * sending and starts nothing again. A PR whose effort left the active pile since you confirmed is refused.
+   */
+  async function sendThread(id: string): Promise<void> {
+    const group = get(id)!.items.flatMap((item, index) => item.kind === "address" && item.state === "pending" ? [index] : []);
+    const at = deps.now();
+    settle(id, group, { state: "sending", at });
+    deps.changed();
+    const results = new Map<string, ActionResult>();
+    try {
+      const batch = get(id)!;
+      const pileOf = await deps.piles();
+      const live = group.map((index) => batch.items[index]!).filter((item) => {
+        const pile = pileOf(item.prUrl);
+        if (pile !== "active") results.set(item.prUrl, { ok: false, error: `${PILE_WHY[pile]} Nothing was started.` });
+        return pile === "active";
+      });
+      if (live.length) {
+        if (!deps.address) throw new Error("This load can't start a batch thread.");
+        for (const [prUrl, result] of await deps.address(batch, live)) results.set(prUrl, result);
+      }
+    } catch (error) { for (const index of group) results.set(get(id)!.items[index]!.prUrl, { ok: false, error: String(error).slice(0, 500) }); }
+    // A reload closed this store mid-send: the next load finds these items sending and marks them unknown.
+    if (disposed) return;
+    for (const index of group) {
+      const result = results.get(get(id)!.items[index]!.prUrl) ?? { ok: false as const, error: "Nothing was started for it." };
+      settle(id, index, result.ok ? { state: "sent", detail: result.detail, at: deps.now() } : { state: "refused", detail: result.error, at: deps.now() });
+    }
+    deps.changed();
+  }
   async function dispatch(id: string): Promise<void> {
     timers.delete(id);
     if (disposed || !claim(id, "scheduled", "dispatching")) return;
@@ -276,7 +366,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
   return {
     get,
     /** Keep a plan with items for starting, and forget stale plans and old batches. */
-    plan(kind: DeckBatch["kind"], effortId: string | null, planned: ReturnType<typeof planBatch>): { batchId: string | null; items: BatchItem[] } {
+    plan(kind: DeckBatch["kind"], effortId: string | null, planned: ReturnType<typeof planBatch>, thread?: BatchThread): { batchId: string | null; items: BatchItem[] } {
       const now = deps.now();
       db.prepare(`DELETE FROM deck_batches WHERE (state = 'planned' AND created_at < ?) OR (state IN ('done', 'cancelled') AND created_at < ?)`)
         .run(now - PLAN_TTL_MS, now - 7 * DAY_MS);
@@ -284,7 +374,7 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       if (!items.length) return { batchId: null, items };
       const id = randomUUID();
       db.prepare(`INSERT INTO deck_batches (id, created_at, state, dispatch_at, body) VALUES (?, ?, 'planned', NULL, ?)`)
-        .run(id, now, JSON.stringify({ kind, effortId, items, skipped: planned.skipped }));
+        .run(id, now, JSON.stringify({ kind, effortId, items, skipped: planned.skipped, ...thread ? { thread } : {} }));
       return { batchId: id, items };
     },
     async start(id: string): Promise<{ ok: true; dispatchAt: number } | { ok: false; error: string }> {

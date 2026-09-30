@@ -5967,7 +5967,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /** Deck batches send through the inventory's guarded actions, one PR at a time, after their Undo window. See deck-batch.ts. */
   const deckBatches = createDeckBatches({ db, now: Date.now, changed: deckChanged,
-    run: (item) => item.kind === "release" ? releaseHold(item.prUrl)
+    run: (item) => item.kind === "address" ? Promise.resolve({ ok: false as const, error: "A batch thread starts every PR at once; nothing was sent." })
+      : item.kind === "release" ? releaseHold(item.prUrl)
       : item.kind === "ask" ? inventoryActions.askThread(item.prUrl, item.headOid!, item.fingerprint!)
       : item.kind === "fix" ? inventoryActions.askFix(item.prUrl, item.headOid!, item.fixes ?? [], item.route)
       : item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)

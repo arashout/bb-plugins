@@ -34,7 +34,8 @@ export function DeckDialog({ open, title, sub, wide, bare, closeKey, onClose, on
   </Dialog>;
 }
 
-const VERB: Record<DeckWrite | "advance", string> = { nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release", ask: "Ask", fix: "Ask", advance: "Run" };
+const VERB: Record<DeckWrite | "advance", string> = { nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release", ask: "Ask", fix: "Ask",
+  address: "Address", advance: "Run" };
 type Pending = { plan: ConfirmPlan; batchId: string; request: { kind: DeckWrite | "advance"; effortId: string | null; prUrls: string[] | null }; reviewer: string;
   /** The reviewer field as the listing was planned: another name typed there sends nothing until it plans again. */
   planned: string };
@@ -69,7 +70,7 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
     setError(null); setBusy(false);
     setPending({ batchId: result.batchId, request: { kind, effortId, prUrls }, reviewer, planned: reviewer, plan: {
       title: kind === "advance" ? `Advance ${scope}` : kind === "release" ? `Release · ${scope}` : kind === "ask" ? `Ask its thread · ${scope}`
-        : kind === "fix" ? `Ask threads to fix · ${scope}` : `${SECTIONS[kind].title} · ${scope}`,
+        : kind === "fix" ? `Ask threads to fix · ${scope}` : kind === "address" ? `Address feedback · ${scope}` : `${SECTIONS[kind].title} · ${scope}`,
       sub: kind === "advance" ? `${result.items.length} action${result.items.length === 1 ? "" : "s"}, listed in full. Nothing else changes.`
         : kind === "release" ? "Each hold, listed in full. Batches and Advance can act on these again."
         : kind === "ask" ? "The listed thread gets the approval-feedback recipe. Nothing is confirmed."

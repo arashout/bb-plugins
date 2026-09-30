@@ -40,7 +40,7 @@ const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge",
   fix: "work" };
 const ACTED: Record<ActedKind, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
   request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"],
-  ask: ["Asking its thread…", "Asked its thread"], fix: ["Asking to fix…", "Asked to fix"] };
+  ask: ["Asking its thread…", "Asked its thread"], fix: ["Asking to fix…", "Asked to fix"], address: ["Starting its batch thread…", "Batch thread started"] };
 /** A held row Release can take: still held, and nothing you did to it waits for Mark seen. */
 const releasable = (line: Pick<DeckLine, "row" | "dim">) => !line.dim && !!line.row?.hold;
 /** Muted effort colors, picked by the effort's id so a card keeps its color across reads and sessions. */

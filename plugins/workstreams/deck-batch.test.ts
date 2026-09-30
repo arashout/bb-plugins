@@ -104,6 +104,47 @@ describe("planning a fix", () => {
   });
 });
 
+describe("planning Address for Your turn PRs", () => {
+  const feedback = (text: string | null, patch: Partial<NonNullable<PlanRow["address"]>> = {}) =>
+    ({ address: { feedback: text, busy: null, checkout: "folio-abc-42", ...patch } });
+
+  // One batch thread takes every PR whose feedback waits on you, and the listing says why each other one stays out, so what it lists is
+  // exactly what the thread gets.
+  it("lists each PR one batch thread takes, with its feedback and where it's worked, and why any other stays out", () => {
+    next = 800;
+    const rows = [row("work", {}, feedback("Changes requested by @otto")), row("confirm", {}, feedback("Approval comment from @mira", { checkout: null })),
+      row("work", { hold: { reason: "Counter redesign", since: 1 } }, feedback("2 open threads")), row("work", {}, { pile: "held", ...feedback("2 open threads") }),
+      row("work", {}, { pile: "done", ...feedback("2 open threads") }), row("work", { managed: "Shelf order roster #2" }, feedback("2 open threads")),
+      row("work", {}, feedback("2 open threads", { busy: "An agent is already working on it." })), row("nudge", {}, feedback(null)),
+      row("work", { acted: { kind: "address", state: "queued", at: 1, batchId: "b" } }, feedback("2 open threads")),
+      row("work", {}, { head: null, ...feedback("2 open threads") })];
+    const plan = planBatch("address", rows, { selected: true });
+    expect(plan.items.map((item) => [item.kind, item.ref, item.what, item.feedback, item.where, item.headOid])).toEqual([
+      ["address", "quill #800", "Batch thread", "Changes requested by @otto", "In folio-abc-42", HEAD],
+      ["address", "quill #801", "Batch thread", "Approval comment from @mira", "No checkout: a clean clone", HEAD]]);
+    expect(brief(plan).skipped).toEqual(["quill #802: On hold. Release it first.", "quill #803: Its effort is on hold.", "quill #804: Its effort is done.",
+      "quill #805: Its v2 roster runs it.", "quill #806: An agent is already working on it.", "quill #807: No feedback waits on you.",
+      "quill #808: A write on it is waiting or just ran.", "quill #809: Not read in full yet. Refresh it first."]);
+    // Never Advance, and never a merge.
+    expect(planBatch("advance", rows, { selected: false }).items.map((item) => item.kind)).toEqual(["nudge"]);
+  });
+
+  // Each PR in its own thread is the Ask its thread path: the approval's notes through Ask and fixes through Fix, only to a thread it has.
+  it("asks each PR's own thread for its notes or fixes, and leaves out a PR with no thread", () => {
+    next = 820;
+    const thread = { kind: "thread" as const, id: "thr_slips" };
+    const rows = [row("confirm", {}, { ask: { to: "Ask “Hold slips”" }, ...feedback("Approval comment from @mira") }),
+      row("work", {}, { fix: { to: "Ask “Hold slips”", route: thread, fixes: ["comments"] }, ...feedback("New comments from @otto") }),
+      row("work", {}, { fix: { why: "It has no thread. Use One batch thread." }, ...feedback("Changes requested by @otto") }),
+      row("nudge", {}, feedback("Changes requested by @otto"))];
+    const plan = planBatch("address", rows, { selected: true, mode: "each" });
+    expect(plan.items.map((item) => [item.kind, item.ref, item.what, item.feedback, item.route ?? null])).toEqual([
+      ["ask", "quill #820", "Ask “Hold slips” to address 1 note", "Approval comment from @mira", null],
+      ["fix", "quill #821", "Ask “Hold slips”: answer comments", "New comments from @otto", thread]]);
+    expect(brief(plan).skipped).toEqual(["quill #822: It has no thread. Use One batch thread.", "quill #823: Its thread has nothing to ask for now."]);
+  });
+});
+
 describe("planning a release", () => {
   it("lists each held PR on the card, never a PR that isn't held, and leaves a release out of Advance", () => {
     next = 640;
@@ -180,6 +221,58 @@ describe("sending a deck batch", () => {
     expect([replacement.get(cut), replacement.get(late)].map((item) => [item?.state, item?.items.map((entry) => entry.state)]))
       .toEqual([["done", ["unknown", "sent"]], ["done", ["sent"]]]);
     replacement.dispose();
+    db.close();
+  });
+
+  // One batch thread takes every PR at once, only after the window, and a restart mid-start never starts a second: it can't know whether
+  // BB made the first, so each PR reads as maybe sent.
+  it("starts one batch thread for every PR at once after the window, never after an Undo, and never twice across a restart", async () => {
+    vi.useFakeTimers();
+    next = 680;
+    const db = new Database(":memory:");
+    db.exec(DECK_BATCH_MIGRATION);
+    const calls: string[][] = [];
+    const hang = { next: false };
+    const piles = new Map<string, "active" | "held">();
+    const deps = { db, now: Date.now, changed: () => undefined, piles: async () => (prUrl: string) => piles.get(prUrl) ?? "active" as const,
+      run: async () => { throw new Error("Address never sends one PR at a time."); },
+      address: async (_batch: unknown, items: readonly { prUrl: string }[]) => {
+        calls.push(items.map((item) => item.prUrl));
+        if (hang.next) { hang.next = false; return await new Promise<never>(() => undefined); }
+        return new Map(items.map((item) => [item.prUrl, { ok: true as const, detail: "Started “Address feedback on 2 PRs”." }]));
+      } };
+    const address = (load: ReturnType<typeof createDeckBatches>) => load.plan("address", null, planBatch("address",
+      [row("work", {}, { address: { feedback: "2 open threads", busy: null, checkout: null } }), row("confirm", {}, { address: { feedback: "Approval comment from @mira", busy: null, checkout: null } })],
+      { selected: true }), { projectId: "proj-inkwell", parentThreadId: null, under: null }).batchId!;
+    const load = createDeckBatches(deps);
+    const undone = address(load), sent = address(load);
+    for (const id of [undone, sent]) expect(await load.start(id)).toMatchObject({ ok: true });
+    // The PR whose effort you hold during the window is refused; the thread takes the rest.
+    piles.set(load.get(sent)!.items[1]!.prUrl, "held");
+    expect(load.undo(undone)).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(7_900);
+    expect(calls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(calls).toEqual([[load.get(sent)!.items[0]!.prUrl]]);
+    expect(load.get(sent)!.items.map((item) => [item.state, item.detail])).toEqual([["sent", "Started “Address feedback on 2 PRs”."],
+      ["refused", "Its effort is on hold. Nothing was started."]]);
+    expect(load.get(sent)!.thread).toEqual({ projectId: "proj-inkwell", parentThreadId: null, under: null });
+    expect(load.get(undone)!.state).toBe("cancelled");
+
+    // BB never answers the start before a reload: the next load starts nothing again.
+    piles.clear();
+    const cut = address(load);
+    expect(await load.start(cut)).toMatchObject({ ok: true });
+    hang.next = true;
+    await vi.advanceTimersByTimeAsync(8_100);
+    expect(calls).toHaveLength(2);
+    load.dispose();
+    const reopened = createDeckBatches(deps);
+    reopened.resume();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toHaveLength(2);
+    expect(reopened.get(cut)).toMatchObject({ state: "done", items: [{ state: "unknown" }, { state: "unknown" }] });
+    reopened.dispose();
     db.close();
   });
 
