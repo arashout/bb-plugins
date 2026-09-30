@@ -49,6 +49,14 @@ describe("the effort deck's markup", () => {
     expect(text(html)).toContain("Done 1");
   });
 
+  it("keeps every row's PR number outside the part that truncates, so a long repo name never hides it", () => {
+    const html = pane(inkwellDeck(), SHELF);
+    const truncated = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span>/gu)].map((match) => match[1]!);
+    expect(truncated.length).toBeGreaterThan(0);
+    for (const repo of truncated) expect(repo).not.toMatch(/#\d/u);
+    expect(html).toMatch(/<b class="shrink-0 font-medium[^"]*">#\d+<\/b>/u);
+  });
+
   it("gives the card its header actions with their keys, then one section per move with one batch button, and none for code work", () => {
     const html = pane(inkwellDeck(), SHELF);
     expect(text(html)).toMatch(/Shelf order 5 need you · 1 in flight|Shelf order 5 need you/u);

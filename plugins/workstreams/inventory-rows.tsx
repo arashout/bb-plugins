@@ -32,9 +32,9 @@ const REVIEW_WORD: Record<InventoryLine["reviewers"][number]["state"], string> =
 
 function Pr({ line, onOpenPr }: { line: InventoryLine } & Pick<RowCallbacks, "onOpenPr">) {
   return <button type="button" onClick={() => onOpenPr(line.prUrl)} title={`Open ${line.slug} #${line.number} on GitHub`}
-    className={cn("min-w-0 truncate rounded-sm text-left hover:underline", FOCUS)}>
-    {line.branch ? <span aria-hidden className="text-muted-foreground" style={{ paddingLeft: `${(line.depth - 1) * 12}px` }}>{line.branch} </span> : null}
-    <span className="text-muted-foreground">{line.repo}</span> <span className="tabular-nums">#{line.number}</span>
+    className={cn("flex min-w-0 gap-1 whitespace-nowrap rounded-sm text-left hover:underline", FOCUS)}>
+    {line.branch ? <span aria-hidden className="shrink-0 text-muted-foreground" style={{ paddingLeft: `${(line.depth - 1) * 12}px` }}>{line.branch}</span> : null}
+    <span className="min-w-0 truncate text-muted-foreground">{line.repo}</span> <span className="shrink-0 tabular-nums">#{line.number}</span>
   </button>;
 }
 

@@ -215,8 +215,9 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
         onChange={() => undefined} onClick={(event) => run({ kind: "select", prUrl: line.prUrl, shift: event.shiftKey })}
         className="size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20" />
       <span className="flex w-1.5 shrink-0">{line.dot ? <Changed title={line.dot} /> : null}</span>
-      <span className={cn("w-[88px] shrink-0 truncate text-right text-muted-foreground", line.dim && "opacity-50")}>
-        {line.ref.replace(/ #\d+$/u, "")} <b className={cn("font-medium", line.needs ? "text-foreground" : "text-foreground/80")}>#{line.ref.split("#")[1]}</b></span>
+      <span title={line.ref} className={cn("flex w-[124px] shrink-0 justify-end gap-1 whitespace-nowrap text-muted-foreground @min-[720px]:w-[156px]", line.dim && "opacity-50")}>
+        <span className="min-w-0 truncate">{line.ref.replace(/ #\d+$/u, "")}</span>
+        <b className={cn("shrink-0 font-medium", line.needs ? "text-foreground" : "text-foreground/80")}>#{line.ref.split("#")[1]}</b></span>
       <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
         className={cn("min-w-0 flex-1 cursor-pointer truncate", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
         {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
