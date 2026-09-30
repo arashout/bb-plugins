@@ -60,3 +60,14 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   const dated = parts.flatMap((part) => part.since !== null && Number.isFinite(part.since) ? [part.since] : []);
   return { kinds: parts.map((part) => part.kind), text: parts.map((part) => part.text).join(" · "), since: dated.length ? Math.min(...dated) : null };
 }
+
+/**
+ * Your turn's feedback as a listing names it, with who left each: "Approval comment from @mira-l · 3 open threads". `reviewed` is the PR's
+ * latest review per reviewer, whose approvers the approval's part names.
+ */
+export function turnSummary(turn: Pick<YourTurn, "kinds" | "text">, reviewed: readonly { login: string; state: string }[]): string {
+  const approvers = reviewed.filter((review) => review.state.toUpperCase() === "APPROVED").map((review) => review.login);
+  // Each part is one kind's words, in the kinds' order.
+  return turn.text.split(" · ").map((part, index) => turn.kinds[index] === "approval" && approvers.length ? `Approval comment from ${mentions(approvers)}` : part)
+    .join(" · ");
+}

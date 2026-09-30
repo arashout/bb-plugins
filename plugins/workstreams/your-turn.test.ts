@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { yourTurn } from "./your-turn.js";
+import { turnSummary, yourTurn } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -97,5 +97,15 @@ describe("Your turn", () => {
   it("keeps a comment no reply answered without the push's date, and asks nothing of a PR never read for it", () => {
     expect(turn({ ...comments, headCommittedAt: undefined })?.kinds).toEqual(["comments"]);
     expect(turn({ ...comments, reviewFeedback: undefined })).toBeNull();
+  });
+
+  // Address selected lists each PR with who left what, so you can tell two approvals apart before one thread takes them all.
+  it("names who left an approval's comment in a listing, and keeps every other part as Your turn words it", () => {
+    const both = { ...approval, reviewFeedback: { ...approval.reviewFeedback!, openThreads: 3 } };
+    const summary = turnSummary(turn(both)!, both.latestReviews);
+    expect(summary).toBe("Approval comment from @mira-l · 3 open threads");
+    expect(turnSummary(turn(changes)!, changes.latestReviews)).toBe("Changes requested by @otto-v");
+    // With no approver read, it says what Your turn says.
+    expect(turnSummary(turn(approval)!, [])).toBe("Approval comment to address");
   });
 });
