@@ -255,6 +255,10 @@ describe("inventory actions on the server", () => {
     expect(stored()).toEqual([]);
 
     env.current.set(319, original);
+    // The confirm reads the note and what came after it from GitHub first, and shows both.
+    expect(await env.rpc("inventory_confirm_read", { prUrl: url(319) })).toEqual({ ok: true, headOid: HEAD, fingerprint: FEEDBACK.fingerprint,
+      ask: { kind: "none", why: "This PR has no thread or checkout yet." },
+      evidence: env.notes.evidence, sources: [expect.objectContaining({ id: "review-319", kind: "review", author: "mira", body: "Wrap spine labels at 40 characters." })] });
     // Nothing since mira's approval shows her note handled: one click records nothing.
     expect(await confirm()).toEqual({ ok: false,
       error: "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written." });

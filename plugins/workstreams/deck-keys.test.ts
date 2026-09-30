@@ -22,10 +22,12 @@ describe("the deck's key registry", () => {
   });
 
   it("opens a listing confirm, or the fresh merge preview, for every key that can lead to a GitHub write", () => {
-    const writes = ["advance", "merge", "confirm", "nudge", "request", "ready"] as const;
-    expect(writes.map((id) => [id, ACTION[id].effect])).toEqual([["advance", "confirm"], ["merge", "preview"], ["confirm", "confirm"], ["nudge", "confirm"],
+    const writes = ["advance", "merge", "nudge", "request", "ready"] as const;
+    expect(writes.map((id) => [id, ACTION[id].effect])).toEqual([["advance", "confirm"], ["merge", "preview"], ["nudge", "confirm"],
       ["request", "confirm"], ["ready", "confirm"]]);
-    expect(["a", "m", "c", "n", "r", "y"].map((key) => actionForKey({ key })?.id)).toEqual([...writes]);
+    expect(["a", "m", "n", "r", "y"].map((key) => actionForKey({ key })?.id)).toEqual([...writes]);
+    // c opens one PR's review notes: a dialog that reads them first, where a confirmation is a click, never a batch.
+    expect([ACTION.confirm.effect, actionForKey({ key: "c" })?.id]).toEqual(["dialog", "confirm"]);
     // Release lifts your hold through the same listing and Undo window, though it writes nothing to GitHub.
     expect([ACTION.release.effect, actionForKey({ key: "l" })?.id]).toEqual(["confirm", "release"]);
     // Nothing else reaches a write: every other action moves, changes the view, or opens a dialog.

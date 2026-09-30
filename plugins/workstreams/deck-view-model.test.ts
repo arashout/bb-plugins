@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { withArrivals } from "./deck-place.js";
-import { acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, paletteItems, readText, refreshNote, rowFacts,
+import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, paletteItems, readText, refreshNote, rowFacts,
   stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
@@ -345,15 +346,17 @@ describe("a service card", () => {
 });
 
 describe("what the keys act on", () => {
-  it("takes the selection first, then the focused row when it has the move, then every row in the card with it", () => {
+  it("takes the selection first, then the focused row when it has the move, then every row in the card with it, but one PR's notes", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
     const all = oneOffs.sections.flatMap((section) => section.lines);
     const [confirm301, confirm318, nudge96] = all;
-    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [] }).map((line) => line.ref)).toEqual(["folio #301", "folio #318"]);
-    expect(targets("confirm", { cur: oneOffs, focused: confirm318!, selected: [] }).map((line) => line.ref)).toEqual(["folio #318"]);
+    expect(targets("nudge", { cur: oneOffs, focused: null, selected: [confirm301!, nudge96!] }).map((line) => line.ref)).toEqual(["catalog #96"]);
     // A focused row without the move doesn't narrow it: n on a confirm row still nudges the card's one overdue review.
     expect(targets("nudge", { cur: oneOffs, focused: confirm301!, selected: [] }).map((line) => line.ref)).toEqual(["catalog #96"]);
-    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [confirm301!, nudge96!] }).map((line) => line.ref)).toEqual(["folio #301"]);
+    // Review notes are read one PR at a time: c takes the focused row's notes, else the card's first, and never a selection's.
+    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [] }).map((line) => line.ref)).toEqual(["folio #301"]);
+    expect(targets("confirm", { cur: oneOffs, focused: confirm318!, selected: [] }).map((line) => line.ref)).toEqual(["folio #318"]);
+    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [confirm301!, confirm318!] }).map((line) => line.ref)).toEqual(["folio #301"]);
   });
 
   it("offers each action only where it can run, and says why it can't", () => {
@@ -383,7 +386,8 @@ describe("what the keys act on", () => {
   it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, review notes, or a dimmed row", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
     expect(oneOffs.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.inline?.label, line.inline?.title])).toEqual([
-      ["folio #301", undefined, undefined], ["folio #318", undefined, undefined],
+      ["folio #301", "Notes…", "Read folio #301's review notes and what came after, then confirm or ask its thread (c)"],
+      ["folio #318", "Notes…", "Read folio #318's review notes and what came after, then confirm or ask its thread (c)"],
       ["catalog #96", "Advance", "Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo (a)"]]);
     const shelf = card(inkwellDeck(), SHELF);
     expect(shelf.sections.flatMap((section) => section.lines).map((line) => line.inline)).toEqual([null, null, null, null, null]);
@@ -436,5 +440,33 @@ describe("what the keys act on", () => {
     expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Shelf order", "1", false],
       ["Go to Store pickup", "2", true], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],
       ["Go to catalog · service", "6", true], ["Resume Gift cards", "", true], ["Reopen Store hours", "", true], ["Reopen Old", "", false]]);
+  });
+});
+
+describe("the review notes confirm", () => {
+  const read = (evidence: Record<string, unknown> = {}, ask: Extract<ConfirmRead, { ok: true }>["ask"] = { kind: "new", under: "Store pickup" }) => ({ ok: true as const,
+    headOid: "a".repeat(40), fingerprint: "f".repeat(64), ask, evidence: { since: new Date(NOW - 86_400_000).toISOString(), commits: 0, replies: 0, threads: { total: 0, resolved: 0 },
+      complete: true, ...evidence },
+    sources: [{ id: "review-318", kind: "review" as const, author: "theo-k", at: new Date(NOW - 86_400_000).toISOString(), body: "Keep the old label as a fallback.",
+      truncated: false, resolved: null }, { id: "thread-318", kind: "thread" as const, author: "theo-k", at: new Date(NOW - 86_400_000).toISOString(),
+      body: "Wrap here too.", truncated: true, resolved: true }] });
+
+  it("leads with asking the PR's thread when nothing since the approval shows the notes handled, and with Confirm handled when something does", () => {
+    expect(notesScreen(read(), NOW)).toEqual({ primary: "ask", ask: { to: "starts a thread under Store pickup" },
+      evidence: { text: "No commits, reply, or resolved threads since this approval", handled: false },
+      notes: [{ id: "review-318", who: "@theo-k", what: "review", age: "1d", body: "Keep the old label as a fallback.", truncated: false },
+        { id: "thread-318", who: "@theo-k", what: "thread, resolved", age: "1d", body: "Wrap here too.", truncated: true }] });
+    expect(notesScreen(read({}, { kind: "thread", title: "Spine labels" }), NOW).ask).toEqual({ to: "goes to “Spine labels”" });
+    for (const evidence of [{ commits: 1 }, { replies: 2 }, { threads: { total: 1, resolved: 1 } }]) {
+      expect(notesScreen(read(evidence), NOW)).toMatchObject({ primary: "confirm", evidence: { handled: true } });
+    }
+    expect(notesScreen(read({ commits: 1, complete: false }), NOW).primary).toBe("ask");
+  });
+
+  // Asking never creates an effort or its threads, so a PR with nowhere to ask says why, and ⌘↵ does nothing: Confirm anyway stays a click.
+  it("leads with nothing when there's no evidence and nowhere to ask", () => {
+    const none = { kind: "none" as const, why: "This PR has no thread or checkout yet." };
+    expect(notesScreen(read({}, none), NOW)).toMatchObject({ primary: null, ask: { why: "This PR has no thread or checkout yet." } });
+    expect(notesScreen(read({ commits: 1 }, none), NOW).primary).toBe("confirm");
   });
 });

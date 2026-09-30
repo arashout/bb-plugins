@@ -36,6 +36,26 @@ describe("the deck's write safety", () => {
     expect([...nav.matchAll(/(on\w+)=\{\(\) => createEffort\(\)\}/gu)].map((match) => match[1])).toEqual(["onConfirmKey", "onCreate"]);
   });
 
+  // A confirmation clears the merge gate on your word, so it comes only from one PR's notes, read fresh: its own button, or ⌘↵ only when
+  // something since the approval shows the notes handled. Confirming without evidence is a click on Confirm anyway alone.
+  it("records a confirmation only from a PR's notes: Confirm handled or ⌘↵ with evidence, and Confirm anyway only on its own click", () => {
+    expect([...VIEWS, "notes-flow.tsx"].flatMap((file) => [...source(file).matchAll(/"inventory_confirm_handled"/gu)].map(() => file))).toEqual(["notes-flow.tsx"]);
+    const notes = source("notes-flow.tsx");
+    expect([...notes.matchAll(/(on\w+)=\{\(\) => void confirmNotes\((true|false)\)\}/gu)].map((match) => [match[1], match[2]]))
+      .toEqual([["onConfirm", "false"], ["onAnyway", "true"]]);
+    expect(notes).toMatch(/const lead = \(\) => \{ if \(screen\?\.primary === "confirm"\) void confirmNotes\(false\); else if \(screen\?\.primary === "ask"\) ask\(\); \};/u);
+    expect(notes).toMatch(/onConfirmKey=\{lead\}/u);
+    expect(notes.match(/confirmNotes\(true\)/gu)).toHaveLength(1);
+  });
+
+  // A slow read for one PR must never fill the dialog opened for another, whose buttons would then confirm or ask on the wrong notes.
+  it("lets a notes read or confirmation land only in the dialog opening it belongs to", () => {
+    const notes = source("notes-flow.tsx");
+    expect(notes).toMatch(/const land = \(result: ConfirmRead\) => \{ if \(opened\.current === id\) setRead\(result\); \};/u);
+    expect(notes.match(/setRead\(/gu)).toHaveLength(2);
+    expect(notes).toMatch(/const current = opened\.current === id;/u);
+  });
+
   it("never calls a GitHub write or a merge from the deck: only the batch confirm and the fresh merge preview do", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);

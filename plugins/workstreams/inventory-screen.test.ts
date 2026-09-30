@@ -67,11 +67,11 @@ describe("the PR inventory screen's markup", () => {
     expect(words).toContain("atlas #410 ABC-210 Show delivery windows at checkout no reviewer Conflicts Request a review · you · 6d Resolve the conflicts · you · 2d+");
   });
 
-  it("shows an approval with comments to confirm as its state, with a Confirm handled button and no Merge… yet, in both layouts", () => {
+  it("shows an approval with comments to confirm as its state, with a Confirm handled… button that opens its notes and no Merge… yet, in both layouts", () => {
     for (const html of [pane(true), pane(false)]) {
       const row = html.slice(html.indexOf('data-inventory-row="inkwell/folio#301"'), html.indexOf('data-inventory-row="inkwell/folio#305"'));
       expect(text(row)).toContain("Approved with comments Confirm the approval's comments are handled · you · 2d");
-      expect(row).toMatch(/<button[^>]*data-inventory-action="confirm-handled" aria-label="Confirm handled folio #301"[^>]*>Confirm handled<\/button>/u);
+      expect(row).toMatch(/<button[^>]*data-inventory-action="confirm-handled" aria-label="Confirm handled… folio #301"[^>]*>Confirm handled…<\/button>/u);
       expect(row).not.toContain('data-inventory-action="merge"');
     }
   });

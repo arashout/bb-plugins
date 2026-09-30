@@ -1,10 +1,12 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
-import { ConfirmBody, DeckPane, HelpBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { ConfirmBody, DeckPane, HelpBody, NotesBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { notesScreen } from "./deck-view-model.js";
 import type { SeedProposal } from "./linear-seed.js";
 
 const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs", FOLIO = "service:inkwell/folio", CATALOG = "service:inkwell/catalog";
@@ -109,8 +111,9 @@ describe("the effort deck's markup", () => {
       expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope }), "act-advance").text).toBe("Advance · 1");
       expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope, stuck: true }), "act-advance").text).toBe("Advance · 1");
     }
-    // Review notes have no Advance of their own.
-    expect(section(pane(inkwellDeck(), ONE_OFFS), "confirm")).not.toContain("data-deck-inline");
+    // Review notes have no Advance: their row opens its notes, one PR at a time.
+    expect(section(pane(inkwellDeck(), ONE_OFFS), "confirm")).not.toContain('data-deck-inline="advance"');
+    expect([...section(pane(inkwellDeck(), ONE_OFFS), "confirm").matchAll(/data-deck-inline="confirm"[^>]*>Notes…/gu)]).toHaveLength(2);
     // A merge row has none: merges stay in the preview.
     expect(section(pane(inkwellDeck(), SHELF), "merge")).not.toContain("data-deck-inline");
   });
@@ -369,5 +372,49 @@ describe("the deck's dialogs", () => {
     const help = text(renderToStaticMarkup(createElement(HelpBody, { items })));
     for (const group of ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"]) expect(help).toContain(group);
     expect(help).toContain("Merges run only from the fresh preview, on a click or ⌘↵.");
+  });
+});
+
+describe("the review notes confirm's markup", () => {
+  const read = (evidence: Partial<{ commits: number; replies: number }> = {}, ask: Extract<ConfirmRead, { ok: true }>["ask"] = { kind: "thread", title: "Spine labels" }) =>
+    notesScreen({ ok: true, headOid: "a".repeat(40), fingerprint: "f".repeat(64), ask, evidence: { since: new Date(NOW - 2 * 86_400_000).toISOString(), commits: 0, replies: 0,
+      threads: { total: 0, resolved: 0 }, complete: true, ...evidence },
+    sources: [{ id: "review-301", kind: "review", author: "mira-l", at: new Date(NOW - 2 * 86_400_000).toISOString(),
+      body: "Ship it, but wrap spine labels at 40 characters.", truncated: false, resolved: null }] }, NOW);
+  const body = (screen: ReturnType<typeof read> | null, failed: string | null = null) => renderToStaticMarkup(createElement(NotesBody, { screen, failed, busy: false,
+    error: null, onConfirm: noop, onAnyway: noop, onAsk: noop, onCancel: noop }));
+
+  // The live case that read as ready: the note sat in the approval's body, and nothing came after it.
+  it("shows the approval's note and says plainly that nothing since shows it handled, leading with Ask and never a one-key confirm", () => {
+    const html = body(read());
+    expect(text(html)).toContain("@mira-l · review · 2d Ship it, but wrap spine labels at 40 characters.");
+    expect(text(html)).toContain("No commits, reply, or resolved threads since this approval");
+    expect(html).toMatch(/data-notes-ask[^>]*>Ask its thread to address it<kbd[^>]*>⌘↵<\/kbd><\/button>/u);
+    // Confirming anyway is its own click, with no key.
+    expect(html).toMatch(/data-notes-anyway[^>]*>Confirm anyway<\/button>/u);
+    expect(text(html)).toContain("Ask goes to “Spine labels” · listed first, then sent after 8 s with Undo");
+    expect(html).not.toContain("data-notes-confirm");
+  });
+
+  it("says why when there's nowhere to ask, and leaves only Confirm anyway's own click and Cancel", () => {
+    const html = body(read({}, { kind: "none", why: "This PR has no thread, and nothing to start one under yet." }));
+    expect(text(html)).toContain("This PR has no thread, and nothing to start one under yet.");
+    expect(html).toMatch(/data-notes-anyway[^>]*>Confirm anyway<\/button>/u);
+    expect(html).not.toMatch(/data-notes-(ask|confirm)|⌘↵/u);
+  });
+
+  it("leads with Confirm handled when something since the approval shows the note handled", () => {
+    const html = body(read({ commits: 2 }));
+    expect(text(html)).toContain("2 commits since this approval");
+    expect(html).toMatch(/data-notes-confirm[^>]*>Confirm handled<kbd[^>]*>⌘↵<\/kbd><\/button>/u);
+    expect(html).not.toContain("data-notes-anyway");
+    expect(html).not.toContain("data-notes-ask");
+  });
+
+  it("says it's reading, or why GitHub couldn't be read, and offers nothing to confirm meanwhile", () => {
+    expect(text(body(null))).toContain("Reading GitHub…");
+    const failed = body(null, "HTTP 502");
+    expect(text(failed)).toContain("Couldn't read the notes: HTTP 502");
+    expect(failed).not.toMatch(/data-notes-(confirm|anyway|ask)/u);
   });
 });

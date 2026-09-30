@@ -10,6 +10,8 @@
 // window, and a preview opens the fresh merge preview, where only a click or
 // ⌘↵ merges. Enter and Space are never bound to either. Release lifts your
 // holds through the same listing and window, though it writes nothing to GitHub.
+// c opens one PR's review notes, where confirming them handled is a click, or
+// ⌘↵ only when something since the approval shows them handled.
 
 export const KEY_GROUPS = ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"] as const;
 export type KeyGroup = (typeof KEY_GROUPS)[number];
@@ -39,7 +41,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "held", group: "Card", title: "Go to held PRs", keys: ["⇧H"], effect: "nav" },
   { id: "tiles", group: "Card", title: "Show or hide every tile's details", keys: ["i"], effect: "local" },
   { id: "merge", group: "Act", title: "Preview merge…", keys: ["m"], effect: "preview" },
-  { id: "confirm", group: "Act", title: "Confirm review notes…", keys: ["c"], effect: "confirm" },
+  { id: "confirm", group: "Act", title: "Confirm review notes…", keys: ["c"], effect: "dialog" },
   { id: "nudge", group: "Act", title: "Nudge reviewers…", keys: ["n"], effect: "confirm" },
   { id: "request", group: "Act", title: "Request a reviewer…", keys: ["r"], effect: "confirm" },
   { id: "ready", group: "Act", title: "Mark ready…", keys: ["y"], effect: "confirm" },

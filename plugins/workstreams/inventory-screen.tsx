@@ -23,6 +23,7 @@ import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, KIND_OF, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { HelpBody, HintBar, HoldBody, PaletteBody } from "./deck-screen";
 import { DeckDialog, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
+import { useNotesConfirm } from "./notes-flow";
 
 /** The views after All PRs, in tab order; the effort deck comes before it. */
 export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
@@ -196,6 +197,8 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   const rows = useMemo(() => new Map<string, InventoryRow>(view?.groups.flatMap((group) => group.rows.map((row) => [row.prUrl, row] as const)) ?? []), [view]);
   const screen = useMemo(() => view && inventoryScreen(view, { now, filter, pending, outcomes }), [view, now, filter, pending, outcomes]);
 
+  /** Opens one PR's review notes; set once the notes confirm below exists. */
+  const showNotes = useRef<(line: InventoryLine) => void>(() => undefined);
   /** One click, one call: the row's facts go with it, and what comes back, a refusal included, shows on the row. */
   const run = useCallback(async (line: InventoryLine, action: LineAction, logins: string[] = []) => {
     const row = rows.get(line.prUrl);
@@ -204,6 +207,8 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     // A disabled action names why in its label and tooltip; clicking it does nothing.
     if (call.kind === "refuse") return;
     if (call.kind === "thread") { navigate.toThread(call.threadId); return; }
+    // Review notes open their confirm, which reads them and what came after first; nothing is recorded on this click.
+    if (call.kind === "notes") { showNotes.current(line); return; }
     // Merge… only opens the fresh merge preview; only a click or ⌘↵ there merges.
     if (call.kind === "preview") { setMerging([{ target: call.target, n: null }]); return; }
     if (pending.has(line.prUrl)) return;
@@ -216,8 +221,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
         result = read.status === "checked" ? null : { ok: false, text: read.error };
       } else {
         const written = call.method === "inventory_mark_ready" ? await rpc.call("inventory_mark_ready", call.input)
-          : call.method === "inventory_request_review" ? await rpc.call("inventory_request_review", call.input)
-          : call.method === "inventory_confirm_handled" ? await rpc.call("inventory_confirm_handled", call.input) : await rpc.call("inventory_nudge", call.input);
+          : call.method === "inventory_request_review" ? await rpc.call("inventory_request_review", call.input) : await rpc.call("inventory_nudge", call.input);
         result = written.ok ? { ok: true, text: written.detail } : { ok: false, text: written.error };
       }
     } catch (cause) {
@@ -250,6 +254,8 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   });
   const batch = useBatchConfirm({ seenAt: () => { try { return readSeen(window.localStorage.getItem(SEEN_KEY), Date.now()).at; } catch { return {}; } },
     scopeName: () => null, say, setUndo, load, onOpen: remember, onReturn: returnFocus, reread: view });
+  const notes = useNotesConfirm({ say, load, onOpen: remember, onReturn: returnFocus, ask: (prUrl) => void batch.plan("ask", null, [prUrl]) });
+  showNotes.current = (line) => notes.show(line.prUrl, `${line.repo} #${line.number}`, null);
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -291,7 +297,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
         return;
       }
       case "merge": { const merge = action("merge"); if (focused && merge) { remember(); void run(focused, merge); } return; }
-      // Review notes are never a batch: c is the row's own Confirm handled, which refuses without evidence of handling.
+      // Review notes are never a batch: c opens the focused row's notes.
       case "confirm": { const confirm = action("confirm-handled"); if (focused && confirm) void run(focused, confirm); return; }
       case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
@@ -322,6 +328,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     <MergePreviewDialog targets={merging} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} onClosed={returnFocus}
       rows={(merging ?? []).flatMap(({ target }) => { const row = rows.get(target); return row ? [{ target, repo: row.repo, number: row.number, title: row.title }] : []; })} />
     {batch.element}
+    {notes.element}
     <DeckDialog open={dialog?.kind === "hold"} title={dialog?.kind === "hold" ? `Hold ${dialog.line.repo} #${dialog.line.number}` : ""}
       sub="Nothing acts on this PR, and no batch writes to it, until you release it." onClose={() => setDialog(null)} onReturn={returnFocus} onConfirmKey={saveHold}>
       {dialog?.kind === "hold" ? <HoldBody reason={dialog.reason} onReason={(reason) => setDialog({ ...dialog, reason })} busy={false} error={holdError} onHold={saveHold}

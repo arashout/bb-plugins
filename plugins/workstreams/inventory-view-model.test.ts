@@ -76,9 +76,10 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
       confirm: (prUrl, headOid, feedback, evidence) => { store.confirm(prUrl, feedback, headOid, NOW, evidence); }, record: async () => {},
       ask: async () => { throw new Error("Confirming asks no thread"); } });
     for (const pr of approvedWithComments) {
+      // The row's click opens its notes; the confirm there binds to the head and notes the read showed.
       const call = actionCall(rowOf(pr), action(find(pr), "confirm-handled")!);
-      if (call.kind !== "rpc" || call.method !== "inventory_confirm_handled") throw new Error(`${pr} offers no confirmation`);
-      expect(await actions.confirmHandled(call.input.prUrl, call.input.headOid, call.input.fingerprint)).toMatchObject({ ok: true });
+      if (call.kind !== "notes") throw new Error(`${pr} offers no confirmation`);
+      expect(await actions.confirmHandled(call.prUrl, rowOf(pr).head!, rowOf(pr).feedbackFingerprint!)).toMatchObject({ ok: true });
     }
     const confirmed = inkwellInventory(store.get);
     for (const pr of approvedWithComments) {
@@ -231,12 +232,12 @@ describe("the PR inventory screen view model", () => {
     expect(parseLogins("@mira-l, theo-k  bad!name inkwell/shelf-team")).toEqual({ logins: ["mira-l", "theo-k", "inkwell/shelf-team"], invalid: ["bad!name"] });
   });
 
-  it("offers Confirm handled on an approval with comments, bound to the head and comments its row shows, and says why when it can't", () => {
+  // One click never records a confirmation: it opens the notes, which read GitHub first and show what came after the approval.
+  it("offers Confirm handled… on an approval with comments, opening its notes, and says why when it can't", () => {
     const line = find("folio #301");
     expect(line).toMatchObject({ status: "Approved with comments", steps: [{ text: "Confirm the approval's comments are handled", owner: { kind: "you" }, age: "2d" }] });
-    expect(action(line, "confirm-handled")).toMatchObject({ enabled: true, label: "Confirm handled" });
-    expect(actionCall(rowOf("folio #301"), action(line, "confirm-handled")!)).toEqual({ kind: "rpc", method: "inventory_confirm_handled",
-      input: { prUrl: "https://github.com/inkwell/folio/pull/301", headOid: rowOf("folio #301").head, fingerprint: rowOf("folio #301").feedbackFingerprint } });
+    expect(action(line, "confirm-handled")).toMatchObject({ enabled: true, label: "Confirm handled…" });
+    expect(actionCall(rowOf("folio #301"), action(line, "confirm-handled")!)).toEqual({ kind: "notes", prUrl: "https://github.com/inkwell/folio/pull/301" });
     for (const patch of [{ head: null }, { feedbackFingerprint: null }]) {
       expect(action(find("folio #301", withRow("folio #301", patch)), "confirm-handled"))
         .toMatchObject({ enabled: false, why: "No head or approval comments read yet; Refresh first" });

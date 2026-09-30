@@ -179,7 +179,7 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   const actions: LineAction[] = [];
   const thread = row.threads.executor ?? row.threads.origin;
   const action = (id: ActionId, title: string, why: string | null, extra: Partial<LineAction> = {}): LineAction =>
-    ({ id, label: context.running === id ? RUNNING[id] : id === "request-review" || id === "merge" ? `${WORD[id]}…` : WORD[id], enabled: why === null, why, title,
+    ({ id, label: context.running === id ? RUNNING[id] : id === "request-review" || id === "merge" || id === "confirm-handled" ? `${WORD[id]}…` : WORD[id], enabled: why === null, why, title,
       reviewers: [], threadId: null, ...extra });
   // Every write reads the PR from GitHub first, so it waits out a rate limit, and one action runs on a PR at a time.
   const blocked = context.running !== null ? "Another action on this PR is running"
@@ -191,8 +191,8 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
   const nudged = nudgees(row);
   if (nudged.length) actions.push(action("nudge", `Ask ${mentions(nudged)} again to review ${target}`, blocked, { reviewers: nudged }));
-  if (asks("confirm-handled")) actions.push(action("confirm-handled", `Record that you've handled the approval's comments on ${target}, ` +
-    "for the head and comments this row shows; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
+  if (asks("confirm-handled")) actions.push(action("confirm-handled", `Read the approval's notes on ${target} and what came after, then confirm ` +
+    "them handled or ask its thread; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
   if (mergeable(row)) actions.push(action("merge", `Open a fresh merge preview of ${target}; only a click or ⌘↵ there merges`, null));
   else if (inOrder(row, parents)) actions.push(action("merge", `Merges after #${row.stackedOn}`, `Merge #${row.stackedOn} first; this one follows it`));
   // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither has only its roster's reads.
@@ -338,7 +338,8 @@ export type ActionCall =
   | { kind: "rpc"; method: "inventory_mark_ready"; input: { prUrl: string; headOid: string } }
   | { kind: "rpc"; method: "inventory_request_review"; input: { prUrl: string; logins: string[]; shown: InventoryRow["reviewers"] } }
   | { kind: "rpc"; method: "inventory_nudge"; input: { prUrl: string; reviewers: string[] } }
-  | { kind: "rpc"; method: "inventory_confirm_handled"; input: { prUrl: string; headOid: string; fingerprint: string } }
+  /** Review notes open their confirm, which reads them and what came after from GitHub first. */
+  | { kind: "notes"; prUrl: string }
   | { kind: "preview"; target: string }
   | { kind: "refresh"; prUrl: string }
   | { kind: "thread"; threadId: string }
@@ -352,8 +353,7 @@ export function actionCall(row: InventoryRow, action: LineAction, logins: readon
   if (action.id === "request-review") return logins.length ? { kind: "rpc", method: "inventory_request_review",
     input: { prUrl: row.prUrl, logins: [...logins], shown: row.reviewers } } : { kind: "refuse", why: "Pick or type a reviewer first" };
   if (action.id === "nudge") return { kind: "rpc", method: "inventory_nudge", input: { prUrl: row.prUrl, reviewers: action.reviewers } };
-  if (action.id === "confirm-handled") return row.head && row.feedbackFingerprint ? { kind: "rpc", method: "inventory_confirm_handled",
-    input: { prUrl: row.prUrl, headOid: row.head, fingerprint: row.feedbackFingerprint } } : { kind: "refuse", why: UNCONFIRMABLE };
+  if (action.id === "confirm-handled") return row.head && row.feedbackFingerprint ? { kind: "notes", prUrl: row.prUrl } : { kind: "refuse", why: UNCONFIRMABLE };
   if (action.id === "merge") return { kind: "preview", target: row.prUrl };
   if (action.id === "refresh") return { kind: "refresh", prUrl: row.prUrl };
   return action.threadId ? { kind: "thread", threadId: action.threadId } : { kind: "refuse", why: "No thread is linked to this PR yet" };

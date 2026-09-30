@@ -4,8 +4,9 @@
 // counted Needs you with deck-shared.ts's one rule; this settles rows in
 // place until Mark seen (deck-place.ts), words them for one line, and says
 // which actions the keys, hint bar, ? sheet, and ⌘K offer right now. It
-// imports types, zero-import modules, and the roster's time format only, so
-// no server module reaches the browser (A12.1).
+// imports types, zero-import modules, the roster's time format, and
+// approval-evidence.ts's wording (zod only), so no server module reaches the
+// browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
 import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type ActedKind, type BatchKind,
   type DeckPile, type DeckSection, type DeckWrite } from "./deck-shared";
@@ -13,6 +14,7 @@ import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
+import { evidenceText, handled, type ConfirmRead } from "./approval-evidence";
 
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
@@ -82,7 +84,7 @@ export type DeckLine = {
   /** What you did to it, what became of it when it left ("Merged · just now"), or its thread. */
   trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "ghost"; text: string }
     | { kind: "thread"; text: string; threadId: string } | null;
-  /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, or Release on a held row. */
+  /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, Notes… on review notes, or Release on a held row. */
   inline: { id: DeckActionId; label: string; title: string } | null;
   row: DeckRow | null;
 };
@@ -179,6 +181,8 @@ function inlineAction(row: DeckRow | null, section: string, pile: DeckPile, need
   // A release writes nothing to GitHub, so a paused card offers it too, as it does Hold PR.
   if (section === "held") return releasable({ row, dim })
     ? { id: "release", label: "Release", title: `Release ${refOf(row)}: lists it, then waits ${WINDOW} with Undo (${ACTION.release.keys[0]})` } : null;
+  if (section === "confirm") return needs && pile === "active"
+    ? { id: "confirm", label: "Notes…", title: `Read ${refOf(row)}'s review notes and what came after, then confirm or ask its thread (${ACTION.confirm.keys[0]})` } : null;
   const kind = BATCH_KINDS.find((candidate) => candidate === section);
   return kind && needs && pile === "active"
     ? { id: "advance", label: "Advance", title: `${stepText(row, kind)}: lists it, then sends in ${WINDOW} with Undo (${ACTION.advance.keys[0]})` } : null;
@@ -464,12 +468,15 @@ export type Availability = Record<DeckActionId, { on: boolean; why: string }>;
 
 /**
  * Which rows an act key would take: the selected rows with that move, else the focused row when it has it, else every row in the card
- * with it. Only rows that need you count, or for Release, rows still held; a dimmed row waits for Mark seen.
+ * with it; for review notes, only one row. Only rows that need you count, or for Release, rows still held; a dimmed row waits for Mark seen.
  */
 export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "focused" | "selected">): DeckLine[] {
   const section = SECTION_OF[id];
   if (!section) return [];
   const take = (lines: readonly DeckLine[]) => lines.filter((line) => (section === "held" ? releasable(line) : line.needs) && line.section === section);
+  // Review notes are read and confirmed one PR at a time: the focused row's, else the card's first, never a selection's.
+  if (id === "confirm") return context.focused && take([context.focused]).length ? [context.focused]
+    : context.cur ? take(context.cur.sections.flatMap((item) => item.lines)).slice(0, 1) : [];
   if (context.selected.length) return take(context.selected);
   if (context.focused && take([context.focused]).length) return [context.focused];
   return context.cur ? take(context.cur.sections.flatMap((item) => item.lines)) : [];
@@ -518,8 +525,6 @@ export function availability(context: KeyContext): Availability {
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready", "release"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
-    // Review notes are confirmed one PR at a time, from its row in All PRs, never as a batch.
-    if (id === "confirm") { set(id, false, targets(id, context).length ? "confirm each PR's notes from its row in All PRs" : !card ? NO_CARD : NOTHING[id]); continue; }
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);
   }
   set("undo", context.undo, "nothing to undo");
@@ -557,7 +562,7 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
     : context.cur?.card.kind === "effort" ? "advance effort" : "advance card"];
   // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
-  const rowHint = move === "merge" || move === "release" ? moveHint : false;
+  const rowHint = move === "merge" || move === "release" || move === "confirm" ? moveHint : false;
   if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
@@ -585,4 +590,29 @@ export function paletteItems(on: Availability, chips: readonly Chip[], piles: { 
 export function paletteMatch(items: readonly PaletteItem[], query: string): PaletteItem[] {
   const q = query.trim().toLowerCase();
   return q ? items.filter((item) => `${item.group} ${item.title}`.toLowerCase().includes(q) || item.keys.some((key) => key.toLowerCase() === q)) : [...items];
+}
+
+/**
+ * The confirm for one PR's review notes: each note (a review body, or a thread the approval opened), the evidence since the newest, and
+ * what leads. With evidence, Confirm handled leads; without it, asking the PR's thread leads, and confirming anyway is a second, deliberate
+ * choice whose record says there was none.
+ */
+export type NotesScreen = {
+  notes: { id: string; who: string; what: string; age: string; body: string; truncated: boolean }[];
+  evidence: { text: string; handled: boolean };
+  /** What ⌘↵ does; null when there's no evidence and nowhere to ask, which leaves only Confirm anyway's own click. */
+  primary: "confirm" | "ask" | null;
+  /** Where Ask sends the approval-feedback recipe, or why it can't. */
+  ask: { to: string } | { why: string };
+};
+export function notesScreen(read: Extract<ConfirmRead, { ok: true }>, now: number): NotesScreen {
+  const yes = handled(read.evidence);
+  return {
+    notes: read.sources.map((source) => ({ id: source.id, who: `@${source.author}`, age: age(Date.parse(source.at), now), body: source.body, truncated: source.truncated,
+      what: source.kind === "review" ? "review" : source.resolved ? "thread, resolved" : "thread, open" })),
+    evidence: { text: evidenceText(read.evidence), handled: yes },
+    primary: yes ? "confirm" : read.ask.kind === "none" ? null : "ask",
+    ask: read.ask.kind === "thread" ? { to: `goes to “${read.ask.title}”` } : read.ask.kind === "new" ? { to: `starts a thread under ${read.ask.under}` }
+      : { why: read.ask.why },
+  };
 }

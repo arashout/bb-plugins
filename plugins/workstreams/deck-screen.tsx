@@ -10,7 +10,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
-import type { Availability, CardScreen, Chip, DeckLine, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
+import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
 import { usePortalScopeProps } from "./lib/portal-scope";
@@ -227,12 +227,12 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
         // What a read changed is the one thing on a settling row that stays at full strength.
         : line.change ? "rounded px-1 leading-[19px] text-foreground/80" : "text-muted-foreground", line.dim && !line.change && "opacity-50")}>{line.info.text}</span> : null}
       <span className={cn("w-7 shrink-0 text-right text-[11px] tabular-nums", line.hot ? TONE.amber.text : "text-muted-foreground")}>{line.age ?? ""}</span>
-      {/* Release stays in sight on Held's few rows; Advance shows on the row you point at or focus. Only the focused row's badge shows, and
-          none while a selection takes the key: then its key acts on that row alone, which the hint bar names. */}
+      {/* Release stays in sight on Held's few rows; Advance and Notes… show on the row you point at or focus. Only the focused row's badge
+          shows, and none while a selection takes the key: then its key acts on that row alone, which the hint bar names. */}
       {line.inline ? <button type="button" tabIndex={-1} data-deck-inline={line.inline.id} title={line.inline.title}
         onClick={() => run({ kind: "action", id: line.inline!.id, line })}
         className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]",
-          line.inline.id === "advance" && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{line.inline.label}
+          line.inline.id !== "release" && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{line.inline.label}
         {state.selected.size ? null : <span className="hidden group-focus-within:inline-flex"><Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></span>}</button>
         : null}
       {line.to ? <button type="button" tabIndex={-1} data-deck-to={line.to.key} onClick={() => run({ kind: "section", key: line.to!.key, prUrl: line.prUrl })}
@@ -286,7 +286,7 @@ function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean 
     </div>
   </div>;
 }
-const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", nudge: "nudge", request: "request", ready: "ready" };
+const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready" };
 
 function Section({ section, state, run, open, stuck, held }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean }) {
   const { meta } = section;
@@ -653,6 +653,43 @@ export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, on
       <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
       <button type="button" data-deck-confirm disabled={busy || dirty || plan.items.length === 0} onClick={onConfirm}
         className={cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{busy ? "Starting…" : `${plan.verb} ${plan.items.length}`}<Kbd inverted>⌘↵</Kbd></button>
+    </div>
+  </div>;
+}
+
+/**
+ * One PR's review notes and the evidence since them, from a fresh read. With evidence, Confirm handled leads (⌘↵); without it, asking
+ * its thread leads (⌘↵), and Confirm anyway is a click only, recorded as confirmed without evidence.
+ */
+export function NotesBody({ screen, failed, busy, error, onConfirm, onAnyway, onAsk, onCancel }: { screen: NotesScreen | null;
+  /** Why GitHub couldn't be read for the notes. */
+  failed: string | null; busy: boolean; error: string | null; onConfirm(): void; onAnyway(): void; onAsk(): void; onCancel(): void }) {
+  if (!screen) return <div className="grid gap-3 text-[12.5px]">
+    <p role={failed ? "alert" : "status"} className={failed ? "text-destructive" : "text-muted-foreground"}>{failed ? `Couldn't read the notes: ${failed}` : "Reading GitHub…"}</p>
+    <div className="flex justify-end border-t border-border/60 pt-2.5"><button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Close<Kbd>esc</Kbd></button></div>
+  </div>;
+  const lead = cn(BUTTON, "h-7 border-foreground bg-foreground font-medium text-background hover:bg-foreground/90");
+  return <div className="grid gap-3 text-[12.5px]">
+    <ul data-notes className="grid max-h-[45vh] gap-2.5 overflow-y-auto">
+      {screen.notes.map((note) => <li key={note.id} className="grid gap-0.5">
+        <span className="text-[11.5px] text-muted-foreground">{note.who} · {note.what} · {note.age}</span>
+        <p className="whitespace-pre-wrap break-words rounded-md bg-foreground/[0.03] px-2.5 py-1.5">{note.body}{note.truncated ? "…" : ""}</p>
+      </li>)}
+    </ul>
+    <p data-notes-evidence className={cn("rounded px-2 py-1 text-[12px]", screen.evidence.handled ? "text-muted-foreground" : TONE.amber.chip)}>{screen.evidence.text}</p>
+    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
+    {screen.primary !== "confirm" ? <p className="text-[11.5px] text-muted-foreground">{"to" in screen.ask
+      ? `Ask ${screen.ask.to} · listed first, then sent after ${Math.round(SEND_DELAY_MS / 1_000)} s with Undo` : screen.ask.why}</p> : null}
+    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/60 pt-2.5">
+      {screen.primary !== "confirm" ? <>
+        <button type="button" data-notes-anyway disabled={busy} onClick={onAnyway} title="Records that nothing showed them handled"
+          className={cn(GHOST, "h-7")}>{busy ? "Confirming…" : "Confirm anyway"}</button>
+        <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
+        {screen.primary === "ask" ? <button type="button" data-notes-ask disabled={busy} onClick={onAsk} className={lead}>Ask its thread to address it<Kbd inverted>⌘↵</Kbd></button> : null}
+      </> : <>
+        <button type="button" onClick={onCancel} className={cn(BUTTON, "h-7 border-border")}>Cancel<Kbd>esc</Kbd></button>
+        <button type="button" data-notes-confirm disabled={busy} onClick={onConfirm} className={lead}>{busy ? "Confirming…" : "Confirm handled"}<Kbd inverted>⌘↵</Kbd></button>
+      </>}
     </div>
   </div>;
 }

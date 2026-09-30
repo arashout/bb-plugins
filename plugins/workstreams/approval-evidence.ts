@@ -58,3 +58,20 @@ export const approvalHandlingSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
 ]);
 export type ApprovalHandling = z.infer<typeof approvalHandlingSchema>;
+
+/**
+ * Where Ask would send: the PR's own thread, a new thread beneath a parent that already exists (`under` names its effort, or its repository
+ * when no effort owns it), or why it can't, since asking never creates an effort or its threads.
+ */
+export const askToSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("thread"), title: z.string() }).strict(),
+  z.object({ kind: z.literal("new"), under: z.string() }).strict(),
+  z.object({ kind: z.literal("none"), why: z.string() }).strict(),
+]);
+
+/** What the confirm shows for one PR: the fresh read, and where Ask would send. */
+export const confirmReadSchema = z.discriminatedUnion("ok", [
+  approvalHandlingSchema.options[0].extend({ ask: askToSchema }).strict(),
+  approvalHandlingSchema.options[1],
+]);
+export type ConfirmRead = z.infer<typeof confirmReadSchema>;

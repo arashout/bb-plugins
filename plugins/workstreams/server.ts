@@ -175,7 +175,7 @@ import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type Ti
 import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
 import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState,
   feedbackVerified } from "./approval-feedback.js";
-import type { ApprovalHandling } from "./approval-evidence.js";
+import { confirmReadSchema, type ApprovalHandling, type ConfirmRead } from "./approval-evidence.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -445,6 +445,11 @@ export const rpcContract = defineRpcContract({
   inventory_request_review: { input: prUrlInput.extend({ logins: z.array(z.string().max(140)).min(1).max(20), shown: inventoryRowSchema.shape.reviewers }).strict(),
     output: writeResult },
   inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
+  /**
+   * Read-only, for the confirm: the approval's notes (review bodies and the threads it opened) and what came after the newest, read from
+   * GitHub now, with the thread Ask would send the approval-feedback recipe to.
+   */
+  inventory_confirm_read: { input: prUrlInput, output: confirmReadSchema },
   inventory_confirm_handled: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u), fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
     /** Confirm though nothing since the approval shows its notes handled; the record says so. */
     anyway: z.boolean().optional() }).strict(),
@@ -5776,6 +5781,13 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true, detail: `Started a thread under ${route.under} to address the notes.` };
     } catch (error) { return { ok: false, error: `The thread couldn't start, so nothing was sent: ${String(error).slice(0, 300)}` }; }
   }
+  /** The confirm's read: the notes and their evidence, and where Ask would send, or why it can't. */
+  async function confirmRead(prUrl: string): Promise<ConfirmRead> {
+    const read = await approvalHandling(prUrl);
+    if (!read.ok) return read;
+    const route = await askRoute(prUrl);
+    return { ...read, ask: route.kind === "thread" ? { kind: "thread", title: route.title } : route.kind === "new" ? { kind: "new", under: route.under } : route };
+  }
   /** One audit row per confirmation you record or revoke, with what it covered. */
   const auditConfirmation = (prUrl: string, action: "confirm" | "revoke", body: Record<string, unknown>) =>
     db.prepare("INSERT INTO approval_confirmation_audit (pr_url, at, action, body) VALUES (?, ?, ?, ?)").run(canonicalPrUrl(prUrl) ?? prUrl, Date.now(), action,
@@ -6300,6 +6312,7 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
+    inventory_confirm_read: ({ prUrl }) => confirmRead(prWorkItemKey(prUrl)),
     inventory_confirm_handled: ({ prUrl, headOid, fingerprint, anyway }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint, anyway),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };

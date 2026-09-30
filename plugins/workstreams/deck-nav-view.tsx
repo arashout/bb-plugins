@@ -21,6 +21,7 @@ import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardS
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
+import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
 import type { SeedProposal } from "./linear-seed";
@@ -192,6 +193,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const batch = useBatchConfirm({ seenAt: () => seenRef.current.at, scopeName: (id) => view?.active.find((item) => item.id === id)?.name ?? null, say, setUndo, load,
     onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; }, onReturn: () => returnFocus(), reread: view });
   const details = batch.details;
+  const notes = useNotesConfirm({ say, load, onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; },
+    onReturn: () => returnFocus(), ask: (prUrl, effortId) => void batch.plan("ask", effortId, [prUrl]) });
 
   // ---- what the deck shows -------------------------------------------------
   const place = placeRef.current;
@@ -679,8 +682,12 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         if (list.length) { opener.current = focusKey(document.activeElement); setMerging(list.map((item) => ({ target: item.prUrl, n: null }))); }
         return;
       }
-      // Review notes are confirmed one PR at a time from All PRs; availability keeps c off here.
-      case "confirm": return;
+      // Review notes are read and confirmed one PR at a time, never as a batch.
+      case "confirm": {
+        const target = line ?? targets("confirm", context)[0];
+        if (target && card) notes.show(target.prUrl, target.ref, card.card.id);
+        return;
+      }
       case "nudge": case "request": case "ready": case "release": {
         const list = line ? [line] : targets(id, context);
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
@@ -869,6 +876,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef} />
     {batch.element}
+    {notes.element}
     <DeckDialog open={dialog?.kind === "hold" || dialog?.kind === "hold-pr"} title={dialog?.kind === "hold" ? `Hold ${dialog.name}` : dialog?.kind === "hold-pr" ? `Hold ${dialog.ref}` : ""}
       sub={dialog?.kind === "hold" ? "It leaves the active pile. Its PRs stay open and stop counting; nothing acts on them until you resume it."
         : "Nothing acts on this PR, and no batch writes to it, until you release it."}
