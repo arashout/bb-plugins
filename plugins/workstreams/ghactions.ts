@@ -414,7 +414,7 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
   };
 }
 
-const ACTIVITY_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid commits(last:100){pageInfo{hasPreviousPage}nodes{commit{oid committedDate}}}}}}";
+const ACTIVITY_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid commits(last:100){pageInfo{hasPreviousPage}nodes{commit{oid authoredDate parents(first:1){totalCount}}}}}}}";
 
 /**
  * Read-only: an approval's notes, as the approval feedback's own sources, and what came after the newest of them: commits, replies from
@@ -435,8 +435,10 @@ export async function readApprovalHandling(run: GhRunner, target: PrTarget): Pro
     commits?: { pageInfo?: { hasPreviousPage?: unknown }; nodes?: unknown } } } } } | undefined;
   const later = activity?.data?.repository?.pullRequest;
   if (later?.headRefOid !== head) return { ok: false, error: "The PR's head changed while it was read. Try again." };
-  const commits = Array.isArray(later.commits?.nodes) ? (later.commits.nodes as { commit?: { oid?: unknown; committedDate?: unknown } }[]) : null;
-  if (commits === null || !commits.every((node) => typeof node?.commit?.oid === "string" && typeof node.commit.committedDate === "string")) {
+  const commits = Array.isArray(later.commits?.nodes)
+    ? (later.commits.nodes as { commit?: { oid?: unknown; authoredDate?: unknown; parents?: { totalCount?: unknown } } }[]) : null;
+  if (commits === null || !commits.every((node) => typeof node?.commit?.oid === "string" && typeof node.commit.authoredDate === "string" &&
+    typeof node.commit.parents?.totalCount === "number")) {
     return { ok: false, error: "GitHub did not return the PR's commits." };
   }
   const noted = [...detail.approvals, ...detail.followups].filter((review) => review.body.trim() !== "");
@@ -444,11 +446,11 @@ export async function readApprovalHandling(run: GhRunner, target: PrTarget): Pro
   const last = [...noted, ...detail.linked.map(({ review }) => review)].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt)).at(-1)!;
   const since = Date.parse(last.submittedAt);
   const after = (at: unknown) => typeof at === "string" && Date.parse(at) > since;
-  const oids = commits.map((node) => node.commit!.oid as string);
-  const at = oids.indexOf(last.commit.oid);
-  // Its head gone from the last 100 commits means more than that many since, or history rewritten after it: either way, new commits.
-  const newCommits = at >= 0 ? oids.length - 1 - at : head === last.commit.oid ? 0
-    : Math.max(1, commits.filter((node) => after(node.commit!.committedDate)).length);
+  // Commits after the head the note was left on, written after the note, and not merges. One pushed later but made before it, a head the
+  // approval never saw that was already there, a rebase or force push (which keeps each commit's author date), and Update branch's merge
+  // commit aren't evidence. With that head gone from the last 100 (history rewritten, or many commits since), the dates alone say.
+  const at = commits.findIndex((node) => node.commit!.oid === last.commit.oid);
+  const newCommits = commits.slice(at + 1).filter(({ commit }) => after(commit!.authoredDate) && (commit!.parents!.totalCount as number) < 2).length;
   const author = detail.author;
   const comments = pr.comments as { pageInfo?: { hasPreviousPage?: unknown }; nodes?: unknown } | undefined;
   const commentNodes = Array.isArray(comments?.nodes) ? comments.nodes as { createdAt?: unknown; author?: { login?: unknown } | null }[] : null;

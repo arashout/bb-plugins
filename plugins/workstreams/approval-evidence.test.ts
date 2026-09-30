@@ -8,6 +8,11 @@ const approval = { id: "review-301", state: "APPROVED", body: "Ship it, but the 
   author: { login: "mira" }, commit: { oid: APPROVED_AT } };
 /** `older`: GitHub has PR comments before the last 100 it returned. `author`: the PR's author, null for a deleted account. */
 type Facts = { head?: string; reviews?: unknown[]; threads?: unknown[]; comments?: unknown[]; older?: boolean; author?: string | null; commits?: string[] };
+/** A commit written before mira's approval and rebased after it, and Update branch's merge of the base after it. */
+const REBASED = "e".repeat(40), MERGE = "f".repeat(40);
+/** When each commit was written: three before mira's approval on the 28th, two after it. */
+const AUTHORED: Record<string, string> = { [EARLIER]: "2026-09-20T00:00:00Z", [APPROVED_AT]: "2026-09-27T00:00:00Z", [REBASED]: "2026-09-27T06:00:00Z",
+  [LATER]: "2026-09-29T00:00:00Z", [MERGE]: "2026-09-29T00:00:00Z" };
 
 /** GitHub as the confirm reads it: the review-threads read with PR comments, then the commits read, both on `head`. */
 function github(facts: Facts = {}): GhRunner {
@@ -15,8 +20,8 @@ function github(facts: Facts = {}): GhRunner {
   return async (args) => {
     const query = args.find((arg) => arg.startsWith("query=")) ?? "";
     if (query.includes("commits(last:100)")) return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head,
-      commits: { pageInfo: { hasPreviousPage: false }, nodes: (facts.commits ?? [EARLIER, APPROVED_AT]).map((oid, index) => ({ commit: { oid,
-        committedDate: `2026-09-${String(20 + index).padStart(2, "0")}T00:00:00Z` } })) } } } } }) };
+      commits: { pageInfo: { hasPreviousPage: false }, nodes: (facts.commits ?? [EARLIER, APPROVED_AT]).map((oid) => ({ commit: { oid,
+        authoredDate: AUTHORED[oid], parents: { totalCount: oid === MERGE ? 2 : 1 } } })) } } } } }) };
     return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head,
       author: facts.author === null ? null : { login: facts.author ?? "dana" },
       reviews: { pageInfo: { hasPreviousPage: false }, nodes: facts.reviews ?? [approval] },
@@ -50,6 +55,24 @@ describe("approval handling evidence", () => {
     expect([pushed.evidence.commits, handled(pushed.evidence), evidenceText(pushed.evidence)]).toEqual([1, true, "1 commit since this approval"]);
     const rewritten = await read({ head: LATER, commits: [EARLIER, LATER] });
     expect(rewritten.evidence.commits).toBe(1);
+    // One before the approval's head in history came first, whatever its date says.
+    expect((await read({ commits: [LATER, APPROVED_AT] })).evidence.commits).toBe(0);
+  });
+
+  // Update branch merges the base in, and a rebase or force push commits old work again: neither answers a note.
+  it("never counts Update branch's merge commit, or a commit rebased after the approval but written before it", async () => {
+    const merged = await read({ head: MERGE, commits: [EARLIER, APPROVED_AT, MERGE] });
+    expect([merged.evidence.commits, handled(merged.evidence)]).toEqual([0, false]);
+    const rebased = await read({ head: REBASED, commits: [EARLIER, REBASED] });
+    expect([rebased.evidence.commits, handled(rebased.evidence)]).toEqual([0, false]);
+  });
+
+  // An approval left on an older head, after a newer commit was already pushed, has nothing after it to show: that commit came first.
+  it("never counts a commit made before the approval, even one after the head the approval named", async () => {
+    const stale = await read({ reviews: [{ ...approval, commit: { oid: EARLIER } }], commits: [EARLIER, APPROVED_AT] });
+    expect([stale.evidence.commits, handled(stale.evidence)]).toEqual([0, false]);
+    const gone = await read({ reviews: [{ ...approval, commit: { oid: "d".repeat(40) } }], commits: [EARLIER, APPROVED_AT] });
+    expect([gone.evidence.commits, handled(gone.evidence)]).toEqual([0, false]);
   });
 
   it("counts the author's PR comment or review reply after the approval, and nobody else's", async () => {
