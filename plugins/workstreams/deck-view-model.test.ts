@@ -152,14 +152,15 @@ describe("an effort card", () => {
     expect(readText({ ...view, limitedUntil: NOW - 1 }, NOW)).toBe("Read 25s ago");
   });
 
-  it("gives Advance only the safe moves drawn as needing you: never a merge, a thread's work, or a row dimmed until Mark seen", () => {
-    expect([card(inkwellDeck(), SHELF).advance, card(inkwellDeck(), ONE_OFFS).advance.length, card(inkwellDeck(), PICKUP).advance]).toEqual([[], 3, []]);
+  it("gives Advance only the safe moves drawn as needing you: never a merge, a thread's work, review notes, or a row dimmed until Mark seen", () => {
+    // One-offs' folio #301 and #318 wait on their review notes, which are confirmed one PR at a time: only catalog #96's nudge is Advance's.
+    expect([card(inkwellDeck(), SHELF).advance, card(inkwellDeck(), ONE_OFFS).advance, card(inkwellDeck(), PICKUP).advance]).toEqual([[], [url("catalog", 96)], []]);
     // catalog #96 was in flight when you last marked One-offs seen. Now due a nudge, it waits dimmed where you saw it, so Advance, which
     // plans exactly these PRs, leaves it out, as its count on the button does.
     const view = inkwellDeck();
     const seen = { rows: { [ONE_OFFS]: cardSnapshot(view.active.find((item) => item.id === ONE_OFFS)!)
       .map((row) => row.prUrl === url("catalog", 96) ? { ...row, section: "flight", status: "In review" } : row) }, at: {} };
-    expect(card(view, ONE_OFFS, seen).advance).toEqual([url("folio", 301), url("folio", 318)]);
+    expect(card(view, ONE_OFFS, seen).advance).toEqual([]);
   });
 
   it("words each tile from the card: next steps, blocked, stats, threads, stored Linear details, people, and recent activity", () => {
@@ -379,11 +380,10 @@ describe("what the keys act on", () => {
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
   });
 
-  it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, or a dimmed row", () => {
+  it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, review notes, or a dimmed row", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
     expect(oneOffs.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.inline?.label, line.inline?.title])).toEqual([
-      ["folio #301", "Advance", "Confirm 1 note handled: lists it, then sends in 8 s with Undo (a)"],
-      ["folio #318", "Advance", "Confirm 1 note handled: lists it, then sends in 8 s with Undo (a)"],
+      ["folio #301", undefined, undefined], ["folio #318", undefined, undefined],
       ["catalog #96", "Advance", "Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo (a)"]]);
     const shelf = card(inkwellDeck(), SHELF);
     expect(shelf.sections.flatMap((section) => section.lines).map((line) => line.inline)).toEqual([null, null, null, null, null]);
@@ -395,15 +395,17 @@ describe("what the keys act on", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
     const [confirm301, , nudge96] = oneOffs.sections.flatMap((section) => section.lines);
     expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [] })).toEqual({ scope: "row", prUrls: [url("catalog", 96)] });
-    expect(advanceTarget({ cur: oneOffs, focused: null, selected: [] })).toEqual({ scope: "card", prUrls: [url("folio", 301), url("folio", 318), url("catalog", 96)] });
+    expect(advanceTarget({ cur: oneOffs, focused: null, selected: [] })).toEqual({ scope: "card", prUrls: [url("catalog", 96)] });
     expect(hintKeys(context(oneOffs, { focused: nudge96! }), availability(context(oneOffs, { focused: nudge96! })))).toContainEqual(["a", "advance row"]);
     expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).toContainEqual(["a", "advance effort"]);
-    // The selection wins, and the confirm says why any of it is left out.
-    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [confirm301!] })).toEqual({ scope: "selected", prUrls: [url("folio", 301)] });
-    // A focused row with no safe step now, such as one whose nudge is waiting to send, leaves a to the card's others.
+    // The selection wins, and the confirm says why any of it is left out; a selection of review notes alone gives a nothing to run.
+    expect(advanceTarget({ cur: oneOffs, focused: confirm301!, selected: [confirm301!, nudge96!] }))
+      .toEqual({ scope: "selected", prUrls: [url("folio", 301), url("catalog", 96)] });
+    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [confirm301!] })).toBeNull();
+    // A focused row with no safe step now, such as one whose nudge is waiting to send, leaves a to the card's others: here, none.
     const acted = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
     const waiting = acted.sections.find((section) => section.key === "nudge")!.lines[0]!;
-    expect(advanceTarget({ cur: acted, focused: waiting, selected: [] })).toEqual({ scope: "card", prUrls: [url("folio", 301), url("folio", 318)] });
+    expect(advanceTarget({ cur: acted, focused: waiting, selected: [] })).toBeNull();
     // A merge keeps its own key, and a card with nothing safe offers no a at all.
     const shelf = card(inkwellDeck(), SHELF);
     const merge = shelf.sections[0]!.lines[0]!;

@@ -7,8 +7,8 @@
 // imports types, zero-import modules, and the roster's time format only, so
 // no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type BatchKind, type DeckPile,
-  type DeckSection, type DeckWrite } from "./deck-shared";
+import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type ActedKind, type BatchKind,
+  type DeckPile, type DeckSection, type DeckWrite } from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
@@ -22,7 +22,7 @@ export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
 export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
 export const SECTIONS: Record<DeckSection, SectionMeta> = {
   merge: { title: "Merge", tone: "green", action: "merge", button: "Preview merge", help: "Approved, checks green, no conflicts. The preview reads each PR again, and nothing merges until you press Merge or ⌘↵." },
-  confirm: { title: "Confirm review notes", tone: "violet", action: "confirm", button: "Confirm…", help: "Approved with written notes. The confirm lists each PR before it records the notes handled." },
+  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "Approved with written notes. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
   nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
   request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
@@ -32,9 +32,9 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
   held: { title: "Held", tone: "gray", action: "release", button: "Release…", help: "PRs you held, with why and for how long. Nothing acts on one until you release it; Release lists each one first, then waits 8 s with Undo." },
 };
 /** The batch each act key plans. */
-export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "release" };
+export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { nudge: "nudge", request: "request", ready: "ready", release: "release" };
 const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "held" };
-const ACTED: Record<DeckWrite, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
+const ACTED: Record<ActedKind, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
   request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"] };
 /** A held row Release can take: still held, and nothing you did to it waits for Mark seen. */
 const releasable = (line: Pick<DeckLine, "row" | "dim">) => !line.dim && !!line.row?.hold;
@@ -167,7 +167,6 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
 /** A row's safe next step, as its inline Advance names it: one GitHub write, never a merge or a thread's work. */
 function stepText(row: DeckRow, kind: BatchKind): string {
   switch (kind) {
-    case "confirm": return `Confirm ${plural(Math.max(1, row.notes), "note")} handled`;
     case "nudge": return row.nudge.length ? `Nudge ${mentions(row.nudge)}` : "Nudge reviewers";
     case "request": return row.suggested.length ? `Request @${row.suggested[0]}` : "Request a reviewer";
     case "ready": return "Mark ready";
@@ -329,7 +328,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     status: card.pile === "held" ? { text: card.status.text, tone: "gray" }
       : { text: parts.join(" · ") || "No open PRs", tone: needsYou ? "amber" : card.blocked.length || held ? "blue" : current.length ? "green" : "gray" },
     needsYou,
-    advance: shown.filter((line) => line.needs && ["confirm", "nudge", "request", "ready"].includes(line.section)).map((line) => line.prUrl),
+    advance: shown.filter((line) => line.needs && (BATCH_KINDS as readonly string[]).includes(line.section)).map((line) => line.prUrl),
     held,
     changed: shown.filter((line) => line.dot !== null).length + threads.filter((thread) => thread.dot).length,
     // Only a landed write's dim is Mark seen's to settle: a waiting write isn't done, and a refused one never dimmed. So are rows and
@@ -518,6 +517,8 @@ export function availability(context: KeyContext): Availability {
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready", "release"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
+    // Review notes are confirmed one PR at a time, from its row in All PRs, never as a batch.
+    if (id === "confirm") { set(id, false, targets(id, context).length ? "confirm each PR's notes from its row in All PRs" : !card ? NO_CARD : NOTHING[id]); continue; }
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);
   }
   set("undo", context.undo, "nothing to undo");

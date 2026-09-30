@@ -41,6 +41,8 @@ describe("the deck's write safety", () => {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
     // All PRs' keys go through the same confirm; its row buttons stay one click each, as before the deck.
-    expect(source("inventory-screen.tsx")).toMatch(/case "confirm": case "nudge": case "request": case "ready": if \(focused\) void batch\.plan\(/u);
+    expect(source("inventory-screen.tsx")).toMatch(/case "nudge": case "request": case "ready": if \(focused\) void batch\.plan\(/u);
+    // Review notes are never a batch: c is the row's own confirm, which refuses without evidence of handling.
+    expect(source("inventory-screen.tsx")).toMatch(/case "confirm": \{ const confirm = action\("confirm-handled"\); if \(focused && confirm\) void run\(focused, confirm\); return; \}/u);
   });
 });

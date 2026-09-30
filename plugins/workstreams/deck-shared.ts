@@ -29,8 +29,11 @@ export const serviceName = (repo: string) => `${repo.split("/").at(-1) ?? repo} 
 export const serviceGoal = (repo: string) => `Work in ${repo.split("/").at(-1) ?? repo} that no effort has yet.`;
 /** Where a card sits in the strip: stored efforts first, then service cards, then Loose threads. */
 export const cardTier = (id: string) => id === LOOSE_ID ? 2 : id.startsWith(SERVICE_PREFIX) ? 1 : 0;
-/** The batches a section button runs, in the order Advance runs them. Each is one GitHub write or your confirmation per PR: never a merge. */
-export const BATCH_KINDS = ["confirm", "nudge", "request", "ready"] as const;
+/**
+ * The batches a section button runs, in the order Advance runs them. Each is one GitHub write per PR: never a merge, and never a
+ * confirmation of review notes, which you make one PR at a time after reading them.
+ */
+export const BATCH_KINDS = ["nudge", "request", "ready"] as const;
 export type BatchKind = (typeof BATCH_KINDS)[number];
 /**
  * Every write the deck confirms in a listing and sends after its Undo window: Advance's kinds, and Release, which lifts your hold on a PR
@@ -38,6 +41,9 @@ export type BatchKind = (typeof BATCH_KINDS)[number];
  */
 export const DECK_WRITES = [...BATCH_KINDS, "release"] as const;
 export type DeckWrite = (typeof DECK_WRITES)[number];
+/** What a row can say you did: a deck write, or a confirmation of its review notes, which only that PR's own confirm records. */
+export const ACTED_KINDS = [...DECK_WRITES, "confirm"] as const;
+export type ActedKind = (typeof ACTED_KINDS)[number];
 /** How long a confirmed batch waits for Undo before it sends anything. */
 export const SEND_DELAY_MS = 8_000;
 
@@ -45,7 +51,7 @@ export const SEND_DELAY_MS = 8_000;
  * What you last did to a row, from the deck or its inventory row: a write waiting out its Undo window or running, sent, refused, or cut
  * off by a restart mid-send. `batchId` names the deck batch it belongs to, which Undo cancels while it waits.
  */
-export type RowActed = { kind: DeckWrite; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number; batchId: string | null };
+export type RowActed = { kind: ActedKind; state: "queued" | "sending" | "sent" | "refused" | "unknown"; at: number; batchId: string | null };
 /** How long a write you made marks its row. An older one is history, so the row counts again whether or not you marked it seen. */
 export const ACTED_MS = 86_400_000;
 

@@ -91,9 +91,8 @@ describe("deck batches on the server", () => {
   it("sends exactly what Advance planned, 8 seconds after you confirm, each through the inventory's guarded action, and never a merge", async () => {
     const env = await setup();
     const planned = await plan(env, { kind: "advance" });
-    // Confirm, nudge, request, then mark ready. #505's merge and #506, which needs nothing, are not in it.
+    // Nudge, request, then mark ready. #504's review notes, #505's merge, and #506, which needs nothing, are not in it.
     expect(planned.items.map(({ prUrl, kind, what, reviewers, headOid, fingerprint, notes }) => ({ prUrl, kind, what, reviewers, headOid, fingerprint, notes }))).toEqual([
-      { prUrl: url(504), kind: "confirm", what: "Confirm 2 comments handled", reviewers: [], headOid: HEAD, fingerprint: FEEDBACK.fingerprint, notes: 2 },
       { prUrl: url(503), kind: "nudge", what: "Nudge @mira", reviewers: ["mira"], headOid: null, fingerprint: null, notes: 0 },
       { prUrl: url(502), kind: "request", what: "Request @mira", reviewers: ["mira"], headOid: null, fingerprint: null, notes: 0 },
       { prUrl: url(501), kind: "ready", what: "Mark ready", reviewers: [], headOid: HEAD, fingerprint: null, notes: 0 }]);
@@ -102,10 +101,10 @@ describe("deck batches on the server", () => {
 
     const started = await env.rpc("deck_batch_start", { batchId: planned.batchId }) as { ok: true; dispatchAt: number };
     expect(started).toEqual({ ok: true, dispatchAt: expect.any(Number) });
-    // Waiting out its Undo window, each row is yours no more and sends nothing.
+    // Waiting out its Undo window, each row is yours no more and sends nothing; #504's notes and #505's merge still need you.
     await vi.advanceTimersByTimeAsync(7_900);
     expect(env.writes).toEqual([]);
-    expect(await env.card()).toMatchObject({ needsYou: 1, sections: expect.arrayContaining([expect.objectContaining({ key: "ready",
+    expect(await env.card()).toMatchObject({ needsYou: 2, sections: expect.arrayContaining([expect.objectContaining({ key: "ready",
       rows: [expect.objectContaining({ acted: { kind: "ready", state: "queued", at: expect.any(Number), batchId: planned.batchId } })] })]) });
 
     await vi.advanceTimersByTimeAsync(200);
@@ -113,14 +112,24 @@ describe("deck batches on the server", () => {
     expect(env.writes).toEqual([{ kind: "nudge", prUrl: url(503), reviewers: ["mira"], comment: null }, { kind: "nudge", prUrl: url(502), reviewers: ["mira"], comment: null },
       { kind: "ready", prUrl: url(501), headOid: HEAD }]);
     expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
-      ["folio #504", "refused", "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written."],
       ["folio #503", "sent", "Wrote nudge."], ["folio #502", "sent", "Wrote nudge."], ["folio #501", "sent", "Wrote ready."]]);
-    // Nothing since mira's approval shows her note handled, so no confirmation is recorded and #504 still doesn't read as ready.
+    // No batch records a confirmation, so #504 doesn't read as ready.
     expect(env.db.prepare("SELECT COUNT(*) AS n FROM approval_feedback_verifications").get()).toEqual({ n: 0 });
-    // Each landed write keeps its row out of Needs you, and out of the next plan, until the view marks it seen; the refused #504 still
-    // counts. Seen, #501, out of draft, needs a reviewer.
+    // Each landed write keeps its row out of Needs you, and out of the next plan, until the view marks it seen; #504's notes and #505's
+    // merge still count. Seen, #501, out of draft, needs a reviewer.
     expect(await env.card()).toMatchObject({ needsYou: 2 });
     expect(await env.card({ [url(501)]: Date.now() })).toMatchObject({ needsYou: 3 });
+  });
+
+  // The live false readiness: a batch recorded #504's notes handled though nobody had answered them.
+  it("never plans a confirmation of review notes: not in Advance, not for the row alone, not as a batch of its own", async () => {
+    const env = await setup();
+    expect((await plan(env, { kind: "advance" })).items.map((item) => item.ref)).not.toContain("folio #504");
+    const alone = await env.rpc("deck_batch_plan", { kind: "advance", effortId: env.effort.id, prUrls: [url(504)] });
+    expect(alone).toEqual({ ok: true, batchId: null, items: [], skipped: [{ prUrl: url(504), ref: "folio #504", reason: "Its review notes are confirmed from its own row." }] });
+    await expect(env.rpc("deck_batch_plan", { kind: "confirm", effortId: env.effort.id })).rejects.toThrow();
+    // Its row offers no Advance, and still needs you.
+    expect((await env.card()).sections.find((section) => section.key === "confirm")?.rows.map((row) => [row.number, row.acted])).toEqual([[504, null]]);
   });
 
   it("stops a confirmed batch at each PR whose effort you hold or complete before it sends, and won't start one for a paused effort", async () => {
@@ -156,7 +165,6 @@ describe("deck batches on the server", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     await settled(env, planned.batchId);
     expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
-      ["folio #504", "refused", expect.stringContaining("No commits, reply, or resolved threads")],
       ["folio #503", "refused", "On hold: Store layout first. Release the hold first; nothing was written."],
       ["folio #502", "refused", expect.stringContaining("is writing this PR")],
       ["folio #501", "sent", "Wrote ready."]]);
@@ -283,15 +291,15 @@ describe("deck batches on the server", () => {
     // GitHub never answers the nudge before the restart; the requests after it still go. Out of draft, #501 needs a reviewer too, which
     // Advance asks for once the view marks its landed write seen.
     env.hang.prUrl = url(503);
-    expect((await plan(env, { kind: "advance" })).items.map((item) => item.ref)).toEqual(["folio #504", "folio #503", "folio #502"]);
+    expect((await plan(env, { kind: "advance" })).items.map((item) => item.ref)).toEqual(["folio #503", "folio #502"]);
     const cut = await plan(env, { kind: "advance", seen: { [url(501)]: Date.now() } });
-    expect(cut.items.map((item) => item.ref)).toEqual(["folio #504", "folio #503", "folio #501", "folio #502"]);
+    expect(cut.items.map((item) => item.ref)).toEqual(["folio #503", "folio #501", "folio #502"]);
     await env.rpc("deck_batch_start", { batchId: cut.batchId });
     await vi.advanceTimersByTimeAsync(8_000);
     await vi.waitFor(() => expect(env.writes).toHaveLength(2));
     await env.restart();
     await settled(env, cut.batchId);
-    expect((await env.batch(cut.batchId)).items.map((item) => [item.ref, item.state])).toEqual([["folio #504", "refused"], ["folio #503", "unknown"],
+    expect((await env.batch(cut.batchId)).items.map((item) => [item.ref, item.state])).toEqual([["folio #503", "unknown"],
       ["folio #501", "sent"], ["folio #502", "sent"]]);
     expect(env.writes.slice(1)).toEqual([{ kind: "nudge", prUrl: url(503), reviewers: ["mira"], comment: null },
       { kind: "nudge", prUrl: url(501), reviewers: ["mira"], comment: null }, { kind: "nudge", prUrl: url(502), reviewers: ["mira"], comment: null }]);

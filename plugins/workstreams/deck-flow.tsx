@@ -34,8 +34,7 @@ export function DeckDialog({ open, title, sub, wide, bare, closeKey, onClose, on
   </Dialog>;
 }
 
-const VERB: Record<DeckWrite | "advance", string> = { confirm: "Confirm", nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release",
-  advance: "Run" };
+const VERB: Record<DeckWrite | "advance", string> = { nudge: "Nudge", request: "Request", ready: "Mark ready", release: "Release", advance: "Run" };
 type Pending = { plan: ConfirmPlan; batchId: string; request: { kind: DeckWrite | "advance"; effortId: string | null; prUrls: string[] | null }; reviewer: string;
   /** The reviewer field as the listing was planned: another name typed there sends nothing until it plans again. */
   planned: string };

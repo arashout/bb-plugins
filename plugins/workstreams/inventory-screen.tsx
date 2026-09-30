@@ -291,7 +291,9 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
         return;
       }
       case "merge": { const merge = action("merge"); if (focused && merge) { remember(); void run(focused, merge); } return; }
-      case "confirm": case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
+      // Review notes are never a batch: c is the row's own Confirm handled, which refuses without evidence of handling.
+      case "confirm": { const confirm = action("confirm-handled"); if (focused && confirm) void run(focused, confirm); return; }
+      case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
       case "hold-pr": if (focused) hold(focused); return;
       case "release": if (focused?.hold) hold(focused); return;

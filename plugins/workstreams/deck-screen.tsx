@@ -286,7 +286,7 @@ function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean 
     </div>
   </div>;
 }
-const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready" };
+const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", nudge: "nudge", request: "request", ready: "ready" };
 
 function Section({ section, state, run, open, stuck, held }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean }) {
   const { meta } = section;

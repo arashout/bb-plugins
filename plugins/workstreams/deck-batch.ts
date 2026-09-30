@@ -4,9 +4,10 @@
 // 8 seconds later unless you Undo. Dispatch runs exactly the planned items,
 // each through the inventory action's own guards (a fresh read, a hold, a v2
 // claim or another writer, and facts changed since the row), so a refusal
-// refuses that PR only. Advance plans every safe batch in an effort: confirm
-// comments, nudges, review requests, and mark ready, never a merge or a
-// thread's work. A PR whose effort you hold or complete after confirming, or
+// refuses that PR only. Advance plans every safe batch in an effort: nudges,
+// review requests, and mark ready, never a merge, a thread's work, or a
+// confirmation of review notes, which is yours to make one PR at a time after
+// reading them. A PR whose effort you hold or complete after confirming, or
 // that leaves its effort, is refused instead of sent. Release (A17.3) lifts
 // your holds the same way: listed, then after the window, and never by Advance.
 // It writes nothing to GitHub, so it runs on any pile, as holding a PR does.
@@ -20,7 +21,8 @@
 // sends nothing more: you confirmed it for then, not for whenever it runs again.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ACTED_MS, BATCH_KINDS, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed } from "./deck-shared.js";
+import { ACTED_KINDS, ACTED_MS, BATCH_KINDS, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed }
+  from "./deck-shared.js";
 import { deckSeenSchema, type DeckRow } from "./deck.js";
 import type { ActionResult, ShownReviewers } from "./inventory-actions.js";
 
@@ -33,9 +35,12 @@ const DAY_MS = 86_400_000;
 /** A batch that shows no sign of life for this long past its window isn't sent: each PR it hadn't reached is refused. */
 const LATE_MS = 60_000;
 
+/** A confirmation in a batch planned before confirmations became per PR: it's refused, never sent. */
+const LEGACY_CONFIRM = "Review notes are confirmed one PR at a time now, after reading them. Nothing was recorded.";
 const itemSchema = z.object({
-  prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(DECK_WRITES),
-  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Confirm 2 comments handled", "Release". */
+  /** `confirm` only in a batch planned before confirmations became per PR. */
+  prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(ACTED_KINDS),
+  /** The write in a few words: "Nudge @mira", "Request @kai", "Mark ready", "Release". */
   what: z.string(),
   /** Whom a nudge or request asks. */
   reviewers: z.array(z.string()),
@@ -50,7 +55,7 @@ const itemSchema = z.object({
 export type BatchItem = z.infer<typeof itemSchema>;
 const skippedSchema = z.object({ prUrl: z.string(), ref: z.string(), reason: z.string() }).strict();
 export type Skipped = z.infer<typeof skippedSchema>;
-const bodySchema = z.object({ kind: z.enum([...DECK_WRITES, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
+const bodySchema = z.object({ kind: z.enum([...ACTED_KINDS, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
   skipped: z.array(skippedSchema) }).strict();
 export const deckBatchSchema = bodySchema.extend({
   id: z.string(), createdAt: z.number(),
@@ -91,7 +96,7 @@ export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title"
 
 const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
-  blocked: "It waits on something else.", confirm: "Its next move is confirming comments.", nudge: "Its next move is a nudge.",
+  blocked: "It waits on something else.", confirm: "Its review notes are confirmed from its own row.", nudge: "Its next move is a nudge.",
   request: "Its next move is a review request.", ready: "Its next move is Mark ready." };
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 
@@ -104,7 +109,7 @@ export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[],
   if (kind === "release") return planRelease(rows, options.selected);
   const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
-  for (const { row, pile, seenAt, head, fingerprint, shown } of rows) {
+  for (const { row, pile, seenAt, head, shown } of rows) {
     const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
     const skip = (reason: string) => { if (options.selected) skipped.push({ prUrl: row.prUrl, ref, reason }); };
     const section = kinds.find((candidate) => candidate === row.section);
@@ -114,10 +119,9 @@ export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[],
     if (!section) { skip(SECTION_WHY[row.section]!); continue; }
     const item = { prUrl: row.prUrl, ref, title: row.title, kind: section, reviewers: [] as string[], headOid: null as string | null, fingerprint: null as string | null,
       notes: 0, shown: null as BatchItem["shown"] };
-    if (section === "ready" || section === "confirm") {
-      if (!head || (section === "confirm" && !fingerprint)) { skipped.push({ prUrl: row.prUrl, ref, reason: "Not read in full yet. Refresh it first." }); continue; }
-      items.push(section === "ready" ? { ...item, what: "Mark ready", headOid: head }
-        : { ...item, what: `Confirm ${row.notes} comment${row.notes === 1 ? "" : "s"} handled`, headOid: head, fingerprint, notes: row.notes });
+    if (section === "ready") {
+      if (!head) { skipped.push({ prUrl: row.prUrl, ref, reason: "Not read in full yet. Refresh it first." }); continue; }
+      items.push({ ...item, what: "Mark ready", headOid: head });
     } else if (section === "nudge") {
       if (!row.nudge.length) { skipped.push({ prUrl: row.prUrl, ref, reason: "No reviewer needs a nudge now." }); continue; }
       items.push({ ...item, what: `Nudge ${mentions(row.nudge)}`, reviewers: [...row.nudge] });
@@ -150,7 +154,7 @@ export type DeckBatchDeps = {
   db: Db;
   now(): number;
   /** Run one item through the inventory action's guards, which read the PR again first. */
-  run(item: BatchItem): Promise<ActionResult>;
+  run(item: BatchItem & { kind: DeckWrite }): Promise<ActionResult>;
   /** Each PR's pile now, from one read: where its effort is, or active on its service card once no effort owns it. */
   piles(): Promise<(prUrl: string) => DeckPile>;
   changed(): void;
@@ -193,7 +197,8 @@ export function createDeckBatches(deps: DeckBatchDeps) {
         try {
           const item = get(id)!.items[index]!;
           const pile = (await deps.piles())(item.prUrl);
-          result = pile === "active" || item.kind === "release" ? await deps.run(item) : { ok: false, error: `${PILE_WHY[pile]} Nothing was written.` };
+          result = item.kind === "confirm" ? { ok: false, error: LEGACY_CONFIRM }
+            : pile === "active" || item.kind === "release" ? await deps.run({ ...item, kind: item.kind }) : { ok: false, error: `${PILE_WHY[pile]} Nothing was written.` };
         } catch (error) { result = { ok: false, error: String(error).slice(0, 500) }; }
         // A reload closed this store mid-send: the next load finds the item sending and marks it unknown.
         if (disposed) return;

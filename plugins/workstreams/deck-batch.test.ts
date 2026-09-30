@@ -16,11 +16,21 @@ const brief = (plan: ReturnType<typeof planBatch>) => ({ items: plan.items.map((
   skipped: plan.skipped.map((skip) => `${skip.ref}: ${skip.reason}`) });
 
 describe("planning a deck batch", () => {
-  it("plans Advance as every safe move in the effort, confirm through mark ready, and leaves merges and a thread's work to their own paths", () => {
+  it("plans Advance as every safe move in the effort, nudge through mark ready, and leaves merges and a thread's work to their own paths", () => {
     next = 600;
     const rows = [row("ready"), row("merge"), row("request"), row("work"), row("nudge"), row("confirm"), row("flight"), row("blocked")];
-    expect(brief(planBatch("advance", rows, { selected: false }))).toEqual({ items: ["confirm quill #605: Confirm 1 comment handled",
+    expect(brief(planBatch("advance", rows, { selected: false }))).toEqual({ items: [
       "nudge quill #604: Nudge @mira", "request quill #602: Request @kai", "ready quill #600: Mark ready"], skipped: [] });
+  });
+
+  // A batched confirmation once read a PR ready to merge though nobody had answered its approval's note: notes are confirmed one PR at a
+  // time, after reading them, so no Advance, row Advance, or selection ever carries one.
+  it("never plans a confirmation of review notes, in Advance, on a row's own Advance, or in a selection", () => {
+    next = 605;
+    const confirm = row("confirm");
+    expect(brief(planBatch("advance", [confirm], { selected: false }))).toEqual({ items: [], skipped: [] });
+    expect(brief(planBatch("advance", [confirm], { selected: true }))).toEqual({ items: [], skipped: ["quill #605: Its review notes are confirmed from its own row."] });
+    expect(brief(planBatch("nudge", [confirm, row("nudge")], { selected: true })).items).toEqual(["nudge quill #606: Nudge @mira"]);
   });
 
   it("asks the reviewers you pick on every PR in a request, and keeps what each row showed so the request can check it", () => {
@@ -122,6 +132,26 @@ describe("sending a deck batch", () => {
     expect([replacement.get(cut), replacement.get(late)].map((item) => [item?.state, item?.items.map((entry) => entry.state)]))
       .toEqual([["done", ["unknown", "sent"]], ["done", ["sent"]]]);
     replacement.dispose();
+    db.close();
+  });
+
+  // An older build planned confirmations into Advance; one of those batches still waiting when this build loads must record nothing.
+  it("refuses a confirmation left in a batch an older build planned, and sends the rest of that batch", async () => {
+    vi.useFakeTimers();
+    next = 670;
+    const { db, sent, deps } = store();
+    const ready = planBatch("ready", [row("ready")], { selected: false }).items[0]!;
+    const confirm = { ...ready, prUrl: "https://github.com/inkwell/quill/pull/699", ref: "quill #699", kind: "confirm", what: "Confirm 1 comment handled",
+      headOid: HEAD, fingerprint: "f".repeat(64), notes: 1 };
+    db.prepare("INSERT INTO deck_batches (id, created_at, state, dispatch_at, body) VALUES (?, ?, 'scheduled', ?, ?)").run("legacy", Date.now(), Date.now() + 1_000,
+      JSON.stringify({ kind: "advance", effortId: null, skipped: [], items: [confirm, ready].map((item) => ({ ...item, state: "pending", detail: null, at: null })) }));
+    const load = createDeckBatches(deps);
+    load.resume();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sent).toEqual([ready.prUrl]);
+    expect(load.get("legacy")?.items.map((item) => [item.kind, item.state, item.detail])).toEqual([
+      ["confirm", "refused", "Review notes are confirmed one PR at a time now, after reading them. Nothing was recorded."], ["ready", "sent", "Wrote ready."]]);
+    load.dispose();
     db.close();
   });
 

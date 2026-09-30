@@ -679,7 +679,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         if (list.length) { opener.current = focusKey(document.activeElement); setMerging(list.map((item) => ({ target: item.prUrl, n: null }))); }
         return;
       }
-      case "confirm": case "nudge": case "request": case "ready": case "release": {
+      // Review notes are confirmed one PR at a time from All PRs; availability keeps c off here.
+      case "confirm": return;
+      case "nudge": case "request": case "ready": case "release": {
         const list = line ? [line] : targets(id, context);
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
         return;
@@ -848,7 +850,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       else if (item.target) run({ kind: item.target.kind, id: item.target.id });
     }, 0);
   };
-  const kinds = (["merge", "confirm", "nudge", "request", "ready"] as const).flatMap((id) => {
+  const kinds = (["merge", "nudge", "request", "ready"] as const).flatMap((id) => {
     const count = selected.filter((line) => line.needs && line.section === id).length;
     return count ? [{ id, count, tone: SECTIONS[id].tone }] : [];
   });

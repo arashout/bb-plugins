@@ -863,14 +863,17 @@ whose ticket it carries.
 ### Batch actions and Advance
 
 Every write from the deck is a batch the user confirms, and each step is only
-on their click. `deck_batch_plan` takes a `kind` (`confirm`, `nudge`,
-`request`, `ready`, `release`, or `advance`) and an `effortId`, `prUrls`, or both. It
+on their click. `deck_batch_plan` takes a `kind` (`nudge`, `request`,
+`ready`, `release`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
 covers the Needs you rows of that kind. The deck's per-row Advance is
 `advance` with that one PR in `prUrls`. `advance` covers every safe kind in
-the effort, in the order confirm, nudge, request, and ready: never a merge,
-which only the fresh merge preview does, and never a thread's work. A request
+the effort, in the order nudge, request, and ready: never a merge, which only
+the fresh merge preview does, never a thread's work, and never confirming
+review notes, which `inventory_confirm_handled` does one PR at a time. A
+batch an older build planned with a confirmation refuses that item when it
+comes due and sends the rest. A request
 asks the `reviewers` given, else each PR's first suggested reviewer. It takes
 `seen` as `deck_get` does, so a row whose write landed isn't planned again
 until the view marks it seen. `release` covers the effort's held PRs: it lifts

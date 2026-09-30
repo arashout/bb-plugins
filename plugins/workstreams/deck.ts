@@ -10,7 +10,7 @@
 // here: nothing stores them.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
-import { ACTED_MS, DECK_SECTIONS, DECK_WRITES, LOOSE_ID, needsYou, serviceGoal, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed }
+import { ACTED_KINDS, ACTED_MS, DECK_SECTIONS, LOOSE_ID, needsYou, serviceGoal, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed }
   from "./deck-shared.js";
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
@@ -52,7 +52,7 @@ export const deckRowSchema = z.object({
   managed: z.string().nullable(),
   /** When GitHub last answered for it; `failed` when its last read didn't, and `stale` when the last full read didn't list it or couldn't read it. */
   checkedAt: z.string().nullable(), failed: z.boolean(), stale: z.boolean(),
-  acted: z.object({ kind: z.enum(DECK_WRITES), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number(), batchId: z.string().nullable() })
+  acted: z.object({ kind: z.enum(ACTED_KINDS), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number(), batchId: z.string().nullable() })
     .strict().nullable(),
 }).strict();
 export type DeckRow = z.infer<typeof deckRowSchema>;

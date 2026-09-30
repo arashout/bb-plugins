@@ -59,9 +59,11 @@ describe("the effort deck's markup", () => {
 
   it("offers Advance and a button per safe section on One-offs, but no Hold or Complete, which One-offs never takes", () => {
     const html = pane(inkwellDeck(), ONE_OFFS);
-    expect(button(html, "act-advance")).toEqual({ text: "Advance · 3 a", disabled: false });
+    expect(button(html, "act-advance")).toEqual({ text: "Advance · 1 a", disabled: false });
     expect(html).not.toContain("act-hold");
-    expect(text(section(html, "confirm"))).toContain("Confirm review notes 2 ? Confirm… c");
+    // Review notes are confirmed one PR at a time: their section has no batch button.
+    expect(text(section(html, "confirm"))).toContain("Confirm review notes 2 ?");
+    expect(section(html, "confirm")).not.toContain('data-deck-focus="sec-confirm"');
     expect(text(section(html, "nudge"))).toContain("Nudge reviewers 1 ? Nudge… n");
   });
 
@@ -98,15 +100,17 @@ describe("the effort deck's markup", () => {
     expect(nudge).toMatch(/<button type="button" tabindex="-1" data-deck-inline="advance" title="Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo \(a\)" class="[^"]*opacity-0 group-hover:opacity-100 group-focus-within:opacity-100[^"]*">Advance<span class="hidden group-focus-within:inline-flex"><kbd[^>]*>a<\/kbd><\/span><\/button>/u);
     // A selection takes a, so a row you select keeps its Advance click but loses the badge, even while it holds focus.
     const badges = (html: string) => [...html.matchAll(/data-deck-inline="advance"[^>]*>(.*?)<\/button>/gu)].map((match) => match[1]!.includes("<kbd"));
-    const focus = { expanded: new Set<string>(), focus: url("folio", 301) };
-    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set<string>() } }))).toEqual([true, true, true]);
-    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set([url("folio", 301)]) } }))).toEqual([false, false, false]);
+    const focus = { expanded: new Set<string>(), focus: url("catalog", 96) };
+    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set<string>() } }))).toEqual([true]);
+    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set([url("catalog", 96)]) } }))).toEqual([false]);
     // The card's Advance keeps its badge only while a takes the card; a focused row or a selection takes it instead.
-    expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: "card" }), "act-advance").text).toBe("Advance · 3 a");
+    expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: "card" }), "act-advance").text).toBe("Advance · 1 a");
     for (const scope of ["row", "selected"] as const) {
-      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope }), "act-advance").text).toBe("Advance · 3");
-      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope, stuck: true }), "act-advance").text).toBe("Advance · 3");
+      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope }), "act-advance").text).toBe("Advance · 1");
+      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope, stuck: true }), "act-advance").text).toBe("Advance · 1");
     }
+    // Review notes have no Advance of their own.
+    expect(section(pane(inkwellDeck(), ONE_OFFS), "confirm")).not.toContain("data-deck-inline");
     // A merge row has none: merges stay in the preview.
     expect(section(pane(inkwellDeck(), SHELF), "merge")).not.toContain("data-deck-inline");
   });

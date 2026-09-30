@@ -5802,8 +5802,7 @@ export default async function plugin(bb: BbPluginApi) {
     run: (item) => item.kind === "release" ? releaseHold(item.prUrl)
       : item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
       : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
-      : item.kind === "request" ? inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!)
-      : inventoryActions.confirmHandled(item.prUrl, item.headOid!, item.fingerprint!),
+      : inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!),
     piles: pileOf });
   deckBatches.resume();
   bb.onDispose(() => deckBatches.dispose());
