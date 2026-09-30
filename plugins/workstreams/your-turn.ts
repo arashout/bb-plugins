@@ -20,7 +20,7 @@ export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments"] as
 export type YourTurnKind = (typeof YOUR_TURN_KINDS)[number];
 export const yourTurnSchema = z.object({
   kinds: z.array(z.enum(YOUR_TURN_KINDS)).min(1),
-  /** Each kind in a few words, first kind first: "Changes requested by @mira · 2 open threads". */
+  /** Each kind in a few words, first kind first: "Changes requested by @mira · 2 open threads", or "Answered @mira · re-request review" once you have. */
   text: z.string(),
   /** When the oldest feedback it names arrived, in epoch ms; null when nothing dates it. */
   since: z.number().nullable(),
@@ -28,6 +28,10 @@ export const yourTurnSchema = z.object({
 export type YourTurn = z.infer<typeof yourTurnSchema>;
 
 export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback">;
+
+/** The approval's part as yourTurn words it: a listing finds it by these words, since another part holds a " · " of its own. */
+const APPROVAL_NOTE = "Approval comment to address";
+const APPROVAL_COMMENTS = "Approved with comments";
 
 const time = (value: string | null | undefined): number | null => {
   const at = value ? Date.parse(value) : Number.NaN;
@@ -40,16 +44,21 @@ const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}
  * and its approval-comments reason, for notes you answered, only once nothing else holds the merge. `held`: you hold the PR, which parks it
  * until you release it.
  */
-export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since">[], held: boolean): YourTurn | null {
+export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since" | "reviewers">[], held: boolean): YourTurn | null {
   if (held || pr.state !== "OPEN") return null;
   const parts: { kind: YourTurnKind; text: string; since: number | null }[] = [];
   // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours.
   const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
-  if (changes.length) parts.push({ kind: "changes", text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
-    since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
+  // A change request you answered, which attention says to ask again, waits on your re-request, not on changes.
+  const asking = new Set(reasons.filter((reason) => reason.kind === "rereview-needed").flatMap((reason) => reason.reviewers.map((login) => login.toLowerCase())));
+  const answered = changes.filter((review) => asking.has(review.login.toLowerCase()));
+  const unanswered = changes.filter((review) => !asking.has(review.login.toLowerCase()));
+  if (changes.length) parts.push({ kind: "changes", since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)),
+    text: [...unanswered.length ? [`Changes requested by ${mentions(unanswered.map((review) => review.login))}`] : [],
+      ...answered.length ? [`Answered ${mentions(answered.map((review) => review.login))} · re-request review`] : []].join(" · ") });
   const note = reasons.find((reason) => reason.kind === "approval-note");
   const approval = note ?? reasons.find((reason) => reason.kind === "approval-comments");
-  if (approval) parts.push({ kind: "approval", text: note ? "Approval comment to address" : "Approved with comments", since: approval.since });
+  if (approval) parts.push({ kind: "approval", text: note ? APPROVAL_NOTE : APPROVAL_COMMENTS, since: approval.since });
   const open = pr.isDraft ? 0 : pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
   // Another person's comment that no reply on the PR answered; a push or a PR that mentions this one never does.
@@ -65,9 +74,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
  * Your turn's feedback as a listing names it, with who left each: "Approval comment from @mira-l · 3 open threads". `reviewed` is the PR's
  * latest review per reviewer, whose approvers the approval's part names.
  */
-export function turnSummary(turn: Pick<YourTurn, "kinds" | "text">, reviewed: readonly { login: string; state: string }[]): string {
+export function turnSummary(turn: Pick<YourTurn, "text">, reviewed: readonly { login: string; state: string }[]): string {
   const approvers = reviewed.filter((review) => review.state.toUpperCase() === "APPROVED").map((review) => review.login);
-  // Each part is one kind's words, in the kinds' order.
-  return turn.text.split(" · ").map((part, index) => turn.kinds[index] === "approval" && approvers.length ? `Approval comment from ${mentions(approvers)}` : part)
-    .join(" · ");
+  return turn.text.split(" · ").map((part) => approvers.length && (part === APPROVAL_NOTE || part === APPROVAL_COMMENTS) ? `Approval comment from ${mentions(approvers)}` : part).join(" · ");
 }

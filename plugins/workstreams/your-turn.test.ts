@@ -47,6 +47,17 @@ describe("Your turn", () => {
     expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
+  // Once you answered the change request (a verified follow-up, pushed since), the reviewer owes nothing and you owe the re-request: Your
+  // turn says so, rather than asking for changes that are made. A push alone answers nothing, so it keeps asking for them.
+  it("says an answered change request waits on your re-request, and keeps asking for changes nothing answered", () => {
+    const answered = pr({ ...changes, headCommittedAt: at(13), reviewFollowupPosted: true });
+    expect(turn(answered)).toEqual({ kinds: ["changes"], text: "Answered @otto-v · re-request review", since: Date.parse(at(10)) });
+    expect(turn(pr({ ...changes, headCommittedAt: at(13) }))?.text).toBe("Changes requested by @otto-v");
+    // Another reviewer's change request that nothing answered keeps its own words beside it.
+    const mixed = pr({ ...answered, latestReviews: [...changes.latestReviews, { login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: at(14) }] });
+    expect(turn(mixed)?.text).toBe("Changes requested by @mira-l · Answered @otto-v · re-request review");
+  });
+
   it("leaves out a PR you hold and a closed PR, whatever feedback they carry, and a draft but for its feedback to address", () => {
     for (const facts of [changes, approval, threads, comments]) {
       expect(turn(facts, true)).toBeNull();
@@ -107,5 +118,8 @@ describe("Your turn", () => {
     expect(turnSummary(turn(changes)!, changes.latestReviews)).toBe("Changes requested by @otto-v");
     // With no approver read, it says what Your turn says.
     expect(turnSummary(turn(approval)!, [])).toBe("Approval comment to address");
+    // The re-request's part holds a " · " of its own, which must not shift the approval's part out of place.
+    const asked = { text: "Answered @otto-v · re-request review · Approval comment to address · 2 open threads" };
+    expect(turnSummary(asked, approval.latestReviews)).toBe("Answered @otto-v · re-request review · Approval comment from @mira-l · 2 open threads");
   });
 });

@@ -59,7 +59,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                 : "Ask its thread to address it. You confirm the listing first, then Undo for 8 s."}
               className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06]", FOCUS)}>Ask its thread</button> : null}
             {nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
-              title={nudge.title} className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", FOCUS)}>Nudge</button> : null}
+              title={nudge.title} className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", FOCUS)}>{nudge.label}</button> : null}
           </li>;
         })}
       </ul>

@@ -285,6 +285,43 @@ describe("the PR inventory screen view model", () => {
     expect(action(line, "nudge")).toMatchObject({ enabled: true, reviewers: ["otto-v"] });
   });
 
+  // The live case: a reviewer approved and left open threads while another was asked over a business day ago. You owe answers first, and a
+  // Nudge to the slow one leaves them waiting; it returns once the feedback clears and the row leaves Your turn.
+  it("offers no Nudge for a reviewer who hasn't answered on a Your turn row, and still does where Your turn doesn't list it", () => {
+    const threads = { kinds: ["threads" as const], text: "5 open threads", since: null };
+    const turn = find("catalog #96", withRow("catalog #96", { yourTurn: threads }));
+    expect(onYourTurn(turn)).toBe(true);
+    expect(rowOf("catalog #96").attention.map((item) => [item.kind, item.action])).toEqual([["review-waiting", "nudge"]]);
+    expect(action(turn, "nudge")).toBeUndefined();
+    // Feedback answered: the same overdue review offers its Nudge again.
+    expect(action(find("catalog #96"), "nudge")).toMatchObject({ enabled: true, label: "Nudge", reviewers: ["mira-l", "theo-k"] });
+    // A thread working the feedback now takes the row off Your turn, where Nudge is unchanged.
+    const working = { id: "thr_catalog_96", title: "Series order", active: true };
+    const inFlight = find("catalog #96", withRow("catalog #96", { yourTurn: threads, threads: { origin: null, executor: working } }));
+    expect(onYourTurn(inFlight)).toBe(false);
+    expect(action(inFlight, "nudge")).toMatchObject({ enabled: true, label: "Nudge", reviewers: ["mira-l", "theo-k"] });
+  });
+
+  it("names the re-request on a Your turn row, for every reviewer it asks again", () => {
+    const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v, @ines-v", owner: "you", reviewers: ["otto-v", "ines-v"] });
+    const line = find("quill #211", withRow("quill #211", { attention: [rerequest] }));
+    expect(onYourTurn(line)).toBe(true);
+    expect(action(line, "nudge")).toMatchObject({ label: "Re-request @otto-v, @ines-v", title: "Re-request review from @otto-v, @ines-v on quill #211",
+      enabled: true, reviewers: ["otto-v", "ines-v"] });
+    // The write is the existing nudge, so the server re-adds those reviewers.
+    expect(actionCall(rowOf("quill #211"), action(line, "nudge")!)).toEqual({ kind: "rpc", method: "inventory_nudge",
+      input: { prUrl: "https://github.com/inkwell/quill/pull/211", reviewers: ["otto-v", "ines-v"] } });
+    const running = screen(withRow("quill #211", { attention: [rerequest] }), { pending: new Map([["https://github.com/inkwell/quill/pull/211", "nudge"]]) })
+      .groups.flatMap((group) => group.lines).find((item) => item.number === 211)!;
+    expect(action(running, "nudge")).toMatchObject({ label: "Re-requesting…", enabled: false });
+    // The server re-requests everyone due or no one, so with an overdue review beside it no Your turn button would ask only the answered
+    // reviewers: it offers none, rather than nudge @mira-l or a click the server refuses.
+    const both = find("quill #211", withRow("quill #211", { attention: [reason({ reviewers: ["mira-l"] }), rerequest] }));
+    expect([onYourTurn(both), action(both, "nudge")]).toEqual([true, undefined]);
+    // Off Your turn, the same move keeps its Nudge word.
+    expect(action(find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null })), "nudge")).toMatchObject({ label: "Nudge" });
+  });
+
   it("never merges from a row: Merge… only opens the fresh preview, and nothing a row sends carries a head to merge", () => {
     const merge = action(find("folio #340"), "merge")!;
     expect(merge).toMatchObject({ label: "Merge…", enabled: true });

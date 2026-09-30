@@ -26,7 +26,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
     ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo. Only on a PR with a thread."],
     ["Address selected", "Select Your turn rows with x, a click, or Shift for a range. It lists each PR's feedback for one batch thread, or each PR's own, for you to confirm. It starts 8 s later unless you Undo, and never merges."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
-    ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
+    ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
   ],
 };
@@ -133,9 +133,12 @@ const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handle
 
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 const keyOf = (row: Pick<InventoryRow, "repo" | "number">) => `${row.repo.toLowerCase()}#${row.number}`;
-/** Whom a nudge asks again: every reviewer an overdue request or an answered change request names, as the server's nudge checks them. */
-export const nudgees = (row: Pick<InventoryRow, "attention">) =>
-  [...new Set(row.attention.filter((reason) => reason.action === "nudge" || reason.action === "rerequest").flatMap((reason) => reason.reviewers))];
+/**
+ * Whom a nudge asks again: every reviewer an overdue request or an answered change request names, as the server's nudge checks them. On
+ * Your turn, none while any reviewer who hasn't answered is due too: you answer first, and the server asks everyone due or no one.
+ */
+export const nudgees = (row: Pick<InventoryRow, "attention">, turn = false) => turn && row.attention.some((reason) => reason.action === "nudge") ? []
+  : [...new Set(row.attention.filter((reason) => reason.action === "nudge" || reason.action === "rerequest").flatMap((reason) => reason.reviewers))];
 
 /** The server calls it mergeable now: a merge reason, or "Clear" on an approved PR stacked on nothing; never with feedback to address. */
 function mergeable(row: InventoryRow): boolean {
@@ -209,7 +212,7 @@ const EFFORT_STOPPED = { done: "Its effort is done. Reopen it first", archived: 
  * effort's row offers no write, and a done or archived effort's row says why each can't run.
  */
 export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, context: { now: number; limitedUntil: number | null;
-  running: ActionId | null; effortPile?: InventoryLine["effortPile"] }): LineAction[] {
+  running: ActionId | null; effortPile?: InventoryLine["effortPile"]; turn?: boolean }): LineAction[] {
   const actions: LineAction[] = [];
   const thread = row.threads.executor ?? row.threads.origin;
   const action = (id: ActionId, title: string, why: string | null, extra: Partial<LineAction> = {}): LineAction =>
@@ -223,8 +226,10 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (asks("mark-ready")) actions.push(action("mark-ready", `Mark ${target} ready for review, pinned to the head this row shows`,
     blocked ?? (row.head === null ? "No head commit read yet; Refresh first" : null)));
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
-  const nudged = nudgees(row);
-  if (nudged.length) actions.push(action("nudge", `Ask ${mentions(nudged)} again to review ${target}`, blocked, { reviewers: nudged }));
+  // On Your turn the one move left is asking again after your answer, which the same write does: it re-adds the reviewer.
+  const nudged = nudgees(row, context.turn);
+  if (nudged.length) actions.push(action("nudge", context.turn ? `Re-request review from ${mentions(nudged)} on ${target}` : `Ask ${mentions(nudged)} again to review ${target}`,
+    blocked, { reviewers: nudged, ...context.turn ? { label: context.running === "nudge" ? "Re-requesting…" : `Re-request ${mentions(nudged)}` } : {} }));
   if (asks("confirm-handled")) actions.push(action("confirm-handled", `Read the approval's notes on ${target} and what came after, then confirm ` +
     "them handled or ask its thread; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
   // Your confirmation can always be taken back, at any age, while its effort or the PR is held too: it only makes the PR need you again.
@@ -291,20 +296,24 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   const { steps, primary } = effortPile === "held" ? { steps: [], primary: null } : nextSteps(row, parents, now);
   const working = row.threads.executor;
   const started = row.threads.origin && row.threads.origin.id !== working?.id ? row.threads.origin : null;
+  const threads = [...working ? [{ ...working, role: "working" as const }] : [], ...started ? [{ ...started, role: "started" as const }] : []];
+  const yourTurn = row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) };
+  const addressing = row.addressing && { threadId: row.addressing.threadId };
+  // Whether Your turn lists the row decides its actions: a Nudge there would leave the feedback waiting on you.
+  const turn = onYourTurn({ yourTurn, primary, threads, effortPile, addressing });
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
     status: statusOf(row),
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) }, effortPile,
     steps, primary,
-    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile }),
-    threads: [...working ? [{ ...working, role: "working" as const }] : [], ...started ? [{ ...started, role: "started" as const }] : []],
+    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile, turn }),
+    threads,
     checked: checked(row, now),
     managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
       label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
-    yourTurn: row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) },
-    addressing: row.addressing && { threadId: row.addressing.threadId },
+    yourTurn, addressing,
     depth: 0, branch: null,
   };
 }

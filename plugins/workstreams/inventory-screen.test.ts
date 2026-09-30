@@ -100,6 +100,20 @@ describe("simple All PRs list", () => {
     expect(html).not.toContain("data-inventory-action=\"request-review\"");
   });
 
+  // The button is the row's own action: a reviewer who hasn't answered is nudged only off Your turn, and an answered change request reads
+  // Re-request, so the word on the button says what the click sends.
+  it("draws no Nudge on a Your turn row for a reviewer who hasn't answered, and Re-request where you've answered", () => {
+    const waiting = { kinds: ["threads" as const], text: "5 open threads", since: null };
+    const turn = rowOf(pane(patched((row) => row.number === 96 ? { yourTurn: waiting } : null)), "inkwell/catalog#96");
+    expect(turn).toContain("5 open threads");
+    expect(turn).not.toContain('data-inventory-action="nudge"');
+    expect(rowOf(pane(), "inkwell/catalog#96")).toMatch(/data-inventory-action="nudge"[^>]*>Nudge<\/button>/u);
+    const rerequest = { question: "needs-nudge" as const, kind: "rereview-needed" as const, action: "rerequest" as const, nextStep: "Re-request review from @otto-v",
+      owner: "you" as const, reviewers: ["otto-v"], since: NOW - 3_600_000, ageMs: 3_600_000, basis: "github" as const };
+    const asked = rowOf(pane(patched((row) => row.number === 211 ? { attention: [rerequest] } : null)), "inkwell/quill#211");
+    expect(asked).toMatch(/data-inventory-action="nudge"[^>]*title="Re-request review from @otto-v on quill #211"[^>]*>Re-request @otto-v<\/button>/u);
+  });
+
   it("keeps the primary read notice visible and folds many other notices without dropping their text or roles", () => {
     const notices = [{ tone: "error" as const, text: "GitHub rate limited this read." },
       ...Array.from({ length: 24 }, (_, index) => ({ tone: "info" as const, text: `Repository ${index + 1} needs a read.` }))];

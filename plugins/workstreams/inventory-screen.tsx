@@ -1,5 +1,6 @@
 // All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
-// you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due. A Your turn row's Ask
+// you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
+// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. A Your turn row's Ask
 // its thread, and f on it, open the deck's listing confirm for the PR's existing thread, which sends only after its Undo window. Your turn
 // rows select (x, a click, Shift for a range, ⇧X or the list's box for all), and Address selected, or b, opens the same listing confirm
 // for one batch thread, or each PR's own. It shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and

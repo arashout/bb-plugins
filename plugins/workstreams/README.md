@@ -198,7 +198,9 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   thread** and file In flight. The deck's selection offers the same.
   **Other open PRs** follows, by effort; each row shows the PR's state
   and next step. **Nudge** appears only where a reviewer has waited long
-  enough, and the server checks again before it sends. All PRs never confirms
+  enough, and the server checks again before it sends. A Your turn row offers
+  none for a reviewer who hasn't answered yet, and reads **Re-request @login**
+  once you've answered that reviewer's changes. All PRs never confirms
   review notes or merges; those run from the effort's card. Each effort's name
   opens its roster.
 - **Efforts admin:** Administer explicitly saved efforts from one list.
