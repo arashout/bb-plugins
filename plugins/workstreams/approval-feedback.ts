@@ -170,9 +170,11 @@ export function createApprovalFeedbackStore(db: RunDb) {
         throw new Error("Only approval feedback read on a known head can be confirmed");
       }
       const seen = `You confirmed this approval feedback handled${handled(evidence) ? "" : " without evidence"}. ${evidenceText(evidence)}.`;
+      // Linked follow-ups are only shown, never counted, so the record leaves them out: an older build's strict schema can't read them.
+      const { linked: _shown, ...kept } = evidence;
       return store.save(prUrl, "inventory", { attemptId: `confirmed-${at}`, headOid, fingerprint: snapshot.fingerprint, blockers: [],
         findings: snapshot.sourceIds.map((sourceId) => ({ sourceId, resolution: "already-satisfied" as const, evidence: seen,
-          validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user", evidence });
+          validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user", evidence: kept });
     },
   };
   return store;

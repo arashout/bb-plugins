@@ -92,6 +92,10 @@ describe("approval feedback verification", () => {
         validation: { outcome: "not-needed", detail: "Your confirmation; no check ran." } }] });
     expect(store.confirm(url, snapshot, head, 5_500, { ...none, commits: 2 }).findings[0]!.evidence)
       .toBe("You confirmed this approval feedback handled. 2 commits since this approval.");
+    // Linked follow-ups are shown in the dialog but left out of the record, so an older build can still read your confirmation.
+    const linked = store.confirm(url, snapshot, head, 5_600, { ...none, linked: [{ repo: "inkwell/folio", number: 302 }] });
+    expect(linked.provenance).toEqual({ kind: "user", evidence: none });
+    expect(JSON.stringify(store.get(url))).not.toContain("linked");
     store.confirm(url, snapshot, head, 5_000, none);
     expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
     expect(feedbackVerificationState(snapshot, "b".repeat(40), store.get(url))).toBe("head-changed");
