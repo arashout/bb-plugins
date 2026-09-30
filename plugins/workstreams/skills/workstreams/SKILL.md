@@ -50,17 +50,27 @@ persisted in plugin kv and survives a reload.
 ## Commands
 
 ```
+bb workstreams list --compact [--json] [--limit N] [--offset N]  # bounded ticket-cluster page; default 20, maximum 50
 bb workstreams list [--json]        # the group tree, its clusters, rollups, and lifecycles
 bb workstreams refresh              # rescan every scan root now and print the result
 bb workstreams group <TICKET> <effort name>   # name the effort a cluster belongs to
 bb workstreams ungroup <TICKET>     # drop that manual name
 ```
 
+For agent lookups, start with `list --compact`. Within a board snapshot, it
+returns ticket clusters in ticket order with each ticket's lifecycle, short
+summary, and full group path, plus scan freshness and warning count. Scans can
+change the board and its ordering. Use `--limit` and `--offset` to page through
+larger boards; the plain output prints the next command when another page exists.
+When `warningCount` is greater than zero, read full plain `list` to see the
+warning messages.
+
 `list --json` emits the whole board as a FLAT `groups` array with a `parentKey`
 on each entry — a flat list describes any collapsed shape without assuming a
 depth. It includes per-unit branch, dirty state, ahead/behind counts, pull
 request state, stack position, staleness and surfaces. Use it when you
-need the details; use the plain form when you need the shape.
+need the details; use the plain form when you need the shape. Full JSON can
+exceed BB's 1 MB CLI output limit on larger boards.
 
 ## Lifecycles
 

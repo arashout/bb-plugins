@@ -7193,6 +7193,38 @@ export default async function plugin(bb: BbPluginApi) {
     return lines.join("\n");
   }
 
+  function compactList(current: Board, limit: number, offset: number, json: boolean): string {
+    const now = Date.now();
+    const scanAgeMs = current.lastScanAt === null ? null : now - Date.parse(current.lastScanAt);
+    const stale = scanAgeMs !== null && Number.isFinite(scanAgeMs) && scanAgeMs > current.health.refreshMinutes * 60_000;
+    const byKey = new Map(current.groups.map((group) => [group.key, group]));
+    const items = current.groups.flatMap((group) => group.clusters.map((cluster) => {
+      const groupPath: Array<{ name: string; key: string; level: WireGroup["level"] }> = [];
+      let cursor: WireGroup | undefined = group;
+      while (cursor !== undefined) {
+        groupPath.unshift({ name: cursor.name, key: cursor.key, level: cursor.level });
+        cursor = cursor.parentKey === null ? undefined : byKey.get(cursor.parentKey);
+      }
+      return { ticket: cluster.ticket, lifecycle: cluster.lifecycle, summary: cluster.summary.slice(0, 160), groupPath };
+    })).sort((a, b) => a.ticket.localeCompare(b.ticket));
+    const page = items.slice(offset, offset + limit);
+    const nextOffset = offset + page.length < items.length ? offset + page.length : null;
+    const result = { scan: { lastScanAt: current.lastScanAt, ageMs: scanAgeMs, stale, scanning: current.scanning }, warningCount: current.warnings.length,
+      total: items.length, offset, limit, nextOffset, items: page };
+    if (json) return JSON.stringify(result);
+    const lines = [
+      `scan: ${current.lastScanAt === null ? "never scanned" : `${current.lastScanAt} (${relativeTime(current.lastScanAt, now)})${stale ? "; stale" : ""}`}${current.scanning ? " (scanning now)" : ""}`,
+      `warnings: ${current.warnings.length}`,
+      `clusters: ${items.length}; showing ${page.length} at offset ${offset}`,
+    ];
+    for (const item of page) {
+      const path = item.groupPath.map((part) => `${part.name} (${part.level}:${part.key})`).join(" > ");
+      lines.push(`${item.ticket}  ${item.lifecycle}  ${item.summary}${path === "" ? "" : `  [${path}]`}`);
+    }
+    if (nextOffset !== null) lines.push(`Next page: bb workstreams list --compact --limit ${limit} --offset ${nextOffset}`);
+    return lines.join("\n");
+  }
+
   const TICKET_KEY = /^[A-Za-z]{2,5}-\d{1,6}$/u;
   function normalizeTicket(raw: string): string {
     const ticket = raw.trim().toUpperCase();
@@ -7225,15 +7257,25 @@ export default async function plugin(bb: BbPluginApi) {
         }),
         list: cliCommand({
           summary: "List workstreams, their clusters, and each cluster's lifecycle",
-          options: { json: { type: "boolean", description: "Emit the full board as JSON" } },
+          options: {
+            json: { type: "boolean", description: "Emit JSON (compact schema with --compact; full board otherwise)" },
+            compact: { type: "boolean", description: "Emit a bounded, agent-friendly page of ticket clusters" },
+            limit: { type: "integer", min: 1, max: 50, description: "Compact page size (default 20, maximum 50)" },
+            offset: { type: "integer", min: 0, max: Number.MAX_SAFE_INTEGER, description: "Compact page offset (default 0)" },
+          },
           async run({ options }) {
+            if (!options.compact && (options.limit !== undefined || options.offset !== undefined)) {
+              throw new PluginCliError("--limit and --offset require --compact.", { code: "invalid_options" });
+            }
+            const limit = options.limit ?? 20;
+            const offset = options.offset ?? 0;
             const current = await board();
-            return {
-              exitCode: 0,
-              stdout: options.json
-                ? JSON.stringify(current)
-                : summarize(current),
-            };
+            let stdout: string;
+            // CLI integer options are parsed and range-checked before this handler runs.
+            if (options.compact) stdout = compactList(current, limit as number, offset as number, options.json === true);
+            else if (options.json) stdout = JSON.stringify(current);
+            else stdout = summarize(current);
+            return { exitCode: 0, stdout };
           },
         }),
         refresh: cliCommand({
