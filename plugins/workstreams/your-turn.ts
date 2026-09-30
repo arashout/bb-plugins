@@ -1,13 +1,18 @@
 // Your turn: your open PRs where a reviewer's feedback waits on your move,
-// from facts the inventory already keeps. Changes someone asked for that you
-// haven't asked them to review again, attention's approval-comments reason,
-// review threads someone else opened that are still open, and a reviewer's
-// comments newer than your last push and your last reply. A draft, a PR you
-// hold, and a PR waiting only on CI or on reviewers are not your turn. Pure:
-// the server computes it per row; the badge and the list only count and show it.
+// from facts the inventory already keeps. Feedback to address, whatever CI
+// says: an approval that said something, as attention's approval-note reason
+// names it, and another person's comment, that no reply, follow-up, or
+// confirmation answered. Then changes someone asked for that you haven't
+// asked them to review again, review threads someone else opened that are
+// still open, and notes you answered that attention asks you to confirm. A
+// push answers none of it. A PR you hold, and one waiting only on CI or on
+// reviewers, are not your turn; a draft is only for its feedback to address.
+// Pure: the server computes it per row; the badge and the list only count
+// and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
+import { feedbackToAddress } from "./feedback-to-address.js";
 import { awaitingRerequest } from "./pr-gates.js";
 
 export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments"] as const;
@@ -21,7 +26,7 @@ export const yourTurnSchema = z.object({
 }).strict();
 export type YourTurn = z.infer<typeof yourTurnSchema>;
 
-export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "headCommittedAt" | "reviewFeedback">;
+export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback">;
 
 const time = (value: string | null | undefined): number | null => {
   const at = value ? Date.parse(value) : Number.NaN;
@@ -29,34 +34,27 @@ const time = (value: string | null | undefined): number | null => {
 };
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 
-/** A reviewer's comment newer than your last push and your last reply, or null. An undated push leaves it unknown, so it asks nothing. */
-export function commentsSince(pr: Pick<Pr, "headCommittedAt" | "reviewFeedback">): { login: string; at: number } | null {
-  const comment = pr.reviewFeedback?.comment;
-  const at = time(comment?.at), pushed = time(pr.headCommittedAt);
-  if (!comment || at === null || pushed === null) return null;
-  return at > Math.max(pushed, time(pr.reviewFeedback!.repliedAt) ?? Number.NEGATIVE_INFINITY) ? { login: comment.login, at } : null;
-}
-
 /**
- * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention, whose approval-comments reason asks only once
- * nothing else holds the merge, so an approval waiting on CI waits with it. `held`: you hold the PR, which parks it until you release it.
+ * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention: its approval-note reason asks whatever CI says,
+ * and its approval-comments reason, for notes you answered, only once nothing else holds the merge. `held`: you hold the PR, which parks it
+ * until you release it.
  */
 export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since">[], held: boolean): YourTurn | null {
-  if (held || pr.state !== "OPEN" || pr.isDraft) return null;
+  if (held || pr.state !== "OPEN") return null;
   const parts: { kind: YourTurnKind; text: string; since: number | null }[] = [];
   // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours.
-  const changes = awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
+  const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
   if (changes.length) parts.push({ kind: "changes", text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
     since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
-  // An approval comment still to address, whatever CI says; else notes you answered that attention asks you to confirm.
   const note = reasons.find((reason) => reason.kind === "approval-note");
   const approval = note ?? reasons.find((reason) => reason.kind === "approval-comments");
   if (approval) parts.push({ kind: "approval", text: note ? "Approval comment to address" : "Approved with comments", since: approval.since });
-  const open = pr.reviewFeedback?.openThreads ?? 0;
+  const open = pr.isDraft ? 0 : pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
-  const comment = commentsSince(pr);
+  // Another person's comment that no reply or follow-up answered; a push never does.
+  const comment = feedbackToAddress({ reviewFeedback: pr.reviewFeedback }, false).find((item) => item.kind === "comment");
   // A reviewer whose change request it names already has their say there: their review is a comment too, and naming it twice says nothing.
-  if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.at });
+  if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.since });
   if (!parts.length) return null;
   const dated = parts.flatMap((part) => part.since !== null && Number.isFinite(part.since) ? [part.since] : []);
   return { kinds: parts.map((part) => part.kind), text: parts.map((part) => part.text).join(" · "), since: dated.length ? Math.min(...dated) : null };

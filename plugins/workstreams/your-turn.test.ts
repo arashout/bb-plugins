@@ -1,10 +1,11 @@
-// Your turn lists your PRs where a reviewer's feedback waits on you, and nothing else: each kind of feedback puts a PR in, and a draft, a
-// held PR, one waiting only on CI, and one waiting on its reviewers stay out, so the badge never asks you to act where nothing is yours.
+// Your turn lists your PRs where a reviewer's feedback waits on you, and nothing else: each kind of feedback puts a PR in, whatever CI says,
+// and a held PR, one waiting only on CI, and one waiting on its reviewers stay out, so the badge never asks you to act where nothing is
+// yours. A draft is in only for feedback to address, and only your reply or a follow-up answers a comment: a push never does.
 import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { commentsSince, yourTurn } from "./your-turn.js";
+import { yourTurn } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -45,12 +46,14 @@ describe("Your turn", () => {
     expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
-  it("leaves out a draft, a PR you hold, and a closed PR, whatever feedback they carry", () => {
+  it("leaves out a PR you hold and a closed PR, whatever feedback they carry, and a draft but for its feedback to address", () => {
     for (const facts of [changes, approval, threads, comments]) {
-      expect(turn({ ...facts, isDraft: true })).toBeNull();
       expect(turn(facts, true)).toBeNull();
       expect(turn({ ...facts, state: "MERGED" })).toBeNull();
     }
+    for (const facts of [changes, threads]) expect(turn({ ...facts, isDraft: true })).toBeNull();
+    expect(turn({ ...approval, isDraft: true })?.kinds).toEqual(["approval"]);
+    expect(turn({ ...comments, isDraft: true })?.kinds).toEqual(["comments"]);
   });
 
   // Red or running checks are the thread's work or CI's, not a reviewer's feedback: they never make it your turn on their own.
@@ -72,17 +75,18 @@ describe("Your turn", () => {
     expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approval comment to address");
   });
 
-  it("clears reviewer comments once you push or reply after them, and only then", () => {
-    expect(commentsSince(comments)).toEqual({ login: "theo-k", at: Date.parse(at(12)) });
-    expect(turn({ ...comments, headCommittedAt: at(13) })).toBeNull();
+  // A push says nothing to the reviewer: only your reply, or a follow-up that links the PR, after the comment answers it.
+  it("clears a reviewer's comment once you reply or link a follow-up after it, and never on a push", () => {
+    expect(turn({ ...comments, headCommittedAt: at(13) })?.kinds).toEqual(["comments"]);
     expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
-    // A reply or push before the comment answers nothing.
-    expect(turn({ ...comments, headCommittedAt: at(11), reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11) } })?.kinds).toEqual(["comments"]);
+    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, followUpAt: at(13) } })).toBeNull();
+    // A reply or follow-up before the comment answers an older one, not this.
+    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11), followUpAt: at(11) } })?.kinds).toEqual(["comments"]);
   });
 
-  // Without the push's date, a comment might be answered already, so it asks nothing rather than guess; so does a PR never read for it.
-  it("asks nothing from comments it can't date against your last push", () => {
-    expect(turn({ ...comments, headCommittedAt: undefined })).toBeNull();
+  // With no push to compare against, the comment still waits: no answer is dated after it. A PR never read for it asks nothing.
+  it("keeps a comment no reply answered without the push's date, and asks nothing of a PR never read for it", () => {
+    expect(turn({ ...comments, headCommittedAt: undefined })?.kinds).toEqual(["comments"]);
     expect(turn({ ...comments, reviewFeedback: undefined })).toBeNull();
   });
 });

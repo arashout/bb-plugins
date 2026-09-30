@@ -53,13 +53,15 @@ async function bounded<T>(items: readonly T[], worker: (item: T) => Promise<void
   }));
 }
 
-/** A PR whose review threads are read: one a reviewer approved or asked to change, and not a draft. */
-const readsReviewThreads = (pr: Pr) => !pr.isDraft && (pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED");
+/** A PR a reviewer approved or asked to change, whose approval evidence is read, a draft's too: an approval's notes wait on you there too. */
+const readsApproval = (pr: Pr) => pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED";
+/** A PR whose review threads are read: one of those, and not a draft. */
+const readsReviewThreads = (pr: Pr) => !pr.isDraft && readsApproval(pr);
 /**
- * A PR whose review read says what feedback waits on you (your-turn.ts): those, and any other a reviewer has reviewed. Only those keep its
- * thread counts and approval evidence, so a PR with only comments keeps its state word.
+ * A PR whose review read says what feedback waits on you (your-turn.ts): those, and any other a reviewer has reviewed, drafts included.
+ * Only those keep approval evidence, and only the ones not in draft their thread counts, so a PR with only comments keeps its state word.
  */
-const readsReviewFeedback = (pr: Pr) => readsReviewThreads(pr) || (!pr.isDraft && pr.latestReviews.some((review) => review.state !== "PENDING"));
+const readsReviewFeedback = (pr: Pr) => readsApproval(pr) || pr.latestReviews.some((review) => review.state !== "PENDING");
 
 async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message: string) => void): Promise<void> {
   const { repo, pr } = entry;
@@ -71,10 +73,10 @@ async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message:
     return;
   }
   if (threads.reviewFeedback) pr.reviewFeedback = threads.reviewFeedback;
+  if (readsApproval(pr)) pr.approvalFeedback = threads.approvalFeedback;
   if (!readsReviewThreads(pr)) return;
   pr.unresolvedReviewThreads = threads.count;
   pr.resolvedReviewThreads = threads.resolvedCount;
-  pr.approvalFeedback = threads.approvalFeedback;
   pr.reviewFollowupPosted = threads.reviewFollowupPosted;
   if (threads.hasNextPage) warn(`${repo} #${pr.number}: more review threads remain unread.`);
 }
@@ -263,14 +265,14 @@ export async function readOpenAuthoredPrs(run: GhRunner, scopeOwners: readonly s
  */
 export function carryReviewFacts(pr: Pr, stored: Pr | undefined): Pr | null {
   if (!readsReviewFeedback(pr)) return pr;
-  const threads = readsReviewThreads(pr);
+  const approval = readsApproval(pr), threads = readsReviewThreads(pr);
   // A stored read from before feedback to address dated notes and follow-ups can't say whether anything answered them.
-  if (stored === undefined || (threads && stored.approvalFeedback === undefined) || stored.reviewFeedback?.followUpAt === undefined ||
+  if (stored === undefined || (approval && stored.approvalFeedback === undefined) || stored.reviewFeedback?.followUpAt === undefined ||
       stored.headRefOid !== pr.headRefOid || stored.reviewDecision !== pr.reviewDecision ||
       stored.updatedAt !== pr.updatedAt || JSON.stringify(stored.latestReviews) !== JSON.stringify(pr.latestReviews)) return null;
   const feedback = { ...stored.reviewFeedback, openThreads: Math.min(stored.reviewFeedback.openThreads, pr.unresolvedReviewThreads ?? Number.POSITIVE_INFINITY) };
-  return { ...pr, reviewFeedback: feedback, ...threads ? { approvalFeedback: stored.approvalFeedback,
-    ...(stored.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: stored.reviewFollowupPosted }) } : {} };
+  return { ...pr, reviewFeedback: feedback, ...approval ? { approvalFeedback: stored.approvalFeedback } : {},
+    ...threads && stored.reviewFollowupPosted !== undefined ? { reviewFollowupPosted: stored.reviewFollowupPosted } : {} };
 }
 
 /** Empty or invalid scope never expands discovery to unrelated organizations. */

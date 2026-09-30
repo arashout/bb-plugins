@@ -3,6 +3,7 @@ import { agesArgv, carryReviewFacts, INVENTORY_LIMIT, OPEN_PRS_QUERY, readAuthor
 import { githubRepoFromRemote, parsePrList, PR_FIELDS } from "./gh.js";
 import { githubRateLimit, type GhRunner, type Run } from "./ghactions.js";
 import type { Pr } from "./contract.js";
+import { feedbackToAddress } from "./feedback-to-address.js";
 
 const url = (number: number, repo = "folio") => `https://github.com/inkwell/${repo}/pull/${number}`;
 const pr = (number: number, extra: Record<string, unknown> = {}) => ({
@@ -88,15 +89,33 @@ describe("authored PR inventory", () => {
     expect(result.entries[0]?.pr).toMatchObject({ unresolvedReviewThreads: 1, resolvedReviewThreads: null });
   });
 
-  it("requests follow-up evidence for written approvals and changes requested, but skips drafts", async () => {
+  it("requests follow-up evidence for written approvals, changes requested, and a reviewed draft, but skips a draft nobody reviewed", async () => {
     const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }]) : args[0] === "pr" ? ok([
       pr(1, { latestReviews: [{ state: "APPROVED", body: "Please cover this edge case." }] }),
-      pr(2, { reviewDecision: "CHANGES_REQUESTED" }), pr(3, { isDraft: true }),
+      pr(2, { reviewDecision: "CHANGES_REQUESTED" }), pr(3, { isDraft: true }), pr(4, { isDraft: true, reviewDecision: "REVIEW_REQUIRED" }),
     ]) : threads());
     await readAuthoredPrs(gh.run, ["inkwell"]);
     const reads = threadReads(gh.calls);
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(3);
     expect(reads.every((args) => args.includes("includeFollowup=true"))).toBe(true);
+    expect(reads.some((args) => args.includes("number=4"))).toBe(false);
+  });
+
+  // A draft's approval can say the work isn't done, and Your turn lists a draft for that: its read keeps the approval's notes and who spoke
+  // last, but no thread count, since open threads on a draft aren't your turn yet.
+  it("reads a reviewed draft's approval notes for Your turn, keeping its thread counts unread", async () => {
+    const approval = { id: "approval-1", state: "APPROVED", body: "Hold this until the migration runs.", submittedAt: "2026-09-29T10:00:00Z",
+      author: { __typename: "User", login: "mira-l" }, commit: { oid: "a".repeat(40) } };
+    const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }]) : args[0] === "pr" ? ok([
+      pr(1, { isDraft: true, latestReviews: [{ author: { login: "mira-l" }, state: "APPROVED", submittedAt: approval.submittedAt }] }),
+    ]) : ok({ data: { repository: { pullRequest: { headRefOid: "a".repeat(40), author: { login: "ana-w" }, baseRefName: "main",
+      reviews: { pageInfo: { hasPreviousPage: false }, nodes: [approval] },
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] }, comments: { pageInfo: { hasPreviousPage: false }, nodes: [] }, timelineItems: { nodes: [] } } } } }));
+    const draft = (await readAuthoredPrs(gh.run, ["inkwell"])).entries[0]!.pr;
+    expect(draft).toMatchObject({ isDraft: true, unresolvedReviewThreads: null, approvalFeedback: { status: "present" },
+      reviewFeedback: { comment: null, repliedAt: null, noteAt: approval.submittedAt, followUpAt: null } });
+    expect(draft.reviewFollowupPosted).toBeUndefined();
+    expect(feedbackToAddress(draft, false)).toEqual([{ kind: "approval", login: null, since: Date.parse(approval.submittedAt) }]);
   });
 
   // Your turn needs a commented PR's feedback too, but its state word stays what the approve-or-change-request read says it is.
@@ -312,8 +331,12 @@ describe("review evidence across polls", () => {
     // A read from before Your turn proves no feedback facts, and one from before feedback to address dated no answer: each is read again once.
     expect(carryReviewFacts(polled, { ...read, reviewFeedback: undefined })).toBeNull();
     expect(carryReviewFacts(polled, { ...read, reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } })).toBeNull();
-    // A draft proves nothing by its threads, so it needs no read.
-    expect(carryReviewFacts({ ...polled, isDraft: true }, undefined)).toEqual({ ...polled, isDraft: true });
+    // A draft nobody reviewed has nothing to read. A reviewed one carries its feedback and approval evidence, but no thread facts.
+    const unreviewed = { ...polled, isDraft: true, reviewDecision: "REVIEW_REQUIRED", latestReviews: [] };
+    expect(carryReviewFacts(unreviewed, undefined)).toEqual(unreviewed);
+    expect(carryReviewFacts({ ...polled, isDraft: true }, undefined)).toBeNull();
+    expect(carryReviewFacts({ ...polled, isDraft: true }, { ...read, isDraft: true })).toEqual({ ...polled, isDraft: true,
+      approvalFeedback: read.approvalFeedback, reviewFeedback: read.reviewFeedback });
   });
 
   // Threads this poll saw resolved are no longer open, even while GitHub's update time stands still.

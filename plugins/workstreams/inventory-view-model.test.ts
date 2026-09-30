@@ -408,7 +408,9 @@ describe("the PR inventory screen view model", () => {
     const words = new Map(INVENTORY_HOW.rows);
     expect(INVENTORY_HOW.intro).toContain("Your turn lists your PRs where a reviewer's feedback waits on you");
     expect(INVENTORY_HOW.intro).not.toContain("Reviews");
-    expect(words.get("Your turn")).toContain("Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
+    expect(words.get("Your turn")).toContain("whatever CI says");
+    expect(words.get("Your turn")).toContain("A push answers nothing");
+    expect(words.get("Your turn")).toContain("Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
     expect(words.has("Back to me")).toBe(false);
     expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
     expect(words.get("Nudge")).toContain("server checks again");
