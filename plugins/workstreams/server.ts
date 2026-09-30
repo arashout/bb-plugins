@@ -595,7 +595,9 @@ export const rpcContract = defineRpcContract({
    * threads, so every open PR and thread is on a card. `seen` is when the view last marked
    * each PR's row seen: a row whose write landed counts again only once seen at or after it.
    */
-  deck_get: { input: z.object({ seen: deckSeenSchema.optional() }).strict(), output: deckViewSchema },
+  deck_get: { input: z.object({ seen: deckSeenSchema.optional(),
+    /** The PRs the view drew, as it last saw them, so a row that left can say it merged or closed. */
+    ghosts: z.array(z.string().max(500)).max(1_000).optional() }).strict(), output: deckViewSchema },
   ...deckBatchContract,
   ...linearSeedContract,
 });
@@ -5607,7 +5609,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** An inventory action as the deck batch kind that runs it. */
   const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm" } as const;
   /** Everything the effort deck reads, from one board read. See deck.ts. */
-  async function deckInput(seen: Readonly<Record<string, number>> = {}): Promise<DeckInput> {
+  async function deckInput(seen: Readonly<Record<string, number>> = {}, ghosts: readonly string[] = []): Promise<DeckInput> {
     const current = await board();
     const view = await inventoryGet(undefined, current);
     const pattern = compilePattern((await settings.get()).ticketPattern);
@@ -5636,7 +5638,12 @@ export default async function plugin(bb: BbPluginApi) {
         acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
     }));
     const { groups, oneOffsId } = await classifyGet(current);
-    return { now: Date.now(), rows, classify: { groups, oneOffsId },
+    // Each PR the view asked about that is no longer open: merged when a read saw the merge, else closed when the last read found it gone.
+    const open = new Set(rows.map((row) => row.prUrl));
+    const merged = new Map(merges.map((merge) => [prWorkItemKey(merge.url), merge.at]));
+    const gone = [...new Set(ghosts.map(prWorkItemKey))].flatMap((prUrl): DeckView["gone"] => open.has(prUrl) ? []
+      : merged.has(prUrl) ? [{ prUrl, how: "merged", at: merged.get(prUrl)! }] : inventory.closed(prUrl) ? [{ prUrl, how: "closed", at: null }] : []);
+    return { now: Date.now(), rows, classify: { groups, oneOffsId }, gone,
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
         parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work) })),
@@ -5647,7 +5654,7 @@ export default async function plugin(bb: BbPluginApi) {
       homes: await threadHomes(efforts, work),
       read: { checkedAt: view.checkedAt, refreshing: view.refreshing, limitedUntil: view.rateLimitedUntil }, seen: new Map(Object.entries(seen)) };
   }
-  const deckGet = async (seen?: Readonly<Record<string, number>>): Promise<DeckView> => deckView(await deckInput(seen));
+  const deckGet = async (seen?: Readonly<Record<string, number>>, ghosts?: readonly string[]): Promise<DeckView> => deckView(await deckInput(seen, ghosts));
   /** What a deck batch would do per PR, from the rows the deck shows; see deck-batch.ts. A request's reviewers must be GitHub logins. */
   async function deckBatchPlan({ kind, effortId, prUrls, reviewers, seen = {} }: z.infer<typeof deckBatchContract.deck_batch_plan.input>) {
     if (!effortId && !prUrls) return { ok: false as const, error: "Choose an effort or PRs." };
@@ -5941,7 +5948,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
     classify_get: () => classifyGet(),
-    deck_get: ({ seen }) => deckGet(seen),
+    deck_get: ({ seen, ghosts }) => deckGet(seen, ghosts),
     deck_batch_plan: (input) => deckBatchPlan(input),
     deck_batch_start: ({ batchId }) => deckBatches.start(batchId),
     deck_batch_undo: ({ batchId }) => deckBatches.undo(batchId),

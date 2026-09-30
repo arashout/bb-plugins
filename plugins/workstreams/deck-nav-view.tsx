@@ -13,8 +13,8 @@ import type { rpcContract } from "./server";
 import type { DeckView } from "./deck";
 import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
-import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
-  type Seen, type ViewPlace } from "./deck-place";
+import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor, type FocusKey,
+  type Place, type Seen, type ViewPlace } from "./deck-place";
 import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips,
   targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
@@ -42,8 +42,11 @@ function useNow(ms: number): number {
   return now;
 }
 
-/** deck_get, read on mount, on deck-changed, and when the page shows again; a signal during a read reads once more after it. */
-function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void) {
+/**
+ * deck_get, read on mount, on deck-changed, and when the page shows again; a signal during a read reads once more after it. `drawn`: the
+ * PRs the view drew as it last saw them, which the read says the fate of when they leave.
+ */
+function useDeck(seenAt: () => Record<string, number>, drawn: () => string[], beforeUpdate: () => void) {
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<DeckView | null>(cachedDeck);
   /** Reads landed on this visit, so a link can wait for one after it: the cached deck can predate a card just made. */
@@ -55,10 +58,12 @@ function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void)
   before.current = beforeUpdate;
   const seen = useRef(seenAt);
   seen.current = seenAt;
+  const asked = useRef(drawn);
+  asked.current = drawn;
   const load = useCallback(function read(): void {
     if (reading.current) { again.current = true; return; }
     reading.current = true;
-    rpc.call("deck_get", { seen: seen.current() }).then((next) => { before.current(); cachedDeck = next; setView(next); setReads((count) => count + 1); setError(null); },
+    rpc.call("deck_get", { seen: seen.current(), ghosts: asked.current() }).then((next) => { before.current(); cachedDeck = next; setView(next); setReads((count) => count + 1); setError(null); },
       (cause: unknown) => setError(message(cause))).finally(() => {
       reading.current = false;
       if (again.current) { again.current = false; read(); }
@@ -167,7 +172,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     scroller.scrollTop = next.scrollTop;
   }, []);
 
-  const { rpc, view, reads, error, load } = useDeck(() => seenRef.current.at, () => { pendingAnchor.current = captureAnchor(); });
+  const { rpc, view, reads, error, load } = useDeck(() => seenRef.current.at, () => [...new Set(Object.entries(seenRef.current.rows)
+    .flatMap(([key, rows]) => key.startsWith("threads:") ? [] : rows.map((row) => row.prUrl)))].slice(0, 1_000), () => { pendingAnchor.current = captureAnchor(); });
   const flashTimer = useRef<number | null>(null);
   const say = useCallback((text: string, withUndo = false, ms?: number) => {
     setFlash({ text, undo: withUndo });
@@ -183,8 +189,18 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   // A service card whose last PR left stays until you mark it seen.
   const active = useMemo(() => view ? [...view.active, ...keptServiceCards(place.order, view.active, seen.rows, accepted)] : [],
     [view, place.order, seen.rows, accepted]);
-  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved })])),
-    [active, seen, now, details, accepted, moved]);
+  /** When the view first drew each row that left, for a ghost's age when the read gives none. */
+  const leftAt = useRef(new Map<string, number>());
+  // What became of a row that left: merged or closed, as the read found it, or on another card now.
+  const fates = useMemo(() => {
+    const open = new Map((view ? [...view.active, ...view.held] : []).flatMap((item) => item.sections.flatMap((section) => section.rows.map((row) => [row.prUrl, item.name] as const))));
+    for (const [key, rows] of Object.entries(seen.rows)) if (!key.startsWith("threads:")) for (const row of rows)
+      if (!open.has(row.prUrl) && !leftAt.current.has(row.prUrl)) leftAt.current.set(row.prUrl, Date.now());
+    for (const url of leftAt.current.keys()) if (open.has(url)) leftAt.current.delete(url);
+    return { gone: new Map((view?.gone ?? []).map((item) => [item.prUrl, { how: item.how, at: item.at }])), elsewhere: open, left: new Map(leftAt.current) };
+  }, [view, seen.rows]);
+  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved, ...fates })])),
+    [active, seen, now, details, accepted, moved, fates]);
   const order = useMemo(() => keepOrder(place.order, active.map((item) => item.id)), [active, place.order]);
   const ring = order;
   if (follow.current && ring.includes(follow.current)) { place.cur = follow.current; follow.current = null; }
@@ -214,7 +230,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (place.order.join() !== order.join()) { place.order = order; persist(); }
     const missing: Record<string, ReturnType<typeof cardSnapshot>> = {};
     for (const item of view.active) {
-      if (!seen.rows[item.id]) missing[item.id] = cardSnapshot(item);
+      // A row that arrives since you looked joins the snapshot as new, so it stays drawn, as a ghost if it leaves again, until Mark seen.
+      const known = seen.rows[item.id];
+      const arrived = known && withArrivals(known, cardSnapshot(item));
+      if (!known || arrived) missing[item.id] = arrived || cardSnapshot(item);
       if (!seen.rows[threadsKey(item.id)]) missing[threadsKey(item.id)] = threadSnapshot(item);
     }
     if (Object.keys(missing).length) setSeen((current) => ({ ...current, rows: { ...current.rows, ...missing } }));
@@ -502,7 +521,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     const firstChanged = Array.from(root?.querySelectorAll("[data-deck-row][data-deck-dot]") ?? []).find(inView);
     const anchor = captureAnchor(focusedRow && inView(focusedRow) ? focusedRow : firstChanged);
     const before = Array.from(root?.querySelectorAll<HTMLElement>("[data-deck-row]") ?? []).map((element) => element.dataset.deckRow!);
-    const moved = lines.filter((line) => line.dot && !line.ghost && line.trail?.kind === "change").length;
+    const moved = lines.filter((line) => !line.ghost && (line.change || line.to)).length;
     const left = lines.filter((line) => line.ghost).length;
     const stamp = Date.now();
     const settled = { [card.card.id]: cardSnapshot(card.card), [threadsKey(card.card.id)]: threadSnapshot(card.card) };
@@ -679,6 +698,20 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "undo-batch": void rpc.call("deck_batch_undo", { batchId: command.batchId }).then((result) => { say(result.ok ? "Undone. Nothing was sent." : result.error); load(); },
         (cause: unknown) => say(message(cause))); return;
       case "thread": navigate.toThread(command.id); return;
+      case "section": {
+        // A moved row's link: the place it lands on Mark seen, flashed, and the row keeps focus.
+        const target = command.prUrl ? rootRef.current?.querySelector<HTMLElement>(`[data-deck-arrive="${CSS.escape(command.prUrl)}"]`) : null;
+        // In flight folds; it opens to show where the row lands, then the link goes on there.
+        if (!target && SECTIONS[command.key as keyof typeof SECTIONS]?.fold && !here.open.includes(command.key)) {
+          here.open = [...here.open, command.key]; persist(); bump();
+          window.requestAnimationFrame(() => run(command));
+          return;
+        }
+        if (!target) { jumpSection(command.key); return; }
+        target.scrollIntoView({ block: "center" });
+        if (!reduced()) target.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
+        return;
+      }
       case "jump": {
         const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(command.prUrl)}"]`);
         if (!element && lines.some((line) => line.prUrl === command.prUrl && line.section === "flight")) {

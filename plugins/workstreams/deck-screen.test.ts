@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import type { SeedProposal } from "./linear-seed.js";
 
@@ -109,6 +109,24 @@ describe("the effort deck's markup", () => {
     }
     // A merge row has none: merges stay in the preview.
     expect(section(pane(inkwellDeck(), SHELF), "merge")).not.toContain("data-deck-inline");
+  });
+
+  it("keeps a row a read moved where it was, linking to where it lands, which holds its place, and a merged row as one ghost line", () => {
+    const shelf = (view: DeckView) => view.active.find((item) => item.id === SHELF)!;
+    const seen = { rows: { [SHELF]: cardSnapshot(shelf(inkwellDeck())) }, at: {} };
+    const after = inkwellDeck({}, (row) => row.number === 342 ? { attention: [], status: "Awaiting review", stage: "review" } : row.number === 341 ? { effort: null } : {});
+    const screen = cardScreen(shelf(after), seen, { now: NOW, gone: new Map([[url("folio", 341), { how: "merged", at: NOW - 10_000 }]]) });
+    const html = pane(after, SHELF, { card: screen });
+    const merge = section(html, "merge");
+    const row = (number: number) => merge.split("data-deck-row=").find((part) => part.startsWith(`"${url("folio", number)}"`))!;
+    expect(text(row(341))).toContain("folio #341 ABC-361 Read shelf order back Merged · just now");
+    expect(row(341)).toContain("line-through");
+    // #343 still waits on #342, which moved to In flight: each says what changed and links where it goes.
+    expect(text(row(342))).toContain("Behind #341 → Awaiting review → moved to In flight ↓");
+    expect(row(343)).toMatch(/<button type="button" tabindex="-1" data-deck-to="blocked" title="It moves to Blocked on Mark seen. Show where."[^>]*>→ moved to Blocked ↓<\/button>/u);
+    // Blocked holds #343's place, so the link has somewhere to land; the row itself is drawn once, where you saw it.
+    expect(text(section(html, "blocked"))).toContain("folio #343 lands here on Mark seen");
+    expect(html.match(new RegExp(`data-deck-row="${url("folio", 343)}"`, "gu"))).toHaveLength(1);
   });
 
   it("says on the row when its last read failed", () => {

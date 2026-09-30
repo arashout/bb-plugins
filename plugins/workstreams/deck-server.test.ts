@@ -100,6 +100,18 @@ describe("the effort deck on the server", () => {
     expect((await env.deck()).active.map((card) => card.name)).toEqual(["Shelf order", "folio · service"]);
   });
 
+  it("says what became of each row the view drew that left: merged, with when, or closed, and nothing of one still open", async () => {
+    const env = await setup();
+    env.current.set(402, { ...env.current.get(402)!, state: "MERGED", mergedAt: daysAgo(1) });
+    expect(await env.rpc("pr_refresh", { prUrl: url(402) })).toMatchObject({ status: "checked" });
+    env.current.set(403, { ...env.current.get(403)!, state: "CLOSED" });
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    const view = await env.harness.callRpc("deck_get", { ghosts: [url(401), url(402), url(403), url(402)] }) as DeckView;
+    expect(view.gone).toEqual([{ prUrl: url(402), how: "merged", at: Date.parse(env.current.get(402)!.mergedAt!) }, { prUrl: url(403), how: "closed", at: null }]);
+    // Asked nothing, it says nothing.
+    expect((await env.deck()).gone).toEqual([]);
+  });
+
   it("counts a merge a read saw on the card of the effort whose ticket it carries, after the PR leaves the inventory", async () => {
     const env = await setup();
     env.current.set(402, { ...env.current.get(402)!, state: "MERGED", mergedAt: daysAgo(1) });

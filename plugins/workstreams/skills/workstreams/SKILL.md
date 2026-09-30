@@ -794,7 +794,9 @@ efforts and On hold and Done piles beside the strip. Every write there opens a c
 each PR, then waits 8 seconds with Undo; merges run only from the fresh merge
 preview. Press `?` for its keys or `⌘K` for every action.
 
-`deck_get` returns the effort deck from one board read, and the `deck-changed`
+`deck_get` returns the effort deck from one board read (`ghosts`, the PRs the
+view drew, returns `gone`: each of them a read found merged, with when, or
+closed), and the `deck-changed`
 realtime event fires after each inventory read or action, pile move, effort
 edit, thread change, and batch step. Every row is an inventory row, filed in
 one section by the move its inventory row leads with: `merge`, `confirm`,

@@ -23,7 +23,8 @@ export type DeckCommand =
   | { kind: "select"; prUrl: string; shift: boolean } | { kind: "expand"; prUrl: string } | { kind: "focus"; prUrl: string }
   | { kind: "tile"; key: string } | { kind: "fold"; key: string }
   | { kind: "group"; key: string } | { kind: "undo-group"; key: string } | { kind: "undo-batch"; batchId: string }
-  | { kind: "thread"; id: string } | { kind: "jump"; prUrl: string } | { kind: "resume"; id: string } | { kind: "reopen"; id: string }
+  | { kind: "thread"; id: string } | { kind: "jump"; prUrl: string } | { kind: "section"; key: string; prUrl?: string }
+  | { kind: "resume"; id: string } | { kind: "reopen"; id: string }
   | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null };
 export type Run = (command: DeckCommand) => void;
 
@@ -219,6 +220,10 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
           line.inline.id === "advance" && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{line.inline.label}
         {state.selected.size ? null : <span className="hidden group-focus-within:inline-flex"><Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></span>}</button>
         : null}
+      {line.to ? <button type="button" tabIndex={-1} data-deck-to={line.to.key} onClick={() => run({ kind: "section", key: line.to!.key, prUrl: line.prUrl })}
+        title={`It moves to ${line.to.title} on Mark seen. Show where.`}
+        className={cn("shrink-0 whitespace-nowrap rounded px-1 text-[11.5px] text-sky-700 hover:underline dark:text-sky-300", RING)}>
+        → moved to {line.to.title} {line.to.up ? "↑" : "↓"}</button> : null}
       <span className="flex min-w-12 shrink-0 items-center justify-end gap-1 text-[11.5px]">
         {trail?.kind === "acted" ? <>
           <span className={cn("max-w-44 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")} title={trail.title ?? trail.text}>{trail.text}</span>
@@ -289,7 +294,10 @@ function Section({ section, state, run, open, stuck, held }: { section: SectionS
         onClick={() => { if (section.action!.enabled) run({ kind: "action", id: section.action!.id }); }}
         className={cn(BUTTON, TONE[meta.tone].button)}>{section.action.label}<Kbd>{section.action.key}</Kbd></button> : null}
     </div>
-    {folded ? null : <div className="pb-1.5 pt-0.5">{section.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0} />)}</div>}
+    {folded ? null : <div className="pb-1.5 pt-0.5">{section.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0} />)}
+      {section.arriving.map((item) => <button key={item.prUrl} type="button" tabIndex={-1} data-deck-arrive={item.prUrl} onClick={() => run({ kind: "jump", prUrl: item.prUrl })}
+        title={`Show ${item.ref} where it is now`} className={cn("flex h-[26px] w-full items-center gap-2 rounded-md border border-dashed border-border/70 pl-[62px] pr-2 text-left text-[11.5px] text-muted-foreground hover:text-foreground", RING)}>
+        <b className="font-medium">{item.ref}</b> lands here on Mark seen</button>)}</div>}
   </section>;
 }
 

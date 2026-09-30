@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { anchorScroll, focusFallback, keepOrder, landAfter, meltSlack, readPlace, readSeen, settleRows, snapshotOf, type FocusDom, type SettledRow } from "./deck-place.js";
+import { anchorScroll, focusFallback, keepOrder, landAfter, meltSlack, readPlace, readSeen, settleRows, snapshotOf, withArrivals, type FocusDom, type SettledRow }
+  from "./deck-place.js";
 
 const DAY = 86_400_000;
 const settled = (prUrl: string, section: string, status = "Awaiting review"): SettledRow => ({ prUrl, ref: prUrl, title: `Title ${prUrl}`, section, status });
@@ -30,6 +31,19 @@ describe("settling deck rows in place", () => {
     expect(shape(settleRows(snapshot, changed, ["merge", "work", "flight"]))).toEqual(["merge:a Awaiting review→In review", "work:b"]);
     const marked = snapshotOf(changed.map((item) => ({ ...item, ref: item.prUrl, title: item.prUrl })));
     expect(shape(settleRows(marked, changed, ["merge", "work", "flight"]))).toEqual(["work:b", "flight:a"]);
+  });
+
+  it("keeps a row that arrived since you looked where it joined, new, and as a ghost if it leaves again, until Mark seen", () => {
+    const snapshot = [settled("a", "merge"), settled("c", "work")];
+    const arrived = withArrivals(snapshot, [settled("a", "merge"), settled("d", "merge", "Ready to merge"), settled("c", "work")])!;
+    expect(arrived.map((item) => [item.prUrl, item.arrived ?? false])).toEqual([["a", false], ["c", false], ["d", true]]);
+    expect(withArrivals(arrived, [settled("a", "merge"), settled("d", "merge")])).toBeNull();
+    // A refresh finds d merged and a moved on: both stay put, d as a ghost, and nothing shifts.
+    expect(shape(settleRows(arrived, [row("a", "flight", "In review"), row("c", "work")], ["merge", "work", "flight"])))
+      .toEqual(["merge:a Awaiting review→In review", "merge:d ghost new", "work:c"]);
+    // It stays in the stored place too, and Mark seen, which snapshots rows as they are, lets it go.
+    expect(readSeen(JSON.stringify({ rows: { shelf: arrived }, at: {} }), 0).rows.shelf).toEqual(arrived);
+    expect(snapshotOf(arrived).some((item) => "arrived" in item)).toBe(false);
   });
 
   it("orders sections it doesn't know by first appearance, so a suggestion group keeps its place", () => {

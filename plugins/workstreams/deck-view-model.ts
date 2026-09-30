@@ -68,12 +68,18 @@ export type DeckLine = {
   dim: boolean; ghost: boolean;
   /** Why it carries a change dot. */
   dot: string | null;
+  /** What it says after its title: its section's detail, or what a read changed, "CI failing → Ready to merge". */
   info: { text: string; tone: Tone | null } | null;
+  /** A read changed its state since you looked: it stays put, with the change in `info`, until Mark seen. */
+  change: { was: string; now: string } | null;
+  /** A read moved it to another section: it stays put, linking there, and moves on Mark seen. `up`: that section is above this one. */
+  to: { key: DeckSection; title: string; up: boolean } | null;
   signals: string[];
   age: string | null; hot: boolean;
   /** Its read, only when it isn't current: the last one failed, or the last full read didn't list it. */
   checked: { text: string; title: string; failed: boolean } | null;
-  trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "change" | "ghost"; text: string }
+  /** What you did to it, what became of it when it left ("Merged · just now"), or its thread. */
+  trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "ghost"; text: string }
     | { kind: "thread"; text: string; threadId: string } | null;
   /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, or Release on a held row. */
   inline: { id: DeckActionId; label: string; title: string } | null;
@@ -81,8 +87,12 @@ export type DeckLine = {
 };
 /** What a view knows beyond deck_get: when each row was last marked seen, and what a refused or cut-off write said. */
 export type LineContext = { now: number; seenAt: Readonly<Record<string, number>>; details?: ReadonlyMap<string, string>;
-  /** PRs a read saw merge, so a row that left says so. */
-  merged?: ReadonlySet<string>;
+  /** Rows that left and a read found merged, with when, or closed (deck_get's `gone`), so a row that left says which. */
+  gone?: ReadonlyMap<string, { how: "merged" | "closed"; at: number | null }>;
+  /** When the view first drew each row that left as gone, for its age when the read gave none. */
+  left?: ReadonlyMap<string, number>;
+  /** The card each open PR is on now, by name, so a row that left for another card says where. */
+  elsewhere?: ReadonlyMap<string, string>;
   /** PRs you moved to an effort from here, by the effort's name, until Mark seen: a row that left that way says where to, as news it isn't. */
   moved?: ReadonlyMap<string, string> };
 
@@ -108,13 +118,26 @@ function checked(row: DeckRow, now: number): DeckLine["checked"] {
     title: `The last full read didn't list it${good}.` } : null;
 }
 
-/** One settled row as a line: a ghost keeps what you last saw; a changed row stays in its old section with what it is now. */
+/** How long ago, as a ghost says it: "just now" for the last minute. */
+const ago = (at: number | null, now: number) => at === null ? "" : ` · ${now - at < 60_000 ? "just now" : `${age(at, now)} ago`}`;
+
+/**
+ * One settled row as a line: a ghost keeps what you last saw and says what became of it, one you moved from here where it went; a changed
+ * row stays in its old section with what changed, and links to the section it moves to on Mark seen.
+ */
 export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineContext, signals: string[] = []): DeckLine {
   const row = item.row;
   const settled = item.settled;
   const section = item.section;
   const seenAt = context.seenAt[item.prUrl];
   const moved = item.ghost ? context.moved?.get(item.prUrl) ?? null : null;
+  const gone = item.ghost && !moved ? context.gone?.get(item.prUrl) ?? null : null;
+  const elsewhere = item.ghost && !moved && !gone ? context.elsewhere?.get(item.prUrl) ?? null : null;
+  const fate = gone ? `${gone.how === "merged" ? "Merged" : "Closed"}${ago(gone.at ?? context.left?.get(item.prUrl) ?? null, context.now)}`
+    : elsewhere ? `→ ${elsewhere}` : `Left${ago(context.left?.get(item.prUrl) ?? null, context.now)}`;
+  const change = item.change && item.change.was !== item.change.now ? item.change : null;
+  const to = row && settled && row.section !== settled.section ? { key: row.section, title: SECTIONS[row.section].title,
+    up: DECK_SECTIONS.indexOf(row.section) < DECK_SECTIONS.indexOf(section as DeckSection) } : null;
   const acted = row?.acted ?? null;
   const dim = item.ghost || item.change !== null || (row !== null && !counted(row, seenAt));
   const needs = !dim && row !== null && needsYou(row, pile, seenAt);
@@ -126,15 +149,16 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
     const failed = acted.state === "refused" || acted.state === "unknown";
     trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: context.details?.get(item.prUrl) ?? null,
       text: acted.state === "refused" ? "Not sent" : acted.state === "unknown" ? "May not have sent" : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
-  } else if (item.ghost) trail = { kind: "ghost", text: moved ? `→ ${moved}` : context.merged?.has(item.prUrl) ? "Merged" : "Left" };
-  else if (item.change) trail = { kind: "change", text: `→ ${item.change.now}` };
+  } else if (item.ghost) trail = { kind: "ghost", text: moved ? `→ ${moved}` : fate };
   else if (row?.thread && section === "work") trail = { kind: "thread", text: row.thread.title, threadId: row.thread.id };
+  const news = [change && `Was ${change.was}; now ${change.now}.`, to ? `Moves to ${to.title} on Mark seen.` : "Settles on Mark seen."].filter(Boolean).join(" ");
   return {
     prUrl: item.prUrl, ref: row ? refOf(row) : settled!.ref, title: row?.title ?? settled!.title,
     stacked: row?.stackedOn != null ? `${short(row.repo)} #${row.stackedOn}` : null, section, tone, needs, dim, ghost: item.ghost,
-    dot: moved ? null : item.ghost ? `${context.merged?.has(item.prUrl) ? "Merged" : "Left"} since you looked. Clears on Mark seen.` : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
-      : item.arrived ? "New since you looked" : null,
-    info: row ? info(row, section) : null, signals, age: shownAge, checked: row ? checked(row, context.now) : null,
+    dot: moved ? null : item.ghost ? `${elsewhere ? `Moved to ${elsewhere}` : fate.replace(/ · .*$/u, "")} since you looked. Clears on Mark seen.`
+      : item.change ? news : item.arrived ? "New since you looked" : null,
+    info: change ? { text: `${change.was} → ${change.now}`, tone: null } : row ? info(row, section) : null, change, to,
+    signals, age: shownAge, checked: row ? checked(row, context.now) : null,
     hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
     inline: inlineAction(row, section, pile, needs, dim),
   };
@@ -188,6 +212,8 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
 }
 
 export type SectionScreen = { key: DeckSection; meta: SectionMeta; count: number; changed: number; lines: DeckLine[];
+  /** Rows a read moved here, still drawn where you saw them until Mark seen. */
+  arriving: { prUrl: string; ref: string }[];
   /** Its one button, and how many rows it takes. */
   action: { id: DeckActionId; label: string; key: string; count: number; enabled: boolean; why: string | null } | null };
 /** How strongly a suggestion's signals point at its target, as its group says it. */
@@ -251,7 +277,7 @@ const pointer = (target: SuggestionGroup["target"]) => target?.kind === "effort"
 export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at: Readonly<Record<string, number>> },
   context: Omit<LineContext, "seenAt"> & { accepted?: Accepted }): CardScreen {
   const { now } = context;
-  const lineContext = { ...context, seenAt: seen.at, merged: new Set(card.activity.filter((item) => item.kind === "merged").map((item) => item.prUrl)) };
+  const lineContext = { ...context, seenAt: seen.at };
   const current = card.sections.flatMap((section) => section.rows);
   const groupOf = new Map(card.suggestions.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group] as const)));
   const shown = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => {
@@ -261,14 +287,16 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   const byPr = new Map(shown.map((line) => [line.prUrl, line]));
   const sections = DECK_SECTIONS.flatMap((key): SectionScreen[] => {
     const lines = shown.filter((line) => line.section === key);
-    if (!lines.length) return [];
+    // A row a read moved here waits where you saw it; its place here says so, and its link there lands on it.
+    const arriving = shown.filter((line) => line.to?.key === key).map((line) => ({ prUrl: line.prUrl, ref: line.ref }));
+    if (!lines.length && !arriving.length) return [];
     const meta = SECTIONS[key];
     const count = lines.filter((line) => line.needs).length;
     // Held rows never need you; Release takes the ones still held.
     const takes = key === "held" ? lines.filter(releasable).length : count;
     const action = meta.action && meta.button ? { id: meta.action, label: meta.button, key: ACTION[meta.action].keys[0]!, count: takes,
       enabled: takes > 0 && (card.pile === "active" || key === "held"), why: takes ? null : "Nothing left here; dimmed rows settle on Mark seen" } : null;
-    return [{ key, meta, count, changed: lines.filter((line) => line.dot !== null).length, lines, action }];
+    return [{ key, meta, count, changed: lines.filter((line) => line.dot !== null).length, lines, arriving, action }];
   });
   const counts = (of: readonly DeckSection[]) => current.filter((row) => of.includes(row.section)).length;
   const threads = settleRows(seen.rows[threadsKey(card.id)], card.threads.map(threadRow)).filter((item) => !item.ghost).map((item) => {

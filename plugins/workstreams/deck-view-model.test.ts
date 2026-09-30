@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { withArrivals } from "./deck-place.js";
 import { acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, paletteItems, readText, stripChips, targets, type Accepted,
   type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
@@ -10,9 +11,10 @@ const SHELF = INVENTORY_EFFORTS.shelf.id, PICKUP = INVENTORY_EFFORTS.pickup.id, 
 const FOLIO = "service:inkwell/folio", ATLAS = "service:inkwell/atlas", CATALOG = "service:inkwell/catalog";
 const none = { rows: {}, at: {} };
 const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1] = none, details?: ReadonlyMap<string, string>,
-  sorted: { accepted?: Accepted; moved?: ReadonlyMap<string, string> } = {}) => cardScreen(view.active.find((item) => item.id === id)!, seen, { now: NOW, details, ...sorted });
+  sorted: Omit<Parameters<typeof cardScreen>[2], "now" | "details"> = {}) => cardScreen(view.active.find((item) => item.id === id)!, seen, { now: NOW, details, ...sorted });
 const lines = (screen: CardScreen) => Object.fromEntries(screen.sections.map((section) => [section.key, section.lines.map((line) =>
-  `${line.ref}${line.needs ? "" : " ·"}${line.dim ? " dim" : ""}${line.ghost ? " ghost" : ""}${line.dot && !line.ghost ? " dot" : ""}${line.trail ? ` [${line.trail.text}]` : ""}`)]));
+  `${line.ref}${line.needs ? "" : " ·"}${line.dim ? " dim" : ""}${line.ghost ? " ghost" : ""}${line.dot && !line.ghost ? " dot" : ""}${line.change ? ` {${line.info!.text}}` : ""}${
+    line.to ? ` ⇢${line.to.key}` : ""}${line.trail ? ` [${line.trail.text}]` : ""}`)]));
 const context = (screen: CardScreen, patch: Partial<KeyContext> = {}): KeyContext =>
   ({ view: "deck", cur: screen, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1, ...patch });
 
@@ -55,22 +57,55 @@ describe("an effort card", () => {
     // folio #342 lost its approval on this read, so #343, stacked on it, no longer merges in order either.
     const after = inkwellDeck({}, (row) => row.number === 342 ? { attention: [], status: "Awaiting review", stage: "review" } : {});
     const shelf = card(after, SHELF, seen);
-    expect(lines(shelf).merge).toEqual(["folio #340", "folio #341", "folio #342 · dim dot [→ Awaiting review]", "folio #343 · dim dot [→ Behind #342]"]);
+    // Each says what changed and links where it goes: #342 to In flight, and #343, whose status stands, to Blocked behind it.
+    expect(lines(shelf).merge).toEqual(["folio #340", "folio #341", "folio #342 · dim dot {Behind #341 → Awaiting review} ⇢flight", "folio #343 · dim dot ⇢blocked"]);
     expect([shelf.needsYou, shelf.sections[0]!.count, shelf.changed]).toEqual([3, 2, 2]);
+    // Where each lands on Mark seen holds its place, so the link has somewhere to go, and it's drawn in no section twice.
+    expect(shelf.sections.map((section) => [section.key, section.lines.map((line) => line.ref), section.arriving.map((item) => item.ref)])).toEqual([
+      ["merge", ["folio #340", "folio #341", "folio #342", "folio #343"], []], ["work", ["folio #330"], []], ["flight", [], ["folio #342"]], ["blocked", [], ["folio #343"]]]);
+    expect(shelf.sections[0]!.lines[2]!.to).toEqual({ key: "flight", title: "In flight", up: false });
+    expect(shelf.sections[0]!.lines[2]!.dot).toBe("Was Behind #341; now Awaiting review. Moves to In flight on Mark seen.");
     // Mark seen takes the card as it is now, and the row settles where it belongs.
     const marked = card(after, SHELF, { rows: { [SHELF]: cardSnapshot(after.active.find((item) => item.id === SHELF)!) }, at: {} });
     expect(lines(marked).merge).not.toContain("folio #342 · dim dot [→ Awaiting review]");
     expect(marked.changed).toBe(0);
   });
 
-  it("keeps a PR that merged elsewhere as a ghost on its line, and a new PR at its section's end, marked", () => {
+  it("keeps a PR that left as a one-line ghost on its line, saying what became of it, and a new PR at its section's end, marked", () => {
     const before = inkwellDeck();
     const seen = { rows: { [SHELF]: cardSnapshot(before.active.find((item) => item.id === SHELF)!).filter((row) => row.prUrl !== url("folio", 343)) }, at: {} };
     const after = inkwellDeck({}, (row) => row.number === 341 ? { effort: null } : {});
-    expect(lines(card(after, SHELF, seen)).merge).toEqual(["folio #340", "folio #341 · dim ghost [Left]", "folio #342", "folio #343 dot"]);
-    // A read that saw it merge says so.
-    const merged = inkwellDeck({ merges: [{ url: url("folio", 341), at: NOW - 60_000, effortId: SHELF }] }, (row) => row.number === 341 ? { effort: null } : {});
-    expect(lines(card(merged, SHELF, seen)).merge[1]).toBe("folio #341 · dim ghost [Merged]");
+    const ghost = (fates: Parameters<typeof card>[4]) => lines(card(after, SHELF, seen, undefined, fates)).merge;
+    expect(ghost({})).toEqual(["folio #340", "folio #341 · dim ghost [Left]", "folio #342", "folio #343 dot"]);
+    // A read that saw it merge says so, and when; one it found closed says so, as of when the view first drew it gone.
+    const pr341 = url("folio", 341);
+    expect(ghost({ gone: new Map([[pr341, { how: "merged", at: NOW - 20_000 }]]) })[1]).toBe("folio #341 · dim ghost [Merged · just now]");
+    expect(ghost({ gone: new Map([[pr341, { how: "merged", at: NOW - 3 * 3_600_000 }]]) })[1]).toBe("folio #341 · dim ghost [Merged · 3h ago]");
+    expect(ghost({ gone: new Map([[pr341, { how: "closed", at: null }]]), left: new Map([[pr341, NOW - 5_000]]) })[1]).toBe("folio #341 · dim ghost [Closed · just now]");
+    // Still open on another card, it names that card.
+    expect(ghost({ elsewhere: new Map([[pr341, "folio · service"]]) })[1]).toBe("folio #341 · dim ghost [→ folio · service]");
+    expect(card(after, SHELF, seen, undefined, { gone: new Map([[pr341, { how: "merged", at: NOW - 20_000 }]]) }).sections[0]!.lines[1]!.dot)
+      .toBe("Merged since you looked. Clears on Mark seen.");
+  });
+
+  it("never takes a row out from under you: a refresh changes a row in place, and one that arrived and then merged stays as a ghost", () => {
+    const shelfOf = (view: DeckView) => view.active.find((item) => item.id === SHELF)!;
+    const drawn = (view: DeckView, rows: ReturnType<typeof cardSnapshot>, fates: Parameters<typeof card>[4] = {}) =>
+      card(view, SHELF, { rows: { [SHELF]: rows }, at: {} }, undefined, fates).sections.flatMap((section) => section.lines.map((line) => `${line.ref}${line.ghost ? " ghost" : ""}`));
+    // You looked before #343 joined; a read brings it, and it joins the end of Merge.
+    let snapshot = cardSnapshot(shelfOf(inkwellDeck({}, (row) => row.number === 343 ? { effort: null } : {})));
+    const joined = inkwellDeck();
+    snapshot = withArrivals(snapshot, cardSnapshot(shelfOf(joined))) ?? snapshot;
+    const before = drawn(joined, snapshot);
+    expect(before).toEqual(["folio #340", "folio #341", "folio #342", "folio #343", "folio #330"]);
+    // Then a refresh finds #343 merged and #340 no longer approved, which blocks the two stacked on it: every line is where it was, the
+    // three that move saying where to and #343 that it merged.
+    const refreshed = inkwellDeck({}, (row) => row.number === 343 ? { effort: null } : row.number === 340 ? { attention: [], status: "Awaiting review", stage: "review" } : {});
+    const merged = new Map([[url("folio", 343), { how: "merged" as const, at: NOW - 5_000 }]]);
+    expect(drawn(refreshed, snapshot, { gone: merged }).map((line) => line.replace(" ghost", ""))).toEqual(before);
+    const lines343 = card(refreshed, SHELF, { rows: { [SHELF]: snapshot }, at: {} }, undefined, { gone: merged }).sections[0]!.lines;
+    expect(lines343.map((line) => [line.ref, line.ghost, line.trail?.text ?? null, line.to?.key ?? null])).toEqual([["folio #340", false, null, "flight"],
+      ["folio #341", false, null, "blocked"], ["folio #342", false, null, "blocked"], ["folio #343", true, "Merged · just now", null]]);
   });
 
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {

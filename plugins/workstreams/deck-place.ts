@@ -5,7 +5,8 @@
 // - Rows hold still. Each view keeps a snapshot of its rows as you last
 //   marked them seen; a row a read changed stays in its old section with a
 //   dot, a row that left stays as a ghost, and a new row joins the end of
-//   its section. Only Mark seen, for that view alone, settles them.
+//   its section and stays there, a ghost too if it leaves again. Only Mark
+//   seen, for that view alone, settles them.
 // - The card order is set once per session: new, resumed, and reopened
 //   efforts join the end of the efforts, before the service cards, so an
 //   effort's number key never shifts.
@@ -14,8 +15,8 @@
 // - Focus falls back through one chain and never lands on the page body.
 import { ACTED_MS, cardTier } from "./deck-shared";
 
-/** A row as you last marked it seen. */
-export type SettledRow = { prUrl: string; ref: string; title: string; section: string; status: string };
+/** A row as you last marked it seen, or as it was when it arrived since then (`arrived`). */
+export type SettledRow = { prUrl: string; ref: string; title: string; section: string; status: string; arrived?: true };
 /** A row as a view draws it: where it settled, what changed since, or that it left. */
 export type Shown<T> = {
   prUrl: string;
@@ -43,7 +44,7 @@ export function settleRows<T extends { prUrl: string; section: string; status: s
     const row = live.get(settled.prUrl) ?? null;
     live.delete(settled.prUrl);
     const moved = row !== null && (row.section !== settled.section || row.status !== settled.status);
-    shown.push({ prUrl: settled.prUrl, section: settled.section, row, settled, ghost: row === null, arrived: false,
+    shown.push({ prUrl: settled.prUrl, section: settled.section, row, settled, ghost: row === null, arrived: settled.arrived === true,
       change: moved ? { was: settled.status, now: row!.status } : null });
   }
   for (const row of live.values()) shown.push({ prUrl: row.prUrl, section: row.section, row, settled: null, change: null, ghost: false, arrived: snapshot !== undefined });
@@ -54,6 +55,16 @@ export function settleRows<T extends { prUrl: string; section: string; status: s
 
 /** What Mark seen keeps: every current row as it is now. */
 export const snapshotOf = (rows: readonly SettledRow[]): SettledRow[] => rows.map(({ prUrl, ref, title, section, status }) => ({ prUrl, ref, title, section, status }));
+
+/**
+ * A view's snapshot with each row that arrived since, as it arrived and marked new, so a read never takes a row out from under you: one
+ * you saw arrive keeps its place, and stays as a ghost if it leaves again, until Mark seen. Null when nothing arrived.
+ */
+export function withArrivals(snapshot: readonly SettledRow[], rows: readonly SettledRow[]): SettledRow[] | null {
+  const known = new Set(snapshot.map((row) => row.prUrl));
+  const fresh = snapshotOf(rows.filter((row) => !known.has(row.prUrl)));
+  return fresh.length ? [...snapshot, ...fresh.map((row) => ({ ...row, arrived: true as const }))] : null;
+}
 
 /**
  * The session's card order: the ones still here where they were, then new ones, in the order given, each at the end of its tier: efforts,

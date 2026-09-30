@@ -121,6 +121,11 @@ export const deckViewSchema = z.object({
   checkedAt: z.string().nullable(), refreshing: z.boolean(),
   /** GitHub's rate limit holds reads until then. */
   limitedUntil: z.number().nullable(),
+  /**
+   * Of the PRs the view asked about (its rows, as it last saw them), each that a read found merged, with when, or closed: so a row that
+   * left says which instead of vanishing.
+   */
+  gone: z.array(z.object({ prUrl: z.string(), how: z.enum(["merged", "closed"]), at: z.number().nullable() }).strict()),
 }).strict();
 export type DeckView = z.infer<typeof deckViewSchema>;
 /** When you last marked each PR's row seen, by PR URL, as the view keeps it. */
@@ -161,6 +166,8 @@ export type DeckInput = {
   read: { checkedAt: string | null; refreshing: boolean; limitedUntil: number | null };
   /** When you last marked each PR's row seen; see counted(). */
   seen: ReadonlyMap<string, number>;
+  /** What a read found of the PRs the view asked about that are no longer open. */
+  gone?: DeckView["gone"];
 };
 
 /** The inventory action a row leads with, as the section it files under. */
@@ -372,5 +379,5 @@ export function deckView(input: DeckInput): DeckView {
     .sort((a, b) => b.since - a.since || a.name.localeCompare(b.name));
   return { active, held, done, oneOffsId: input.classify.oneOffsId,
     counts: { needsYou: active.reduce((sum, item) => sum + item.needsYou, 0), held: held.length, done: done.length },
-    checkedAt: input.read.checkedAt, refreshing: input.read.refreshing, limitedUntil: input.read.limitedUntil };
+    checkedAt: input.read.checkedAt, refreshing: input.read.refreshing, limitedUntil: input.read.limitedUntil, gone: [...input.gone ?? []] };
 }
