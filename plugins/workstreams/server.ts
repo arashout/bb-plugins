@@ -197,6 +197,8 @@ const RESCAN_DELAY_MS = 3_000;
 const TARGETED_MAX = 8;
 /** A batch thread's action in the board's run record: one run per PR it claims, all in its thread. */
 const ADDRESS_RUN = "address-feedback";
+/** What every other writer hears while a batch thread's claim holds the PR. */
+const ADDRESSING = "A batch thread is addressing this PR's feedback. Wait for it to finish.";
 
 const lifecycleSchema = z.enum(LIFECYCLES);
 const stalenessSchema = z.enum(STALENESS);
@@ -2479,6 +2481,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function relistThreads(): Promise<void> {
     try {
+      // The threads open runs were bound to before this list began: one it leaves out is gone, not merely newer than the list.
+      const bound = new Set(runs.openThreadIds());
       const pageSize = 500;
       const maxPages = 21; // Twenty full pages, plus one to confirm there are no more.
       const rows = [] as Awaited<ReturnType<typeof bb.sdk.threads.list>>[number][];
@@ -2519,6 +2523,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
       threadsSynced = true;
       reconcileRuns(rows);
+      releaseLostClaims(rows, bound);
       announceThreads();
       backfillPrLinks(rows);
     } catch (error) {
@@ -2807,6 +2812,21 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
     }
+  }
+
+  /**
+   * A batch thread deleted or archived while no load listened sent no event, so its claims would hold their PRs forever. BB's list leaves
+   * both out: one bound before this list began that it leaves out is gone, and each claim in it ends failed, saying so, and its PR is read
+   * again, back on Your turn while its feedback waits. Every other run keeps its own rules.
+   */
+  function releaseLostClaims(rows: readonly { id: string }[], bound: ReadonlySet<string>): void {
+    const listed = new Set(rows.map((row) => row.id));
+    const lost = [...bound].filter((id) => !listed.has(id)).flatMap((id) => runs.openIn(id).filter((run) => run.action === ADDRESS_RUN));
+    if (!lost.length) return;
+    for (const run of lost) runs.settle(run.id, false, "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read.");
+    scheduleInventoryUrls(lost.flatMap((run) => run.prUrl ? [run.prUrl] : []));
+    for (const run of lost) if (run.path) rescans.add(run.path);
+    bb.log.info(`released ${lost.length} batch claim(s) whose thread is gone`);
   }
 
   /** A continue run whose own turn was missed in a reload never arms: close it after 6h on an idle thread. */
@@ -4468,7 +4488,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (claimed) return { ok: false, error: claimed };
     if (advance.reserved(key ?? "", path) || (key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
     // A batch thread's claim holds the PR and its checkout until the thread finishes: no second agent starts beside it.
-    if (openRunOn(prUrl ?? null, path, ADDRESS_RUN)) return { ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." };
+    if (openRunOn(prUrl ?? null, path, ADDRESS_RUN)) return { ok: false, error: ADDRESSING };
     if (key) manualPrWrites.add(key);
     try {
       const result = await action();
@@ -5865,9 +5885,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /**
    * One batch thread for a confirmed Address listing. Each PR is read again first and must still show feedback waiting on you, on the head
-   * its row showed, with no hold, paused effort, v2 claim, or agent on it. Then every PR left is claimed in the board's run record, which
-   * every other writer reads, in one step with nothing awaited, before one worker starts on the code-work model in the listed project and
-   * parent. Its claims end when the thread finishes; a failed start drops them. A claim answers no feedback: only your reply on the PR does.
+   * its row showed, with no hold, paused effort, v2 claim, or agent on it or in its own thread. Then every PR left is checked again and
+   * claimed in the board's run record, which every other writer reads, in one step with nothing awaited, before one worker starts on the
+   * code-work model in the listed project and parent. Its claims end when the thread finishes; a failed start drops them. A claim answers no
+   * feedback: only your reply on the PR does.
    */
   async function dispatchAddress(batch: DeckBatch, items: readonly BatchItem[]): Promise<Map<string, ActionResult>> {
     const results = new Map<string, ActionResult>();
@@ -5876,12 +5897,24 @@ export default async function plugin(bb: BbPluginApi) {
     if (!place) return all("This listing named no thread to start; nothing was started.");
     const hostId = (await bb.sdk.system.config()).primaryHostId;
     if (hostId === null) return all("No primary BB host is available; nothing was started.");
+    /**
+     * What keeps a PR out, as a check that awaits nothing once read: a hold, its effort stopped, a v2 claim, the thread its row names at work
+     * (planning reads the same; a PR with no checkout shows no other sign of one), or an agent on it or its checkout.
+     */
+    const stops = async () => {
+      const stopped = await effortStops(false);
+      const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+      const threadAtWork = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
+        attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null }).executor?.active ? "An agent is already working on it." : null;
+      return (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl) ?? v2Claimed(prUrl, path) ?? threadAtWork(prUrl) ?? agentOn(prUrl, path);
+    };
+    let stop = await stops();
     const ready: { item: BatchItem; pr: Pr; path: string | null; feedback: string }[] = [];
     for (const item of items) {
       const refuse = (error: string) => { results.set(item.prUrl, { ok: false, error }); };
       const path = knownPr(item.prUrl)?.path ?? null;
-      const stop = holdMessage(item.prUrl) ?? await effortStop(item.prUrl, false) ?? v2Claimed(item.prUrl, path) ?? agentOn(item.prUrl, path);
-      if (stop) { refuse(stop); continue; }
+      const why = stop(item.prUrl, path);
+      if (why) { refuse(why); continue; }
       const read = await readPrNow(item.prUrl);
       if (!read.ok) { refuse(`GitHub couldn't be read, so nothing was started: ${read.error}`); continue; }
       if (!read.pr) { refuse("This PR is no longer open; nothing was started."); continue; }
@@ -5891,12 +5924,14 @@ export default async function plugin(bb: BbPluginApi) {
       ready.push({ item, pr: read.pr, path, feedback: turnSummary(turn, read.pr.latestReviews) });
     }
     if (place.parentThreadId && !await liveThread(place.parentThreadId)) return all("Its parent thread is gone since the listing. Review it and try again; nothing was started.");
-    // The claims: nothing is awaited from the last check to the last claim, so no other writer lands between them. Each names the PR as
-    // GitHub does, as every other writer's run does, so their checks match it.
+    // A hold, an effort's hold, a claim, or an agent may have landed while GitHub answered. The claims: nothing is awaited from the last
+    // check to the last claim, so no other writer lands between them. Each names the PR as GitHub does, as every other writer's run does,
+    // so their checks match it.
+    stop = await stops();
     const claimed = ready.filter(({ item, path }) => {
-      const stop = holdMessage(item.prUrl) ?? v2Claimed(item.prUrl, path) ?? agentOn(item.prUrl, path);
-      if (stop) results.set(item.prUrl, { ok: false, error: stop });
-      return !stop;
+      const why = stop(item.prUrl, path);
+      if (why) results.set(item.prUrl, { ok: false, error: why });
+      return !why;
     }).map((entry) => ({ ...entry, runId: runs.begin({ path: entry.path ?? "", ticket: null, prUrl: entry.pr.url, prNumber: entry.pr.number,
       action: ADDRESS_RUN, mode: "new", threadId: null }) }));
     if (!claimed.length) return results;
@@ -5978,11 +6013,18 @@ export default async function plugin(bb: BbPluginApi) {
    * the effort. Why, or null.
    */
   async function effortStop(prUrl: string, merging: boolean): Promise<string | null> {
-    const effort = (await ownerEfforts())(prUrl);
-    const pile = effort && (effort.archivedAt ? "archived" : piles.get(effort).pile);
-    if (!pile || pile === "active") return null;
-    const [word, undo] = STOPPED[pile];
-    return `Its effort is ${word}. ${undo} it ${merging ? "before merging this PR." : "first; nothing was written."}`;
+    return (await effortStops(merging))(prUrl);
+  }
+  /** effortStop as a check that awaits nothing once read: each PR's owner as read now, its effort's pile as it stands when asked. */
+  async function effortStops(merging: boolean): Promise<(prUrl: string) => string | null> {
+    const effortOf = await ownerEfforts();
+    return (prUrl) => {
+      const effort = effortOf(prUrl);
+      const pile = effort && (effort.archivedAt ? "archived" : piles.get(effort).pile);
+      if (!pile || pile === "active") return null;
+      const [word, undo] = STOPPED[pile];
+      return `Its effort is ${word}. ${undo} it ${merging ? "before merging this PR." : "first; nothing was written."}`;
+    };
   }
   /** An approval's notes and what came after them, read from GitHub now; see approval-evidence.ts. */
   async function approvalHandling(prUrl: string): Promise<ApprovalHandling> {
@@ -6697,6 +6739,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (held) return { ok: false as const, error: held };
       const claimed = v2Claimed(canonical, known.path);
       if (claimed) return { ok: false as const, error: claimed };
+      // A batch thread's claim holds the PR from before its thread exists, which the owners below can't name yet, until it finishes.
+      if (openRunOn(canonical, known.path, ADDRESS_RUN)) return { ok: false as const, error: ADDRESSING };
       if (manualPrWrites.has(canonical)) return { ok: false as const, error: "Another action owns this PR." };
       manualPrWrites.add(canonical);
       try {

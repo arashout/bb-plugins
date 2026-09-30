@@ -1,6 +1,6 @@
 // Address selected on Your turn PRs, through the real server on BB's fake host: the listing, its Undo window, one batch thread on the
-// code-work model under the effort's parent, the claims it holds until it finishes, and each PR's own thread as the other choice. Every
-// name here is synthetic.
+// code-work model under the effort's parent, the checks its claims pass as it starts, the claims it holds until it finishes or goes, and
+// each PR's own thread as the other choice. Every name here is synthetic.
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr, RawUnit } from "./contract.js";
@@ -60,22 +60,34 @@ async function setup() {
     return row;
   };
   add("thr-42", { title: "Order fixes" });
-  /** A start BB never answers; `made`: it made the thread all the same. */
-  const hang = { spawn: false, made: false };
+  /** A start BB never answers; `made`: it made the thread all the same. `until`: BB makes the thread and answers once this settles. */
+  const hang = { spawn: false, made: false, until: null as Promise<void> | null };
   const hostCalls: string[] = [];
+  /** Each PR read from GitHub, and what lands while one PR's read is out. */
+  const reads = { urls: [] as string[], during: null as ((prUrl: string) => Promise<unknown>) | null };
+  /** What lands once, after the board's next full thread list is read and before it answers. */
+  const lists = { during: null as (() => Promise<unknown>) | null };
   const output = { text: "" };
   const send = vi.fn(async () => ({ ok: true as const, delivery: "sent" as const }));
   const spawn = vi.fn(async (args: { title?: string; parentThreadId?: string; pluginMetadata?: Record<string, unknown> }) => {
     const id = `thr-batch-${spawn.mock.calls.length}`;
     const made = () => { metadata.set(id, args.pluginMetadata ?? {}); return add(id, { title: args.title ?? id, status: "active", parentThreadId: args.parentThreadId ?? null }); };
     if (hang.spawn) { if (hang.made) made(); return await new Promise<never>(() => undefined); }
+    if (hang.until) await hang.until;
     return made();
   });
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: HOST }) as never },
     projects: { list: async () => [{ id: PROJECT, name: "Folio", sources: [{ hostId: HOST, path: "/p" }] }] as never },
     threads: {
-      list: async () => [...threads.values()].map((row) => ({ ...row, originPluginId: metadata.has(row.id) ? "workstreams" : null })) as never,
+      // As BB lists them: archived threads only when asked for.
+      list: async (args?: { archived?: boolean; limit?: number }) => {
+        const rows = [...threads.values()].filter((row) => (row.archivedAt !== null) === !!args?.archived)
+          .map((row) => ({ ...row, originPluginId: metadata.has(row.id) ? "workstreams" : null }));
+        const during = args?.limit === 500 ? lists.during : null;
+        if (during) { lists.during = null; await during(); }
+        return rows as never;
+      },
       get: async ({ threadId }: { threadId: string }) => {
         const row = threads.get(threadId);
         if (!row) throw new Error("Unknown synthetic thread");
@@ -90,8 +102,12 @@ async function setup() {
     if (method === "scan" || method === "inspectPaths") return { units: [{ ...raw, pr: current.get(43)! }], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [...current.values()].map((entry) => ({ repo: REPO, pr: entry })),
       discoveryComplete: true, repositories: [{ repo: REPO, complete: true }], complete: true, warnings: [] };
-    if (method === "inspectPrs") return { entries: (input as { prUrls: string[] }).prUrls.map((prUrl) => ({ repo: REPO,
-      pr: current.get(Number(prUrl.split("/").pop()))! })), closed: [], failed: [], warnings: [] };
+    if (method === "inspectPrs") return (async () => {
+      const { prUrls } = input as { prUrls: string[] };
+      reads.urls.push(...prUrls);
+      for (const prUrl of prUrls) await reads.during?.(prUrl);
+      return { entries: prUrls.map((prUrl) => ({ repo: REPO, pr: current.get(Number(prUrl.split("/").pop()))! })), closed: [], failed: [], warnings: [] };
+    })();
     if (method === "contextWorkspace") return { path: "/synthetic/workstreams/context/batch" };
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host call ${method}`);
@@ -105,7 +121,7 @@ async function setup() {
   efforts.recordWorker(effort.id, "thr-42", url(42), "pr");
   add("thr-coordinator", { title: "🧭 Manuscript review" });
   efforts.save({ ...efforts.get(effort.id)!, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
-  const env = { harness, bb, current, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls,
+  const env = { harness, bb, current, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls, reads, lists,
     rpc: (method: string, value: unknown) => env.harness.callRpc(method as never, value as never),
     refresh: async () => expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0),
     batch: async (batchId: string) => await env.rpc("deck_batch_get", { batchId }) as DeckBatch,
@@ -128,6 +144,41 @@ const spawned = (env: Env) => env.spawn.mock.calls.map(([args]) => args as unkno
   providerId: string; model: string; reasoningLevel: string; environment: unknown; pluginMetadata: { role: string; runIds: number[] } });
 const result = (attemptId: string, number: number, outcome = "changed") => `${RESULT_PREFIX}${JSON.stringify({ attemptId, target: url(number),
   actions: ["address_review_feedback"], outcome, headOid: "b".repeat(40), baseOid: "c".repeat(40), commits: [], validation: [], blockers: [] })}`;
+/** Manuscript review's v2 roster claims #43 and its checkout. */
+function claimV2(env: Env) {
+  const body: AttemptBody = { instructionRevision: 1, recipes: ["address_review_feedback"], role: "code", retryEpoch: 0, retryIndex: 0,
+    start: { headOid: HEAD, baseOid: "c".repeat(40), fingerprint: null, sourceIds: [] },
+    resource: { kind: "spawn", threadId: null, path: PATH, hostId: HOST, projectId: PROJECT, reason: null, workspace: null },
+    mode: "spawn", marker: "[Workstreams attempt A-1 · inkwell/folio#43 · instruction r1]", settledAt: Date.now(), uncertainAt: null,
+    emptyReadbackAt: null, failure: null, error: null, releasedReason: null };
+  const work = createEffortWorkStore(env.bb.storage.database() as never);
+  work.claim({ id: "A-1", target: url(43), effortId: env.effort.id, instructionId: `I-${env.effort.id}-r1`, launchKey: "key-A-1", threadId: null, hostId: HOST, path: PATH, body });
+  return { work, body };
+}
+/** An agent on this PR in its own thread, in the board's run record. */
+const runOn = (env: Env, number: number) => createRunStore(env.bb.storage.database() as never).begin({ path: "", ticket: null, prUrl: url(number), prNumber: number,
+  action: "address-review", mode: "new", threadId: `thr-${number}` });
+/** Every step already under way finishes: a thread event's handling, or the thread list a refresh starts and doesn't wait for. */
+const drain = () => new Promise((resolve) => setImmediate(resolve));
+/** BB says this thread went to work. */
+async function activate(env: Env, id: string) {
+  env.threads.set(id, { ...env.threads.get(id)!, status: "active" });
+  await env.harness.emitThreadEvent("thread.active", { thread: env.threads.get(id)! });
+  await drain();
+}
+/** Confirm a listing and let its Undo window pass; `during`, what lands inside the window first. */
+async function confirm(env: Env, batchId: string | null, during?: () => Promise<unknown>) {
+  expect(await env.rpc("deck_batch_start", { batchId })).toMatchObject({ ok: true });
+  await vi.advanceTimersByTimeAsync(2_000);
+  await during?.();
+  env.reads.urls.length = 0;
+  await vi.advanceTimersByTimeAsync(6_100);
+  await env.settled(batchId!);
+  return (await env.batch(batchId!)).items.map((item) => `${item.ref}: ${item.state}: ${item.detail}`);
+}
+/** Each batch claim in the board's run record: its PR and status. */
+const claims = (env: Env) => createRunStore(env.bb.storage.database() as never).recent(0).filter((run) => run.action === "address-feedback")
+  .map((run) => [run.prNumber, run.status]);
 
 describe("addressing Your turn PRs in one batch thread", () => {
   it("lists each PR's feedback and where it runs, then after the window starts one worker under the effort's parent that claims them all until it finishes", async () => {
@@ -184,7 +235,7 @@ describe("addressing Your turn PRs in one batch thread", () => {
       .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     expect(await env.rpc("thread_start", { path: PATH, prompt: "Fix it" })).toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." }))
-      .toEqual({ ok: false, error: "Another agent thread is working on this PR. Open its thread before sending." });
+      .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     const again = await env.plan([42, 43, 44].map(url));
     expect(again.items.map((item) => item.ref)).toEqual(["folio #44"]);
     expect(again.skipped).toEqual([{ prUrl: url(42), ref: "folio #42", reason: "An agent is already working on it." },
@@ -224,14 +275,8 @@ describe("addressing Your turn PRs in one batch thread", () => {
     const env = await setup();
     await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
     expect(await env.rpc("effort_hold", { effortKey: env.spine.id, reason: "Labels later" })).toMatchObject({ ok: true });
-    const body: AttemptBody = { instructionRevision: 1, recipes: ["address_review_feedback"], role: "code", retryEpoch: 0, retryIndex: 0,
-      start: { headOid: HEAD, baseOid: "c".repeat(40), fingerprint: null, sourceIds: [] },
-      resource: { kind: "spawn", threadId: null, path: PATH, hostId: HOST, projectId: PROJECT, reason: null, workspace: null },
-      mode: "spawn", marker: "[Workstreams attempt A-1 · inkwell/folio#43 · instruction r1]", settledAt: Date.now(), uncertainAt: null,
-      emptyReadbackAt: null, failure: null, error: null, releasedReason: null };
-    const work = createEffortWorkStore(env.bb.storage.database() as never);
-    work.claim({ id: "A-1", target: url(43), effortId: env.effort.id, instructionId: `I-${env.effort.id}-r1`, launchKey: "key-A-1", threadId: null, hostId: HOST, path: PATH, body });
-    createRunStore(env.bb.storage.database() as never).begin({ path: "", ticket: null, prUrl: url(44), prNumber: 44, action: "address-review", mode: "new", threadId: "thr-44" });
+    const { work, body } = claimV2(env);
+    runOn(env, 44);
     env.threads.set("thr-42", { ...env.threads.get("thr-42")!, status: "active" });
     await env.refresh();
     const plan = await env.plan([42, 43, 44, 45, 46].map(url));
@@ -309,5 +354,163 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect((await env.batch(plan.batchId!)).items.map((item) => [item.state, item.detail])).toEqual([["sent", "Asked “Order fixes” to address the notes."]]);
     expect((env.send.mock.calls as unknown as [{ threadId: string }][]).map(([args]) => args.threadId)).toEqual(["thr-42"]);
     expect(env.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("the checks a batch thread's claims pass as it starts", () => {
+  // What the listing checked, the start checks again before it reads GitHub. #42 has no checkout, so only its own thread going to work
+  // shows an agent on it.
+  it("leaves out, unread, a PR that got a hold, a v2 claim, or an agent in the Undo window, even one only in the PR's own thread", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 43, 44, 45].map(url));
+    expect(plan.items).toHaveLength(4);
+    expect(await confirm(env, plan.batchId, async () => {
+      await activate(env, "thr-42");
+      claimV2(env);
+      runOn(env, 44);
+      await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
+    })).toEqual(["folio #42: refused: An agent is already working on it.",
+      "folio #43: refused: A worker from the Manuscript review roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.",
+      "folio #44: refused: An agent is already working on it.", "folio #45: refused: On hold: Counter redesign. Release the hold before advancing or merging this PR."]);
+    expect(env.reads.urls).toEqual([]);
+    expect([claims(env), env.spawn.mock.calls.length]).toEqual([[], 0]);
+  });
+
+  // An effort held while GitHub answers holds each of its PRs: the one being read at the claim, and the next before it's read.
+  it("claims nothing for a PR whose effort is held while GitHub reads it", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 43].map(url));
+    expect(await confirm(env, plan.batchId, async () => {
+      env.reads.during = async (prUrl) => { if (prUrl === url(42)) await env.rpc("effort_hold", { effortKey: env.effort.id, reason: "Counter redesign" }); };
+    })).toEqual([42, 43].map((number) => `folio #${number}: refused: Its effort is on hold. Resume it first; nothing was written.`));
+    expect(env.reads.urls).toEqual([url(42)]);
+    expect([claims(env), env.spawn.mock.calls.length]).toEqual([[], 0]);
+  });
+
+  // Whatever lands while GitHub answers, the step that claims sees, on every PR in the listing: #42 gets a new worker thread, at work.
+  it("checks each PR again in the step that claims it, after the last GitHub read", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 43, 44, 45, 46].map(url));
+    expect(plan.items).toHaveLength(5);
+    expect(await confirm(env, plan.batchId, async () => {
+      env.reads.during = async (prUrl) => {
+        if (prUrl !== url(46)) return;
+        env.efforts.recordWorker(env.effort.id, "thr-42-again", url(42), "pr");
+        env.add("thr-42-again", { title: "Order fixes, again" });
+        await activate(env, "thr-42-again");
+        claimV2(env);
+        runOn(env, 44);
+        await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
+        await env.rpc("effort_hold", { effortKey: env.spine.id, reason: "Labels later" });
+      };
+    })).toEqual(["folio #42: refused: An agent is already working on it.",
+      "folio #43: refused: A worker from the Manuscript review roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.",
+      "folio #44: refused: An agent is already working on it.", "folio #45: refused: On hold: Counter redesign. Release the hold before advancing or merging this PR.",
+      "folio #46: refused: Its effort is on hold. Resume it first; nothing was written."]);
+    expect(env.reads.urls).toEqual([42, 43, 44, 45, 46].map(url));
+    expect([claims(env), env.spawn.mock.calls.length]).toEqual([[], 0]);
+  });
+
+  // The thread gets only what GitHub still shows waiting on you, on the head the listing showed.
+  it("leaves out a PR with new commits since the listing, or with no feedback waiting now, and starts the rest", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 43, 44].map(url));
+    expect(await confirm(env, plan.batchId, async () => {
+      env.current.set(43, { ...env.current.get(43)!, headRefOid: "d".repeat(40) });
+      env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 0, comment: { login: "ines", at: ago(HOUR) }, repliedAt: ago(HOUR / 2) } });
+    })).toEqual(["folio #42: sent: Started “Address feedback on 1 PR”.",
+      "folio #43: refused: New commits landed since the listing. Review it and try again; nothing was started.",
+      "folio #44: refused: No feedback waits on you now; nothing was started."]);
+    expect(claims(env)).toEqual([[42, "running"]]);
+    expect(spawned(env).map((args) => [args.title, args.prompt.includes(url(42)), args.prompt.includes(url(43)), args.prompt.includes(url(44))]))
+      .toEqual([["Address feedback on 1 PR", true, false, false]]);
+  });
+
+  it("starts nothing when the parent thread it listed is gone", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 43].map(url));
+    expect(plan.thread?.parentThreadId).toBe("thr-coordinator");
+    expect(await confirm(env, plan.batchId, async () => { env.threads.delete("thr-coordinator"); })).toEqual([42, 43].map((number) =>
+      `folio #${number}: refused: Its parent thread is gone since the listing. Review it and try again; nothing was started.`));
+    expect([claims(env), env.spawn.mock.calls.length]).toEqual([[], 0]);
+  });
+
+  // Two listings confirmed together that share a PR: one claim takes it, and the other batch starts without it. Each batch's read of #43
+  // waits for the other's, so both pass the check before the read and only the one at the claim can tell them apart.
+  it("claims a PR two listings share once when both are confirmed in the same window", async () => {
+    const env = await setup();
+    const first = await env.plan([42, 43].map(url));
+    const second = await env.plan([43, 44].map(url));
+    for (const plan of [first, second]) expect(await env.rpc("deck_batch_start", { batchId: plan.batchId })).toMatchObject({ ok: true });
+    let meet = () => undefined as void;
+    const met = new Promise<void>((resolve) => { meet = resolve; });
+    let seen = 0;
+    env.reads.during = async (prUrl) => { if (prUrl === url(43) && ++seen <= 2) { if (seen === 2) meet(); await met; } };
+    await vi.advanceTimersByTimeAsync(8_100);
+    for (const plan of [first, second]) await env.settled(plan.batchId!);
+    const items = [...(await env.batch(first.batchId!)).items, ...(await env.batch(second.batchId!)).items];
+    expect(items.filter((item) => item.ref === "folio #43").map((item) => item.state).sort()).toEqual(["refused", "sent"]);
+    expect(items.find((item) => item.state === "refused")?.detail).toBe("An agent is already working on it.");
+    expect(seen).toBe(2);
+    expect(claims(env).map(([number]) => number).sort()).toEqual([42, 43, 44]);
+    expect(env.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  // Until its start returns, a claim has no thread for a message's owner check to name; it holds the PR all the same.
+  it("refuses a message to a batched PR's thread while the batch thread is still starting", async () => {
+    const env = await setup();
+    env.hang.spawn = true;
+    const plan = await env.plan([42, 43].map(url));
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    expect(claims(env).map(([number]) => number).sort()).toEqual([42, 43]);
+    expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." }))
+      .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
+    expect(env.send).not.toHaveBeenCalled();
+  });
+
+  // A batch thread removed while no load listened sends no event. The next list of BB's threads finds it gone and ends its claims, so its
+  // PRs don't wait on a thread that no longer exists; a run of another kind in a thread the list leaves out keeps its own rules.
+  it("releases the claims of a batch thread deleted or archived unheard, back to Your turn", async () => {
+    for (const gone of ["deleted", "archived"] as const) {
+      const env = await setup();
+      const plan = await env.plan([43, 44].map(url));
+      await confirm(env, plan.batchId);
+      const other = runOn(env, 45);
+      await env.restart();
+      if (gone === "deleted") env.threads.delete("thr-batch-1");
+      else env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, archivedAt: Date.now() });
+      await env.refresh();
+      await drain();
+      const runs = createRunStore(env.bb.storage.database() as never).recent(0);
+      expect(runs.filter((run) => run.action === "address-feedback").map((run) => [run.prNumber, run.status, run.error])).toEqual([44, 43].map((number) =>
+        [number, "failed", "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read."]));
+      expect(runs.find((run) => run.id === other)?.status).toBe("running");
+      expect((await env.rows()).get(43)).toMatchObject({ addressing: null });
+      expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
+      await env.harness.lifecycle.dispose();
+      cleanups.pop();
+      vi.useRealTimers();
+    }
+  });
+
+  // A list read before BB made a batch thread can't show it: the claim bound while that list was out is not taken for gone.
+  it("keeps the claims of a batch thread its start bound after the thread list began", async () => {
+    const env = await setup();
+    let answer = () => undefined as void;
+    env.hang.until = new Promise<void>((resolve) => { answer = resolve; });
+    const plan = await env.plan([url(43)]);
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    let listed = false;
+    env.lists.during = async () => { answer(); await env.settled(plan.batchId!); listed = true; };
+    await env.refresh();
+    // The list answers after BB made the thread and its claim was bound; then the board reconciles.
+    await vi.waitFor(() => expect(listed).toBe(true));
+    await drain();
+    expect(claims(env)).toEqual([[43, "running"]]);
+    expect((await env.rows()).get(43)?.addressing?.threadId).toBe("thr-batch-1");
   });
 });
