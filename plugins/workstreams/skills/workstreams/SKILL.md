@@ -861,7 +861,8 @@ on their click. `deck_batch_plan` takes a `kind` (`confirm`, `nudge`,
 `request`, `ready`, `release`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
-covers the Needs you rows of that kind. `advance` covers every safe kind in
+covers the Needs you rows of that kind. The deck's per-row Advance is
+`advance` with that one PR in `prUrls`. `advance` covers every safe kind in
 the effort, in the order confirm, nudge, request, and ready: never a merge,
 which only the fresh merge preview does, and never a thread's work. A request
 asks the `reviewers` given, else each PR's first suggested reviewer. It takes

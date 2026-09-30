@@ -124,8 +124,9 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         </p>
         <p>
           Every GitHub write lists each PR in a confirm, then waits {Math.round(SEND_DELAY_MS / 1_000)} s with Undo.
-          Advance runs a card&apos;s safe next steps: nudge, request a review, mark ready, and confirm review notes. Merges
-          run only from the fresh merge preview, on a click or ⌘↵.
+          Advance runs a card&apos;s safe next steps: nudge, request a review, mark ready, and confirm review notes. A row
+          with one of those steps has its own Advance, and a advances the focused row, else the card; the hint bar says
+          which. Merges run only from the fresh merge preview, on a click or ⌘↵.
         </p>
       </Section>
 

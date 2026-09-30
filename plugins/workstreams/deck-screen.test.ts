@@ -92,6 +92,25 @@ describe("the effort deck's markup", () => {
     expect(shelf).not.toContain('data-deck-sec="held"');
   });
 
+  it("gives a row with a safe next step its own Advance, shown on the row you point at or focus, and the a badge only where a acts", () => {
+    const nudge = section(pane(inkwellDeck(), ONE_OFFS), "nudge");
+    // A hovered row's Advance is a click, not a: only the focused row's badge shows, as a takes that row alone.
+    expect(nudge).toMatch(/<button type="button" tabindex="-1" data-deck-inline="advance" title="Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo \(a\)" class="[^"]*opacity-0 group-hover:opacity-100 group-focus-within:opacity-100[^"]*">Advance<span class="hidden group-focus-within:inline-flex"><kbd[^>]*>a<\/kbd><\/span><\/button>/u);
+    // A selection takes a, so a row you select keeps its Advance click but loses the badge, even while it holds focus.
+    const badges = (html: string) => [...html.matchAll(/data-deck-inline="advance"[^>]*>(.*?)<\/button>/gu)].map((match) => match[1]!.includes("<kbd"));
+    const focus = { expanded: new Set<string>(), focus: url("folio", 301) };
+    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set<string>() } }))).toEqual([true, true, true]);
+    expect(badges(pane(inkwellDeck(), ONE_OFFS, { state: { ...focus, selected: new Set([url("folio", 301)]) } }))).toEqual([false, false, false]);
+    // The card's Advance keeps its badge only while a takes the card; a focused row or a selection takes it instead.
+    expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: "card" }), "act-advance").text).toBe("Advance · 3 a");
+    for (const scope of ["row", "selected"] as const) {
+      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope }), "act-advance").text).toBe("Advance · 3");
+      expect(button(pane(inkwellDeck(), ONE_OFFS, { advanceScope: scope, stuck: true }), "act-advance").text).toBe("Advance · 3");
+    }
+    // A merge row has none: merges stay in the preview.
+    expect(section(pane(inkwellDeck(), SHELF), "merge")).not.toContain("data-deck-inline");
+  });
+
   it("says on the row when its last read failed", () => {
     const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } } : {});
     const row = section(pane(view, SHELF), "merge").split("data-deck-row=").find((part) => part.includes("folio/pull/340"))!;

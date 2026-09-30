@@ -15,7 +15,7 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
   type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips,
+import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips,
   targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type RuleDraft, type RuleItem } from "./deck-screen";
@@ -571,9 +571,11 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "hold-pile": setPile("hold"); return;
       case "done-pile": setPile("done"); return;
       case "advance": {
-        if (selected.length) void batch.plan("advance", card?.card.id ?? null, selected.map((item) => item.prUrl));
-        // The rows its count names, as drawn: one dimmed until Mark seen stays out even when the server would now plan it.
-        else if (card) void batch.plan("advance", card.card.id, card.advance);
+        // A row's own Advance button takes that row; a key or the card's button takes the selection, else the focused row's safe step,
+        // else the card's, as the hint bar says. The card's rows are the ones its count names, as drawn: one dimmed until Mark seen
+        // stays out even when the server would now plan it.
+        const target = line ? { prUrls: [line.prUrl] } : advanceTarget(context);
+        if (card && target) void batch.plan("advance", card.card.id, target.prUrls);
         return;
       }
       case "hold": if (card) openDialog({ kind: "hold", id: card.card.id, effortKey: card.card.key, name: card.card.name, reason: "" }); return;
@@ -761,7 +763,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus }} tiles={new Set(here.tiles)} open={new Set(here.open)} stuck={stuck}
-      on={on} hints={hintKeys(context, on)} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
+      on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef} />
     {batch.element}
     <DeckDialog open={dialog?.kind === "hold" || dialog?.kind === "hold-pr"} title={dialog?.kind === "hold" ? `Hold ${dialog.name}` : dialog?.kind === "hold-pr" ? `Hold ${dialog.ref}` : ""}

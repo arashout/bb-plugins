@@ -33,7 +33,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "seen", group: "Deck", title: "Mark seen here", keys: ["s"], effect: "local" },
   { id: "hold-pile", group: "Deck", title: "Show the On hold pile", keys: [], effect: "dialog" },
   { id: "done-pile", group: "Deck", title: "Show the Done pile", keys: [], effect: "dialog" },
-  { id: "advance", group: "Card", title: "Advance this effort…", keys: ["a"], effect: "confirm" },
+  { id: "advance", group: "Card", title: "Advance the row, else the effort…", keys: ["a"], effect: "confirm" },
   { id: "hold", group: "Card", title: "Hold the effort…", keys: ["h"], effect: "dialog" },
   { id: "complete", group: "Card", title: "Complete the effort…", keys: [], effect: "dialog" },
   { id: "held", group: "Card", title: "Go to held PRs", keys: ["⇧H"], effect: "nav" },

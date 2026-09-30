@@ -63,7 +63,9 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
     const open = pending !== null;
     if (!result.ok) { if (open) setError(result.error); else say(result.error); return; }
     if (!result.batchId) { const first = result.skipped[0]; const why = first ? `${first.ref}: ${first.reason}` : "Nothing to send here."; if (open) setError(why); else say(why); return; }
-    const scope = effortId ? latest.current.scopeName(effortId) ?? "this effort" : `${prUrls?.length ?? 0} PR${prUrls?.length === 1 ? "" : "s"}`;
+    // One PR's listing names it: Advance from a row reads "Advance folio #340".
+    const one = prUrls?.length === 1 ? result.items[0]?.ref ?? result.skipped[0]?.ref : undefined;
+    const scope = one ?? (effortId ? latest.current.scopeName(effortId) ?? "this effort" : `${prUrls?.length ?? 0} PR${prUrls?.length === 1 ? "" : "s"}`);
     if (!open) latest.current.onOpen();
     setError(null); setBusy(false);
     setPending({ batchId: result.batchId, request: { kind, effortId, prUrls }, reviewer, planned: reviewer, plan: {

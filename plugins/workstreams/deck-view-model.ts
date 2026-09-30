@@ -7,8 +7,8 @@
 // imports types, zero-import modules, and the roster's time format only, so
 // no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SERVICE_PREFIX, serviceGoal, serviceName, type DeckPile, type DeckSection, type DeckWrite }
-  from "./deck-shared";
+import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type BatchKind, type DeckPile,
+  type DeckSection, type DeckWrite } from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
@@ -75,7 +75,7 @@ export type DeckLine = {
   checked: { text: string; title: string; failed: boolean } | null;
   trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "change" | "ghost"; text: string }
     | { kind: "thread"; text: string; threadId: string } | null;
-  /** Its one inline action, on the row itself: Release on a held row. */
+  /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, or Release on a held row. */
   inline: { id: DeckActionId; label: string; title: string } | null;
   row: DeckRow | null;
 };
@@ -136,10 +136,28 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
       : item.arrived ? "New since you looked" : null,
     info: row ? info(row, section) : null, signals, age: shownAge, checked: row ? checked(row, context.now) : null,
     hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
-    // A release writes nothing to GitHub, so a paused card offers it too, as it does Hold PR.
-    inline: row && section === "held" && releasable({ row, dim }) ? { id: "release", label: "Release",
-      title: `Release ${refOf(row)}: lists it, then waits 8 s with Undo (${ACTION.release.keys[0]})` } : null,
+    inline: inlineAction(row, section, pile, needs, dim),
   };
+}
+
+/** A row's safe next step, as its inline Advance names it: one GitHub write, never a merge or a thread's work. */
+function stepText(row: DeckRow, kind: BatchKind): string {
+  switch (kind) {
+    case "confirm": return `Confirm ${plural(Math.max(1, row.notes), "note")} handled`;
+    case "nudge": return row.nudge.length ? `Nudge ${mentions(row.nudge)}` : "Nudge reviewers";
+    case "request": return row.suggested.length ? `Request @${row.suggested[0]}` : "Request a reviewer";
+    case "ready": return "Mark ready";
+  }
+}
+const WINDOW = `${Math.round(SEND_DELAY_MS / 1_000)} s`;
+function inlineAction(row: DeckRow | null, section: string, pile: DeckPile, needs: boolean, dim: boolean): DeckLine["inline"] {
+  if (!row) return null;
+  // A release writes nothing to GitHub, so a paused card offers it too, as it does Hold PR.
+  if (section === "held") return releasable({ row, dim })
+    ? { id: "release", label: "Release", title: `Release ${refOf(row)}: lists it, then waits ${WINDOW} with Undo (${ACTION.release.keys[0]})` } : null;
+  const kind = BATCH_KINDS.find((candidate) => candidate === section);
+  return kind && needs && pile === "active"
+    ? { id: "advance", label: "Advance", title: `${stepText(row, kind)}: lists it, then sends in ${WINDOW} with Undo (${ACTION.advance.keys[0]})` } : null;
 }
 
 const settledOf = (row: DeckRow, section: string = row.section): SettledRow => ({ prUrl: row.prUrl, ref: refOf(row), title: row.title, section, status: row.status });
@@ -407,6 +425,19 @@ export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "foc
   return context.cur ? take(context.cur.sections.flatMap((item) => item.lines)) : [];
 }
 
+/**
+ * What Advance takes now, which the a key, its buttons, and the hint bar share: the selection, which the confirm lists with why any of it
+ * is left out; else the focused row, when its next step is a safe one; else every safe move on the card. Never a merge.
+ */
+export function advanceTarget(context: Pick<KeyContext, "cur" | "focused" | "selected">): { scope: "selected" | "row" | "card"; prUrls: string[] } | null {
+  const card = context.cur;
+  if (!card || card.card.pile !== "active") return null;
+  const safe = (line: DeckLine) => line.inline?.id === "advance";
+  if (context.selected.length) return context.selected.some(safe) ? { scope: "selected", prUrls: context.selected.map((line) => line.prUrl) } : null;
+  if (context.focused && safe(context.focused)) return { scope: "row", prUrls: [context.focused.prUrl] };
+  return card.advance.length ? { scope: "card", prUrls: card.advance } : null;
+}
+
 const NO_CARD = "open an effort card";
 const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are waiting", nudge: "no nudge is due", request: "every PR has a reviewer",
   ready: "no draft is ready", release: "nothing here is on hold" } as const;
@@ -426,7 +457,8 @@ export function availability(context: KeyContext): Availability {
   set("view", true); set("seen", deck && context.seenAvailable, deck ? "nothing changed here" : "Efforts only");
   set("hold-pile", deck && context.held > 0, deck ? "no effort is on hold" : "Efforts only");
   set("done-pile", deck && context.done > 0, deck ? "no effort is done" : "Efforts only");
-  set("advance", live && card!.advance.length > 0, card ? "nothing safe to run" : deck ? NO_CARD : "Efforts only");
+  set("advance", deck && advanceTarget(context) !== null, !card ? (deck ? NO_CARD : "Efforts only") : !live ? "this card is paused"
+    : selected.length ? "nothing selected has a safe step" : "nothing safe to run");
   const effort = card?.card.kind === "effort";
   const stays = card?.card.oneOff ? "One-offs stays active" : !effort ? "this card stays active" : "it's on hold";
   set("hold", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
@@ -468,11 +500,17 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : ACTION[move].title.replace("…", "").toLowerCase()] as
     [DeckActionId, string] : false;
   if (context.view === "prs") return pick(["row-next", "rows"], moveHint, ["open-thread", "open thread"], ["view", "Efforts"]);
-  if (context.selected.length) return [["x", "toggle"], ...pick(["advance", "advance"], ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
+  // a takes the focused row when its step is safe, else the whole card: the hint says which.
+  const scope = advanceTarget(context)?.scope;
+  const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
+    : context.cur?.card.kind === "effort" ? "advance effort" : "advance card"];
+  // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
+  const rowHint = move === "merge" || move === "release" ? moveHint : false;
+  if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
-  if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], moveHint, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
-  if (focused) return pick(["row-next", "rows"], moveHint, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
-  return pick(["next", "flip"], ["row-next", "rows"], ["advance", "advance"], ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
+  if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
+  if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
+  return pick(["next", "flip"], ["row-next", "rows"], advance, ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
 }
 
 /** One palette entry: a registry action, or a go-to, resume, or reopen for one effort. */

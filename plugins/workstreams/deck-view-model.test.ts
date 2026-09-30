@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, paletteItems, readText, stripChips, targets, type Accepted,
+import { acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, paletteItems, readText, stripChips, targets, type Accepted,
   type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
@@ -328,6 +328,43 @@ describe("what the keys act on", () => {
     // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.
     const prs = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["nudge"]) } });
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
+  });
+
+  it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, or a dimmed row", () => {
+    const oneOffs = card(inkwellDeck(), ONE_OFFS);
+    expect(oneOffs.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.inline?.label, line.inline?.title])).toEqual([
+      ["folio #301", "Advance", "Confirm 1 note handled: lists it, then sends in 8 s with Undo (a)"],
+      ["folio #318", "Advance", "Confirm 1 note handled: lists it, then sends in 8 s with Undo (a)"],
+      ["catalog #96", "Advance", "Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo (a)"]]);
+    const shelf = card(inkwellDeck(), SHELF);
+    expect(shelf.sections.flatMap((section) => section.lines).map((line) => line.inline)).toEqual([null, null, null, null, null]);
+    const queued = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
+    expect(queued.sections.find((section) => section.key === "nudge")!.lines[0]!.inline).toBeNull();
+  });
+
+  it("points a at the focused row when its step is safe, else at the card, and the hint bar says which", () => {
+    const oneOffs = card(inkwellDeck(), ONE_OFFS);
+    const [confirm301, , nudge96] = oneOffs.sections.flatMap((section) => section.lines);
+    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [] })).toEqual({ scope: "row", prUrls: [url("catalog", 96)] });
+    expect(advanceTarget({ cur: oneOffs, focused: null, selected: [] })).toEqual({ scope: "card", prUrls: [url("folio", 301), url("folio", 318), url("catalog", 96)] });
+    expect(hintKeys(context(oneOffs, { focused: nudge96! }), availability(context(oneOffs, { focused: nudge96! })))).toContainEqual(["a", "advance row"]);
+    expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).toContainEqual(["a", "advance effort"]);
+    // The selection wins, and the confirm says why any of it is left out.
+    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [confirm301!] })).toEqual({ scope: "selected", prUrls: [url("folio", 301)] });
+    // A focused row with no safe step now, such as one whose nudge is waiting to send, leaves a to the card's others.
+    const acted = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
+    const waiting = acted.sections.find((section) => section.key === "nudge")!.lines[0]!;
+    expect(advanceTarget({ cur: acted, focused: waiting, selected: [] })).toEqual({ scope: "card", prUrls: [url("folio", 301), url("folio", 318)] });
+    // A merge keeps its own key, and a card with nothing safe offers no a at all.
+    const shelf = card(inkwellDeck(), SHELF);
+    const merge = shelf.sections[0]!.lines[0]!;
+    expect([advanceTarget({ cur: shelf, focused: merge, selected: [] }), availability(context(shelf, { focused: merge })).advance.why]).toEqual([null, "nothing safe to run"]);
+    // A service card names itself.
+    const folio = card(inkwellDeck(), FOLIO);
+    expect(hintKeys(context(folio), availability(context(folio)))).toContainEqual(["a", "advance card"]);
+    // A held card advances nothing.
+    const paused = cardScreen({ ...inkwellDeck().active.find((item) => item.id === ONE_OFFS)!, pile: "held" }, none, { now: NOW });
+    expect([advanceTarget({ cur: paused, focused: null, selected: [] }), availability(context(paused)).advance.why]).toEqual([null, "this card is paused"]);
   });
 
   it("keeps the hint bar to the few keys that apply now", () => {

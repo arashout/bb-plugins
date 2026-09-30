@@ -66,15 +66,16 @@ const Dot = ({ color, hollow }: { color: string; hollow?: boolean }) => <span ar
 const Changed = ({ title }: { title: string }) => <span title={title} aria-label={title} className="inline-block size-1.5 shrink-0 rounded-full bg-sky-500" />;
 
 /** A button that names its key: disabled ones stay focusable and say why. */
-function ActionButton({ id, on, run, label, tone, primary, line }: { id: DeckActionId; on: Availability; run: Run; label?: string; tone?: Tone; primary?: boolean;
-  line?: DeckLine }) {
+/** `keyless` drops its badge while its key acts through another control, as a does on a focused row or a selection. */
+function ActionButton({ id, on, run, label, tone, primary, line, keyless }: { id: DeckActionId; on: Availability; run: Run; label?: string; tone?: Tone;
+  primary?: boolean; line?: DeckLine; keyless?: boolean }) {
   const available = on[id];
   const key = ACTION[id].keys[0];
   return <button type="button" data-deck-focus={`act-${id}`} aria-disabled={available.on ? undefined : true}
     title={available.on ? `${ACTION[id].title}${key ? ` (${key})` : ""}` : `${ACTION[id].title.replace("…", "")}: ${available.why}`}
     onClick={() => { if (available.on) run({ kind: "action", id, line }); }}
     className={cn(BUTTON, primary ? "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90" : tone ? TONE[tone].button : "border-border hover:bg-foreground/[0.06]")}>
-    {label ?? ACTION[id].title}<Keys keys={key ?? ""} inverted={primary} />
+    {label ?? ACTION[id].title}<Keys keys={keyless ? "" : key ?? ""} inverted={primary} />
   </button>;
 }
 
@@ -210,9 +211,14 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
         line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)
         : "text-muted-foreground", line.dim && "opacity-50")}>{line.info.text}</span> : null}
       <span className={cn("w-7 shrink-0 text-right text-[11px] tabular-nums", line.hot ? TONE.amber.text : "text-muted-foreground")}>{line.age ?? ""}</span>
+      {/* Release stays in sight on Held's few rows; Advance shows on the row you point at or focus. Only the focused row's badge shows, and
+          none while a selection takes the key: then its key acts on that row alone, which the hint bar names. */}
       {line.inline ? <button type="button" tabIndex={-1} data-deck-inline={line.inline.id} title={line.inline.title}
         onClick={() => run({ kind: "action", id: line.inline!.id, line })}
-        className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}>{line.inline.label}<Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></button> : null}
+        className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]",
+          line.inline.id === "advance" && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{line.inline.label}
+        {state.selected.size ? null : <span className="hidden group-focus-within:inline-flex"><Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></span>}</button>
+        : null}
       <span className="flex min-w-12 shrink-0 items-center justify-end gap-1 text-[11.5px]">
         {trail?.kind === "acted" ? <>
           <span className={cn("max-w-44 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")} title={trail.title ?? trail.text}>{trail.text}</span>
@@ -307,7 +313,8 @@ function Tile({ id, title, note, open, more, run, className, children }: { id: s
   </div>;
 }
 
-export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability }) {
+/** `keyless` drops its Advance's badge while a acts on a focused row or a selection. */
+export function Card({ screen, tiles, run, on, keyless }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability; keyless?: boolean }) {
   const { card } = screen;
   const held = card.pile === "held";
   const service = card.kind === "service";
@@ -351,7 +358,7 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
       <div className="flex flex-wrap gap-1.5">
         {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, "border-foreground bg-foreground text-background")}>Resume</button>
           : bare ? null : <>
-          <ActionButton id="advance" on={on} run={run} primary label={`Advance${screen.advance.length ? ` · ${screen.advance.length}` : ""}`} />
+          <ActionButton id="advance" on={on} run={run} primary label={`Advance${screen.advance.length ? ` · ${screen.advance.length}` : ""}`} keyless={keyless} />
           {service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
             : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
         </>}
@@ -829,6 +836,8 @@ export type DeckPaneProps = {
   state: RowState; tiles: ReadonlySet<string>; open: ReadonlySet<string>; pile: "hold" | "done" | null;
   /** The card's own header has scrolled away, so its one-line bar shows and section headers stick below it. */
   stuck: boolean;
+  /** What a takes now; the card's Advance shows its badge only when that's the card. */
+  advanceScope?: "selected" | "row" | "card" | null;
   /** The card a flip landed on, said once to screen readers; empty otherwise. */
   announce?: string;
   on: Availability; hints: readonly [string, string][]; flash: { text: string; undo: boolean } | null;
@@ -841,15 +850,17 @@ export type DeckPaneProps = {
 export function DeckPane(props: DeckPaneProps) {
   const { card, stuck } = props;
   const behind = cardsBehind(props.chips, props.cur);
+  const keyless = props.advanceScope === "row" || props.advanceScope === "selected";
   return <div ref={props.rootRef} role="region" aria-label="Effort deck" className={cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS)}>
     <TopBar view="deck" read={props.read} seen={props.seen} run={props.run} onPalette={props.onPalette} onHelp={props.onHelp} />
     <Strip chips={props.chips} cur={props.cur} deck held={props.held} done={props.done} pile={props.pile} run={props.run} chipsRef={props.chipsRef} />
     <div ref={props.scrollerRef} data-deck-scroller className="@container relative min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]">
       {stuck && card ? <CardBar name={card.card.name} color={card.color} hollow={card.card.kind !== "effort"} status={card.status}
-        advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`} /> : null} /> : null}
+        advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`}
+          keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-[1260px] px-2 pb-10 pt-3 @min-[720px]:px-4">
-        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} /></Stack>
+        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} /></Stack>
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
             <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></div></>
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck."
