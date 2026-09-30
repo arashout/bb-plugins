@@ -143,10 +143,12 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
 
       <Section title="Sorting PRs into efforts">
         <p>
-          Unclassified, the last card, lists open PRs that no effort owns, grouped by suggestion. Each group shows its
-          strength (strong, moderate, or weak) and the signals behind it: a shared ticket, Linear project, stack, linked
-          thread, board group, or code area. A ticket prefix only adds weight to a stronger signal. A lone PR whose ticket
-          nothing else carries is offered as a weak one-off.
+          Every open PR is on a card. One that no effort owns is on its repository&apos;s service card, such as
+          folio · service, after the efforts in the strip. It works like an effort&apos;s card, and its PRs count in
+          Needs you. Suggestions above its rows show where each group of its PRs could go, with its strength (strong,
+          moderate, or weak) and the signals behind it: a shared ticket, Linear project, stack, linked thread, board group,
+          or code area. A ticket prefix only adds weight to a stronger signal. A lone PR whose ticket nothing else carries
+          is offered as a weak one-off.
         </p>
         <p>
           Nothing moves until you press a group&apos;s button, and Undo takes it back. A weak group asks again first. You
@@ -154,13 +156,13 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         </p>
         <p>
           A standing rule places new PRs on every read by ticket prefix, branch, repository, Linear project, or stack.
-          Removing a rule leaves the PRs it placed.
+          Standing rules in ⌘K lists and removes them from any card. Removing a rule leaves the PRs it placed.
         </p>
       </Section>
 
       <Section title="Seed from Linear">
         <p>
-          Seed from Linear, on the Unclassified card, proposes one effort per Linear project that has tickets on your open
+          Seed from Linear, on a service card, proposes one effort per Linear project that has tickets on your open
           PRs. Each takes the project&apos;s name and description, and flags an effort that already matches. Check the ones
           to create. Each takes only PRs that no effort owns, never syncs with Linear after, and Undo takes it back. It
           needs a Linear API key in settings.

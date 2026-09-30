@@ -47,6 +47,13 @@ describe("the session's card order", () => {
     expect(keepOrder(["shelf", "one-offs"], ["pickup", "shelf", "one-offs"])).toEqual(["shelf", "one-offs", "pickup"]);
     expect(keepOrder([], ["b", "a"])).toEqual(["b", "a"]);
   });
+
+  // A17.1: service cards stand in for efforts no one made yet, so they follow every real one in the strip, whatever the session saw first.
+  it("keeps the service cards after every effort: a new effort joins the end of the efforts, before them", () => {
+    expect(keepOrder(["shelf", "service:inkwell/folio", "service:inkwell/atlas"], ["shelf", "service:inkwell/atlas", "folio", "service:inkwell/folio"]))
+      .toEqual(["shelf", "folio", "service:inkwell/folio", "service:inkwell/atlas"]);
+    expect(keepOrder([], ["service:inkwell/atlas", "shelf"])).toEqual(["shelf", "service:inkwell/atlas"]);
+  });
 });
 
 describe("scroll anchors", () => {

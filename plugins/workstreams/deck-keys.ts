@@ -10,14 +10,14 @@
 // window, and a preview opens the fresh merge preview, where only a click or
 // ⌘↵ merges. Enter and Space are never bound to either.
 
-export const KEY_GROUPS = ["Deck", "Card", "Act", "Rows", "Unclassified", "Anywhere"] as const;
+export const KEY_GROUPS = ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"] as const;
 export type KeyGroup = (typeof KEY_GROUPS)[number];
 /**
  * What pressing the key does: move around, change only what the view shows, open a dialog, open a listing confirm for a batch write, or
  * open the fresh merge preview.
  */
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
-export type DeckActionId = "next" | "prev" | "jump" | "unclassified" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
+export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
   | "tiles" | "merge" | "confirm" | "nudge" | "request" | "ready" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "rule" | "seed" | "palette" | "help";
 /** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine. */
@@ -27,7 +27,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "next", group: "Deck", title: "Next effort", keys: ["]", "→"], effect: "nav" },
   { id: "prev", group: "Deck", title: "Previous effort", keys: ["[", "←"], effect: "nav" },
   { id: "jump", group: "Deck", title: "Go to effort by number", keys: ["1–9"], effect: "nav" },
-  { id: "unclassified", group: "Deck", title: "Unclassified", keys: ["u"], effect: "nav" },
+  { id: "services", group: "Deck", title: "Service cards", keys: ["u"], effect: "nav" },
   { id: "view", group: "Deck", title: "Switch Efforts and All PRs", keys: ["v"], effect: "nav" },
   { id: "seen", group: "Deck", title: "Mark seen here", keys: ["s"], effect: "local" },
   { id: "hold-pile", group: "Deck", title: "Show the On hold pile", keys: [], effect: "dialog" },
@@ -52,12 +52,12 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "clear", group: "Rows", title: "Clear the selection", keys: ["esc"], effect: "local" },
   { id: "open-thread", group: "Rows", title: "Open the row's thread", keys: ["o"], effect: "nav" },
   { id: "open-pr", group: "Rows", title: "Open the PR on GitHub", keys: [], effect: "nav" },
-  { id: "accept", group: "Unclassified", title: "Accept the suggestion", keys: ["p"], effect: "local" },
-  { id: "move", group: "Unclassified", title: "Move to an effort…", keys: ["e"], effect: "dialog" },
-  { id: "one-off", group: "Unclassified", title: "Mark as one-offs", keys: [], effect: "local" },
-  { id: "new-effort", group: "Unclassified", title: "New effort from the selection…", keys: [], effect: "dialog" },
-  { id: "rule", group: "Unclassified", title: "Add a standing rule…", keys: [], effect: "dialog" },
-  { id: "seed", group: "Unclassified", title: "Seed efforts from Linear…", keys: [], effect: "dialog" },
+  { id: "accept", group: "Sort", title: "Accept the suggestion", keys: ["p"], effect: "local" },
+  { id: "move", group: "Sort", title: "Move to an effort…", keys: ["e"], effect: "dialog" },
+  { id: "one-off", group: "Sort", title: "Mark as one-offs", keys: [], effect: "local" },
+  { id: "new-effort", group: "Sort", title: "New effort from the selection…", keys: [], effect: "dialog" },
+  { id: "rule", group: "Sort", title: "Standing rules…", keys: [], effect: "dialog" },
+  { id: "seed", group: "Sort", title: "Seed efforts from Linear…", keys: [], effect: "dialog" },
   { id: "palette", group: "Anywhere", title: "All actions", keys: ["⌘K"], effect: "dialog" },
   { id: "help", group: "Anywhere", title: "Keys and colors", keys: ["?"], effect: "dialog" },
 ];

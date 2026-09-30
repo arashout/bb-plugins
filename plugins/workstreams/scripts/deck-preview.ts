@@ -17,7 +17,7 @@ import { build } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { inkwellDeck, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, stripChips, uncScreen, type KeyContext } from "../deck-view-model.js";
+import { availability, cardScreen, hintKeys, stripChips, type KeyContext } from "../deck-view-model.js";
 import { DeckPane } from "../deck-screen.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -27,14 +27,14 @@ const none = { rows: {}, at: {} };
 const view = inkwellDeck();
 const order = view.active.map((item) => item.id);
 const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-const unc = uncScreen(view, none, new Map(), { now: NOW });
-const ring = [...order, "unc"];
+const ring = order;
 const pane = (cur: string) => {
   const card = cards.get(cur) ?? null;
-  const context: KeyContext = { view: "deck", cur: card ?? "unc", focused: null, selected: [], seenAvailable: false, undo: false, held: view.held.length, done: view.done.length };
+  const context: KeyContext = { view: "deck", cur: card, service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused: null, selected: [],
+    seenAvailable: false, undo: false, held: view.held.length, done: view.done.length };
   const on = availability(context);
   return renderToStaticMarkup(createElement(DeckPane, {
-    chips: stripChips(order, cards, { toSort: unc.coverage.toSort, changed: unc.changed }, cur), cur, card, unc: card ? null : unc,
+    chips: stripChips(order, cards, cur), cur, card,
     rules: [{ id: "r1", text: "Branch shelf/* → Shelf order · 2 this week" }],
     held: view.held.map((item) => ({ id: item.id, key: item.key, name: item.name, note: `${item.reason || "No reason given"} · ${item.stats.open} open` })),
     done: view.done.map((item) => ({ id: item.id, key: item.key, name: item.name, archived: item.archived, note: `${item.merged} merged · ${item.open} open` })),

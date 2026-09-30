@@ -5,6 +5,7 @@ import { feedbackVerificationState, type ApprovalFeedbackRecord } from "./approv
 import { advanceBatchSchema, type AdvanceBatch, type AdvanceJob } from "./bulk-advance.js";
 import { prSchema, type Pr, type RawUnit } from "./contract.js";
 import { deckView, type DeckInput, type DeckRowInput, type DeckView } from "./deck.js";
+import type { SuggestionGroup } from "./effort-classify.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
 import { suggestReviewers } from "./inventory-actions.js";
 import { inventoryRow, inventoryView, type InventoryView, type ThreadRef } from "./inventory-view.js";
@@ -441,10 +442,29 @@ function inventoryCase(feedback: ApprovalFeedbackRecords) {
 }
 
 /**
+ * The classifier's suggestions for the deck case's four PRs no effort owns: folio #325 for Shelf order, atlas #410 and catalog #97, in two
+ * repositories, as a new effort, and folio #305 with no clear signal.
+ */
+export function inkwellSuggestions(): SuggestionGroup[] {
+  const pr = (repo: string, number: number, title: string, signals: { kind: "ticket" | "stack" | "thread" | "group" | "prefix" | "area"; text: string }[], effortId: string | null) =>
+    ({ prUrl: url(repo, number), repo: `inkwell/${repo}`, number, title, signals: signals.map((signal) => ({ ...signal, effortId })) });
+  const shelf = INVENTORY_EFFORTS.shelf.id;
+  return [
+    { key: `effort:${shelf}:high`, target: { kind: "effort", effortId: shelf, name: "Shelf order" }, confidence: "high", reason: "Shared ticket · same ticket prefix",
+      signals: ["ticket ABC-355", "prefix ABC"], tickets: [], prs: [pr("folio", 325, "Remember the last shelf you browsed", [{ kind: "ticket", text: "ticket ABC-355" }, { kind: "prefix", text: "prefix ABC" }], shelf)] },
+    { key: "new:ABC-210", target: { kind: "new", name: "Delivery windows" }, confidence: "medium", reason: "Shared ticket ABC-210, no effort yet",
+      signals: ["ticket ABC-210", "board group “Checkout”"], tickets: ["ABC-210"],
+      prs: [pr("atlas", 410, "Show delivery windows at checkout", [{ kind: "ticket", text: "ticket ABC-210" }], null),
+        pr("catalog", 97, "Merge duplicate author records", [{ kind: "group", text: "board group “Checkout”" }], null)] },
+    { key: "none", target: null, confidence: null, reason: "No clear signal. Pick an effort for each PR.", signals: [], tickets: [],
+      prs: [pr("folio", 305, "Load cover images lazily", [], null)] }];
+}
+
+/**
  * The inventory case as the effort deck serves it: Shelf order (the approved folio stack and the conflicting #330) and Store pickup (three
  * PRs to fix and two stacked on them) on the active pile, One-offs holding the two approvals with comments and the overdue catalog
- * review, Gift cards on hold, Store hours done, and four PRs to sort: folio #325 suggested for Shelf order, atlas #410 and catalog #97
- * proposed as a new effort, and folio #305 with no clear signal. `row` patches one row as the server hands it over.
+ * review, Gift cards on hold, Store hours done, and four PRs no effort owns on their service cards: folio #325 suggested for Shelf order,
+ * atlas #410 and catalog #97 proposed as a new effort, and folio #305 with no clear signal. `row` patches one row as the server hands it over.
  */
 export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Partial<DeckRowInput> = () => ({})): DeckView {
   const day = 24 * HOUR;
@@ -459,8 +479,6 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
   const effort = (id: string, name: string, pile: "active" | "held" | "done" = "active", extra: Partial<DeckInput["efforts"][number]> = {}) => ({ id, key: id, name,
     goal: `${name} for every reader.`, oneOff: false, archived: false, pile: { effortId: id, pile, reason: pile === "held" ? "Waiting on the card vendor" : "",
       since: pile === "active" ? 1 : INVENTORY_NOW - day }, parentThreadId: null, tickets: [], criteria: null, ...extra });
-  const pr = (repo: string, number: number, title: string, signals: { kind: "ticket" | "stack" | "thread" | "group" | "prefix" | "area"; text: string }[], effortId: string | null) =>
-    ({ prUrl: url(repo, number), repo: `inkwell/${repo}`, number, title, signals: signals.map((signal) => ({ ...signal, effortId })) });
   const shelf = INVENTORY_EFFORTS.shelf.id;
   return deckView({ now: INVENTORY_NOW, rows,
     efforts: [effort(shelf, "Shelf order"), effort(INVENTORY_EFFORTS.pickup.id, "Store pickup", "active", { parentThreadId: "thr_pickup" }),
@@ -469,14 +487,6 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
     linear: new Map([["ABC-360", { identifier: "ABC-360", title: "Store shelf order", description: null, state: { name: "In Review", type: "started" },
       project: { id: "p1", name: "Shelf redesign" }, parent: null, labels: ["shelves"], url: null, updatedAt: null, source: "agent" }]]),
     threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }]]),
-    unclassified: { oneOffsId: oneOffs.id, groups: [
-      { key: `effort:${shelf}:high`, target: { kind: "effort", effortId: shelf, name: "Shelf order" }, confidence: "high", reason: "Shared ticket · same ticket prefix",
-        signals: ["ticket ABC-355", "prefix ABC"], tickets: [], prs: [pr("folio", 325, "Remember the last shelf you browsed", [{ kind: "ticket", text: "ticket ABC-355" }, { kind: "prefix", text: "prefix ABC" }], shelf)] },
-      { key: "new:ABC-210", target: { kind: "new", name: "Delivery windows" }, confidence: "medium", reason: "Shared ticket ABC-210, no effort yet",
-        signals: ["ticket ABC-210", "board group “Checkout”"], tickets: ["ABC-210"],
-        prs: [pr("atlas", 410, "Show delivery windows at checkout", [{ kind: "ticket", text: "ticket ABC-210" }], null),
-          pr("catalog", 97, "Merge duplicate author records", [{ kind: "group", text: "board group “Checkout”" }], null)] },
-      { key: "none", target: null, confidence: null, reason: "No clear signal. Pick an effort for each PR.", signals: [], tickets: [],
-        prs: [pr("folio", 305, "Load cover images lazily", [], null)] }] },
+    classify: { oneOffsId: oneOffs.id, groups: inkwellSuggestions() },
     read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false, limitedUntil: null }, seen: new Map(), ...patch });
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { serviceId, serviceName } from "./deck-shared.js";
 
 export const threadEffortSourceSchema = z.object({
   id: z.string(), kind: z.enum(["ticket", "pr"]), label: z.string(), ticket: z.string().nullable(),
@@ -16,9 +17,9 @@ export const threadEffortPickerSchema = z.object({
     /** An effort: the thread's own, the one it coordinates, or the one its linked PRs are in. A service: no effort, so its linked PRs' repository. */
     kind: z.enum(["effort", "service", "none"]),
     effortId: z.string().nullable(), name: z.string(), oneOff: z.boolean(),
-    /** Needs you on the effort's card; 0 for a service, whose PRs count as to sort, never as Needs you. */
+    /** Needs you on its card: an effort's, or a service's, whose PRs count as any effort's do. */
     needsYou: z.number(),
-    /** The deck card it opens: an effort's id, "unc" for a service's PRs still to sort, or null. */
+    /** The deck card it opens: an effort's id, a repository's service card, or null. */
     card: z.string().nullable(),
   }).strict(),
   choices: z.array(z.object({ key: z.string(), id: z.string(), name: z.string(), oneOff: z.boolean(), held: z.boolean(), needsYou: z.number(),
@@ -108,7 +109,7 @@ export function threadEffortSignals(input: {
 }
 
 /** A repository's service effort, where its PRs and threads that no effort has fall back to (A17.1). */
-export const serviceName = (repo: string) => `${repo.split("/").at(-1) ?? repo} · service`;
+export { serviceName };
 
 /**
  * The effort a thread's chip names. Explicit efforts win: the thread's own, then the one whose parent thread it is, then the one most of
@@ -119,7 +120,7 @@ export function threadEffortChip(input: {
   coordinates: { id: string; name: string; oneOff: boolean } | null;
   /** Its linked PRs, each with its repository and the effort it's in. */
   linked: readonly { repo: string; effort: { id: string; name: string; oneOff: boolean } | null }[];
-  /** Needs you on the effort's card; null when the deck draws no card for it. */
+  /** Needs you on the effort's or service's card; null when the deck draws no card for it. */
   needsYou: (effortId: string) => number | null;
 }): ThreadEffortPicker["chip"] {
   const most = <T>(items: readonly T[], key: (item: T) => string, name: (item: T) => string): T | null => {
@@ -134,7 +135,9 @@ export function threadEffortChip(input: {
     return { kind: "effort", effortId: effort.id, name: effort.name, oneOff: effort.oneOff, needsYou: needs ?? 0, card: needs === null ? null : effort.id };
   }
   const repo = most(input.linked.map((pr) => pr.repo.toLowerCase()), (item) => item, (item) => item);
-  // Its PRs are to sort (A15), so a service counts none as Needs you.
-  if (repo) return { kind: "service", effortId: null, name: serviceName(repo), oneOff: false, needsYou: 0, card: "unc" };
+  if (repo) {
+    const needs = input.needsYou(serviceId(repo));
+    return { kind: "service", effortId: null, name: serviceName(repo), oneOff: false, needsYou: needs ?? 0, card: needs === null ? null : serviceId(repo) };
+  }
   return { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null };
 }

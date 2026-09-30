@@ -1,30 +1,31 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
-import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, uncScreen, uncSnapshot, type CardScreen,
+import { inkwellDeck, inkwellSuggestions, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, type Accepted, type CardScreen,
   type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const SHELF = INVENTORY_EFFORTS.shelf.id, PICKUP = INVENTORY_EFFORTS.pickup.id, ONE_OFFS = "effort-one-offs";
+const FOLIO = "service:inkwell/folio", ATLAS = "service:inkwell/atlas", CATALOG = "service:inkwell/catalog";
 const none = { rows: {}, at: {} };
-const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1] = none, details?: ReadonlyMap<string, string>) =>
-  cardScreen(view.active.find((item) => item.id === id)!, seen, { now: NOW, details });
+const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1] = none, details?: ReadonlyMap<string, string>,
+  sorted: { accepted?: Accepted; moved?: ReadonlyMap<string, string> } = {}) => cardScreen(view.active.find((item) => item.id === id)!, seen, { now: NOW, details, ...sorted });
 const lines = (screen: CardScreen) => Object.fromEntries(screen.sections.map((section) => [section.key, section.lines.map((line) =>
   `${line.ref}${line.needs ? "" : " ·"}${line.dim ? " dim" : ""}${line.ghost ? " ghost" : ""}${line.dot && !line.ghost ? " dot" : ""}${line.trail ? ` [${line.trail.text}]` : ""}`)]));
-const context = (screen: CardScreen | "unc", patch: Partial<KeyContext> = {}): KeyContext =>
-  ({ view: "deck", cur: screen, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1, ...patch });
+const context = (screen: CardScreen, patch: Partial<KeyContext> = {}): KeyContext =>
+  ({ view: "deck", cur: screen, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1, ...patch });
 
 describe("the effort deck's strip", () => {
-  it("lists the active pile in session order with each card's Needs you, then Unclassified with what's to sort, and numbers the first nine", () => {
+  it("lists the active pile in session order with each card's Needs you, the service cards after the efforts, and numbers the first nine", () => {
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
-    const unc = uncScreen(view, none, new Map(), { now: NOW });
-    const chips = stripChips(view.active.map((item) => item.id), cards, { toSort: unc.coverage.toSort, changed: unc.changed }, SHELF);
-    expect(chips.map((chip) => [chip.n, chip.name, chip.count])).toEqual([[1, "Shelf order", 5], [2, "Store pickup", 3], [3, "One-offs", 3], [4, "Unclassified", 4]]);
+    const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
+    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[1, "Shelf order", 5, false], [2, "Store pickup", 3, false],
+      [3, "One-offs", 3, false], [4, "folio · service", 2, true], [5, "atlas · service", 1, true], [6, "catalog · service", 1, true]]);
     // A card keeps its number after you flip away and a read reorders the server's pile: the session order wins.
-    expect(stripChips([PICKUP, ONE_OFFS, SHELF], cards, { toSort: 4, changed: 0 }, SHELF).map((chip) => chip.name))
-      .toEqual(["Store pickup", "One-offs", "Shelf order", "Unclassified"]);
+    expect(stripChips([PICKUP, ONE_OFFS, SHELF, CATALOG], cards, SHELF).map((chip) => chip.name))
+      .toEqual(["Store pickup", "One-offs", "Shelf order", "catalog · service"]);
   });
 });
 
@@ -136,66 +137,71 @@ describe("an effort card", () => {
   });
 });
 
-describe("the Unclassified deck", () => {
-  it("groups PRs by suggestion with its strength and signals once per group, one button each, and each PR's signals", () => {
-    const unc = uncScreen(inkwellDeck(), none, new Map(), { now: NOW });
-    expect(unc.groups.map((group) => [group.title, group.strength, group.signals, group.button.label, group.lines.map((line) => [line.ref, line.signals])])).toEqual([
-      ["Shelf order", "strong", ["ticket ABC-355", "prefix ABC"], "Put 1 in Shelf order", [["folio #325", ["ticket ABC-355", "prefix ABC"]]]],
-      ["Delivery windows", "moderate", ["ticket ABC-210", "board group “Checkout”"], "New effort from 2…",
-        [["atlas #410", ["ticket ABC-210"]], ["catalog #97", ["board group “Checkout”"]]]],
-      ["No clear signal", null, [], "Pick per PR", [["folio #305", []]]]]);
-    expect(unc.groups.at(-1)!.reason).toBe("Pick an effort for each PR.");
-    // Unclassified PRs are to sort, never Needs you.
-    expect(unc.groups.flatMap((group) => group.lines).some((line) => line.needs)).toBe(false);
+describe("a service card", () => {
+  it("files its rows by the move they need, as an effort's are, counts them as Needs you, and names each row's suggestion", () => {
+    const folio = card(inkwellDeck(), FOLIO);
+    expect(lines(folio)).toEqual({ request: ["folio #305", "folio #325"] });
+    expect(folio.needsYou).toBe(2);
+    expect(folio.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.signals])).toEqual([["folio #305", []], ["folio #325", ["→ Shelf order"]]]);
+    expect(card(inkwellDeck(), ATLAS).sections[0]!.lines[0]!.signals).toEqual(["→ new Delivery windows"]);
+    expect(card(inkwellDeck(), SHELF).suggest).toEqual([]);
+  });
+
+  it("shows each suggestion over its rows once, with its strength, signals, and one button, and each PR's own signals", () => {
+    const folio = card(inkwellDeck(), FOLIO);
+    expect(folio.suggest.map((group) => [group.key, group.title, group.strength, group.signals, group.button.label, group.lines.map((line) => [line.ref, line.signals])]))
+      .toEqual([[`${FOLIO} effort:${SHELF}:high`, "Shelf order", "strong", ["ticket ABC-355", "prefix ABC"], "Put 1 in Shelf order", [["folio #325", ["ticket ABC-355", "prefix ABC"]]]],
+        [`${FOLIO} none`, "No clear signal", null, [], "Pick per PR", [["folio #305", []]]]]);
+    expect(folio.suggest.at(-1)!.reason).toBe("Pick an effort for each PR.");
+    // A suggestion that spans two repositories shows on each of their cards, over the PRs on that card.
+    expect([ATLAS, CATALOG].map((id) => card(inkwellDeck(), id).suggest.map((group) => [group.key, group.button.label, group.lines.map((line) => line.ref)])))
+      .toEqual([[[`${ATLAS} new:ABC-210`, "New effort from 1…", ["atlas #410"]]], [[`${CATALOG} new:ABC-210`, "New effort from 1…", ["catalog #97"]]]]);
   });
 
   // A weak suggestion rests on one faint signal, so the one button that would move its PRs at once asks first. A new effort's naming dialog
   // already asks, and strong or moderate groups move on one click, with Undo.
   it("asks again before a weak group moves anything", () => {
-    const base = inkwellDeck();
-    const [shelf, delivery, rest] = base.unclassified.groups;
-    const view = inkwellDeck({ unclassified: { ...base.unclassified, groups: [
+    const [shelf, delivery, rest] = inkwellSuggestions();
+    const view = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: [
       { ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area", signals: ["area inkwell/folio:shelves"] },
       { ...delivery!, confidence: "low" },
-      { ...rest!, key: "one-off", target: { kind: "one-off" }, confidence: "low", reason: "Standalone ticket that nothing else carries", signals: ["standalone ticket ABC-305"] }] } });
-    const unc = uncScreen(view, none, new Map(), { now: NOW });
-    expect(unc.groups.map((group) => [group.title, group.strength, group.button.label, group.button.confirm])).toEqual([
-      ["Shelf order", "weak", "Put 1 in Shelf order…", true], ["Delivery windows", "weak", "New effort from 2…", false], ["One-offs", "weak", "Mark 1 one-off…", true]]);
-    expect(uncScreen(inkwellDeck(), none, new Map(), { now: NOW }).groups.map((group) => group.button.confirm)).toEqual([false, false, false]);
+      { ...rest!, key: "one-off", target: { kind: "one-off" }, confidence: "medium", reason: "Standalone ticket that nothing else carries", signals: ["standalone ticket ABC-305"] }] } });
+    const folio = card(view, FOLIO);
+    expect(folio.suggest.map((group) => [group.title, group.strength, group.button.label, group.button.confirm])).toEqual([
+      ["Shelf order", "weak", "Put 1 in Shelf order…", true], ["One-offs", "moderate", "Mark 1 one-off", false]]);
+    expect(card(view, ATLAS).suggest.map((group) => [group.title, group.strength, group.button.label, group.button.confirm]))
+      .toEqual([["Delivery windows", "weak", "New effort from 1…", false]]);
+    expect(card(inkwellDeck(), FOLIO).suggest.map((group) => group.button.confirm)).toEqual([false, false]);
     // Across groups, Accept takes the rest and leaves each weak one for its own confirm, and says so; alone, its Accept opens that confirm.
-    const keys = unc.groups.map((group) => group.key);
-    expect(acceptPlan(unc.groups, keys)).toEqual({ take: ["new:ABC-210"], left: "2 weak groups left: accept each alone." });
-    expect(acceptPlan(unc.groups, keys.slice(0, 2))).toEqual({ take: ["new:ABC-210"], left: "1 weak group left: accept it alone." });
-    expect(acceptPlan(unc.groups, [keys[0]!])).toEqual({ take: [keys[0]], left: null });
-    const strong = uncScreen(inkwellDeck(), none, new Map(), { now: NOW }).groups;
-    expect(acceptPlan(strong, strong.map((group) => group.key))).toEqual({ take: strong.map((group) => group.key), left: null });
+    const keys = folio.suggest.map((group) => group.key);
+    expect(acceptPlan(folio.suggest, keys)).toEqual({ take: [`${FOLIO} one-off`], left: "1 weak group left: accept it alone." });
+    expect(acceptPlan(folio.suggest, [keys[0]!])).toEqual({ take: [keys[0]], left: null });
   });
 
-  it("counts coverage as the open PRs in a real effort, with One-offs and what's to sort beside it", () => {
-    expect(uncScreen(inkwellDeck(), none, new Map(), { now: NOW }).coverage).toEqual({ efforts: 10, oneOffs: 3, toSort: 4, total: 17, pct: 59 });
-  });
-
-  it("collapses a group you accepted to one line with Undo, and keeps the next group where it was", () => {
+  it("collapses a group you accepted to one line with Undo where it was, and keeps each row it moved where it was, saying where it went", () => {
     const before = inkwellDeck();
-    const seen = { rows: { unc: uncSnapshot(before) }, at: {} };
-    const after = inkwellDeck({ unclassified: { ...before.unclassified, groups: before.unclassified.groups.slice(1) } },
-      (row) => row.number === 325 ? { effort: INVENTORY_EFFORTS.shelf } : {});
-    const unc = uncScreen(after, seen, new Map([[before.unclassified.groups[0]!.key, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)] }]]),
-      { now: NOW });
-    expect(unc.groups.map((group) => [group.title, group.accepted?.text ?? null, group.lines.length])).toEqual([["Left since you looked", "1 PR → Shelf order", 0],
-      ["Delivery windows", null, 2], ["No clear signal", null, 1]]);
-    expect(unc.changed).toBe(0);
+    const seen = { rows: { [FOLIO]: cardSnapshot(before.active.find((item) => item.id === FOLIO)!) }, at: {} };
+    const [shelf, ...rest] = inkwellSuggestions();
+    const after = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: rest } }, (row) => row.number === 325 ? { effort: INVENTORY_EFFORTS.shelf } : {});
+    const key = `${FOLIO} ${shelf!.key}`;
+    const folio = card(after, FOLIO, seen, undefined, { accepted: new Map([[key, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)], index: 0 }]]),
+      moved: new Map([[url("folio", 325), "Shelf order"]]) });
+    expect(folio.suggest.map((group) => [group.title, group.accepted?.text ?? null, group.lines.length])).toEqual([["Moved", "1 PR → Shelf order", 0],
+      ["No clear signal", null, 1]]);
+    // It moved at your click, so it's no news: no dot, and nothing counts as changed, but Mark seen is there to settle it.
+    expect(lines(folio).request).toEqual(["folio #305", "folio #325 · dim ghost [→ Shelf order]"]);
+    expect([folio.changed, folio.settleable, folio.needsYou]).toEqual([0, true, 1]);
   });
 
-  it("keeps a group open while any of it is left to sort, so accepting part of it hides none of the rest", () => {
-    const before = inkwellDeck();
-    const seen = { rows: { unc: uncSnapshot(before) }, at: {} };
-    // You selected atlas #410 and accepted Delivery windows for it alone; catalog #97 is still to sort.
-    const after = inkwellDeck({}, (row) => row.number === 410 ? { effort: INVENTORY_EFFORTS.shelf } : {});
-    const unc = uncScreen(after, seen, new Map([["new:ABC-210", { actionId: "a1", text: "1 PR → Delivery windows", prUrls: [url("atlas", 410)] }]]), { now: NOW });
-    const group = unc.groups.find((item) => item.key === "new:ABC-210")!;
-    expect([group.accepted, group.button.label, group.lines.map((line) => [line.ref, line.ghost])]).toEqual([null, "New effort from 1…",
-      [["atlas #410", true], ["catalog #97", false]]]);
+  it("keeps a group open while any of it is left here, so accepting part of it hides none of the rest", () => {
+    const [shelf, , rest] = inkwellSuggestions();
+    const both = { ...shelf!, prs: [...shelf!.prs, rest!.prs[0]!] };
+    const view = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: [both] } });
+    // You selected folio #325 and accepted Shelf order for it alone; folio #305 is still here.
+    const folio = card(view, FOLIO, none, undefined, { accepted: new Map([[`${FOLIO} ${shelf!.key}`, { actionId: "a1", text: "1 PR → Shelf order",
+      prUrls: [url("folio", 325)], index: 0 }]]) });
+    expect(folio.suggest.map((group) => [group.accepted, group.button.label, group.lines.map((line) => line.ref)])).toEqual([[null, "Put 2 in Shelf order",
+      ["folio #305", "folio #325"]]]);
   });
 });
 
@@ -216,11 +222,16 @@ describe("what the keys act on", () => {
     const on = availability(context(shelf));
     expect([on.merge.on, on.advance.on, on.nudge.on, on.nudge.why, on.accept.on, on.hold.on]).toEqual([true, false, false, "no nudge is due", false, true]);
     const oneOffs = availability(context(card(inkwellDeck(), ONE_OFFS)));
-    expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on]).toEqual([false, "One-offs stays active", false]);
-    const unc = uncScreen(inkwellDeck(), none, new Map(), { now: NOW });
-    const focused = unc.groups[0]!.lines[0]!;
-    const sorting = availability(context("unc", { focused }));
-    expect([sorting.accept.on, sorting.move.on, sorting.advance.on, sorting.advance.why]).toEqual([true, true, false, "open an effort card"]);
+    expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on, oneOffs.accept.on]).toEqual([false, "One-offs stays active", false, false]);
+    // A service card acts like an effort's and sorts its rows into efforts, but never holds or completes: it isn't an effort yet.
+    const folio = card(inkwellDeck(), FOLIO);
+    const focused = folio.sections[0]!.lines[0]!;
+    const sorting = availability(context(folio, { focused }));
+    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting.request.on, sorting.advance.on, sorting.hold.on, sorting.hold.why,
+      sorting["new-effort"].on]).toEqual([true, true, true, true, true, false, "a service card stays active", false]);
+    expect(availability(context(folio, { focused, selected: [focused] }))["new-effort"].on).toBe(true);
+    // u goes to the first service card, while one exists.
+    expect([sorting.services.on, availability(context(folio, { service: null })).services.why]).toEqual([true, "every PR is in an effort"]);
     // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.
     const prs = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["nudge"]) } });
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
@@ -237,12 +248,12 @@ describe("what the keys act on", () => {
   it("lists every action in the palette with its key, and each effort to go to, resume, or reopen", () => {
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
-    const chips = stripChips(view.active.map((item) => item.id), cards, { toSort: 4, changed: 0 }, SHELF);
+    const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
     const items = paletteItems(availability(context(cards.get(SHELF)!)), chips, { held: [{ id: "effort-gift-cards", name: "Gift cards" }],
       done: [{ id: "effort-store-hours", name: "Store hours", archived: false }, { id: "effort-old", name: "Old", archived: true }] }, SHELF, true);
     expect(items.filter((item) => item.action).map((item) => item.key)).toEqual(DECK_ACTIONS.filter((action) => action.id !== "jump").map((action) => action.id));
     expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Shelf order", "1", false],
-      ["Go to Store pickup", "2", true], ["Go to One-offs", "3", true], ["Go to Unclassified", "4", true], ["Resume Gift cards", "", true], ["Reopen Store hours", "", true],
-      ["Reopen Old", "", false]]);
+      ["Go to Store pickup", "2", true], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],
+      ["Go to catalog · service", "6", true], ["Resume Gift cards", "", true], ["Reopen Store hours", "", true], ["Reopen Old", "", false]]);
   });
 });

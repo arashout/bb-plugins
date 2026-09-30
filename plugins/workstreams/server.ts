@@ -29,7 +29,7 @@ import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establ
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
-import { DECK_CHANGED, type DeckPile, type RowActed } from "./deck-shared.js";
+import { DECK_CHANGED, SERVICE_PREFIX, type DeckPile, type RowActed } from "./deck-shared.js";
 import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
@@ -3598,7 +3598,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const classified = linked.flatMap((pr) => {
       if (pr.effortId) return [];
-      const group = deck.unclassified.groups.find((item) => item.prs.some((row) => row.prUrl === pr.url));
+      const group = deck.active.flatMap((card) => card.suggestions).find((item) => item.prs.some((row) => row.prUrl === pr.url));
       const target = group?.target;
       if (target?.kind !== "effort" || !group!.confidence) return [];
       const own = group!.prs.find((row) => row.prUrl === pr.url)!.signals.find((signal) => signal.effortId === target.effortId);
@@ -5596,7 +5596,7 @@ export default async function plugin(bb: BbPluginApi) {
         acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
     }));
     const { groups, oneOffsId } = await classifyGet(current);
-    return { now: Date.now(), rows, unclassified: { groups, oneOffsId },
+    return { now: Date.now(), rows, classify: { groups, oneOffsId },
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
         parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work) })),
@@ -5612,19 +5612,21 @@ export default async function plugin(bb: BbPluginApi) {
     if (!effortId && !prUrls) return { ok: false as const, error: "Choose an effort or PRs." };
     const invalid = (reviewers ?? []).filter((login) => !REVIEWER.test(login));
     if (invalid.length) return { ok: false as const, error: `Not a GitHub login: ${invalid.join(", ")}.` };
-    const effort = effortId ? effortStore.get(effortId) : null;
-    if (effortId && !effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+    // A service card is only the deck's: its PRs are the ones no effort owns in its repository.
+    const service = effortId?.startsWith(SERVICE_PREFIX) ?? false;
+    const effort = effortId && !service ? effortStore.get(effortId) : null;
+    if (effortId && !service && !effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort && piles.get(effort).pile !== "active") return { ok: false as const, error: "Resume or reopen this effort first." };
     const wanted = prUrls && new Set(prUrls.map(prWorkItemKey));
-    const rows = deckRows(await deckInput()).filter(({ input }) => (!effort || input.effort?.id === effort.id) && (!wanted || wanted.has(input.prUrl)));
+    const rows = deckRows(await deckInput()).filter(({ input, cardId }) => (!effortId || cardId === (effort?.id ?? effortId)) && (!wanted || wanted.has(input.prUrl)));
     const seenAt = new Map(Object.entries(seen));
     const planned = planBatch(kind, rows.map(({ row, input, pile }) => ({ row, pile, seenAt: seenAt.get(row.prUrl), head: input.head,
       fingerprint: input.feedbackFingerprint, shown: input.reviewers })), { selected: !!wanted, reviewers });
     for (const url of wanted ?? []) if (!rows.some(({ row }) => row.prUrl === url)) {
       const target = prTarget(url);
-      planned.skipped.push({ prUrl: url, ref: target ? `${target.name} #${target.number}` : url, reason: effort ? "Not an open PR in this effort." : "Not an open PR on the deck." });
+      planned.skipped.push({ prUrl: url, ref: target ? `${target.name} #${target.number}` : url, reason: effortId ? "Not an open PR on this card." : "Not an open PR on the deck." });
     }
-    return { ok: true as const, ...deckBatches.plan(kind, effort?.id ?? null, planned), skipped: planned.skipped };
+    return { ok: true as const, ...deckBatches.plan(kind, effort?.id ?? (service ? effortId! : null), planned), skipped: planned.skipped };
   }
 
   const actionRecordsSchema = z.array(z.object({ at: z.number(), prUrl: z.string(), action: z.enum(["mark-ready", "request-review", "nudge", "confirm-handled"]),
@@ -5637,10 +5639,10 @@ export default async function plugin(bb: BbPluginApi) {
     const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     return (prUrl: string) => { const owner = work.ownerForPr(prUrl); return owner ? effortStore.get(owner.id) : null; };
   };
-  /** Each PR's pile now, as the deck files it: an archived effort's PRs pause with the done efforts'. */
+  /** Each PR's pile now, as the deck files it: an archived effort's PRs pause with the done efforts', and one no effort owns is on its always active service card. */
   const pileOf = async (): Promise<(prUrl: string) => DeckPile> => {
     const effortOf = await ownerEfforts();
-    return (prUrl) => { const effort = effortOf(prUrl); return !effort ? "unclassified" : effort.archivedAt ? "done" : piles.get(effort).pile; };
+    return (prUrl) => { const effort = effortOf(prUrl); return !effort ? "active" : effort.archivedAt ? "done" : piles.get(effort).pile; };
   };
   const STOPPED = { held: ["on hold", "Resume"], done: ["done", "Reopen"], archived: ["archived", "Restore"] } as const;
   /**

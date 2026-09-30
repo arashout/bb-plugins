@@ -14,8 +14,19 @@ export const DECK_SECTIONS = ["merge", "confirm", "nudge", "request", "ready", "
 export type DeckSection = (typeof DECK_SECTIONS)[number];
 const YOURS = new Set<DeckSection>(["merge", "confirm", "nudge", "request", "ready", "work"]);
 
-/** The pile a row's card is on; Unclassified rows are "to sort". */
-export type DeckPile = "active" | "held" | "done" | "unclassified";
+/** The pile a row's card is on. A PR no effort owns is on its repository's service card, which is always active. */
+export type DeckPile = "active" | "held" | "done";
+
+/**
+ * The cards no stored effort backs (plan amendment A17.1), so nothing open is outside a card: each repository's service card, where its
+ * open PRs and threads that no effort has fall back to, and Loose threads, for threads with no effort, PR, or single repository.
+ */
+export const SERVICE_PREFIX = "service:";
+export const LOOSE_ID = "loose";
+export const serviceId = (repo: string) => `${SERVICE_PREFIX}${repo.toLowerCase()}`;
+export const serviceName = (repo: string) => `${repo.split("/").at(-1) ?? repo} · service`;
+/** Where a card sits in the strip: stored efforts first, then service cards, then Loose threads. */
+export const cardTier = (id: string) => id === LOOSE_ID ? 2 : id.startsWith(SERVICE_PREFIX) ? 1 : 0;
 /** The batches a section button runs, in the order Advance runs them. Each is one GitHub write or your confirmation per PR: never a merge. */
 export const BATCH_KINDS = ["confirm", "nudge", "request", "ready"] as const;
 export type BatchKind = (typeof BATCH_KINDS)[number];
@@ -40,7 +51,7 @@ export function counted(row: { acted: RowActed | null }, seenAt = Number.NEGATIV
   return acted.state === "sent" && acted.at <= seenAt;
 }
 
-/** Needs you: an open PR in an active effort or One-offs whose next move is yours. Held and done efforts pause, and Unclassified PRs are to sort. */
+/** Needs you: an open PR on an active card (an effort, One-offs, or a service card) whose next move is yours. Held and done efforts pause. */
 export function needsYou(row: { section: DeckSection; acted: RowActed | null }, pile: DeckPile, seenAt?: number): boolean {
   return pile === "active" && YOURS.has(row.section) && counted(row, seenAt);
 }

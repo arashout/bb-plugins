@@ -33,11 +33,11 @@ describe("planning a deck batch", () => {
 
   it("names why each selected PR can't take the write, so the confirm lists what won't happen as well as what will", () => {
     next = 620;
-    const rows = [row("nudge"), row("nudge", {}, { pile: "held" }), row("nudge", {}, { pile: "unclassified" }), row("merge"),
+    const rows = [row("nudge"), row("nudge", {}, { pile: "held" }), row("nudge", {}, { pile: "done" }), row("merge"),
       row("nudge", { acted: { kind: "nudge", state: "queued", at: 1, batchId: "b" } }), row("blocked", { hold: { reason: "Counter redesign", since: 1 } }),
       row("request", { suggested: [] }), row("ready", {}, { head: null }), row("nudge", { nudge: [] })];
     expect(brief(planBatch("advance", rows, { selected: true }))).toEqual({ items: ["nudge quill #620: Nudge @mira"], skipped: [
-      "quill #621: Its effort is on hold.", "quill #622: Sort it into an effort first.", "quill #623: Merges go through the merge preview.",
+      "quill #621: Its effort is on hold.", "quill #622: Its effort is done.", "quill #623: Merges go through the merge preview.",
       "quill #624: A write on it is waiting or just ran.", "quill #625: On hold. Release it first.", "quill #626: No reviewer to suggest. Pick one.",
       "quill #627: Not read in full yet. Refresh it first.", "quill #628: No reviewer needs a nudge now."] });
     // A selection for one kind names the move a row needs instead.

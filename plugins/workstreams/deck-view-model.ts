@@ -7,7 +7,7 @@
 // imports types, zero-import modules, and the roster's time format only, so
 // no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { counted, DECK_SECTIONS, needsYou, type BatchKind, type DeckPile, type DeckSection } from "./deck-shared";
+import { cardTier, counted, DECK_SECTIONS, needsYou, type BatchKind, type DeckPile, type DeckSection } from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
@@ -16,7 +16,7 @@ import { age, clock } from "./roster-view-model";
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
 const calendarDay = (value: string) => new Date(Date.parse(value)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-/** Color only where the move is yours; gray waits on others, runs itself, or is to sort. */
+/** Color only where the move is yours; gray waits on others or runs itself. */
 export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
 export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
 export const SECTIONS: Record<DeckSection, SectionMeta> = {
@@ -37,8 +37,11 @@ const ACTED: Record<BatchKind, [string, string]> = { confirm: ["Confirming…", 
 /** Muted effort colors, picked by the effort's id so a card keeps its color across reads and sessions. */
 const EFFORT_COLORS = ["#5fb3b3", "#d3a35a", "#8c8fd9", "#d98ca8", "#9cb86a", "#6fa8d6", "#d9905f", "#b48ad6"];
 export const ONE_OFF_COLOR = "#8f8e8a";
+/** A service card's color, drawn as a hollow dot: it stands in for an effort no one made yet. */
+export const SERVICE_COLOR = "#d3a35a";
 export function effortColor(id: string, oneOff = false): string {
   if (oneOff) return ONE_OFF_COLOR;
+  if (cardTier(id) > 0) return SERVICE_COLOR;
   let hash = 0;
   for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   return EFFORT_COLORS[hash % EFFORT_COLORS.length]!;
@@ -73,10 +76,11 @@ export type DeckLine = {
 /** What a view knows beyond deck_get: when each row was last marked seen, and what a refused or cut-off write said. */
 export type LineContext = { now: number; seenAt: Readonly<Record<string, number>>; details?: ReadonlyMap<string, string>;
   /** PRs a read saw merge, so a row that left says so. */
-  merged?: ReadonlySet<string> };
+  merged?: ReadonlySet<string>;
+  /** PRs you moved to an effort from here, by the effort's name, until Mark seen: a row that left that way says where to, as news it isn't. */
+  moved?: ReadonlyMap<string, string> };
 
-function info(row: DeckRow, section: string, unsorted: boolean): DeckLine["info"] {
-  if (unsorted) return { text: row.status, tone: null };
+function info(row: DeckRow, section: string): DeckLine["info"] {
   switch (section) {
     case "merge": { const approved = row.reviewers.filter((review) => review.state === "approved").map((review) => review.login);
       return approved.length ? { text: `✓ ${mentions(approved)}`, tone: null } : null; }
@@ -102,28 +106,28 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const row = item.row;
   const settled = item.settled;
   const section = item.section;
-  const unsorted = pile === "unclassified";
   const seenAt = context.seenAt[item.prUrl];
+  const moved = item.ghost ? context.moved?.get(item.prUrl) ?? null : null;
   const acted = row?.acted ?? null;
   const dim = item.ghost || item.change !== null || (row !== null && !counted(row, seenAt));
   const needs = !dim && row !== null && needsYou(row, pile, seenAt);
   const since = row?.waitsOn?.since ?? row?.step?.since ?? null;
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
-  const tone: Tone = unsorted ? "gray" : section === "work" && row ? info(row, section, false)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
+  const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
   if (acted) {
     const failed = acted.state === "refused" || acted.state === "unknown";
     trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: context.details?.get(item.prUrl) ?? null,
       text: acted.state === "refused" ? "Not sent" : acted.state === "unknown" ? "May not have sent" : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
-  } else if (item.ghost) trail = { kind: "ghost", text: context.merged?.has(item.prUrl) ? "Merged" : "Left" };
+  } else if (item.ghost) trail = { kind: "ghost", text: moved ? `→ ${moved}` : context.merged?.has(item.prUrl) ? "Merged" : "Left" };
   else if (item.change) trail = { kind: "change", text: `→ ${item.change.now}` };
   else if (row?.thread && section === "work") trail = { kind: "thread", text: row.thread.title, threadId: row.thread.id };
   return {
     prUrl: item.prUrl, ref: row ? refOf(row) : settled!.ref, title: row?.title ?? settled!.title,
     stacked: row?.stackedOn != null ? `${short(row.repo)} #${row.stackedOn}` : null, section, tone, needs, dim, ghost: item.ghost,
-    dot: item.ghost ? `${context.merged?.has(item.prUrl) ? "Merged" : "Left"} since you looked. Clears on Mark seen.` : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
+    dot: moved ? null : item.ghost ? `${context.merged?.has(item.prUrl) ? "Merged" : "Left"} since you looked. Clears on Mark seen.` : item.change ? `Was ${item.change.was}; now ${item.change.now}. Settles on Mark seen.`
       : item.arrived ? "New since you looked" : null,
-    info: row ? info(row, section, unsorted) : null, signals, age: shownAge, checked: row ? checked(row, context.now) : null,
+    info: row ? info(row, section) : null, signals, age: shownAge, checked: row ? checked(row, context.now) : null,
     hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
   };
 }
@@ -138,6 +142,26 @@ export const threadsKey = (cardId: string) => `threads:${cardId}`;
 
 export type SectionScreen = { key: DeckSection; meta: SectionMeta; count: number; changed: number; lines: DeckLine[];
   action: { id: DeckActionId; label: string; key: string; enabled: boolean; why: string | null } | null };
+/** How strongly a suggestion's signals point at its target, as its group says it. */
+export type Strength = "strong" | "moderate" | "weak";
+/** One of a service card's suggestions, with the card's rows it covers. */
+export type SuggestGroup = {
+  /** The card's id and the classifier's group key: a group that spans repositories shows on each of their cards. */
+  key: string; title: string; target: SuggestionGroup["target"]; color: string; reason: string; strength: Strength | null;
+  /** The specific signals behind its target, strongest first, shown before you accept it. */
+  signals: readonly string[];
+  /**
+   * What its one button does to its rows still here, and how many. `confirm`: a weak suggestion that would move PRs at once asks first,
+   * listing each PR with its signals.
+   */
+  button: { kind: "assign" | "new" | "one-off" | "pick"; label: string; count: number; confirm: boolean };
+  /** Its rows on the card, each with its own signals. */
+  lines: DeckLine[];
+  /** You accepted all of it that was here: one line with Undo until Mark seen. */
+  accepted: { text: string; actionId: string } | null;
+};
+/** A suggestion you accepted, by its group key, with the PRs it moved and where its line was, until Mark seen. */
+export type Accepted = ReadonlyMap<string, { actionId: string; text: string; prUrls: readonly string[]; index?: number }>;
 export type CardScreen = {
   card: DeckCard; color: string;
   status: { text: string; tone: Tone };
@@ -156,6 +180,8 @@ export type CardScreen = {
   people: { summary: string; waitOnYou: { login: string; count: number; title: string }[]; youWaitOn: { login: string; count: number; title: string }[] };
   recent: { summary: string; items: { text: string; age: string }[] };
   sections: SectionScreen[];
+  /** A service card's suggestions, in the classifier's order; empty on an effort's card. */
+  suggest: SuggestGroup[];
 };
 
 const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] }[] = [
@@ -164,13 +190,24 @@ const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] 
   { key: "blocked", label: "blocked", tone: "gray", of: ["blocked"] }];
 const ACTIVITY: Record<DeckCard["activity"][number]["kind"], string> = { merged: "Merged", approved: "Approved", changes: "Changes asked on", pushed: "Pushed" };
 
-/** A card as the deck draws it, with its rows settled against what you last marked seen. */
+/** Where a suggestion points, as a row's chip says it. */
+const pointer = (target: SuggestionGroup["target"]) => target?.kind === "effort" ? `→ ${target.name}` : target?.kind === "new" ? `→ new ${target.name}`
+  : target?.kind === "one-off" ? "→ One-offs" : null;
+
+/**
+ * A card as the deck draws it, with its rows settled against what you last marked seen. On a service card, each row names where its
+ * suggestion points, and `accepted` collapses the suggestions you took.
+ */
 export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at: Readonly<Record<string, number>> },
-  context: Omit<LineContext, "seenAt">): CardScreen {
+  context: Omit<LineContext, "seenAt"> & { accepted?: Accepted }): CardScreen {
   const { now } = context;
   const lineContext = { ...context, seenAt: seen.at, merged: new Set(card.activity.filter((item) => item.kind === "merged").map((item) => item.prUrl)) };
   const current = card.sections.flatMap((section) => section.rows);
-  const shown = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => deckLine(item, card.pile, lineContext));
+  const groupOf = new Map(card.suggestions.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group] as const)));
+  const shown = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => {
+    const chip = pointer(groupOf.get(item.prUrl)?.target ?? null);
+    return deckLine(item, card.pile, lineContext, chip && !item.ghost ? [chip] : []);
+  });
   const byPr = new Map(shown.map((line) => [line.prUrl, line]));
   const sections = DECK_SECTIONS.flatMap((key): SectionScreen[] => {
     const lines = shown.filter((line) => line.section === key);
@@ -202,6 +239,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   const waitOnYou = people(card.people.waitOnYou), youWaitOn = people(card.people.youWaitOn);
   const first = card.activity[0];
   const needsYou = shown.filter((line) => line.needs).length;
+  const suggest = suggestGroups(card, shown, context.accepted ?? new Map());
   // Worded from the rows as drawn, so the header, the strip, and the sections agree while rows wait for Mark seen.
   const parts = [needsYou && `${needsYou} need you`, card.blocked.length && `${card.blocked.length} blocked`,
     counts(["flight"]) && `${counts(["flight"])} in flight`].filter(Boolean);
@@ -212,8 +250,10 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     needsYou,
     advance: shown.filter((line) => line.needs && ["confirm", "nudge", "request", "ready"].includes(line.section)).map((line) => line.prUrl),
     changed: shown.filter((line) => line.dot !== null).length + threads.filter((thread) => thread.dot).length,
-    // Only a landed write's dim is Mark seen's to settle: a waiting write isn't done, and a refused one never dimmed.
-    settleable: shown.some((line) => line.row?.acted?.state === "sent" && !counted(line.row, seen.at[line.prUrl])),
+    // Only a landed write's dim is Mark seen's to settle: a waiting write isn't done, and a refused one never dimmed. So are rows and
+    // suggestions you moved from here.
+    settleable: shown.some((line) => line.row?.acted?.state === "sent" && !counted(line.row, seen.at[line.prUrl]))
+      || shown.some((line) => line.ghost && !line.dot) || suggest.some((group) => group.accepted),
     next: { criteria: card.progress.criteria, items: card.next.map((item) => {
       const row = item.prUrl ? current.find((candidate) => candidate.prUrl === item.prUrl) : undefined;
       return { text: item.text, owner: item.owner, prUrl: row ? item.prUrl : null, ref: row ? refOf(row) : null };
@@ -234,32 +274,11 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     people: { waitOnYou, youWaitOn, summary: waitOnYou.length ? `@${waitOnYou[0]!.login} waits on you` : youWaitOn.length ? `you wait on ${youWaitOn.length}` : "nobody" },
     recent: { summary: first ? `${ACTIVITY[first.kind]} ${first.ref} ${age(first.at, now)} ago` : "quiet",
       items: card.activity.map((item) => ({ text: `${ACTIVITY[item.kind]} ${item.ref}${item.who ? ` · @${item.who}` : ""}`, age: age(item.at, now) })) },
-    sections,
+    sections, suggest,
   };
 }
 
-/** How strongly a suggestion's signals point at its target, as its group says it. */
-export type Strength = "strong" | "moderate" | "weak";
 const STRENGTH: Record<NonNullable<SuggestionGroup["confidence"]>, Strength> = { high: "strong", medium: "moderate", low: "weak" };
-export type UncGroup = {
-  key: string; title: string; target: SuggestionGroup["target"]; color: string; reason: string; strength: Strength | null;
-  /** The specific signals behind its target, strongest first, shown before you accept it. */
-  signals: readonly string[];
-  /**
-   * What its one button does to the rows still here, and how many. `confirm`: a weak suggestion that would move PRs at once asks first,
-   * listing each PR with its signals.
-   */
-  button: { kind: "assign" | "new" | "one-off" | "pick"; label: string; count: number; confirm: boolean };
-  lines: DeckLine[];
-  /** You accepted all of it that was left to sort: one line with Undo until Mark seen. */
-  accepted: { text: string; actionId: string } | null;
-};
-export type UncScreen = {
-  coverage: { efforts: number; oneOffs: number; toSort: number; total: number; pct: number };
-  groups: UncGroup[]; changed: number;
-};
-/** A suggestion you accepted, by its group key, with the PRs it moved, until Mark seen. */
-export type Accepted = ReadonlyMap<string, { actionId: string; text: string; prUrls: readonly string[] }>;
 
 /** What accepting a group does to `n` of its PRs, as its button and a weak group's confirm say it. */
 export function acceptLabel(target: SuggestionGroup["target"], n: number): string {
@@ -271,61 +290,41 @@ export function acceptLabel(target: SuggestionGroup["target"], n: number): strin
  * What Accept takes from a selection across the groups `keys`. A weak group asks on its own, so across two or more groups Accept takes
  * the rest and leaves each weak one, and `left` says so; a lone weak group is taken, and its Accept opens its confirm.
  */
-export function acceptPlan(groups: readonly Pick<UncGroup, "key" | "button">[], keys: readonly string[]): { take: string[]; left: string | null } {
+export function acceptPlan(groups: readonly Pick<SuggestGroup, "key" | "button">[], keys: readonly string[]): { take: string[]; left: string | null } {
   const weak = keys.length > 1 ? keys.filter((key) => groups.some((group) => group.key === key && group.button.confirm)) : [];
   const n = weak.length;
   return { take: keys.filter((key) => !weak.includes(key)), left: n ? `${n} weak group${n === 1 ? "" : "s"} left: accept ${n === 1 ? "it" : "each"} alone.` : null };
 }
 
 /**
- * The Unclassified deck: each suggestion group with its reason once and one button, rows settled against what you last marked seen
- * (a group's place is its section), and how much of your open work sits in a real effort.
+ * A service card's suggestions: each group with its reason once and one button, over the card's rows it covers, in the classifier's order.
+ * A group you accepted all of collapses to one line with Undo where it was, even after its PRs leave the card, until Mark seen.
  */
-export function uncScreen(view: DeckView, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at: Readonly<Record<string, number>> },
-  accepted: Accepted, context: Omit<LineContext, "seenAt">): UncScreen {
-  const groupOf = new Map(view.unclassified.groups.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group] as const)));
-  const signals = new Map(view.unclassified.groups.flatMap((group) => group.prs.map((pr) => [pr.prUrl, pr.signals.map((signal) => signal.text)] as const)));
-  // A row's place here is its suggestion group.
-  const rows = view.unclassified.rows.map((row) => ({ prUrl: row.prUrl, section: groupOf.get(row.prUrl)?.key ?? "none", status: row.status, row }));
-  // Groups keep the order you last saw them in; new ones follow in the classifier's order, most confident first.
-  const frozen = [...new Set((seen.rows.unc ?? []).map((row) => row.section))];
-  const order = [...frozen, ...view.unclassified.groups.map((group) => group.key).filter((key) => !frozen.includes(key))];
-  const shown = settleRows(seen.rows.unc, rows, order).map((item) => deckLine({ ...item, row: item.row?.row ?? null }, "unclassified", { ...context, seenAt: seen.at },
-    signals.get(item.prUrl) ?? []));
-  const keys = [...new Set(shown.map((line) => line.section)), ...[...accepted.keys()].filter((key) => !shown.some((line) => line.section === key))];
-  const groups = keys.map((key): UncGroup => {
-    const group = view.unclassified.groups.find((candidate) => candidate.key === key);
+function suggestGroups(card: DeckCard, shown: readonly DeckLine[], accepted: Accepted): SuggestGroup[] {
+  if (card.kind !== "service") return [];
+  const keyOf = (key: string) => `${card.id} ${key}`;
+  const make = (key: string, group: SuggestionGroup | null, lines: DeckLine[], done: { text: string; actionId: string } | null): SuggestGroup => {
     const target = group?.target ?? null;
-    const taken = accepted.get(key);
-    const here = shown.filter((line) => line.section === key);
-    // It collapses only while nothing left to sort is outside what you accepted, so the rest of a partial accept, or a PR that arrives, shows.
-    const done = taken && here.every((line) => line.dim || taken.prUrls.includes(line.prUrl)) ? taken : undefined;
-    const lines = here.filter((line) => !(done && line.ghost));
     const count = lines.filter((line) => !line.dim).length;
-    const title = !group ? "Left since you looked" : target?.kind === "effort" ? target.name : target?.kind === "new" ? target.name : target?.kind === "one-off" ? "One-offs"
-      : "No clear signal";
+    const title = !group ? "Moved" : target?.kind === "effort" || target?.kind === "new" ? target.name : target?.kind === "one-off" ? "One-offs" : "No clear signal";
     const strength = group?.confidence ? STRENGTH[group.confidence] : null;
     const confirm = strength === "weak" && (target?.kind === "effort" || target?.kind === "one-off");
-    const button: UncGroup["button"] = { kind: target?.kind === "effort" ? "assign" : target?.kind ?? "pick",
+    const button: SuggestGroup["button"] = { kind: target?.kind === "effort" ? "assign" : target?.kind ?? "pick",
       label: `${acceptLabel(target, count)}${confirm || target?.kind === "new" ? "…" : ""}`, count, confirm };
-    return { key, title, target, color: target?.kind === "effort" ? effortColor(target.effortId) : target?.kind === "one-off" ? ONE_OFF_COLOR : "#d3a35a",
-      reason: (group?.reason ?? "").replace(/^No clear signal\.\s*/u, ""), strength, signals: group?.signals ?? [], button, lines, accepted: done ?? null };
-  }).filter((group) => group.lines.length || group.accepted);
-  const collapsed = new Set(groups.filter((group) => group.accepted).map((group) => group.key));
-  const open = (cards: readonly DeckCard[]) => cards.reduce((sum, card) => sum + card.stats.open, 0);
-  const efforts = open([...view.active, ...view.held].filter((card) => !card.oneOff)) + view.done.reduce((sum, item) => sum + item.open, 0);
-  const oneOffs = open(view.active.filter((card) => card.oneOff));
-  const toSort = view.unclassified.rows.length;
-  const total = efforts + oneOffs + toSort;
-  return { coverage: { efforts, oneOffs, toSort, total, pct: total ? Math.round(efforts / total * 100) : 100 }, groups,
-    changed: shown.filter((line) => line.dot !== null && !(collapsed.has(line.section) && line.ghost)).length };
-}
-/** What Mark seen keeps for the Unclassified deck: each row in its suggestion group now, in the classifier's group order. */
-export function uncSnapshot(view: DeckView): SettledRow[] {
-  const keys = view.unclassified.groups.map((group) => group.key);
-  const groupOf = new Map(view.unclassified.groups.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group.key] as const)));
-  return view.unclassified.rows.map((row) => settledOf(row, groupOf.get(row.prUrl) ?? "none"))
-    .sort((a, b) => (keys.indexOf(a.section) + 1 || Infinity) - (keys.indexOf(b.section) + 1 || Infinity));
+    return { key, title, target, color: target?.kind === "effort" ? effortColor(target.effortId) : target?.kind === "one-off" ? ONE_OFF_COLOR : SERVICE_COLOR,
+      reason: (group?.reason ?? "").replace(/^No clear signal\.\s*/u, ""), strength, signals: group?.signals ?? [], button, lines, accepted: done };
+  };
+  const groups = card.suggestions.map((group) => {
+    const key = keyOf(group.key);
+    const taken = accepted.get(key);
+    const lines = shown.filter((line) => !line.ghost && line.row && group.prs.some((pr) => pr.prUrl === line.prUrl))
+      .map((line) => ({ ...line, signals: group.prs.find((pr) => pr.prUrl === line.prUrl)!.signals.map((signal) => signal.text) }));
+    // It collapses only while nothing here is outside what you accepted, so the rest of a partial accept, or a PR that arrives, shows.
+    return make(key, group, lines, taken && lines.every((line) => line.dim || taken.prUrls.includes(line.prUrl)) ? taken : null);
+  });
+  for (const [key, taken] of accepted) if (key.startsWith(keyOf("")) && !groups.some((group) => group.key === key))
+    groups.splice(Math.min(taken.index ?? groups.length, groups.length), 0, make(key, null, [], taken));
+  return groups.filter((group) => group.lines.length || group.accepted);
 }
 
 /** The top bar's read status: when the deck last read GitHub, and GitHub's rate limit while it holds reads. */
@@ -334,22 +333,23 @@ export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limi
   return `${limited}${view.refreshing ? "Reading now · " : ""}Read ${view.checkedAt ? `${age(Date.parse(view.checkedAt), now)} ago` : "never"}`;
 }
 
-/** One strip chip: the active pile in session order, then Unclassified. */
-export type Chip = { id: string; n: number | null; name: string; color: string; count: number; ping: boolean; unc: boolean };
-export function stripChips(order: readonly string[], cards: ReadonlyMap<string, CardScreen>, unc: { toSort: number; changed: number }, cur: string | null): Chip[] {
-  const ids = [...order.filter((id) => cards.has(id)), "unc"];
-  return ids.map((id, index) => {
-    const card = cards.get(id);
-    return card ? { id, n: index < 9 ? index + 1 : null, name: card.card.name, color: card.color, count: card.needsYou, ping: id !== cur && card.changed > 0, unc: false }
-      : { id, n: index < 9 ? index + 1 : null, name: "Unclassified", color: "#d3a35a", count: unc.toSort, ping: id !== cur && unc.changed > 0, unc: true };
+/** One strip chip: the active pile in session order, service cards after the efforts. `service`: no stored effort backs it. */
+export type Chip = { id: string; n: number | null; name: string; color: string; count: number; ping: boolean; service: boolean };
+export function stripChips(order: readonly string[], cards: ReadonlyMap<string, CardScreen>, cur: string | null): Chip[] {
+  return order.filter((id) => cards.has(id)).map((id, index) => {
+    const card = cards.get(id)!;
+    return { id, n: index < 9 ? index + 1 : null, name: card.card.name, color: card.color, count: card.needsYou, ping: id !== cur && card.changed > 0,
+      service: card.card.kind !== "effort" };
   });
 }
 
 /** What the keys can act on: the view, the card or deck shown, the focused row, and the selection. */
 export type KeyContext = {
   view: "deck" | "prs";
-  /** The card shown, or "unc", on the deck. */
-  cur: CardScreen | "unc" | null;
+  /** The card shown on the deck. */
+  cur: CardScreen | null;
+  /** The first service card, which u goes to; none when nothing open is outside an effort. */
+  service?: string | null;
   focused: DeckLine | null;
   selected: readonly DeckLine[];
   seenAvailable: boolean; undo: boolean; held: number; done: number;
@@ -368,7 +368,7 @@ export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "foc
   const take = (lines: readonly DeckLine[]) => lines.filter((line) => line.needs && line.section === section);
   if (context.selected.length) return take(context.selected);
   if (context.focused && take([context.focused]).length) return [context.focused];
-  return context.cur && context.cur !== "unc" ? take(context.cur.sections.flatMap((item) => item.lines)) : [];
+  return context.cur ? take(context.cur.sections.flatMap((item) => item.lines)) : [];
 }
 
 const NO_CARD = "open an effort card";
@@ -378,20 +378,22 @@ const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are wai
 export function availability(context: KeyContext): Availability {
   const { focused, selected } = context;
   const deck = context.view === "deck";
-  const card = deck && context.cur !== "unc" ? context.cur : null;
+  const card = deck ? context.cur : null;
   const live = !!card && card.card.pile === "active";
-  const unc = deck && context.cur === "unc";
-  const sorting = unc && (selected.length ? selected.some((line) => !line.dim) : !!focused && !focused.dim);
+  const service = !!card && card.card.kind === "service";
+  const sorting = service && (selected.length ? selected.some((line) => !line.dim) : !!focused?.row && !focused.dim);
   const prs = context.prs;
   const out = {} as Availability;
   const set = (id: DeckActionId, on: boolean, why = "") => { out[id] = { on, why: on ? "" : why }; };
-  set("next", deck, "Efforts only"); set("prev", deck, "Efforts only"); set("jump", deck, "Efforts only"); set("unclassified", deck, "Efforts only");
+  set("next", deck, "Efforts only"); set("prev", deck, "Efforts only"); set("jump", deck, "Efforts only");
+  set("services", deck && !!context.service, deck ? "every PR is in an effort" : "Efforts only");
   set("view", true); set("seen", deck && context.seenAvailable, deck ? "nothing changed here" : "Efforts only");
   set("hold-pile", deck && context.held > 0, deck ? "no effort is on hold" : "Efforts only");
   set("done-pile", deck && context.done > 0, deck ? "no effort is done" : "Efforts only");
   set("advance", live && card!.advance.length > 0, card ? "nothing safe to run" : deck ? NO_CARD : "Efforts only");
-  set("hold", live && !card!.card.oneOff, card ? (card.card.oneOff ? "One-offs stays active" : "it's on hold") : deck ? NO_CARD : "Efforts only");
-  set("complete", live && !card!.card.oneOff, card ? (card.card.oneOff ? "One-offs stays active" : "it's on hold") : deck ? NO_CARD : "Efforts only");
+  const stays = card?.card.oneOff ? "One-offs stays active" : service ? "a service card stays active" : "it's on hold";
+  set("hold", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
+  set("complete", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
@@ -408,10 +410,10 @@ export function availability(context: KeyContext): Availability {
   set("clear", selected.length > 0, "nothing selected");
   set("open-thread", deck ? !!focused?.row?.thread : !!prs?.thread, row ? "the row has no thread" : "focus a row first");
   set("open-pr", row, "focus a row first");
-  set("accept", sorting, "focus an Unclassified row");
-  set("move", sorting, unc ? "focus or select a row" : "only Unclassified rows move from here");
-  set("one-off", sorting, "focus or select an Unclassified row");
-  set("new-effort", unc && selected.length > 0, "select Unclassified rows first");
+  set("accept", sorting, service ? "focus a row first" : "only a service card's rows move from here");
+  set("move", sorting, service ? "focus or select a row" : "only a service card's rows move from here");
+  set("one-off", sorting, service ? "focus or select a row" : "only a service card's rows move from here");
+  set("new-effort", service && selected.length > 0, service ? "select rows first" : "only a service card's rows move from here");
   set("rule", deck, "Efforts only");
   set("seed", deck, "Efforts only");
   set("palette", true); set("help", true);
@@ -427,9 +429,8 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   if (context.view === "prs") return pick(["row-next", "rows"], moveHint, ["open-thread", "open thread"], ["view", "Efforts"]);
   if (context.selected.length) return [["x", "toggle"], ...pick(["advance", "advance"], ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
-  if (focused && context.cur === "unc") return pick(["row-next", "rows"], ["select", "select"], ["accept", "accept this group"], ["move", "move…"], ["expand", "details"]);
+  if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], moveHint, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
   if (focused) return pick(["row-next", "rows"], moveHint, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
-  if (context.cur === "unc") return pick(["next", "flip"], ["row-next", "rows, then p accepts a group"], ["undo", "undo"]);
   return pick(["next", "flip"], ["row-next", "rows"], ["advance", "advance"], ["seen", "mark seen"], ["merge", "merge"]);
 }
 

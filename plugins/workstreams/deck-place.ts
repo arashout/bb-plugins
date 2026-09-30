@@ -7,11 +7,12 @@
 //   dot, a row that left stays as a ghost, and a new row joins the end of
 //   its section. Only Mark seen, for that view alone, settles them.
 // - The card order is set once per session: new, resumed, and reopened
-//   efforts join the end, so number keys never shift.
+//   efforts join the end of the efforts, before the service cards, so an
+//   effort's number key never shifts.
 // - Scroll anchors hold a row at its pixel through reads, resizes, and flips,
 //   with a spacer above the view when that would need a negative scroll.
 // - Focus falls back through one chain and never lands on the page body.
-import { ACTED_MS } from "./deck-shared";
+import { ACTED_MS, cardTier } from "./deck-shared";
 
 /** A row as you last marked it seen. */
 export type SettledRow = { prUrl: string; ref: string; title: string; section: string; status: string };
@@ -54,11 +55,14 @@ export function settleRows<T extends { prUrl: string; section: string; status: s
 /** What Mark seen keeps: every current row as it is now. */
 export const snapshotOf = (rows: readonly SettledRow[]): SettledRow[] => rows.map(({ prUrl, ref, title, section, status }) => ({ prUrl, ref, title, section, status }));
 
-/** The session's card order: the ones still here where they were, then new ones at the end, in the order given. */
+/**
+ * The session's card order: the ones still here where they were, then new ones, in the order given, each at the end of its tier: efforts,
+ * then service cards, then Loose threads.
+ */
 export function keepOrder(previous: readonly string[], ids: readonly string[]): string[] {
   const here = new Set(ids);
   const kept = previous.filter((id) => here.has(id));
-  return [...kept, ...ids.filter((id) => !kept.includes(id))];
+  return [...kept, ...ids.filter((id) => !kept.includes(id))].sort((a, b) => cardTier(a) - cardTier(b));
 }
 
 /**

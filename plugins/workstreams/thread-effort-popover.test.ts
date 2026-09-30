@@ -41,11 +41,11 @@ describe("the thread's effort chip", () => {
     expect(html).toMatch(/data-effort-open[^>]*aria-label="Change the thread&#x27;s effort"/u);
   });
 
-  it("names a service fallback with a hollow dot, and a thread with no effort, neither with a count: a service's PRs are to sort", () => {
-    const service = bar({ chip: { kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 0, card: "unc" } });
+  it("names a service fallback with a hollow dot and its Needs you, which opens its card, and a thread with no effort without a count", () => {
+    const service = bar({ chip: { kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 2, card: "service:inkwell/folio" } });
     expect(service).toMatch(/border-dashed/u);
-    expect(text(service)).toBe("folio · service ⌄");
-    expect(service).toContain("Open its PRs to sort");
+    expect(text(service)).toBe("folio · service 2 ⌄");
+    expect(service).toContain("folio · service, 2 need you. Open its card");
     expect(text(bar({ chip: { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null } }))).toBe("No effort ⌄");
   });
 

@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, paletteItems, stripChips, uncScreen, type KeyContext, type Tone } from "./deck-view-model.js";
+import { availability, cardScreen, hintKeys, paletteItems, stripChips, type KeyContext, type Tone } from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, HoldBody, Kbd, Keys, PaletteBody, type DeckPaneProps } from "./deck-screen.js";
 import { PickerBody } from "./thread-effort-popover.js";
 
@@ -82,13 +82,12 @@ const TONES: Tone[] = ["green", "violet", "blue", "amber", "red", "gray"];
 function pane(cur: string, patch: Partial<DeckPaneProps> = {}, selected: string[] = []) {
   const view = inkwellDeck();
   const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-  const unc = uncScreen(view, none, new Map(), { now: NOW });
   const card = cards.get(cur) ?? null;
-  const lines = (card ? card.sections.flatMap((section) => section.lines) : unc.groups.flatMap((group) => group.lines)).filter((line) => selected.includes(line.prUrl));
-  const context: KeyContext = { view: "deck", cur: card ?? "unc", focused: null, selected: lines, seenAvailable: true, undo: true, held: 1, done: 1 };
+  const lines = (card?.sections.flatMap((section) => section.lines) ?? []).filter((line) => selected.includes(line.prUrl));
+  const context: KeyContext = { view: "deck", cur: card, service: null, focused: null, selected: lines, seenAvailable: true, undo: true, held: 1, done: 1 };
   const on = availability(context);
   return renderToStaticMarkup(createElement(DeckPane, {
-    chips: stripChips(view.active.map((item) => item.id), cards, { toSort: unc.coverage.toSort, changed: unc.changed }, cur), cur, card, unc: card ? null : unc,
+    chips: stripChips(view.active.map((item) => item.id), cards, cur), cur, card,
     rules: [], held: [], done: [], read: { text: "Read 25s ago", error: null }, seen: { changed: 2, available: true, note: null },
     state: { selected: new Set(selected), expanded: new Set<string>(), focus: null }, tiles: new Set<string>(), open: new Set<string>(), pile: null, stuck: false,
     on, hints: hintKeys(context, on), flash: null, batch: { kinds: [] }, run: noop, onPalette: noop, onHelp: noop, onUndo: noop, ...patch }));
@@ -112,7 +111,7 @@ function everyBadge(): { where: string; badge: Badge }[] {
     ["rows' details", pane(SHELF, { state: { selected: new Set(), expanded: new Set([url("folio", 340), url("folio", 330)]), focus: null } })],
     ["the batch bar", pane(ONE_OFFS, { batch: { kinds: TONES.map((tone, index) => ({ id: (["merge", "confirm", "nudge", "request", "ready", "undo"] as const)[index]!,
       count: 1, tone })) } }, [url("catalog", 96)])],
-    ["Unclassified and its batch bar", pane("unc", {}, [url("folio", 305)])],
+    ["a service card, its suggestions, and its batch bar", pane("service:inkwell/folio", {}, [url("folio", 305)])],
     ["the hint bar's Undo", pane(SHELF, { flash: { text: "Nudged 1", undo: true } })],
     ["the confirm", renderToStaticMarkup(createElement(ConfirmBody, { plan, busy: false, error: null, reviewer: "", dirty: false, onReviewer: noop, onReplan: noop,
       onConfirm: noop, onCancel: noop }))],

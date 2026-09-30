@@ -83,7 +83,7 @@ export const deckBatchContract = {
 export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
   pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers };
 
-const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done.", unclassified: "Sort it into an effort first." };
+const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
   blocked: "It waits on something else.", confirm: "Its next move is confirming comments.", nudge: "Its next move is a nudge.",
   request: "Its next move is a review request.", ready: "Its next move is Mark ready." };
@@ -131,7 +131,7 @@ export type DeckBatchDeps = {
   now(): number;
   /** Run one item through the inventory action's guards, which read the PR again first. */
   run(item: BatchItem): Promise<ActionResult>;
-  /** Each PR's pile now, from one read: where its effort is, or unclassified once no effort owns it. */
+  /** Each PR's pile now, from one read: where its effort is, or active on its service card once no effort owns it. */
   piles(): Promise<(prUrl: string) => DeckPile>;
   changed(): void;
 };

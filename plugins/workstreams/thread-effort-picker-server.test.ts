@@ -108,9 +108,10 @@ describe("the thread effort chip and popover's read", () => {
     expect(env.efforts.owner("prUrl", url(316))?.id).toBe(env.pickup.id);
   });
 
-  it("falls back to the repository's service effort and opens its PRs to sort, which count as to sort, never as Needs you", async () => {
+  it("falls back to the repository's service card, and opens it with its Needs you: #313, #316, and #317, which no effort has, each want a reviewer", async () => {
     const env = await setup();
-    expect((await env.picker("thr-service")).chip).toEqual({ kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 0, card: "unc" });
+    expect((await env.picker("thr-service")).chip).toEqual({ kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 3,
+      card: "service:inkwell/folio" });
   });
 
   it("suggests from a ticket in the title and from the parent thread's effort, and says No effort with nothing linked", async () => {

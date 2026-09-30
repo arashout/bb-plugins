@@ -19,13 +19,25 @@ describe("Workstreams view preference", () => {
 
   it("opens the deck on the card a thread's effort chip links to", () => {
     expect(viewFromSubPath("deck/effort-shelf-order")).toBe("deck");
-    expect([deckRoute("deck/effort-shelf-order"), deckRoute(`deck/${encodeURIComponent("effort:a b")}`), deckRoute("deck/unc")]).toEqual(["effort-shelf-order", "effort:a b", "unc"]);
+    expect([deckRoute("deck/effort-shelf-order"), deckRoute(`deck/${encodeURIComponent("effort:a b")}`)]).toEqual(["effort-shelf-order", "effort:a b"]);
     expect([deckRoute("deck"), deckRoute("roster/effort-shelf-order")]).toEqual([null, null]);
   });
 
+  // The chip links with toPluginPanel("board", { subPath: `deck/${encodeURIComponent(card)}` }). BB encodes each "/"-separated part of
+  // a sub-path again for the URL, and its router decodes each part once and then turns "%2F" back into "/" for the panel's sub-path. A
+  // service card's id has a "/" in it, so it reaches the panel split across two parts.
+  it("opens a service card from the chip's link as BB routes it", () => {
+    const routed = (subPath: string) => subPath.split("/").filter(Boolean).map(encodeURIComponent)
+      .map((part) => decodeURIComponent(part).replace(/\//gu, "%2F")).join("/").replace(/%2F/gu, "/");
+    const link = (card: string) => deckRoute(routed(`deck/${encodeURIComponent(card)}`));
+    expect(routed(`deck/${encodeURIComponent("service:inkwell/folio")}`)).toBe("deck/service%3Ainkwell/folio");
+    expect([link("service:inkwell/folio"), link("effort-shelf-order"), link("effort:a b"), link("loose")])
+      .toEqual(["service:inkwell/folio", "effort-shelf-order", "effort:a b", "loose"]);
+  });
+
   it("waits for a deck read after the link before giving up on a card, since a cached deck can predate one just made", () => {
-    const deck = { ring: ["effort-shelf-order", "unc"], held: ["effort-gift-cards"] };
-    expect([deckLinkStep("effort-shelf-order", deck, false), deckLinkStep("unc", deck, false), deckLinkStep("effort-gift-cards", deck, false)])
+    const deck = { ring: ["effort-shelf-order", "service:inkwell/folio"], held: ["effort-gift-cards"] };
+    expect([deckLinkStep("effort-shelf-order", deck, false), deckLinkStep("service:inkwell/folio", deck, false), deckLinkStep("effort-gift-cards", deck, false)])
       .toEqual(["open", "open", "hold"]);
     expect([deckLinkStep("effort-store-pickup", deck, false), deckLinkStep("effort-store-pickup", deck, true)]).toEqual(["read", "drop"]);
   });

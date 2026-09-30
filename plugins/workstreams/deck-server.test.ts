@@ -54,15 +54,28 @@ async function setup() {
 }
 
 describe("the effort deck on the server", () => {
-  it("draws each effort's card from the inventory's rows by the move each needs, and leaves the PRs no effort owns to sort", async () => {
+  it("draws each effort's card from the inventory's rows by the move each needs, and a service card for the PRs no effort owns", async () => {
     const env = await setup();
     const view = await env.deck();
-    expect(view.active.map((card) => ({ name: card.name, needsYou: card.needsYou,
+    expect(view.active.map((card) => ({ name: card.name, kind: card.kind, needsYou: card.needsYou,
       sections: card.sections.map((section) => [section.key, section.rows.map((row) => row.number)]) }))).toEqual([
-      { name: "Shelf order", needsYou: 2, sections: [["request", [402]], ["ready", [401]]] }]);
-    // #403 has a move of yours too, but a PR no effort owns is to sort before it counts.
-    expect(view.unclassified.rows.map((row) => [row.number, row.section])).toEqual([[403, "request"]]);
-    expect(view.counts).toEqual({ needsYou: 2, toSort: 1, held: 0, done: 0 });
+      { name: "Shelf order", kind: "effort", needsYou: 2, sections: [["request", [402]], ["ready", [401]]] },
+      // #403 has no effort, so it's on folio's service card, and its move is yours like any other.
+      { name: "folio · service", kind: "service", needsYou: 1, sections: [["request", [403]]] }]);
+    expect(view.counts).toEqual({ needsYou: 3, held: 0, done: 0 });
+  });
+
+  it("plans a batch on a service card as on an effort's, from its own rows only, and starts it: a service card is always active", async () => {
+    const env = await setup();
+    const service = "service:inkwell/folio";
+    const plan = await env.rpc("deck_batch_plan", { kind: "request", effortId: service, reviewers: ["mira-l"] }) as { ok: true; batchId: string;
+      items: { ref: string; what: string }[]; skipped: unknown[] };
+    expect(plan).toMatchObject({ ok: true, items: [{ ref: "folio #403", what: "Request @mira-l" }], skipped: [] });
+    expect(await env.rpc("deck_batch_start", { batchId: plan.batchId })).toMatchObject({ ok: true });
+    expect(await env.rpc("deck_batch_undo", { batchId: plan.batchId })).toEqual({ ok: true });
+    // Shelf order's #402 isn't on the service card, so a selection there leaves it out, and says why.
+    expect(await env.rpc("deck_batch_plan", { kind: "request", effortId: service, prUrls: [url(402)], reviewers: ["mira-l"] }))
+      .toMatchObject({ ok: true, batchId: null, items: [], skipped: [{ ref: "folio #402", reason: "Not an open PR on this card." }] });
   });
 
   it("counts a merge a read saw on the card of the effort whose ticket it carries, after the PR leaves the inventory", async () => {
@@ -83,8 +96,9 @@ describe("the effort deck on the server", () => {
     const moved = env.signals();
     expect(await env.rpc("effort_hold", { effortKey: env.effort.id, reason: "Design review" })).toMatchObject({ ok: true });
     expect(env.signals()).toBeGreaterThan(moved);
-    expect(await env.deck()).toMatchObject({ active: [], held: [{ name: "Shelf order", needsYou: 0, status: { text: "On hold: Design review" } }],
-      counts: { needsYou: 0, held: 1 } });
+    // Its PRs pause with it; #403 still counts on the service card.
+    expect(await env.deck()).toMatchObject({ active: [{ name: "folio · service" }], held: [{ name: "Shelf order", needsYou: 0, status: { text: "On hold: Design review" } }],
+      counts: { needsYou: 1, held: 1 } });
   });
 
   it("keeps an archived effort's open PRs on the deck with the done efforts, and tells the deck it was archived", async () => {
@@ -93,8 +107,8 @@ describe("the effort deck on the server", () => {
     const before = env.signals();
     expect(await env.rpc("effort_admin_archive", { effortKey: env.effort.key, archived: true, expectedScope: scopes[env.effort.key] })).toMatchObject({ ok: true });
     expect(env.signals()).toBeGreaterThan(before);
-    // #401 and #402 pause, as a done effort's PRs do, and #403 is still the one to sort.
-    expect(await env.deck()).toMatchObject({ active: [], done: [{ name: "Shelf order", archived: true, open: 2 }],
-      counts: { needsYou: 0, toSort: 1, held: 0, done: 1 } });
+    // #401 and #402 pause, as a done effort's PRs do, and #403 is still on the service card.
+    expect(await env.deck()).toMatchObject({ active: [{ name: "folio · service" }], done: [{ name: "Shelf order", archived: true, open: 2 }],
+      counts: { needsYou: 1, held: 0, done: 1 } });
   });
 });

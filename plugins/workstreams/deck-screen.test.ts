@@ -2,25 +2,24 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
-import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, paletteItems, stripChips, uncScreen, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
-import { ConfirmBody, DeckPane, HelpBody, PaletteBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { inkwellDeck, inkwellSuggestions, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { availability, cardScreen, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { ConfirmBody, DeckPane, HelpBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import type { SeedProposal } from "./linear-seed.js";
 
-const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs";
+const SHELF = INVENTORY_EFFORTS.shelf.id, ONE_OFFS = "effort-one-offs", FOLIO = "service:inkwell/folio", CATALOG = "service:inkwell/catalog";
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const noop = () => {};
 const none = { rows: {}, at: {} };
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, '"').replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 
 function pane(view: DeckView, cur: string, patch: Partial<DeckPaneProps> = {}, accepted: Accepted = new Map()) {
-  const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-  const unc = uncScreen(view, none, accepted, { now: NOW });
+  const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW, accepted })]));
   const card = cards.get(cur) ?? null;
-  const context: KeyContext = { view: "deck", cur: card ?? "unc", focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1 };
+  const context: KeyContext = { view: "deck", cur: card, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1 };
   const on = availability(context);
   return renderToStaticMarkup(createElement(DeckPane, {
-    chips: stripChips(view.active.map((item) => item.id), cards, { toSort: unc.coverage.toSort, changed: unc.changed }, cur), cur, card, unc: card ? null : unc,
+    chips: stripChips(view.active.map((item) => item.id), cards, cur), cur, card,
     rules: [{ id: "r1", text: "Branch shelf/* → Shelf order · 2 this week" }], held: [{ id: "effort-gift-cards", key: "effort-gift-cards", name: "Gift cards", note: "Waiting on the card vendor" }],
     done: [{ id: "effort-store-hours", key: "effort-store-hours", name: "Store hours", note: "0 merged" }], read: { text: "Read 25s ago", error: null },
     seen: { changed: 0, available: false, note: null }, state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set<string>(), open: new Set<string>(), pile: null, stuck: false,
@@ -38,10 +37,11 @@ const section = (html: string, key: string) => {
 };
 
 describe("the effort deck's markup", () => {
-  it("draws the strip in session order with each card's number, color dot, and Needs you, Unclassified last with what's to sort, and both piles", () => {
+  it("draws the strip in session order with each card's number, color dot, and Needs you, the service cards last and dashed, and both piles", () => {
     const html = pane(inkwellDeck(), SHELF);
     const chips = [...html.matchAll(/data-deck-chip="([^"]+)"[^>]*>(.*?)<\/button>/gu)].map((match) => text(match[2]!).trim());
-    expect(chips).toEqual(["1 Shelf order 5", "2 Store pickup 3", "3 One-offs 3", "4 Unclassified 4"]);
+    expect(chips).toEqual(["1 Shelf order 5", "2 Store pickup 3", "3 One-offs 3", "4 folio · service 2", "5 atlas · service 1", "6 catalog · service 1"]);
+    expect(html).toMatch(/data-deck-chip="service:inkwell\/folio" title="folio · service: 2 need you \(4\)" class="[^"]*border-dashed/u);
     expect(html).toMatch(/data-deck-chip="effort-shelf-order" aria-current="true"/u);
     expect(text(html)).toContain("Hold 1");
     expect(text(html)).toContain("Done 1");
@@ -112,13 +112,13 @@ describe("the effort deck's markup", () => {
     // spans the top card and is clipped at its bottom edge only, so a taller card taken away can't paint over the rows below.
     expect(html.indexOf("data-deck-rows")).toBeLessThan(html.indexOf("data-deck-sec="));
     expect(html).toMatch(/<div data-deck-ghost="true" aria-hidden="true" class="[^"]*\binset-0\b[^"]*" style="clip-path:inset\(-60px -60px 0 -60px\)"><\/div>/u);
-    // The last effort's next card is Unclassified; Unclassified's wraps to the first effort; a pile of two has one card behind.
+    // The last effort's next card is the first service card; the last service card's wraps to the first effort; a pile of two has one card behind.
     expect(html.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("effort-store-pickup");
-    expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("unc");
-    expect(pane(inkwellDeck(), "unc").match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(SHELF);
+    expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(FOLIO);
+    expect(pane(inkwellDeck(), CATALOG).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(SHELF);
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-    const two = pane(view, SHELF, { chips: stripChips([SHELF], cards, { toSort: 4, changed: 0 }, SHELF) });
+    const two = pane(view, SHELF, { chips: stripChips([SHELF, FOLIO], cards, SHELF) });
     expect(two.match(/data-deck-layer=/gu)).toHaveLength(1);
     expect(two).toMatch(/style="padding-bottom:16px"/u);
   });
@@ -136,18 +136,24 @@ describe("the effort deck's markup", () => {
     expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
   });
 
-  it("draws the Unclassified deck: coverage, rules, and each suggestion's strength and signals once before its one button, and each PR's signals", () => {
-    const html = pane(inkwellDeck(), "unc");
-    expect(text(html)).toContain("Effort coverage 59% of 17 open PRs are in a real effort");
-    expect(text(html)).toContain("10 in efforts 3 one-offs 4 to sort");
-    expect(text(html)).toContain("Branch shelf/* → Shelf order · 2 this week");
-    const group = text(section(html, `effort:${SHELF}:high`));
-    expect(group).toContain("→ Shelf order strong ticket ABC-355 · prefix ABC Put 1 in Shelf order p");
-    expect(group).toContain("folio #325 ABC-355 Remember the last shelf you browsed ticket ABC-355 prefix ABC Conflicts");
+  it("draws a service card as an effort's with a hollow dot and no Hold or Complete, and its suggestions and rules above its rows", () => {
+    const html = pane(inkwellDeck(), FOLIO);
+    expect(html).toMatch(/data-deck-card="service:inkwell\/folio"/u);
+    expect(text(html)).toContain("folio · service 2 need you Work in folio that no effort has yet.");
+    expect(button(html, "act-advance")).toEqual({ text: "Advance · 2 a", disabled: false });
+    expect(html).not.toContain("act-hold");
+    expect(html).not.toContain("act-complete");
+    // Suggestions sit above the rows, which stay in their sections by the move each needs, each naming where its suggestion points.
+    expect(html.indexOf("data-deck-suggest")).toBeLessThan(html.indexOf('data-deck-sec="request"'));
+    expect(text(html)).toContain("Suggestions Nothing moves until you press it. Seed from Linear… + Standing rule Branch shelf/* → Shelf order · 2 this week");
+    const group = text(section(html, `${FOLIO} effort:${SHELF}:high`));
+    expect(group).toContain("→ Shelf order strong ticket ABC-355 · prefix ABC folio #325 Put 1 in Shelf order p");
     expect(group.match(/ticket ABC-355 · prefix ABC/gu)).toHaveLength(1);
-    expect(text(section(html, "new:ABC-210"))).toContain("→ new Delivery windows moderate ticket ABC-210 · board group “Checkout” New effort from 2… p");
-    expect(text(section(html, "none"))).toContain("No clear signal Pick an effort for each PR. Pick per PR e");
+    expect(text(section(html, `${FOLIO} none`))).toContain("No clear signal Pick an effort for each PR. folio #305 Pick per PR e");
+    expect(text(section(html, "request"))).toContain("folio #325 ABC-355 Remember the last shelf you browsed → Shelf order suggest @mira-l");
     expect(button(html, "seed")).toEqual({ text: "Seed from Linear…", disabled: false });
+    // An effort's card has no suggestions to draw.
+    expect(pane(inkwellDeck(), SHELF)).not.toContain("data-deck-suggest");
   });
 
   // Seeding is two explicit clicks: nothing is checked when the preview opens, and a project Create would skip can't be checked: one whose PRs
@@ -176,15 +182,28 @@ describe("the effort deck's markup", () => {
       onCreate: noop, onCancel: noop })))).toContain("No Linear API key is set.");
   });
 
-  it("collapses a group to one line with Undo once you accepted all of it, and keeps drawing what a partial accept left to sort", () => {
-    const view = inkwellDeck({}, (row) => row.number === 305 || row.number === 410 ? { effort: { id: ONE_OFFS, name: "One-offs" } } : {});
-    const html = pane(view, "unc", {}, new Map([["none", { actionId: "a1", text: "1 PR → One-offs", prUrls: [url("folio", 305)] }],
-      ["new:ABC-210", { actionId: "a2", text: "1 PR → One-offs", prUrls: [url("atlas", 410)] }]]));
-    expect(text(section(html, "none"))).toContain("✓ 1 PR → One-offs Undo");
-    expect(section(html, "none")).not.toContain("data-deck-row");
-    // Only atlas #410 of Delivery windows moved: catalog #97 is still there to sort, with the group's button.
-    expect(text(section(html, "new:ABC-210"))).toContain("catalog #97 ABC-122 Merge duplicate author records");
-    expect(button(html, "group-new:ABC-210")).toEqual({ text: "New effort from 1… p", disabled: false });
+  // A rule keeps placing new PRs until you remove it, so its list can't live only on a service card: once every PR is sorted there is none.
+  it("lists each standing rule with its remove button in the rules dialog, which ⌘K opens from an effort's card", () => {
+    const card = cardScreen(inkwellDeck().active.find((item) => item.id === SHELF)!, none, { now: NOW });
+    const on = availability({ view: "deck", cur: card, focused: null, selected: [], seenAvailable: false, undo: false, held: 0, done: 0 });
+    expect(paletteItems(on, [], { held: [], done: [] }, SHELF, true).find((item) => item.key === "rule")).toMatchObject({ title: "Standing rules…", on: true });
+    const html = renderToStaticMarkup(createElement(RuleBody, { draft: { kind: "ticket-prefix", value: "", effortId: SHELF, now: true },
+      efforts: [{ id: SHELF, name: "Shelf order" }], rules: [{ id: "r1", text: "Branch shelf/* → Shelf order · 2 this week" }], matches: null, busy: false,
+      error: null, onDraft: noop, onAdd: noop, onRemove: noop, onCancel: noop }));
+    expect(html).toContain('aria-label="Remove the rule Branch shelf/* → Shelf order · 2 this week"');
+    expect(html.indexOf("data-deck-rules")).toBeLessThan(html.indexOf("Always put"));
+  });
+
+  it("collapses a group to one line with Undo once you accepted all of it here, and keeps drawing the rest", () => {
+    const [shelf, , rest] = inkwellSuggestions();
+    const view = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: [{ ...shelf!, prs: [...shelf!.prs, rest!.prs[0]!] }] } });
+    const key = `${FOLIO} ${shelf!.key}`;
+    const all = pane(view, FOLIO, {}, new Map([[key, { actionId: "a1", text: "2 PRs → Shelf order", prUrls: [url("folio", 325), url("folio", 305)] }]]));
+    expect(text(section(all, key))).toContain("✓ 2 PRs → Shelf order Undo");
+    expect(all).toContain(`data-deck-focus="undo-group-${key}"`);
+    // Only folio #325 moved: #305 is still here, with the group's button.
+    const part = pane(view, FOLIO, {}, new Map([[key, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)] }]]));
+    expect(button(part, `group-${key}`)).toEqual({ text: "Put 2 in Shelf order p", disabled: false });
   });
 
   it("sizes rows, the hint bar, and the top bar by the pane's width, never the window's, so a narrow pane on a wide screen keeps its titles", () => {
@@ -231,12 +250,11 @@ describe("the deck's dialogs", () => {
   });
 
   it("marks a weak group, and lists each PR with its signals before a weak accept moves them", () => {
-    const base = inkwellDeck();
-    const [shelf, ...rest] = base.unclassified.groups;
-    const view = inkwellDeck({ unclassified: { ...base.unclassified, groups: [{ ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area",
+    const [shelf, ...rest] = inkwellSuggestions();
+    const view = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: [{ ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area",
       signals: ["area inkwell/folio:shelves"] }, ...rest] } });
-    const group = section(pane(view, "unc"), `effort:${SHELF}:low`);
-    expect(text(group)).toContain("→ Shelf order weak area inkwell/folio:shelves Put 1 in Shelf order… p");
+    const group = section(pane(view, FOLIO), `${FOLIO} effort:${SHELF}:low`);
+    expect(text(group)).toContain("→ Shelf order weak area inkwell/folio:shelves folio #325 Put 1 in Shelf order… p");
     expect(group).toMatch(/data-deck-strength="weak" title="weak signals" class="[^"]*text-amber-700/u);
     const lines = [{ prUrl: "u1", ref: "folio #325", title: "Remember the last shelf you browsed", signals: ["area inkwell/folio:shelves"] },
       { prUrl: "u2", ref: "folio #326", title: "Show the shelf you came from", signals: [] }];
@@ -257,7 +275,7 @@ describe("the deck's dialogs", () => {
     expect(palette).toContain("Seed efforts from Linear…");
     expect(palette).toContain(`${items.filter((item) => item.on).length} of ${items.length} available here`);
     const help = text(renderToStaticMarkup(createElement(HelpBody, { items })));
-    for (const group of ["Deck", "Card", "Act", "Rows", "Unclassified", "Anywhere"]) expect(help).toContain(group);
+    for (const group of ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"]) expect(help).toContain(group);
     expect(help).toContain("Merges run only from the fresh preview, on a click or ⌘↵.");
   });
 });

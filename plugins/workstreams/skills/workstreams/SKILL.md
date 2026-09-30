@@ -456,8 +456,8 @@ instruction; their thread and scope remain unchanged.
 The effort chip above a thread's composer names the thread's effort with its
 color and Needs you count, and opens that effort's card on the deck. Without an
 explicit effort (the thread's own, the one it coordinates, or the one its
-linked PRs are in), it names the `<repo> · service` fallback of the repository
-most of its linked PRs are in, with no Needs you count: its PRs are to sort.
+linked PRs are in), it names the `<repo> · service` card of the repository
+most of its linked PRs are in, with that card's Needs you count.
 Linked PRs are the ones the thread records and the PR in its exact checkout,
 which assigning the thread takes in; a link only by branch name or worked path
 doesn't count.
@@ -789,8 +789,8 @@ v2 effort. A PR whose rule placement was undone stays where the undo left it.
 ## Effort deck
 
 The Workstreams panel opens on the deck: one effort card at a time, flipped
-with `[` and `]` or picked with `1`-`9`, with Unclassified last and On hold
-and Done piles beside the strip. Every write there opens a confirm that lists
+with `[` and `]` or picked with `1`-`9`, with the service cards after the
+efforts and On hold and Done piles beside the strip. Every write there opens a confirm that lists
 each PR, then waits 8 seconds with Undo; merges run only from the fresh merge
 preview. Press `?` for its keys or `⌘K` for every action.
 
@@ -805,16 +805,21 @@ code work a thread is doing); `blocked` waits on something else, named in
 PR in an approved stack is a merge, since the preview merges the stack in
 order.
 
-**Needs you** counts rows in the user's sections on the active pile. Held and
-done efforts pause, and PRs no effort owns are "to sort". A row the user acted
+**Needs you** counts rows in the user's sections on the active pile, service
+cards included. Held and done efforts pause. A row the user acted
 on (`acted`) stops counting while its write waits or runs, and once it lands
 until the view marks its row seen: `deck_get` takes `seen`, when the view last
 marked each PR's row seen. A refusal stays theirs, and a mark older than a day
 is history. `deck-shared.ts` holds this one rule for every view.
 
 - `active`: one card per active effort, most Needs you first, One-offs after
-  the rest. The Unclassified deck (`unclassified`: its rows and
-  `classify_get`'s suggestion groups) follows the last card.
+  the rest, then one service card per repository with open PRs that no effort
+  owns (`kind` `service`, `repo`, id `service:<owner/repo>`, named
+  `<repo> · service`), most Needs you first. Nothing stores a service card; the
+  read model draws it, so every open PR is on a card and an explicit effort
+  always wins. Its `suggestions` are `classify_get`'s groups cut to its PRs.
+  `deck_batch_plan` takes its id as the `effortId`, and it is always active.
+- `oneOffsId`: One-offs, once it exists.
 - `held`: held efforts' cards, which ask nothing. `done`: each done effort's
   name, merges, and still-open PRs, and each archived effort (`archived`)
   while it still owns open PRs, which pause as a done effort's do.

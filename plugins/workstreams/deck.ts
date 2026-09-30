@@ -1,12 +1,14 @@
-// The effort deck's read model (plan amendment A15): the active pile of effort
-// cards, the On hold and Done piles, and the Unclassified deck. Pure: the
-// server gathers the inventory's rows and what the board keeps about each
-// effort. This places every row in one section by the move it needs, words it
-// as the inventory does, counts Needs you with deck-shared.ts's one rule, and
-// sums each card from its rows, merges, Linear details, and threads.
+// The effort deck's read model (plan amendments A15 and A17.1): the active pile
+// of effort cards, the On hold and Done piles, and a service card per
+// repository for its open PRs that no effort owns, so nothing open is outside
+// a card. Pure: the server gathers the inventory's rows and what the board
+// keeps about each effort. This places every row in one section by the move
+// it needs, words it as the inventory does, counts Needs you with
+// deck-shared.ts's one rule, and sums each card from its rows, merges, Linear
+// details, and threads. Service cards live only here: nothing stores them.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
-import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, needsYou, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
+import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, needsYou, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
 import type { InventoryRow } from "./inventory-view.js";
@@ -56,6 +58,8 @@ const tally = z.array(z.object({ name: z.string(), count: z.number() }).strict()
 const personSchema = z.object({ login: z.string(), prs: z.array(z.object({ prUrl: z.string(), ref: z.string(), since: z.number().nullable() }).strict()) }).strict();
 export const deckCardSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(), goal: z.string(),
+  /** A stored effort's card, or a repository's service card, which only this read model draws; `repo` names a service card's repository. */
+  kind: z.enum(["effort", "service"]), repo: z.string().nullable(),
   /** The one effort for standalone PRs. */
   oneOff: z.boolean(),
   pile: z.enum(EFFORT_PILES), reason: z.string(), since: z.number(),
@@ -86,18 +90,21 @@ export const deckCardSchema = z.object({
   activity: z.array(z.object({ kind: z.enum(["merged", "approved", "changes", "pushed"]), prUrl: z.string(), ref: z.string(), who: z.string().nullable(),
     at: z.number() }).strict()),
   sections: z.array(z.object({ key: z.enum(DECK_SECTIONS), needsYou: z.number(), rows: z.array(deckRowSchema) }).strict()),
+  /** On a service card, the classifier's suggestions for its PRs, each group cut to the PRs on this card; empty on an effort's. */
+  suggestions: z.array(suggestionGroupSchema),
 }).strict();
 export type DeckCard = z.infer<typeof deckCardSchema>;
 export const deckViewSchema = z.object({
-  /** Active efforts, most Needs you first and One-offs after them. The Unclassified deck follows the last. */
+  /** Active efforts, most Needs you first and One-offs after them, then the service cards, most Needs you first. */
   active: z.array(deckCardSchema),
   /** Held efforts, in the order they were held. */
   held: z.array(deckCardSchema),
   /** Done efforts, newest first, and archived efforts that still own open PRs. */
   done: z.array(z.object({ id: z.string(), key: z.string(), name: z.string(), archived: z.boolean(), since: z.number(), merged: z.number(), open: z.number() })
     .strict()),
-  unclassified: z.object({ rows: z.array(deckRowSchema), groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable() }).strict(),
-  counts: z.object({ needsYou: z.number(), toSort: z.number(), held: z.number(), done: z.number() }).strict(),
+  /** One-offs, once the first one-off made it. */
+  oneOffsId: z.string().nullable(),
+  counts: z.object({ needsYou: z.number(), held: z.number(), done: z.number() }).strict(),
   checkedAt: z.string().nullable(), refreshing: z.boolean(),
   /** GitHub's rate limit holds reads until then. */
   limitedUntil: z.number().nullable(),
@@ -134,7 +141,8 @@ export type DeckInput = {
   merges: readonly { url: string; at: number; effortId: string }[];
   linear: ReadonlyMap<string, LinearDetail>;
   threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
-  unclassified: { groups: SuggestionGroup[]; oneOffsId: string | null };
+  /** The classifier's suggestions for the open PRs no effort owns, and One-offs. */
+  classify: { groups: SuggestionGroup[]; oneOffsId: string | null };
   read: { checkedAt: string | null; refreshing: boolean; limitedUntil: number | null };
   /** When you last marked each PR's row seen; see counted(). */
   seen: ReadonlyMap<string, number>;
@@ -208,7 +216,7 @@ function people(rows: readonly Placed[]): DeckCard["people"] {
   return { youWaitOn: sorted(youWaitOn), waitOnYou: sorted(waitOnYou) };
 }
 
-function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput): DeckCard {
+function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput, repo: string | null = null): DeckCard {
   const { now } = input;
   const pile = effort.pile.pile;
   const all = rows.map(({ row }) => row);
@@ -255,7 +263,8 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   ].sort((a, b) => b.at - a.at).slice(0, 12);
   const parts = [needs && `${needs} need you`, blocked.length && `${blocked.length} blocked`, flight && `${flight} in flight`].filter(Boolean);
   return {
-    id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.oneOff, pile, reason: effort.pile.reason, since: effort.pile.since,
+    id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, kind: repo === null ? "effort" : "service", repo, oneOff: effort.oneOff, pile,
+    reason: effort.pile.reason, since: effort.pile.since,
     status: pile === "held" ? { tone: "held", text: effort.pile.reason ? `On hold: ${effort.pile.reason}` : "On hold" }
       : { tone: needs ? "you" : blocked.length ? "waiting" : rows.length ? "moving" : "quiet", text: parts.join(" · ") || "No open PRs" },
     needsYou: needs,
@@ -284,33 +293,44 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
       const list = inSection(key);
       return list.length ? [{ key, needsYou: list.filter(counts).length, rows: list }] : [];
     }),
+    suggestions: repo === null ? [] : input.classify.groups.flatMap((group) => {
+      const prs = group.prs.filter((pr) => all.some((row) => row.prUrl === pr.prUrl));
+      return prs.length ? [{ ...group, prs }] : [];
+    }),
   };
 }
 
-/** Every row as the deck draws it, with the facts it came from and its card's pile. */
-export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (Placed & { pile: DeckPile })[] {
+/** A repository's service card, as the effort it stands in for: always active, and never held, completed, or given a goal to meet. */
+const serviceEffort = (repo: string): DeckEffortInput => ({ id: serviceId(repo), key: serviceId(repo), name: serviceName(repo),
+  goal: `Work in ${repo.split("/").at(-1)} that no effort has yet.`, oneOff: false, archived: false, pile: { effortId: serviceId(repo), pile: "active", reason: "", since: 0 },
+  parentThreadId: null, tickets: [], criteria: null });
+
+/** Every row as the deck draws it, with the facts it came from, its card, and its card's pile: a PR no effort owns is on its repository's service card. */
+export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (Placed & { pile: DeckPile; cardId: string })[] {
   const parents = new Map(input.rows.map((row) => [`${row.repo.toLowerCase()}#${row.number}`, row]));
   const piles = new Map(input.efforts.map((effort) => [effort.id, effort.pile.pile]));
   return input.rows.flatMap((row) => {
-    const pile = row.effort ? piles.get(row.effort.id) : "unclassified";
-    return pile ? [{ row: deckRow(row, parents, input.now), input: row, pile }] : [];
+    const pile = row.effort ? piles.get(row.effort.id) : "active";
+    return pile ? [{ row: deckRow(row, parents, input.now), input: row, pile, cardId: row.effort?.id ?? serviceId(row.repo) }] : [];
   });
 }
 
 /** The whole deck from one read. */
 export function deckView(input: DeckInput): DeckView {
   const placed = deckRows(input);
-  const of = (effortId: string | null) => placed.filter(({ input: row }) => (row.effort?.id ?? null) === effortId);
+  const of = (cardId: string) => placed.filter((item) => item.cardId === cardId);
   const cards = input.efforts.filter((effort) => effort.pile.pile !== "done").map((effort) => card(effort, of(effort.id), input));
-  const active = cards.filter((item) => item.pile === "active")
-    .sort((a, b) => Number(a.oneOff) - Number(b.oneOff) || b.needsYou - a.needsYou || a.since - b.since || a.name.localeCompare(b.name));
+  const repos = [...new Set(placed.flatMap(({ input: row }) => row.effort ? [] : [row.repo.toLowerCase()]))];
+  const services = repos.map((repo) => card(serviceEffort(repo), of(serviceId(repo)), input, repo))
+    .sort((a, b) => b.needsYou - a.needsYou || b.stats.open - a.stats.open || a.name.localeCompare(b.name));
+  const active = [...cards.filter((item) => item.pile === "active")
+    .sort((a, b) => Number(a.oneOff) - Number(b.oneOff) || b.needsYou - a.needsYou || a.since - b.since || a.name.localeCompare(b.name)), ...services];
   const held = cards.filter((item) => item.pile === "held").sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));
   const done = input.efforts.filter((effort) => effort.pile.pile === "done" && (!effort.archived || of(effort.id).length))
     .map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, archived: effort.archived, since: effort.pile.since,
       merged: input.merges.filter((merge) => merge.effortId === effort.id).length, open: of(effort.id).length }))
     .sort((a, b) => b.since - a.since || a.name.localeCompare(b.name));
-  const unsorted = of(null).map(({ row }) => row);
-  return { active, held, done, unclassified: { rows: unsorted, groups: input.unclassified.groups, oneOffsId: input.unclassified.oneOffsId },
-    counts: { needsYou: active.reduce((sum, item) => sum + item.needsYou, 0), toSort: unsorted.length, held: held.length, done: done.length },
+  return { active, held, done, oneOffsId: input.classify.oneOffsId,
+    counts: { needsYou: active.reduce((sum, item) => sum + item.needsYou, 0), held: held.length, done: done.length },
     checkedAt: input.read.checkedAt, refreshing: input.read.refreshing, limitedUntil: input.read.limitedUntil };
 }

@@ -20,10 +20,14 @@ export function rosterRoute(subPath: string): { effortId: string | null; n: numb
   return { effortId: decoded, n: n !== undefined && /^\d+$/u.test(n) ? Number(n) : null };
 }
 
-/** `deck/<card>`: the card to open, such as a thread's effort chip links to (an effort's id, or "unc"); null for any other path. */
+/**
+ * `deck/<card>`: the card to open, such as a thread's effort chip links to (an effort's id, or a service card's `service:<owner/repo>`);
+ * null for any other path. BB turns an encoded "/" back into one before the panel sees it, so the card is the rest of the path.
+ */
 export function deckRoute(subPath: string): string | null {
-  const [head, card] = subPath.split("/").filter(Boolean);
-  if (head !== "deck" || card === undefined) return null;
+  const [head, ...rest] = subPath.split("/").filter(Boolean);
+  if (head !== "deck" || !rest.length) return null;
+  const card = rest.join("/");
   try { return decodeURIComponent(card); } catch { return card; }
 }
 

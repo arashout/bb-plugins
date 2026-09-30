@@ -63,9 +63,10 @@ Workstreams starts planning and context threads with the **Planning model** sett
 The effort chip above the thread composer shows the thread's effort: its
 color dot, its name, and how many of its PRs need you. Select the chip to open
 that effort's card on the deck. A thread without an effort of its own shows the
-effort its linked PRs are in. Without one, the chip shows the service effort of
-the repository most of its PRs are in, such as `folio · service`, and opens
-those PRs on the Unclassified deck, with no count: they are to sort. The chip
+effort its linked PRs are in. Without one, the chip shows the service card of
+the repository most of its PRs are in, such as `folio · service`, with its
+count, and opens it: every open PR no effort owns is on its repository's
+service card. The chip
 counts the PRs the thread records and the PR in its own checkout. A PR that the
 thread reaches only by branch name or a path it worked in doesn't count.
 

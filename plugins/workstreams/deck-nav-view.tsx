@@ -1,8 +1,8 @@
-// The effort deck in the Workstreams panel (plan amendment A15): deck_get
-// live from the server, the one key registry, and every write through a
-// listing confirm that waits out its Undo window, or through the fresh merge
-// preview. Membership changes (accept, move, one-off, new effort, rules) and
-// pile moves are each one explicit click or key with Undo.
+// The effort deck in the Workstreams panel (plan amendments A15 and A17.1):
+// deck_get live from the server, the one key registry, and every write
+// through a listing confirm that waits out its Undo window, or through the
+// fresh merge preview. Membership changes (accept, move, one-off, new effort,
+// rules) and pile moves are each one explicit click or key with Undo.
 //
 // This is the part that talks to BB and the DOM: it keeps your place per view
 // in the session (deck-place.ts), holds rows at their pixel through reads,
@@ -16,7 +16,7 @@ import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
   type Seen, type ViewPlace } from "./deck-place";
 import { acceptLabel, acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
-  uncScreen, uncSnapshot, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type UncGroup } from "./deck-view-model";
+  type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
@@ -114,6 +114,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const [stuck, setStuck] = useState(false);
   const [activeRow, setActiveRow] = useState<string | null>(null);
   const [accepted, setAccepted] = useState<Accepted>(new Map());
+  /** PRs you moved to an effort from a service card, by the effort's name, until you mark that card seen. */
+  const [moved, setMoved] = useState<ReadonlyMap<string, string>>(new Map());
   const [dialog, setDialog] = useState<Dialogs | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -174,25 +176,25 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
 
   // ---- what the deck shows -------------------------------------------------
   const place = placeRef.current;
-  const cards = useMemo(() => new Map((view?.active ?? []).map((item) => [item.id, cardScreen(item, seen, { now, details })])), [view, seen, now, details]);
+  const cards = useMemo(() => new Map((view?.active ?? []).map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved })])),
+    [view, seen, now, details, accepted, moved]);
   const order = useMemo(() => keepOrder(place.order, view?.active.map((item) => item.id) ?? []), [view, place.order]);
-  const ring = useMemo(() => [...order, "unc"], [order]);
-  const cur = place.cur && ring.includes(place.cur) ? place.cur : ring[0]!;
-  const card = cur === "unc" ? null : cards.get(cur) ?? null;
-  const unc = useMemo(() => view && uncScreen(view, seen, accepted, { now }), [view, seen, accepted, now]);
-  const viewPlace = (key: string): ViewPlace => (place.views[key] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
+  const ring = order;
+  const cur: string | null = place.cur && ring.includes(place.cur) ? place.cur : ring[0] ?? null;
+  const card = cur ? cards.get(cur) ?? null : null;
+  const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
   const here = viewPlace(cur);
   // Focus and scroll events can fire between a flip's render and its effects; they read the card shown now.
   const curRef = useRef(cur);
   curRef.current = cur;
-  const lines: DeckLine[] = card ? card.sections.flatMap((section) => section.lines) : unc?.groups.flatMap((group) => group.lines) ?? [];
+  const lines: DeckLine[] = card ? card.sections.flatMap((section) => section.lines) : [];
   const focused = lines.find((line) => line.prUrl === activeRow) ?? null;
   const selected = lines.filter((line) => here.selected.includes(line.prUrl) && !line.dim);
-  const changedHere = card ? card.changed : unc?.changed ?? 0;
-  const settleable = card ? card.settleable : accepted.size > 0;
-  const chips = useMemo(() => stripChips(order, cards, { toSort: unc?.coverage.toSort ?? 0, changed: unc?.changed ?? 0 }, cur), [order, cards, unc, cur]);
-  const context: KeyContext = { view: "deck", cur: card ?? (view ? "unc" : null), focused, selected, seenAvailable: changedHere > 0 || settleable,
-    undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0 };
+  const changedHere = card?.changed ?? 0;
+  const settleable = card?.settleable ?? false;
+  const chips = useMemo(() => stripChips(order, cards, cur), [order, cards, cur]);
+  const context: KeyContext = { view: "deck", cur: card, service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused, selected,
+    seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0 };
   const on = availability(context);
   const persist = useCallback(() => writeStore("sessionStorage", PLACE_KEY, placeRef.current), []);
 
@@ -205,7 +207,6 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       if (!seen.rows[item.id]) missing[item.id] = cardSnapshot(item);
       if (!seen.rows[threadsKey(item.id)]) missing[threadsKey(item.id)] = threadSnapshot(item);
     }
-    if (!seen.rows.unc) missing.unc = uncSnapshot(view);
     if (Object.keys(missing).length) setSeen((current) => ({ ...current, rows: { ...current.rows, ...missing } }));
   }, [view, order, place, seen.rows, persist]);
   useEffect(() => writeStore("localStorage", SEEN_KEY, seen), [seen]);
@@ -247,7 +248,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (flipped && viewRef.current) playFlip(viewRef.current, flipped);
     // Screen readers hear the card once, after the last of a run of flips, and not at all when focus moved onto its heading or chip, which say it.
     const said = focusNamesCard(before, document.activeElement);
-    const name = card ? card.card.name : "Unclassified";
+    const name = card?.card.name ?? "";
     setAnnounce("");
     if (announceTimer.current !== null) window.clearTimeout(announceTimer.current);
     announceTimer.current = said ? null : window.setTimeout(() => setAnnounce(name), FLIP_MS);
@@ -352,7 +353,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const returnFocus = () => { pendingFocus.current = null; window.requestAnimationFrame(() => focusBack(opener.current)); };
   /** A flip lands on its card now; the card it takes away is copied first, for its motion to take away after the swap. */
   const go = (to: { step: 1 | -1 } | { id: string }) => {
-    const next = flips(ring, cur, to, performance.now(), reduced());
+    const next = cur && flips(ring, cur, to, performance.now(), reduced());
     if (!next) return;
     viewPlace(cur).scrollTop = scrollerRef.current?.scrollTop ?? 0;
     viewPlace(cur).anchor = captureAnchor();
@@ -367,8 +368,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
 
   // ---- membership: accept, move, one-off, new effort, rules ---------------
   /** `note`: what else an Accept across groups did, said with its result so the result doesn't hide it. */
-  async function classify(call: () => Promise<{ ok: true; actionId: string; effort: { name: string }; added: number } | { ok: false; error: string }>, group: string | null,
-    prUrls: readonly string[], note?: string | null) {
+  async function classify(call: () => Promise<{ ok: true; actionId: string; effort: { id: string; name: string }; added: number } | { ok: false; error: string }>,
+    group: string | null, prUrls: readonly string[], note?: string | null) {
     setBusy(true);
     let result: Awaited<ReturnType<typeof call>>;
     try { result = await call(); } catch (cause) { result = { ok: false, error: message(cause) }; }
@@ -376,10 +377,16 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (!result.ok) { if (dialog) setDialogError(result.error); else say(result.error); return false; }
     const { actionId, effort, added } = result;
     const text = `${added} PR${added === 1 ? "" : "s"} → ${effort.name}`;
-    if (group) setAccepted((current) => new Map([...current, [group, { actionId, text, prUrls }]]));
+    const index = card?.suggest.findIndex((item) => item.key === group) ?? -1;
+    if (group) setAccepted((current) => new Map([...current, [group, { actionId, text, prUrls, index: Math.max(0, index) }]]));
+    // A row you moved stays where it was, saying where it went, until you mark the card seen.
+    setMoved((current) => new Map([...current, ...prUrls.map((url) => [url, effort.name] as const)]));
     const undoIt = async () => {
       const undone = await rpc.call("classify_undo", { actionId });
-      if (undone.ok && group) setAccepted((current) => { const next = new Map(current); next.delete(group); return next; });
+      if (undone.ok) {
+        if (group) setAccepted((current) => { const next = new Map(current); next.delete(group); return next; });
+        setMoved((current) => new Map([...current].filter(([url]) => !prUrls.includes(url))));
+      }
       say(undone.ok ? "Undone." : undone.error);
       load();
     };
@@ -387,20 +394,18 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     setUndo({ label: text, live: () => !used, run: async () => { used = true; await undoIt(); } });
     closeDialog();
     say(note ? `${text} · ${note}` : text, true);
-    if (group) nextGroupFocus(group, prUrls);
+    if (group) nextSortFocus(prUrls);
     load();
     return true;
   }
-  /** After an accept, the next row left to sort takes focus where it stood: the same group's, else the next group's. A group you took all of collapses. */
-  function nextGroupFocus(group: string, moved: readonly string[]) {
-    const groups = unc?.groups ?? [];
-    const from = Math.max(0, groups.findIndex((item) => item.key === group));
-    const left = (item: UncGroup) => item.accepted ? [] : item.lines.filter((line) => !line.dim && !moved.includes(line.prUrl));
-    const next = [...groups.slice(from), ...groups.slice(0, from)].find((item) => left(item).length);
-    const row = next && left(next)[0];
+  /** After an accept, the next row on the card still to sort takes focus: the next one below the rows it moved, else the first. They stay put, dimmed. */
+  function nextSortFocus(gone: readonly string[]) {
+    const left = lines.filter((line) => line.row && !line.dim && !line.ghost && !gone.includes(line.prUrl));
+    const from = lines.findIndex((line) => gone.includes(line.prUrl));
+    const row = left.find((line) => lines.indexOf(line) > from) ?? left[0];
     const element = row ? rootRef.current?.querySelector(`[data-deck-row="${CSS.escape(row.prUrl)}"]`) : null;
     pendingAnchor.current = captureAnchor(element);
-    pendingFocus.current = row ? { row: row.prUrl, section: next!.key } : { id: "heading" };
+    pendingFocus.current = row ? { row: row.prUrl, section: row.section } : { id: "heading" };
     scrollFocus.current = true;
   }
   const assign = (effortId: string, prUrls: string[], group: string | null, note?: string | null) =>
@@ -408,7 +413,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const oneOff = (prUrls: string[], group: string | null, note?: string | null) => classify(() => rpc.call("classify_one_off", { prUrls }), group, prUrls, note);
   /** `asked`: a weak group's rows you already checked in its confirm; before that, its Accept opens the confirm. `note`: see `classify`. */
   function acceptGroup(key: string, { asked, note }: { asked?: readonly DeckLine[]; note?: string | null } = {}) {
-    const group = unc?.groups.find((item) => item.key === key);
+    const group = card?.suggest.find((item) => item.key === key);
     if (!group) return;
     const live = group.lines.filter((line) => !line.dim);
     const picked = live.filter((line) => here.selected.includes(line.prUrl));
@@ -426,7 +431,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       openDialog({ kind: "move", prUrls: chosen.map((line) => line.prUrl), refs: refs(chosen), group: null });
     }
   }
-  const scopeRows = () => selected.length ? selected : focused && !focused.dim ? [focused] : [];
+  const scopeRows = () => selected.length ? selected : focused?.row && !focused.dim ? [focused] : [];
+  /** The suggestion a row on this card is in. */
+  const groupOf = (prUrl: string) => card?.suggest.find((item) => !item.accepted && item.lines.some((line) => line.prUrl === prUrl))?.key ?? null;
 
   // ---- piles --------------------------------------------------------------
   async function movePile(move: "hold" | "complete" | "resume" | "reopen", effort: { id: string; key: string; name: string }, reason = "") {
@@ -463,7 +470,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (leaving) {
       const index = order.indexOf(effort.id);
       const nextOrder = order.filter((id) => id !== effort.id);
-      place.cur = nextOrder[Math.min(Math.max(0, index), nextOrder.length - 1)] ?? "unc";
+      place.cur = nextOrder[Math.min(Math.max(0, index), nextOrder.length - 1)] ?? null;
     } else place.cur = effort.id;
     // The card it lands on rises out of the stack; the one that left already flew to its pile.
     if (place.cur !== cur) landing.current = { direction: 1, motion: flipMotion(reduced(), null), ghost: null };
@@ -474,7 +481,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
 
   // ---- Mark seen -----------------------------------------------------------
   function markSeen() {
-    if (!view || !context.seenAvailable) return;
+    if (!view || !card || !context.seenAvailable) return;
     const root = rootRef.current;
     const focusedRow = document.activeElement?.closest?.("[data-deck-row]");
     const firstChanged = Array.from(root?.querySelectorAll("[data-deck-row][data-deck-dot]") ?? []).find(inView);
@@ -483,14 +490,16 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     const moved = lines.filter((line) => line.dot && !line.ghost && line.trail?.kind === "change").length;
     const left = lines.filter((line) => line.ghost).length;
     const stamp = Date.now();
-    const settled = card ? { [card.card.id]: cardSnapshot(card.card), [threadsKey(card.card.id)]: threadSnapshot(card.card) } : { unc: uncSnapshot(view) };
-    const marked = Object.fromEntries((card ? card.card.sections.flatMap((section) => section.rows) : view.unclassified.rows).map((row) => [row.prUrl, stamp]));
+    const settled = { [card.card.id]: cardSnapshot(card.card), [threadsKey(card.card.id)]: threadSnapshot(card.card) };
+    const marked = Object.fromEntries(card.card.sections.flatMap((section) => section.rows).map((row) => [row.prUrl, stamp]));
     setSeen((current) => ({ rows: { ...current.rows, ...settled }, at: { ...current.at, ...marked } }));
-    if (!card) setAccepted(new Map());
+    // What you moved from here settles with it: its collapsed suggestions, and the rows that stayed to say where they went.
+    const onCard = new Set(lines.map((line) => line.prUrl));
+    setAccepted((current) => new Map([...current].filter(([key]) => !key.startsWith(`${card.card.id} `))));
+    setMoved((current) => new Map([...current].filter(([url]) => !onCard.has(url))));
     // The anchor row holds its pixel; if Mark seen took it away, the next row that stays takes its place.
     const from = anchor && "row" in anchor ? before.indexOf(anchor.row) : -1;
-    const stays = (prUrl: string) => card ? card.card.sections.some((section) => section.rows.some((row) => row.prUrl === prUrl))
-      : view.unclassified.rows.some((row) => row.prUrl === prUrl);
+    const stays = (prUrl: string) => card.card.sections.some((section) => section.rows.some((row) => row.prUrl === prUrl));
     const survivor = from < 0 ? null : before.slice(from).find(stays) ?? before.slice(0, from).reverse().find(stays) ?? null;
     pendingAnchor.current = anchor && "row" in anchor ? (survivor ? { row: survivor, at: anchor.at } : null) : anchor;
     const key = focusKey(document.activeElement);
@@ -532,7 +541,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     switch (id) {
       case "next": case "prev": go({ step: id === "next" ? 1 : -1 }); return;
       case "jump": { const target = n ? ring[n - 1] : undefined; if (target) go({ id: target }); return; }
-      case "unclassified": go({ id: "unc" }); return;
+      case "services": if (context.service) go({ id: context.service }); return;
       case "view": onView("prs"); return;
       case "seen": markSeen(); return;
       case "hold-pile": setPile("hold"); return;
@@ -575,17 +584,17 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "select": if (row && !row.dim) toggleSelect(row.prUrl, false); return;
       case "select-section": {
         if (!row) return;
-        const same = lines.filter((item) => item.section === row.section && (cur === "unc" ? !item.dim : item.needs)).map((item) => item.prUrl);
+        const same = lines.filter((item) => item.section === row.section && item.needs).map((item) => item.prUrl);
         here.selected = [...new Set([...here.selected, ...same])];
-        persist(); bump(); say(`Selected ${same.length} in this ${cur === "unc" ? "group" : "section"}.`); return;
+        persist(); bump(); say(`Selected ${same.length} in this section.`); return;
       }
       case "expand": if (row) { here.expanded = toggleIn(here.expanded, row.prUrl); pendingAnchor.current = captureAnchor(); persist(); bump(); } return;
       case "clear": if (here.selected.length) { here.selected = []; persist(); bump(); } else if (row && here.expanded.includes(row.prUrl)) runAction("expand", row); return;
       case "open-thread": if (row?.row?.thread) navigate.toThread(row.row.thread.id); return;
       case "open-pr": if (row) navigate.openUrl(row.prUrl); return;
       case "accept": {
-        if (!selected.length) { if (row) acceptGroup(row.section); return; }
-        const plan = acceptPlan(unc?.groups ?? [], [...new Set(selected.map((item) => item.section))]);
+        if (!selected.length) { const key = row && groupOf(row.prUrl); if (key) acceptGroup(key); return; }
+        const plan = acceptPlan(card?.suggest ?? [], [...new Set(selected.flatMap((item) => groupOf(item.prUrl) ?? []))]);
         for (const key of plan.take) acceptGroup(key, { note: plan.left });
         if (plan.left) say(plan.left);
         return;
@@ -594,7 +603,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "one-off": { const list = scopeRows(); if (list.length) void oneOff(list.map((item) => item.prUrl), null); return; }
       case "new-effort": { const list = scopeRows(); if (list.length) openDialog({ kind: "new", prUrls: list.map((item) => item.prUrl), refs: refs(list), name: "", goal: "", group: null }); return; }
       case "rule": {
-        const first = view?.active.find((item) => !item.oneOff);
+        loadRules();
+        const first = view?.active.find((item) => !item.oneOff && item.kind === "effort");
         openDialog({ kind: "rule", draft: { kind: "ticket-prefix", value: "", effortId: first?.id ?? "", now: true }, matches: null });
         return;
       }
@@ -662,7 +672,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       text: `${RULE_WORDS[rule.kind]}${rule.kind === "stack" ? "" : ` ${rule.value}`} → ${rule.effortName ?? "its base's effort"} · ${rule.hits} this week` }))), () => undefined);
   }, [rpc]);
   const loaded = view !== null;
-  useEffect(() => { if (loaded && cur === "unc") loadRules(); }, [loaded, cur, loadRules]);
+  const sorting = card?.card.kind === "service";
+  useEffect(() => { if (loaded && sorting) loadRules(); }, [loaded, sorting, loadRules]);
   // A link opens its card once the deck has it. A deck read before the link can predate the card, so a miss reads again and waits for
   // that. Then the link leaves the route, so coming Back to the deck keeps your place.
   const linked = useRef<{ card: string; reads: number } | null>(null);
@@ -707,12 +718,13 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     return count ? [{ id, count, tone: SECTIONS[id].tone }] : [];
   });
   const complete = dialog?.kind === "complete" ? cardOf(dialog.id) : null;
-  const weakGroup = dialog?.kind === "weak" ? unc?.groups.find((item) => item.key === dialog.group) ?? null : null;
+  const weakGroup = dialog?.kind === "weak" ? card?.suggest.find((item) => item.key === dialog.group) ?? null : null;
   const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
-  const moveTargets = [...order.flatMap((id) => { const item = cards.get(id); return item ? [{ id, name: item.card.name, color: item.color, open: item.card.stats.open }] : []; })];
+  const moveTargets = [...order.flatMap((id) => { const item = cards.get(id); return item?.card.kind === "effort" ? [{ id, name: item.card.name, color: item.color,
+    open: item.card.stats.open }] : []; })];
 
   return <>
-    <DeckPane chips={chips} cur={cur} card={card} unc={card ? null : unc} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
+    <DeckPane chips={chips} cur={cur} card={card} empty={!!view && !card} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus }} tiles={new Set(here.tiles)} open={new Set(here.open)} stuck={stuck}
@@ -731,10 +743,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       {complete ? <CompleteBody screen={cards.get(complete.id) ?? cardScreen(complete, seen, { now })} busy={busy} error={dialogError}
         onComplete={() => void movePile("complete", complete)} onCancel={closeDialog} /> : null}
     </DeckDialog>
-    <DeckDialog open={dialog?.kind === "rule"} title="Add a standing rule" sub="Applies to new PRs on every read. Remove it any time; the PRs it placed stay."
+    <DeckDialog open={dialog?.kind === "rule"} title="Standing rules" sub="Each places new PRs on every read. Removing one leaves the PRs it placed."
       onClose={closeDialog} onReturn={returnFocus} onConfirmKey={() => addRule()}>
-      {dialog?.kind === "rule" ? <RuleBody draft={dialog.draft} efforts={moveTargets} matches={dialog.matches} busy={busy} error={dialogError}
-        onDraft={(draft) => setDialog({ ...dialog, draft })} onAdd={() => addRule()} onCancel={closeDialog} /> : null}
+      {dialog?.kind === "rule" ? <RuleBody draft={dialog.draft} efforts={moveTargets} rules={rules} matches={dialog.matches} busy={busy} error={dialogError}
+        onDraft={(draft) => setDialog({ ...dialog, draft })} onAdd={() => addRule()} onRemove={(id) => run({ kind: "rule-remove", id })} onCancel={closeDialog} /> : null}
     </DeckDialog>
     <DeckDialog open={dialog?.kind === "new"} title="New effort" sub="A new card joins the end of the pile. You stay where you are." onClose={closeDialog} onReturn={returnFocus}
       onConfirmKey={() => createEffort()}>

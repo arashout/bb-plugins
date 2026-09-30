@@ -28,7 +28,7 @@ function Dot({ chip }: { chip: Pick<Chip, "kind" | "effortId" | "oneOff"> }) {
 /** What the chip opens, in words, for its title and label. */
 export function chipLabel(chip: Chip): string {
   const needs = chip.needsYou ? `, ${chip.needsYou} need${chip.needsYou === 1 ? "s" : ""} you` : "";
-  return chip.card === null ? `${chip.name}. Choose an effort` : chip.kind === "service" ? `${chip.name}${needs}. Open its PRs to sort` : `${chip.name}${needs}. Open its card`;
+  return chip.card === null ? `${chip.name}. Choose an effort` : `${chip.name}${needs}. Open its card`;
 }
 
 export type ThreadEffortBarProps = {

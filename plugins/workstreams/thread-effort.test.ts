@@ -52,10 +52,10 @@ describe("a thread's effort chip", () => {
       linked: [{ repo: "inkwell/folio", effort: pickup }, { repo: "inkwell/folio", effort: shelf }, { repo: "inkwell/atlas", effort: shelf }] }).name).toBe("Shelf order");
   });
 
-  it("falls back to the service effort of its PRs' repository when no effort has them, whose PRs are to sort, never Needs you", () => {
+  it("falls back to the service card of its PRs' repository when no effort has them, whose PRs count as Needs you as an effort's do", () => {
     expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts,
       linked: [{ repo: "inkwell/Atlas", effort: null }, { repo: "inkwell/folio", effort: null }, { repo: "inkwell/atlas", effort: null }] }))
-      .toEqual({ kind: "service", effortId: null, name: "atlas · service", oneOff: false, needsYou: 0, card: "unc" });
+      .toEqual({ kind: "service", effortId: null, name: "atlas · service", oneOff: false, needsYou: 4, card: "service:inkwell/atlas" });
     // A tie goes by name, so the chip doesn't change between reads.
     expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts,
       linked: [{ repo: "inkwell/folio", effort: null }, { repo: "inkwell/atlas", effort: null }] }).name).toBe(serviceName("inkwell/atlas"));

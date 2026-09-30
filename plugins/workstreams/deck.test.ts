@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { counted, needsYou } from "./deck-shared.js";
-import { deckView, type DeckEffortInput, type DeckInput, type DeckRowInput } from "./deck.js";
+import { deckRows, deckView, type DeckEffortInput, type DeckInput, type DeckRowInput } from "./deck.js";
+import type { SuggestionGroup } from "./effort-classify.js";
 import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW } from "./inkwell-fixtures.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
@@ -24,11 +25,14 @@ function input(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Parti
     return { ...base, ...row(base) };
   }));
   return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), threads: new Map(),
-    unclassified: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false, limitedUntil: null }, seen: new Map(), ...patch };
+    classify: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false, limitedUntil: null }, seen: new Map(), ...patch };
 }
 const sections = (card: ReturnType<typeof deckView>["active"][number]) =>
   Object.fromEntries(card.sections.map((section) => [section.key, section.rows.map((row) => `${row.repo.split("/")[1]} #${row.number}`)]));
 const cardOf = (view: ReturnType<typeof deckView>, id: string) => [...view.active, ...view.held].find((card) => card.id === id)!;
+/** Every row on a service card, by where it files. */
+const serviceRows = (view: ReturnType<typeof deckView>) => Object.fromEntries(view.active.filter((card) => card.kind === "service")
+  .flatMap((card) => card.sections.flatMap((section) => section.rows.map((row) => [`${row.repo.split("/")[1]} #${row.number}`, row.section]))));
 
 describe("the effort deck", () => {
   it("files each row under the move its inventory row leads with, so the deck and the inventory never disagree about what you do next", () => {
@@ -39,18 +43,53 @@ describe("the effort deck", () => {
     expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).blocked.map(({ ref, kind, on }) => [ref, kind, on]))
       .toEqual([["quill #212", "parent", "quill #210"], ["spine #156", "parent", "spine #155"]]);
     // A PR missing a reviewer asks for one first, as its inventory row does, even while it conflicts; one asked 2 hours ago is no nudge yet.
-    expect(Object.fromEntries(view.unclassified.rows.map((row) => [`${row.repo.split("/")[1]} #${row.number}`, row.section]))).toEqual({
+    expect(serviceRows(view)).toEqual({
       "atlas #410": "request", "catalog #96": "nudge", "catalog #97": "work", "folio #301": "confirm", "folio #305": "request", "folio #318": "confirm",
       "folio #325": "request" });
   });
 
-  it("orders the active pile by Needs you with One-offs after every effort, and counts Unclassified PRs as to sort, never as Needs you", () => {
+  it("orders the active pile by Needs you with One-offs after every effort, and the service cards after them, whose moves count as Needs you too", () => {
     const loose = [url("folio", 301), url("folio", 318), url("catalog", 96), url("catalog", 97), url("atlas", 410), url("folio", 305)];
     const view = deckView(input({ efforts: [effort("pickup"), effort("shelf"), { ...effort("shelf"), ...ONE_OFFS, key: "one-offs", oneOff: true,
       pile: { effortId: ONE_OFFS.id, pile: "active", reason: "", since: 0 } }] }, (row) => loose.includes(row.prUrl) ? { effort: ONE_OFFS } : {}));
-    expect(view.active.map((card) => [card.name, card.needsYou])).toEqual([["Shelf order", 5], ["Store pickup", 3], ["One-offs", 6]]);
-    // folio #325 still has a move of yours, but a PR no effort owns is to sort first.
-    expect(view.counts).toEqual({ needsYou: 14, toSort: 1, held: 0, done: 0 });
+    expect(view.active.map((card) => [card.name, card.needsYou])).toEqual([["Shelf order", 5], ["Store pickup", 3], ["One-offs", 6], ["folio · service", 1]]);
+    // folio #325 has no effort, and its move is yours all the same: nothing open is outside a card, or outside the count.
+    expect(view.counts).toEqual({ needsYou: 15, held: 0, done: 0 });
+  });
+
+  it("puts each open PR no effort owns on its repository's service card, most Needs you first, with the classifier's suggestions cut to its PRs", () => {
+    const signal = (effortId: string | null) => [{ kind: "ticket" as const, effortId, text: "ticket ABC-210" }];
+    const pr = (repo: string, number: number) => ({ prUrl: url(repo, number), repo: `inkwell/${repo}`, number, title: `Change ${number}`, signals: signal(null) });
+    // One suggestion spans two repositories: each card shows the part of it that is on that card.
+    const groups: SuggestionGroup[] = [{ key: "new:ABC-210", target: { kind: "new", name: "Delivery windows" }, confidence: "medium", reason: "Shared ticket ABC-210",
+      signals: ["ticket ABC-210"], tickets: ["ABC-210"], prs: [pr("atlas", 410), pr("catalog", 97)] }];
+    const view = deckView(input({ classify: { groups, oneOffsId: null } }));
+    expect(view.active.map((card) => [card.name, card.kind, card.repo, card.needsYou, card.stats.open])).toEqual([
+      ["Shelf order", "effort", null, 5, 5], ["Store pickup", "effort", null, 3, 5],
+      ["folio · service", "service", "inkwell/folio", 4, 4], ["catalog · service", "service", "inkwell/catalog", 2, 2], ["atlas · service", "service", "inkwell/atlas", 1, 1]]);
+    const service = (repo: string) => view.active.find((card) => card.repo === `inkwell/${repo}`)!;
+    expect(service("folio")).toMatchObject({ id: "service:inkwell/folio", key: "service:inkwell/folio", pile: "active", oneOff: false, suggestions: [] });
+    expect(service("atlas").suggestions.map((group) => [group.key, group.prs.map((item) => item.number)])).toEqual([["new:ABC-210", [410]]]);
+    expect(service("catalog").suggestions.map((group) => [group.key, group.prs.map((item) => item.number)])).toEqual([["new:ABC-210", [97]]]);
+    // An effort's card never carries suggestions: its PRs are already where they belong.
+    expect(cardOf(view, INVENTORY_EFFORTS.shelf.id).suggestions).toEqual([]);
+    expect(view.counts.needsYou).toBe(5 + 3 + 4 + 2 + 1);
+    // A batch reads the same rows: each PR no effort owns is on its service card, which is always active.
+    expect(deckRows(input()).filter((item) => item.input.effort === null).map((item) => `${item.row.number} ${item.cardId} ${item.pile}`).sort()).toEqual([
+      "301 service:inkwell/folio active", "305 service:inkwell/folio active", "318 service:inkwell/folio active", "325 service:inkwell/folio active",
+      "410 service:inkwell/atlas active", "96 service:inkwell/catalog active", "97 service:inkwell/catalog active"]);
+  });
+
+  it("lets an explicit effort win over the service card, even for a PR in the same repository, and draws no service card a repository doesn't need", () => {
+    // folio #325 joins Shelf order; the other folio PRs no effort owns stay on folio's service card. Every catalog PR joins One-offs.
+    const view = deckView(input({ efforts: [effort("shelf"), effort("pickup"), { ...effort("shelf"), ...ONE_OFFS, key: "one-offs", oneOff: true }] },
+      (row) => row.number === 325 ? { effort: INVENTORY_EFFORTS.shelf } : row.repo === "inkwell/catalog" ? { effort: ONE_OFFS } : {}));
+    expect(sections(cardOf(view, INVENTORY_EFFORTS.shelf.id)).request).toEqual(["folio #325"]);
+    expect(Object.keys(serviceRows(view)).sort()).toEqual(["atlas #410", "folio #301", "folio #305", "folio #318"]);
+    expect(view.active.map((card) => card.name)).not.toContain("catalog · service");
+    // A held effort's PR pauses with it rather than falling back to a service card.
+    const held = deckView(input({ efforts: [effort("shelf", { pile: { effortId: INVENTORY_EFFORTS.shelf.id, pile: "held", reason: "", since: 1 } }), effort("pickup")] }));
+    expect(Object.keys(serviceRows(held))).not.toContain("folio #340");
   });
 
   it("stops counting a row you acted on while its write waits, and once it lands until you mark the view seen; a refusal stays yours", () => {
@@ -60,7 +99,7 @@ describe("the effort deck", () => {
     expect(needsYou({ ...row, acted: { kind: "nudge", state: "sending", at: 5, batchId: null } }, "active")).toBe(false);
     expect([4, 5].map((seenAt) => counted({ acted: { kind: "nudge", state: "sent", at: 5, batchId: null } }, seenAt))).toEqual([false, true]);
     expect(needsYou({ ...row, acted: { kind: "nudge", state: "refused", at: 5, batchId: null } }, "active", 0)).toBe(true);
-    expect(["held", "done", "unclassified"].map((pile) => needsYou({ ...row, acted: null }, pile as never))).toEqual([false, false, false]);
+    expect((["held", "done"] as const).map((pile) => needsYou({ ...row, acted: null }, pile))).toEqual([false, false]);
     expect(needsYou({ section: "blocked", acted: null }, "active")).toBe(false);
     const view = deckView(input({}, (entry) => entry.number === 340 ? { acted: { kind: "ready", state: "queued", at: INVENTORY_NOW, batchId: null } } : {}));
     expect(cardOf(view, INVENTORY_EFFORTS.shelf.id)).toMatchObject({ needsYou: 4, sections: [{ key: "merge", needsYou: 3 }, { key: "work", needsYou: 1 }] });
@@ -79,9 +118,10 @@ describe("the effort deck", () => {
     const view = deckView(input({ efforts: [effort("shelf", { pile: { effortId: INVENTORY_EFFORTS.shelf.id, pile: "held", reason: "Design review", since: 9 } }),
       effort("pickup")] }, (row) => row.number === 210 ? { hold: { reason: "Waiting on the counter redesign", heldAt: INVENTORY_NOW - DAY } }
       : row.number === 211 ? { decision: { n: 2, question: "Print slips per hold or per visit?", since: INVENTORY_NOW - 2 * DAY } } : {}));
-    expect(view.active.map((card) => card.name)).toEqual(["Store pickup"]);
+    expect(view.active.filter((card) => card.kind === "effort").map((card) => card.name)).toEqual(["Store pickup"]);
     expect(view.held).toMatchObject([{ name: "Shelf order", needsYou: 0, status: { tone: "held", text: "On hold: Design review" } }]);
-    expect(view.counts).toMatchObject({ needsYou: 1, held: 1 });
+    // Store pickup's one move of yours, and the seven on service cards.
+    expect(view.counts).toMatchObject({ needsYou: 1 + 7, held: 1 });
     // Oldest wait first: the stacked PRs since their push 3 days ago, then the decision, then the hold.
     expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).blocked.map(({ ref, kind, on, what, since }) => [ref, kind, on, what, since])).toEqual([
       ["quill #212", "parent", "quill #210", "Merges after quill #210", INVENTORY_NOW - 3 * DAY],
@@ -95,8 +135,8 @@ describe("the effort deck", () => {
       pr: { ...row.pr!, reviewRequestedAt: [{ reviewer: "mira-l", at: new Date(INVENTORY_NOW - 5 * 3_600_000).toISOString() }] } }
       : row.number === 318 ? { attention: [], status: "Checks pending" }
       : row.number === 330 ? { threads: { ...row.threads, executor: { id: "thr_folio_330", title: "Fix the shelf conflict", active: true } } } : {}));
-    expect(Object.fromEntries(view.unclassified.rows.filter((row) => [96, 318].includes(row.number)).map((row) => [row.number, [row.section, row.waitsOn]])))
-      .toEqual({ 96: ["flight", null], 318: ["flight", null] });
+    expect(Object.fromEntries(view.active.flatMap((card) => card.sections.flatMap((section) => section.rows)).filter((row) => [96, 318].includes(row.number))
+      .map((row) => [row.number, [row.section, row.waitsOn]]))).toEqual({ 96: ["flight", null], 318: ["flight", null] });
     // Its thread is working the conflict now; with that thread idle, the conflict is yours to hand it.
     expect(cardOf(view, INVENTORY_EFFORTS.shelf.id)).toMatchObject({ needsYou: 4, status: { text: "4 need you · 1 in flight" } });
     expect(sections(cardOf(view, INVENTORY_EFFORTS.shelf.id))).toMatchObject({ flight: ["folio #330"] });
@@ -167,15 +207,16 @@ describe("the effort deck", () => {
     const view = deckView(input({ efforts: [effort("shelf", { pile: { effortId: INVENTORY_EFFORTS.shelf.id, pile: "done", reason: "", since: 7 } }), effort("pickup")],
       merges: [{ url: url("folio", 290), at: INVENTORY_NOW - 30 * DAY, effortId: INVENTORY_EFFORTS.shelf.id }] }));
     expect(view.done).toEqual([{ id: INVENTORY_EFFORTS.shelf.id, key: "shelf", name: "Shelf order", archived: false, since: 7, merged: 1, open: 5 }]);
-    expect(view.active.map((card) => card.name)).toEqual(["Store pickup"]);
+    expect(view.active.filter((card) => card.kind === "effort").map((card) => card.name)).toEqual(["Store pickup"]);
   });
 
   it("lists an archived effort with the done ones while it still owns open PRs, so none of yours drops off the deck", () => {
     const archived = effort("pickup", { archived: true, pile: { effortId: INVENTORY_EFFORTS.pickup.id, pile: "done", reason: "", since: 9 } });
     const view = deckView(input({ efforts: [effort("shelf"), archived] }));
     expect(view.done).toEqual([{ id: INVENTORY_EFFORTS.pickup.id, key: "pickup", name: "Store pickup", archived: true, since: 9, merged: 0, open: 5 }]);
-    // Its PRs pause as a done effort's do: they are neither Needs you nor to sort.
-    expect(view.counts).toEqual({ needsYou: 5, toSort: 7, held: 0, done: 1 });
+    // Its PRs pause as a done effort's do: they don't count, and don't fall back to a service card. The seven no effort owns count there.
+    expect(view.counts).toEqual({ needsYou: 5 + 7, held: 0, done: 1 });
+    expect(Object.keys(serviceRows(view))).toHaveLength(7);
     // Once they close, it leaves the deck.
     expect(deckView(input({ efforts: [archived], rows: [] })).done).toEqual([]);
   });
