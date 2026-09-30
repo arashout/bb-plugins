@@ -29,7 +29,7 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
   nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
   request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
-  work: { title: "Work in threads", tone: "amber", action: "fix", button: "Ask threads to fix", help: "Conflicts, failing checks, and requested changes. Each is fixed in its PR's thread; o opens it. Ask threads to fix sends each its own fix, or starts a worker for one with no thread, after 8 s with Undo. Nothing merges." },
+  work: { title: "Work in threads", tone: "amber", action: "fix", button: "Ask threads to fix", help: "Conflicts, failing checks, and review feedback waiting on you. Each is fixed in its PR's thread; o opens it. Ask threads to fix sends each its own fix, or starts a worker for one with no thread, after 8 s with Undo. Nothing merges." },
   flight: { title: "In flight", tone: "gray", action: null, button: null, fold: true, help: "In review under a business day, checks running, or a thread working on it. Nothing for you yet." },
   blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR or an open decision." },
   held: { title: "Held", tone: "gray", action: "release", button: "Release…", help: "PRs you held, with why and for how long. Nothing acts on one until you release it; Release lists each one first, then waits 8 s with Undo." },

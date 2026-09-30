@@ -7,7 +7,7 @@ import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW
 import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
-import { actionCall, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+import { actionCall, askKind, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
   type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
@@ -181,7 +181,8 @@ describe("the PR inventory screen view model", () => {
       [{ status: "Checks pending" }, null, null, null],
     ];
     for (const [patch, text, owner, primary] of cases) {
-      const line = find("folio #301", withRow("folio #301", { attention: [], ...patch }));
+      // A PR with no feedback waiting on you, so only its state word speaks.
+      const line = find("folio #301", withRow("folio #301", { attention: [], yourTurn: null, ...patch }));
       expect([patch.status, line.steps.map((step) => step.text)[0] ?? null, line.steps[0]?.owner.kind ?? null, line.primary])
         .toEqual([patch.status, text, owner, primary]);
     }
@@ -358,12 +359,51 @@ describe("the PR inventory screen view model", () => {
     expect(withOutcome(refused, url, next).get(url)).toEqual(next);
   });
 
+  // Feedback the state word doesn't name is still yours, and a thread's to address, so the deck files it under Work in threads.
+  it("leads a Your turn row the state word doesn't explain with the review feedback, which its thread addresses", () => {
+    const commented = withRow("catalog #96", { attention: [], yourTurn: { kinds: ["comments"], text: "New comments from @theo-k", since: NOW - 3_600_000 } });
+    expect(find("catalog #96", commented)).toMatchObject({ steps: [{ text: "Address the review feedback", owner: { kind: "you" } }], primary: "thread",
+      yourTurn: { text: "New comments from @theo-k", age: "1h" } });
+    // A read that left it unknown asks for a read first.
+    expect(find("catalog #96", withRow("catalog #96", { status: "Status unknown" }, commented)).primary).toBe("refresh");
+    // With no feedback, it waits on its reviewers as before.
+    expect(find("catalog #96", withRow("catalog #96", { attention: [] })).steps[0]?.owner.kind).toBe("reviewers");
+  });
+
+  // Merging, or nudging someone else, leaves Your turn's feedback waiting on you, so the row leads with the move that answers it, or with the
+  // feedback itself, and the deck files it where Your turn lists it: never under Merge or Nudge reviewers while the feedback waits.
+  it("leads a Your turn row with the move that answers its feedback, or the feedback, before a merge or another reviewer's nudge", () => {
+    const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", since: NOW - 3_600_000 };
+    const merge = reason({ kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [] });
+    expect(find("folio #340", withRow("folio #340", { attention: [merge], yourTurn: comments }))).toMatchObject({ primary: "thread",
+      steps: [{ text: "Address the review feedback", age: "1h", since: NOW - 3_600_000 }, { text: "Merge" }] });
+    expect(find("catalog #96", withRow("catalog #96", { yourTurn: comments }))).toMatchObject({ primary: "thread",
+      steps: [{ text: "Address the review feedback" }, { text: "Nudge @mira-l, @theo-k", owner: { kind: "reviewers" } }] });
+    // An approval's notes are yours to confirm, even behind an overdue review; with no feedback waiting, attention keeps its own order.
+    const overdue = [reason({}), ...rowOf("folio #301").attention];
+    expect(find("folio #301", withRow("folio #301", { attention: overdue }))).toMatchObject({ primary: "confirm-handled",
+      steps: [{ text: "Confirm the approval's comments are handled" }, { text: "Nudge @mira-l" }] });
+    expect(find("folio #301", withRow("folio #301", { attention: overdue, yourTurn: null })).primary).toBe("nudge");
+  });
+
+  // Ask plans the deck's own batch, so it's offered only where that batch takes the row: never where a thread is working now, or on a
+  // held, done, or archived effort's PR, which the server refuses.
+  it("asks a Your turn row's thread for the approval's notes or its fixes, only where the deck's listing takes it", () => {
+    expect(askKind(find("folio #301"))).toBe("ask");
+    expect(askKind(find("quill #211"))).toBe("fix");
+    expect(askKind(find("folio #305"))).toBeNull();
+    const working = rowOf("quill #211");
+    expect(askKind(find("quill #211", withRow("quill #211", { threads: { ...working.threads, executor: { ...working.threads.executor!, active: true } } })))).toBeNull();
+    for (const pile of ["held", "done", "archived"] as const) expect(askKind({ ...find("quill #211"), effortPile: pile })).toBeNull();
+  });
+
   it("explains the two lists and why Nudge is conditional", () => {
     const words = new Map(INVENTORY_HOW.rows);
     expect(INVENTORY_HOW.intro).toContain("Your turn lists your PRs where a reviewer's feedback waits on you");
     expect(INVENTORY_HOW.intro).not.toContain("Reviews");
     expect(words.get("Your turn")).toContain("Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
     expect(words.has("Back to me")).toBe(false);
+    expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

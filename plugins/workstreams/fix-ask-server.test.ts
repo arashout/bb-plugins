@@ -189,6 +189,40 @@ describe("asking threads to fix an effort's code work", () => {
     expect([env.send.mock.calls.length, env.spawn.mock.calls.length]).toEqual([0, 0]);
   });
 
+  // All PRs' Ask its thread on a Your turn row: one PR, no effort named, the same listing and window, and the PR's own thread asked. A
+  // reply after the listing answers the comments, so the fresh read at send time refuses the ask rather than send stale work.
+  it("asks a Your turn PR's own thread to answer new comments, from one PR's listing, until you reply", async () => {
+    const env = await setup();
+    const hour = 3_600_000;
+    const commented = { ...env.current.get(43)!, reviewRequests: [], latestReviews: [{ login: "mira", state: "COMMENTED", submittedAt: new Date(Date.now() - hour).toISOString() }],
+      headCommittedAt: new Date(Date.now() - 2 * hour).toISOString(),
+      reviewFeedback: { openThreads: 0, comment: { login: "mira", at: new Date(Date.now() - hour).toISOString() }, repliedAt: null } };
+    env.current.set(43, commented);
+    env.add("thr-43", { title: "Order reads" });
+    env.efforts.recordWorker(env.effort.id, "thr-43", url(43), "pr");
+    await env.refresh();
+    const row = (await env.card()).sections.flatMap((section) => section.rows).find((item) => item.number === 43)!;
+    expect(row).toMatchObject({ section: "work", yourTurn: { kinds: ["comments"], text: "New comments from @mira" }, step: { text: "Address the review feedback" } });
+    const plan = await env.rpc("deck_batch_plan", { kind: "fix", prUrls: [url(43)] }) as { ok: true; batchId: string; items: BatchItem[] };
+    expect(plan.items.map((item) => [item.what, item.fixes, item.route])).toEqual([["Ask “Order reads”: answer comments", ["comments"], { kind: "thread", id: "thr-43" }]]);
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await env.settled(plan.batchId);
+    expect((await env.batch(plan.batchId)).items.map((item) => [item.state, item.detail])).toEqual([["sent", "Asked “Order reads” to answer comments."]]);
+    const [{ threadId, input }] = env.send.mock.calls[0] as unknown as [{ threadId: string; input: { text: string }[] }];
+    expect([threadId, input[0]!.text.includes("Fix this PR so it can move toward merge: answer comments.")]).toEqual(["thr-43", true]);
+    expect(env.spawn).not.toHaveBeenCalled();
+
+    // Seen since, it's listed again; then you reply before it sends.
+    const again = await env.rpc("deck_batch_plan", { kind: "fix", prUrls: [url(43)], seen: { [url(43)]: Date.now() } }) as { ok: true; batchId: string };
+    await env.rpc("deck_batch_start", { batchId: again.batchId });
+    env.current.set(43, { ...commented, reviewFeedback: { ...commented.reviewFeedback, repliedAt: new Date(Date.now()).toISOString() } });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await env.settled(again.batchId);
+    expect((await env.batch(again.batchId)).items.map((item) => [item.state, item.detail])).toEqual([["refused", "It no longer needs to answer comments; nothing was sent."]]);
+    expect(env.send).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves a PR that isn't code work out, saying why, and never plans a merge", async () => {
     const env = await setup();
     const plan = await env.plan([url(43), url(42)]);

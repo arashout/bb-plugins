@@ -695,7 +695,11 @@ board's words (its roster's when a v2 roster manages it), the PR of yours it is
 stacked on (`stackedOn`, whose row it files under), and each attention
 reason with its next step, owner, and age. It also gives when GitHub last
 answered for the PR, its last failed read and why, any hold, and the thread the
-work started in and the one working on it. The header counts PRs forgotten in
+work started in and the one working on it. On your own PRs, `yourTurn` names
+the reviewer feedback waiting on you (`changes`, `approval`, `threads`, or
+`comments` since your last push or reply), which All PRs lists as Your turn
+unless a thread is working on it or its effort is on hold; drafts and held PRs
+have none. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory

@@ -180,4 +180,17 @@ describe("asking a PR's thread to fix it", () => {
     const checks = fixThreadAsk({ fixes: ["checks"], headOid: "b".repeat(40), headBranch: null });
     expect([checks.includes(CHECKS_WORK), checks.includes(BRANCH_WORK.integrate), checks.includes(FEEDBACK_WORK.address)]).toEqual([true, false, false]);
   });
+
+  // Your turn's feedback is a thread's to address too: comments since your last push and reply, and threads others opened on a PR only
+  // commented on, whose poll count the board doesn't keep.
+  it("asks a thread to answer a reviewer's comments until you push or reply after them", () => {
+    const commented = facts({ unresolvedReviewThreads: null, headCommittedAt: "2026-09-29T09:00:00Z",
+      reviewFeedback: { openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T10:00:00Z" }, repliedAt: null } });
+    expect(fixesFor(commented)).toEqual(["threads", "comments"]);
+    expect(fixesFor({ ...commented, headCommittedAt: "2026-09-29T11:00:00Z" })).toEqual(["threads"]);
+    expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, openThreads: 0, repliedAt: "2026-09-29T11:00:00Z" } })).toEqual([]);
+    const text = fixThreadAsk({ fixes: ["comments"], headOid: "b".repeat(40), headBranch: "abc-96-series" });
+    expect(text).toContain("Fix this PR so it can move toward merge: answer comments.");
+    expect(text).toContain(`1. ${FEEDBACK_WORK.address}`);
+  });
 });

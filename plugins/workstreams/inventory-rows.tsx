@@ -1,4 +1,4 @@
-import type { InventoryLine, LineAction } from "./inventory-view-model";
+import { askKind, type InventoryLine, type LineAction } from "./inventory-view-model";
 import { cn } from "./lib/utils";
 
 export type SimpleGroup = { key: string; label: string; effortId: string | null; lines: InventoryLine[] };
@@ -10,6 +10,8 @@ export type SimpleRowsProps = {
   onOpenThread(id: string): void;
   onOpenRoster(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void;
+  /** Open the deck's listing confirm asking the PR's thread to address its feedback; nothing sends before you confirm it. */
+  onAsk(line: InventoryLine): void;
 };
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500";
 
@@ -25,6 +27,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const thread = line.actions.find((action) => action.id === "thread" && action.enabled)?.threadId;
           const next = line.steps[0];
           const turn = props.kind === "turn" ? line.yourTurn : null;
+          const ask = turn ? askKind(line) : null;
           const info = turn ? `${turn.text}${turn.age ? ` · ${turn.age}` : ""}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} tabIndex={-1}
             className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", FOCUS)}>
@@ -40,6 +43,10 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
               {line.last ? <p role="status" className={cn("text-[11px]", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
             </div>
             {turn && thread ? <button type="button" onClick={() => props.onOpenThread(thread)} className={cn("shrink-0 rounded-sm text-[11px] text-muted-foreground hover:underline", FOCUS)}>Open thread</button> : null}
+            {ask ? <button type="button" data-inventory-action="ask" onClick={() => props.onAsk(line)}
+              title={ask === "ask" ? "Ask its thread to address the approval's notes. You confirm the listing first, then Undo for 8 s."
+                : "Ask its thread to address it. You confirm the listing first, then Undo for 8 s."}
+              className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06]", FOCUS)}>Ask its thread</button> : null}
             {nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
               title={nudge.title} className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", FOCUS)}>Nudge</button> : null}
           </li>;

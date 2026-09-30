@@ -23,6 +23,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
     ["Your turn", "Changes requested, approval comments, open threads, or new comments since your last push or reply. Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out. Open thread goes to its thread."],
+    ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
@@ -35,7 +36,8 @@ export const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\/[A-Za-z0-9][A-Za-z0
 export type ActionId = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "revoke" | "merge" | "refresh" | "thread";
 /** Who acts next: you, the reviewers a step names, or the PR this one is stacked on. */
 export type Owner = { kind: "you" | "reviewers" | "parent"; label: string };
-export type Step = { text: string; owner: Owner; age: string | null; ageTitle: string | null };
+/** `since`: when what it answers began, in epoch ms, as `age` words it; null when nothing dates it. */
+export type Step = { text: string; owner: Owner; age: string | null; ageTitle: string | null; since: number | null };
 export type LineAction = {
   id: ActionId; label: string; enabled: boolean;
   /** Why a disabled action can't run now. */
@@ -117,6 +119,11 @@ const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 /** A read that left the PR's state open: Refresh reads it again. */
 const UNREAD = new Set(["Status unknown", "Review history unknown"]);
 const YOU: Owner = { kind: "you", label: "you" };
+/**
+ * Attention moves that answer Your turn's feedback: confirming the approval's notes, asking again after a verified follow-up, and a thread's
+ * code work, whose fix takes the feedback too. Merging, or nudging someone else, leaves it waiting.
+ */
+const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handled", "rerequest", "open-thread"]);
 
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 const keyOf = (row: Pick<InventoryRow, "repo" | "number">) => `${row.repo.toLowerCase()}#${row.number}`;
@@ -139,24 +146,32 @@ function inOrder(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, 
 }
 
 /**
- * Each reason's step with its owner and age; with none, the step the state word or the stack names, so an authored row that needs you
- * never reads blank. Held and teammates' rows ask nothing.
+ * Each reason's step with its owner and age, led by the one that answers Your turn's feedback, else by that feedback; with none, the step
+ * the state word or the stack names, so an authored row that needs you never reads blank. Held and teammates' rows ask nothing.
  */
 export function nextSteps(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, now: number): { steps: Step[]; primary: ActionId | null } {
   if (row.hold !== null || !row.authored) return { steps: [], primary: null };
-  if (row.attention.length) return {
-    steps: row.attention.map((reason) => ({ text: reason.nextStep,
+  const step = (text: string, owner: Owner = YOU, since: number | null = null): Step => ({ text, owner, since,
+    age: since === null ? null : age(since, now), ageTitle: since === null ? null : `Since ${new Date(since).toLocaleString()}` });
+  // Feedback that waits on you is its thread's work, as old as the feedback.
+  const feedback = row.yourTurn && step("Address the review feedback", YOU, row.yourTurn.since);
+  if (row.attention.length) {
+    // Your turn's feedback leads, so the deck files the row where Your turn lists it: the attention move that answers it, else the feedback.
+    const answer = feedback ? row.attention.find((reason) => ANSWERS.has(reason.action)) : undefined;
+    const reasons = answer ? [answer, ...row.attention.filter((reason) => reason !== answer)] : row.attention;
+    const steps = reasons.map((reason): Step => ({ text: reason.nextStep, since: reason.since,
       owner: reason.owner === "reviewers" ? { kind: "reviewers", label: "reviewers" } : YOU,
       age: reason.since === null ? null : `${age(reason.since, now)}${reason.basis === "observed" ? "+" : ""}`,
       ageTitle: reason.since === null ? null : reason.basis === "observed"
-        ? "At least this long: dated from the first read that saw it" : `Since ${new Date(reason.since).toLocaleString()}` })),
-    primary: STEP_ACTION[row.attention[0]!.action],
-  };
-  const step = (text: string, owner: Owner = YOU): Step => ({ text, owner, age: null, ageTitle: null });
+        ? "At least this long: dated from the first read that saw it" : `Since ${new Date(reason.since).toLocaleString()}` }));
+    return feedback && !answer ? { steps: [feedback, ...steps], primary: "thread" } : { steps, primary: STEP_ACTION[reasons[0]!.action] };
+  }
   if (CODE_WORK[row.status]) return { steps: [step(CODE_WORK[row.status]!)], primary: "thread" };
   if (/^\d+ open threads?$/u.test(row.status)) return { steps: [step("Resolve the open review threads")], primary: "thread" };
   if (APPROVAL_NOTES[row.status]) return { steps: [step(APPROVAL_NOTES[row.status]!)], primary: null };
   if (UNREAD.has(row.status)) return { steps: [step("Refresh to read it again")], primary: "refresh" };
+  // Feedback the state word doesn't name, such as comments since your last push, is its thread's work too.
+  if (feedback) return { steps: [feedback], primary: "thread" };
   if (row.stackedOn !== null && row.status === `Behind #${row.stackedOn}`) {
     return inOrder(row, parents) ? { steps: [step(`Merge after #${row.stackedOn}`)], primary: "merge" }
       : { steps: [step(`Waits on #${row.stackedOn}`, { kind: "parent", label: `#${row.stackedOn}` })], primary: null };
@@ -274,6 +289,16 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     yourTurn: row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) },
     depth: 0, branch: null,
   };
+}
+
+/**
+ * How a Your turn row asks its PR's thread to address the feedback, through the deck's listing confirm: the approval's notes while they're
+ * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Null where the deck would refuse it.
+ */
+export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile">): "ask" | "fix" | null {
+  if (!line.yourTurn || line.effortPile) return null;
+  if (line.primary === "confirm-handled") return "ask";
+  return line.primary === "thread" && !line.threads.some((thread) => thread.role === "working" && thread.active) ? "fix" : null;
 }
 
 /**

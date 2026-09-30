@@ -11,6 +11,7 @@ import type { ModelRole } from "./execution.js";
 import { changesAddressed, conflicted, type GateId } from "./pr-gates.js";
 import { checksFailed } from "./pr-checks.js";
 import { BRANCH_WORK, CHECKS_WORK, DRAFT_RULE, FEEDBACK_WORK, PUSH_RULES } from "./preparation-guidance.js";
+import { commentsSince } from "./your-turn.js";
 
 /** Conditions besides PR gates: instruction scope, writers, criteria, and the attempt a recipe follows. */
 export const ATTEMPT_CONDITIONS = ["scoped", "effort-active", "writer-free", "criteria-satisfied", "head-matches-report", "envelope-valid", "single-writer", "attempt-completed", "same-thread-idle"] as const;
@@ -235,19 +236,24 @@ export function approvalFeedbackAsk(input: { headOid: string; notes: number }): 
 
 /**
  * The code work a PR in the deck's Work in threads section can ask its thread for, each one worker recipe's job: integrate_base for
- * conflicts or a branch behind its base, fix_failing_checks for red CI, and address_review_feedback for requested changes or open review
- * threads.
+ * conflicts or a branch behind its base, fix_failing_checks for red CI, and address_review_feedback for requested changes, open review
+ * threads, or a reviewer's comments since your last push and reply.
  */
-export const FIX_KINDS = ["conflicts", "behind", "checks", "changes", "threads"] as const;
+export const FIX_KINDS = ["conflicts", "behind", "checks", "changes", "threads", "comments"] as const;
 export type FixKind = (typeof FIX_KINDS)[number];
 /** Each fix in a few words, as a listing names it. */
 export const FIX_WORDS: Record<FixKind, string> = { conflicts: "resolve conflicts", behind: "update the branch", checks: "fix CI", changes: "address changes",
-  threads: "resolve threads" };
+  threads: "resolve threads", comments: "answer comments" };
 
-/** What a thread can fix on this PR now, from GitHub's facts. A branch behind its base needs no update of its own once it conflicts. */
-export function fixesFor(pr: Pick<Pr, "checkConclusions" | "mergeable" | "mergeStateStatus" | "reviewDecision" | "reviewFollowupPosted" | "unresolvedReviewThreads">): FixKind[] {
+/**
+ * What a thread can fix on this PR now, from GitHub's facts. A branch behind its base needs no update of its own once it conflicts. Open
+ * threads count from either read: the poll's count, or Your turn's count of threads others started on a PR with only comments.
+ */
+export function fixesFor(pr: Pick<Pr, "checkConclusions" | "mergeable" | "mergeStateStatus" | "reviewDecision" | "reviewFollowupPosted" | "unresolvedReviewThreads" |
+  "headCommittedAt" | "reviewFeedback">): FixKind[] {
   const has: Record<FixKind, boolean> = { conflicts: conflicted(pr), behind: !conflicted(pr) && pr.mergeStateStatus === "BEHIND", checks: checksFailed(pr.checkConclusions),
-    changes: !changesAddressed(pr), threads: (pr.unresolvedReviewThreads ?? 0) > 0 };
+    changes: !changesAddressed(pr), threads: Math.max(pr.unresolvedReviewThreads ?? 0, pr.reviewFeedback?.openThreads ?? 0) > 0,
+    comments: commentsSince(pr) !== null };
   return FIX_KINDS.filter((kind) => has[kind]);
 }
 
@@ -257,7 +263,7 @@ export function fixesFor(pr: Pick<Pr, "checkConclusions" | "mergeable" | "mergeS
  */
 export function fixThreadAsk(input: { fixes: readonly FixKind[]; headOid: string; headBranch: string | null }): string {
   const has = (...kinds: FixKind[]) => kinds.some((kind) => input.fixes.includes(kind));
-  const steps = [has("conflicts", "behind") ? BRANCH_WORK.integrate : null, has("checks") ? CHECKS_WORK : null, has("changes", "threads") ? FEEDBACK_WORK.address : null]
+  const steps = [has("conflicts", "behind") ? BRANCH_WORK.integrate : null, has("checks") ? CHECKS_WORK : null, has("changes", "threads", "comments") ? FEEDBACK_WORK.address : null]
     .filter((step): step is string => step !== null);
   return [
     `Fix this PR so it can move toward merge: ${input.fixes.map((kind) => FIX_WORDS[kind]).join(", ")}. expectedHead: ${input.headOid}; headBranch: ${input.headBranch ?? "its head branch"}.`,

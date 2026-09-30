@@ -220,7 +220,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
   const feedback = row.pr?.approvalFeedback;
   return {
     prUrl: row.prUrl, repo: row.repo, number: row.number, title: row.title, draft: row.draft, section, status: line.status,
-    step: first ? { text: first.text, owner: first.owner.label, since: row.attention.length ? row.attention[0]!.since : null } : null,
+    step: first ? { text: first.text, owner: first.owner.label, since: first.since } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },

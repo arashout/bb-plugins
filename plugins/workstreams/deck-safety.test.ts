@@ -59,11 +59,13 @@ describe("the deck's write safety", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
-    // All PRs exposes only Open thread and eligible Nudge buttons. Its keys move focus, and n, its one key that writes, opens the same
-    // listing confirm as the deck's; its Nudge button stays one click, its only direct call besides the read.
+    // All PRs exposes only Open thread, Ask its thread, and eligible Nudge buttons. Its keys move focus; n and f, its keys that write, open
+    // the same listing confirm as the deck's, as Ask its thread does. Its Nudge button stays one click, its only direct call besides the read.
     const inventory = source("inventory-screen.tsx");
     expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
-    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(1);
+    expect(inventory).toMatch(/const ask = \(line: InventoryLine\) => \{ const kind = askKind\(line\); if \(kind\) void batch\.plan\(kind, null, \[line\.prUrl\]\); \};/u);
+    expect(inventory).toMatch(/case "fix": if \(focused && fix\) ask\(focused\); return;/u);
+    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(2);
     expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge"]);
     // Review notes and merges are the deck's alone: no key or button here confirms or merges.
     expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);
@@ -73,6 +75,7 @@ describe("the deck's write safety", () => {
     expect(rows).toContain('action.id === "nudge" && action.enabled');
     expect(rows).toContain('onClick={() => props.onNudge(line, nudge)}');
     expect(rows).toContain('onClick={() => props.onOpenThread(thread)}');
+    expect(rows).toContain('onClick={() => props.onAsk(line)}');
     expect(rows).not.toMatch(/onStart|item_start/u);
   });
 });

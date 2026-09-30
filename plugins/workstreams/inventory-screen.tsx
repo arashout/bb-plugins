@@ -1,7 +1,8 @@
 // All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
-// you author or an effort names. Its only write is Nudge, one click on a row where the server says it's due. It shares the deck's key
-// registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge,
-// never a write itself.
+// you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due. A Your turn row's Ask
+// its thread, and f on it, open the deck's listing confirm, which sends only after its Undo window. It shares the deck's key registry, hint
+// bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write
+// itself.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
@@ -9,7 +10,7 @@ import type { rpcContract } from "./server";
 import { Icon } from "./components/ui/icon";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
+import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
 import type { DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
@@ -64,13 +65,13 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(view: OtherView): void; onHow(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
-  onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
+  onNudge(line: InventoryLine, action: LineAction): void; onAsk(line: InventoryLine): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
   const { turn, other } = splitInventory(props.screen);
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge };
+    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onAsk: props.onAsk };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header onView={props.onView} onHow={props.onHow} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
@@ -190,8 +191,11 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   // Nudge is due exactly where its row shows the button.
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
+  const fix = focused && askKind(focused) === "fix";
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>(due ? ["nudge"] : []) } };
+    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : []]) } };
+  /** Ask a Your turn row's thread to address its feedback: the deck's listing confirm, with the PR's own thread named, then its Undo window. */
+  const ask = (line: InventoryLine) => { const kind = askKind(line); if (kind) void batch.plan(kind, null, [line.prUrl]); };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
@@ -210,6 +214,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
       }
       // The key opens the deck's listing confirm, which waits out its Undo window; only the row's own Nudge button is one click.
       case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
+      case "fix": if (focused && fix) ask(focused); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
       case "open-thread": if (thread) navigate.toThread(thread); return;
       case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
@@ -228,7 +233,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
       onView={onView} onHow={onHow} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
-      onNudge={(line, action) => { void nudge(line, action); }}
+      onNudge={(line, action) => { void nudge(line, action); }} onAsk={ask}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
     {batch.element}
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>
