@@ -189,7 +189,14 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   feedback waits on you, by effort, with **No effort** last. **Open thread**
   goes to the PR's thread. On a PR that has a thread, **Ask its thread** lists
   what the thread gets for you to confirm, then sends it after its Undo
-  window. **Other open PRs** follows, by effort; each row shows the PR's state
+  window. Select Your turn rows (x, a click, Shift for a range, or ⇧X for all)
+  and **Address selected** (b) lists each PR's feedback for one new batch
+  thread, the default, or for each PR's own thread. The batch thread starts on
+  the code-work model after the Undo window, under the effort's parent when
+  every PR shares one. It holds each PR until it finishes, replies to each
+  reviewer's note, and never merges. Rows it holds read **Addressing · batch
+  thread** and file In flight. The deck's selection offers the same.
+  **Other open PRs** follows, by effort; each row shows the PR's state
   and next step. **Nudge** appears only where a reviewer has waited long
   enough, and the server checks again before it sends. All PRs never confirms
   review notes or merges; those run from the effort's card. Each effort's name

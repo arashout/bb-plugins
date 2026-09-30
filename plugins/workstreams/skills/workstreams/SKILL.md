@@ -699,8 +699,9 @@ work started in and the one working on it. On your own PRs, `yourTurn` names
 the reviewer feedback waiting on you (`approval` and `comments` that neither
 your reply on the PR nor your confirmation answered, whatever CI says, then
 `changes` and `threads`), which All PRs lists as Your turn unless a thread is
-working on it or its effort is on hold. Held PRs have none, and a draft has
-only its `approval` and `comments`. The header counts PRs forgotten in
+working on it, a batch thread holds it (`addressing`, with that thread's
+`threadId` and `title`), or its effort is on hold. Held PRs have none, and a
+draft has only its `approval` and `comments`. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
@@ -902,7 +903,7 @@ whose ticket it carries.
 
 Every write from the deck is a batch the user confirms, and each step is only
 on their click. `deck_batch_plan` takes a `kind` (`nudge`, `request`,
-`ready`, `release`, `ask`, `fix`, or `advance`) and an `effortId`, `prUrls`, or both. It
+`ready`, `release`, `ask`, `fix`, `address`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
 covers the Needs you rows of that kind. The deck's per-row Advance is
@@ -931,7 +932,22 @@ model beneath the same parent when it has none, else it is skipped with why.
 When it sends, it reads the PR again and asks only for the listed fixes still
 needed on the head the row showed, and only where the listing said: a PR whose
 thread appeared or went away since is refused. It never merges, and Advance
-never includes it.
+never includes it. `address` takes the selected Your turn PRs, with `mode`
+`batch` (the default) or `each`. Each item names its `feedback` and, for a
+batch, `where` it's worked; `skipped` names why a PR stays out: a hold, a held
+or done effort, a v2 roster or claim, an agent or open run on the PR or its
+checkout, no feedback waiting, or a write just sent. A batch plan returns its
+`thread`: the project, and the effort parent it starts under when every PR
+shares that effort, else none. When it sends, it reads each PR again, claims
+every PR still waiting in the run record (one `address-feedback` run per PR)
+with nothing awaited between the last check and the last claim, and starts one
+worker titled "Address feedback on N PRs" on the code-work model. The worker
+follows the `address_review_feedback` recipe per PR, replies to each note,
+never merges, and ends with one `Workstreams result v1` line per PR. Agent
+and thread starts refuse a PR or checkout a claim holds; the claims end when
+the thread finishes, and each PR's result is kept on its run. A result clears
+nothing: only a reply on the PR or your Confirm does. `each` sends Ask or Fix
+to each PR's own thread, and skips a PR with none.
 
 `deck_batch_start` confirms a plan within 10 minutes of it, while each of its
 PRs is on the active pile (a release needn't be). The batch sends 8 seconds later (`dispatchAt`)
