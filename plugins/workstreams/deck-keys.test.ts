@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTION, actionForKey, DECK_ACTIONS, KEY_GROUPS, typingTarget } from "./deck-keys.js";
+import { ACTION, actionForKey, DECK_ACTIONS, KEY_GROUPS, PICKER_ACTIONS, pickerActionForKey, typingTarget } from "./deck-keys.js";
 
 describe("the deck's key registry", () => {
   it("gives each key one meaning, so the same letter does the same thing in the deck and All PRs", () => {
@@ -51,5 +51,25 @@ describe("the deck's key registry", () => {
     expect(typingTarget({ closest: (selector: string) => selector.includes("textarea") ? {} : null })).toBe(true);
     expect(typingTarget({ closest: () => null })).toBe(false);
     expect(typingTarget(null)).toBe(false);
+  });
+});
+
+describe("the thread effort popover's keys", () => {
+  it("moves, picks, and backs out with the keys that move, open, and leave rows in the deck", () => {
+    const deckMeaning = (token: string) => DECK_ACTIONS.find((action) => action.keys.includes(token))?.id;
+    expect(PICKER_ACTIONS.map((action) => [action.id, action.keys.map(deckMeaning)])).toEqual([
+      ["pick-next", ["row-next"]], ["pick-prev", ["row-prev"]], ["pick", ["expand"]], ["pick-back", ["clear"]]]);
+    expect(["ArrowDown", "ArrowUp", "Enter", "Escape"].map((key) => pickerActionForKey({ key }))).toEqual(["pick-next", "pick-prev", "pick", "pick-back"]);
+  });
+
+  it("binds no letter or number, since you type in its field, and no modified key", () => {
+    for (const key of ["j", "k", "a", "x", "1", " ", "Tab"]) expect(pickerActionForKey({ key })).toBeNull();
+    expect(pickerActionForKey({ key: "Enter", metaKey: true })).toBeNull();
+    expect(pickerActionForKey({ key: "Enter", shiftKey: true })).toBeNull();
+  });
+
+  it("repeats only movement while a key is held, so a held ↵ picks once", () => {
+    expect(pickerActionForKey({ key: "ArrowDown", repeat: true })).toBe("pick-next");
+    expect(pickerActionForKey({ key: "Enter", repeat: true })).toBeNull();
   });
 });

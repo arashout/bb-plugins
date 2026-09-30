@@ -453,27 +453,40 @@ increase the offset to read later pages. A page accepts at most 100 records.
 Older conversations without a saved initial instruction return an empty
 instruction; their thread and scope remain unchanged.
 
-The **Effort** control above a thread's composer assigns the thread to an
-effort before it has a PR. Confirmed, unassigned PR work inherits that effort
-from exact checkout links, recorded actions, or explicit PR links. Title and
-discussion mentions do not authorize automatic assignment. Existing explicit
-ticket and PR ownership stays intact, and clearing thread intent does not
-remove inherited membership.
+The effort chip above a thread's composer names the thread's effort with its
+color and Needs you count, and opens that effort's card on the deck. Without an
+explicit effort (the thread's own, the one it coordinates, or the one its
+linked PRs are in), it names the `<repo> · service` fallback of the repository
+most of its linked PRs are in, with no Needs you count: its PRs are to sort.
+Linked PRs are the ones the thread records and the PR in its exact checkout,
+which assigning the thread takes in; a link only by branch name or worked path
+doesn't count.
 
-**Create effort** creates a named effort and assigns the thread. It does not
-start a coordinator. **Suggest efforts** uses Jev on demand to recommend
-existing efforts and an editable name drawn from thread and linked-work
-titles. The user selects and saves a destination; suggestions never assign
-work automatically. Manual creation remains available without Jev.
+The chip's popover lists efforts with suggested ones first, each with its
+signal: an effort has a PR the thread links, the title names one of its
+tickets, the classifier suggests it for a linked PR, or it's the parent thread's
+effort. Jev suggests only when the user asks. A pick applies at once and offers
+an Undo: `thread_effort_undo` puts the thread's effort and linked PR back, moves
+moved work back with the effort each piece came from, lets go work the change
+brought in, and removes an effort it created while that effort is still empty.
+Undo refuses, changing nothing, once anything it touched changed, and keeps a
+forward change's guards: nothing goes back into a done effort, and no effort
+under automatic dispatch changes.
 
-**Move linked work** changes existing membership explicitly. A ticket move
-includes its related PRs and checkouts; a standalone PR can move independently.
-The picker shows this scope and requires a choice when several work items are
-linked. **Link a PR** adds a tracked PR as thread context. Explicit membership
-survives rescans. Organizing an effort does not launch its coordinator, start
-an agent, or change existing thread parents. Automatic dispatch must be off
-for an affected effort before a move; automatic inheritance pauses while the
-destination effort has automatic dispatch enabled.
+Assigning a thread lets confirmed, unassigned PR work inherit the effort from
+exact checkout links, recorded actions, or explicit PR links. Title and
+discussion mentions don't authorize automatic assignment. Existing explicit
+ticket and PR ownership stays intact, and removing the thread's effort doesn't
+remove inherited membership. **+ New effort** creates a named effort and
+assigns the thread without starting a coordinator. **Move here** on a linked
+PR chip moves that PR, with its ticket's related PRs and checkouts, into the
+thread's effort; each linked PR's `also` names what else that move takes, and
+the popover lists it and waits for Move all before moving. **+ Link PR** adds a tracked PR as thread context. A done
+effort takes no thread or moved work. Explicit membership survives rescans.
+Organizing an effort doesn't launch its coordinator, start an agent, or change
+existing thread parents. Automatic dispatch must be off for an affected effort
+before a move; automatic inheritance pauses while the destination effort has
+automatic dispatch enabled.
 
 **Pipeline** shares the Board's scan and is the main action view. It assigns
 checkout work and each open pull request to **Build**, **Review**, **Feedback**,

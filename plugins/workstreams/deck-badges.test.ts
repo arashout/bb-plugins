@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { inkwellDeck, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, paletteItems, stripChips, uncScreen, type KeyContext, type Tone } from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, HoldBody, Kbd, Keys, PaletteBody, type DeckPaneProps } from "./deck-screen.js";
+import { PickerBody } from "./thread-effort-popover.js";
 
 type Rgb = readonly [number, number, number];
 /** sRGB, gamma-encoded, from OKLCH (lightness 0–1, chroma, hue in degrees). */
@@ -93,7 +94,10 @@ function pane(cur: string, patch: Partial<DeckPaneProps> = {}, selected: string[
     on, hints: hintKeys(context, on), flash: null, batch: { kinds: [] }, run: noop, onPalette: noop, onHelp: noop, onUndo: noop, ...patch }));
 }
 
-/** Every surface the deck draws a badge on: primary, tone, bordered, and ghost buttons, the Mark seen pill, rows' details, bars, and dialogs. */
+/**
+ * Every surface the deck draws a badge on: primary, tone, bordered, and ghost buttons, the Mark seen pill, rows' details, bars, and dialogs,
+ * and the thread effort popover's highlighted row.
+ */
 function everyBadge(): { where: string; badge: Badge }[] {
   const view = inkwellDeck();
   const shelf = cardScreen(view.active.find((item) => item.id === SHELF)!, none, { now: NOW });
@@ -115,6 +119,11 @@ function everyBadge(): { where: string; badge: Badge }[] {
     ["a dialog's buttons", renderToStaticMarkup(createElement(HoldBody, { reason: "", onReason: noop, busy: false, error: null, onHold: noop, onCancel: noop }))],
     ["⌘K", renderToStaticMarkup(createElement(PaletteBody, { query: "", items, highlight: 0, onQuery: noop, onRun: noop, onHighlight: noop }))],
     ["?", renderToStaticMarkup(createElement(HelpBody, { items }))],
+    ["the thread effort popover", renderToStaticMarkup(createElement(PickerBody, { mode: "effort", query: "", highlight: 0, busy: false, current: null, notice: null,
+      error: null, listId: "picker", linked: [], confirm: null, onQuery: noop, onKeyDown: noop, onPick: noop, onHighlight: noop, onLinkMode: noop, onMove: noop,
+      onConfirmMove: noop, onCancelMove: noop, onOpenPr: noop,
+      items: [{ kind: "effort", key: "effort:shelf", id: "shelf", name: "Shelf order", oneOff: false, held: false, needsYou: 2, signal: "has folio #340", score: 3,
+        suggested: true, current: false }, { kind: "new", name: "" }] }))],
   ];
   return renders.flatMap(([where, html]) => badges(html).map((badge) => ({ where, badge })));
 }

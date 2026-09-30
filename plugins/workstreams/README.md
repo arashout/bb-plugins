@@ -60,24 +60,43 @@ Workstreams starts planning and context threads with the **Planning model** sett
 
 ## Organize work from a thread
 
-Use **Effort** above the thread composer to assign the thread to an effort,
-even before it has a PR. Confirmed, unassigned work in the thread inherits
-that effort, including existing recorded work and work discovered later.
-Workstreams discovers PRs through the thread's exact checkout, recorded
-actions, or explicit PR links. A PR mentioned only in a title or discussion
-does not inherit automatically. Existing explicit assignments stay intact.
-Clearing the thread effort leaves previously assigned work where it is.
+The effort chip above the thread composer shows the thread's effort: its
+color dot, its name, and how many of its PRs need you. Select the chip to open
+that effort's card on the deck. A thread without an effort of its own shows the
+effort its linked PRs are in. Without one, the chip shows the service effort of
+the repository most of its PRs are in, such as `folio · service`, and opens
+those PRs on the Unclassified deck, with no count: they are to sort. The chip
+counts the PRs the thread records and the PR in its own checkout. A PR that the
+thread reaches only by branch name or a path it worked in doesn't count.
 
-If no effort fits, choose **Create effort**, enter a name, and select **Create
-and assign**. **Suggest efforts** asks Jev to compare the thread title and
-linked work with available efforts. Select a suggestion, then save your
-choice. Jev can also select an editable name from the thread and work titles.
-Suggestions do not change membership. Manual creation works without Jev.
+Select **⌄** beside the chip to change the effort. Type to filter the list, or
+use the up and down arrow keys, then press Enter to pick. Esc closes the
+popover. Suggested efforts come first, each with the strongest signal behind
+it: the effort has a PR that the thread links, the thread title names one of
+its tickets, the classifier suggests it for a linked PR, or it's the parent
+thread's effort. With a TypeSafe key, **Ask Jev to suggest** asks Jev to
+compare the thread with your efforts; it runs only when you select it. **+ New
+effort** creates an effort from the name you typed. **Remove from effort** is
+at the bottom. A pick applies at once, and **Undo** appears beside the chip for
+8 seconds. Undo puts back the thread's effort and lets go the work that the
+change brought in. It refuses, changing nothing, once that work moved again,
+or when it would put work back into a done effort or change an effort under
+automatic dispatch.
 
-Use **Move linked work** to change existing ticket or PR membership. The
-picker shows the affected ticket, PRs, and checkouts. Select the work when a
-thread has several links. Ticket work moves together; a standalone PR moves
-on its own. **Link a PR** supplies an explicit link to a tracked pull request.
+After you assign a thread, its confirmed, unassigned work inherits the effort,
+including existing recorded work and work discovered later. Workstreams
+discovers PRs through the thread's exact checkout, recorded actions, or
+explicit PR links. A PR mentioned only in a title or discussion doesn't inherit
+automatically. Existing explicit assignments stay intact, and removing the
+thread from its effort leaves assigned work where it is.
+
+The popover lists the thread's linked PRs as chips. A PR in another effort
+names that effort and offers **Move here**, which moves it into the thread's
+effort with its ticket; a ticket move includes its related PRs and checkouts.
+When a move takes more than that PR and its tickets, **Move here…** first lists
+what else moves and waits for **Move all**.
+**+ Link PR** lists tracked pull requests to link to the thread. Both take an
+Undo. A done effort takes no new work: reopen it first.
 
 Explicit assignments use the same ticket and PR membership as the board.
 Assigning work preserves existing thread parents and worker history and does

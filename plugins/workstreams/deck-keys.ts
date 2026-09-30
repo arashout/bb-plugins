@@ -87,3 +87,24 @@ export function typingTarget(target: unknown): boolean {
   const element = target as { isContentEditable?: boolean; closest?: (selector: string) => unknown } | null;
   return !!element && (element.isContentEditable === true || !!element.closest?.("input, textarea, select, [contenteditable]"));
 }
+
+/**
+ * The thread effort popover's keys (plan amendment A17.2), from the same registry: its list moves as rows do, ↵ picks as it opens a row,
+ * and esc backs out of the PR list, then closes. You type in its field, so no letter is bound.
+ */
+export type PickerActionId = "pick-next" | "pick-prev" | "pick" | "pick-back";
+export const PICKER_ACTIONS: readonly { id: PickerActionId; title: string; keys: readonly string[] }[] = [
+  { id: "pick-next", title: "Next choice", keys: ["↓"] },
+  { id: "pick-prev", title: "Previous choice", keys: ["↑"] },
+  { id: "pick", title: "Pick it", keys: ["↵"] },
+  { id: "pick-back", title: "Back, or close", keys: ["esc"] },
+];
+
+/** The popover action a key runs: never with ⌘, Ctrl, or Alt, and only the list's movement repeats while held, so a held ↵ picks once. */
+export function pickerActionForKey(event: { key: string; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; repeat?: boolean }):
+  PickerActionId | null {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
+  const token = TOKEN[event.key];
+  const action = token ? PICKER_ACTIONS.find((candidate) => candidate.keys.includes(token)) : undefined;
+  return action && (!event.repeat || action.id === "pick-next" || action.id === "pick-prev") ? action.id : null;
+}

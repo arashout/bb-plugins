@@ -3844,7 +3844,7 @@ export default async function plugin(bb: BbPluginApi) {
       claimed ||= result.claimed.tickets.length + result.claimed.prUrls.length > 0;
       if (result.conflict) conflicts++;
     }
-    note(conflicts ? `${conflicts} linked PR ${conflicts === 1 ? "group has" : "groups have"} work assigned to another effort. Review linked work to move it.` : null);
+    note(conflicts ? `${conflicts} linked PR ${conflicts === 1 ? "group has" : "groups have"} work assigned to another effort. Move here on its PR moves it.` : null);
     if (claimed) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
