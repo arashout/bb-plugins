@@ -14,13 +14,14 @@ import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, OverviewScr
 import { SEND_DELAY_MS } from "./deck-shared";
 import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
+import { Icon } from "./components/ui/icon";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 
 /** Everything a click on the deck can ask for; the nav view decides what each does. */
 export type DeckCommand =
   | { kind: "action"; id: DeckActionId; line?: DeckLine }
-  | { kind: "go"; id: string } | { kind: "view"; view: "prs" | "map" | "pipeline" | "work" | "efforts" }
+  | { kind: "go"; id: string } | { kind: "view"; view: HeaderTarget }
   | { kind: "select"; prUrl: string; shift: boolean } | { kind: "expand"; prUrl: string } | { kind: "focus"; prUrl: string }
   | { kind: "tile"; key: string } | { kind: "fold"; key: string }
   | { kind: "group"; key: string } | { kind: "undo-group"; key: string } | { kind: "undo-batch"; batchId: string }
@@ -138,7 +139,7 @@ function PilePopover({ pile, items, open, run }: { pile: "hold" | "done"; items:
         {items.length ? items.map((item) => <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-1 py-1 hover:bg-foreground/[0.04]">
           <span className="truncate">{item.name}</span>
           {pile === "hold" ? <button type="button" onClick={() => run({ kind: "resume", id: item.id })} className={cn(BUTTON, "border-border")}>Resume</button>
-            : item.archived ? <span className="text-[11px] text-muted-foreground" title="Restore it from Manage efforts first">Archived</span>
+            : item.archived ? <span className="text-[11px] text-muted-foreground" title="Restore it from Efforts admin first">Archived</span>
             : <button type="button" onClick={() => run({ kind: "reopen", id: item.id })} className={cn(BUTTON, "border-border")}>Reopen</button>}
           <span className="col-span-2 truncate text-[11px] text-muted-foreground">{item.note}</span>
         </div>) : <p className="px-1 text-muted-foreground">Empty.</p>}
@@ -624,42 +625,88 @@ function RuleList({ rules, onRemove, className }: { rules: readonly RuleItem[]; 
 }
 
 // ---------------------------------------------------------------------------
-// Chrome: the top bar, the batch bar docked under the rows, and the hint bar.
+// Chrome: the header every Workstreams view shares, the batch bar docked under the rows, and the hint bar.
 // ---------------------------------------------------------------------------
 
-export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
+const TABS = [{ id: "deck", title: "Efforts", tip: "One effort per card" }, { id: "inventory", title: "All PRs", tip: "Every open PR in one list" }] as const;
+/** The views behind More ▾, which ends with How it works. */
+export const MORE_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "board", title: "Board" },
+  { id: "efforts", title: "Efforts admin" }] as const;
+export type HeaderView = (typeof TABS)[number]["id"] | (typeof MORE_VIEWS)[number]["id"];
+/** Where a header click goes: a view, or the How this works tab. */
+export type HeaderTarget = HeaderView | "how";
+export type HeaderProps = {
+  /** The view under the header; an effort's roster sits under neither tab. */
+  view: HeaderView | "roster";
+  /** How fresh this view's read is; `title` gives the exact times. */
+  read: { text: string; error: string | null; title?: string; busy?: boolean };
+  /** Mark seen, on a view that has it, with its key and what it settles there. */
+  seen?: { changed: number; available: boolean; note: string | null; key: string; title?: string };
+  /** What ⌘K opens here: this view's actions, or the views. */
+  palette: "all actions" | "go to";
+  /** What ? opens here. */
+  help: string;
+  /** The view's own controls, after More. */
+  tools?: ReactNode;
+  onView(target: HeaderTarget): void; onSeen?(): void; onPalette(): void; onHelp(): void;
+};
 
-export function TopBar({ view, read, seen, run, onPalette, onHelp }: { view: "deck" | "prs"; read: { text: string; error: string | null };
-  seen: { changed: number; available: boolean; note: string | null }; run: Run; onPalette(): void; onHelp(): void }) {
+/**
+ * One header on every view: Efforts · All PRs · More ▾, then the same right side everywhere: freshness, Mark seen where it applies, ⌘K, and ?.
+ * On a narrow panel the right side wraps to its own line as one group, so no control is cut off and freshness truncates only there.
+ */
+export function WorkstreamsHeader(props: HeaderProps) {
   const scope = usePortalScopeProps();
-  return <header className="@container flex h-10 shrink-0 items-center gap-2 border-b border-border/70 px-3">
+  const { read, seen } = props;
+  const more = MORE_VIEWS.find((item) => item.id === props.view) ?? null;
+  const go = (target: HeaderTarget) => { if (target !== props.view) props.onView(target); };
+  return <header data-ws-header={props.view} className="@container flex min-h-10 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/70 px-3 py-1">
     <nav aria-label="Workstreams views" className="inline-flex shrink-0 overflow-hidden rounded-md border border-border">
-      <button type="button" data-deck-focus="view-deck" aria-pressed={view === "deck"} title="One effort per card (v)" onClick={() => { if (view !== "deck") run({ kind: "action", id: "view" }); }}
-        className={cn("h-6 px-2.5 text-[12px]", RING, view === "deck" ? "bg-foreground/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground")}>Efforts</button>
-      <button type="button" data-deck-focus="view-prs" aria-pressed={view === "prs"} title="Every open PR in one list (v)" onClick={() => { if (view !== "prs") run({ kind: "action", id: "view" }); }}
-        className={cn("h-6 px-2.5 text-[12px]", RING, view === "prs" ? "bg-foreground/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground")}>All PRs</button>
+      {TABS.map((tab) => <button key={tab.id} type="button" data-deck-focus={tab.id === "deck" ? "view-deck" : "view-prs"} aria-pressed={props.view === tab.id} title={tab.tip}
+        onClick={() => go(tab.id)} className={cn("h-6 px-2.5 text-[12px]", RING, props.view === tab.id ? "bg-foreground/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground")}>
+        {tab.title}</button>)}
     </nav>
     <PopoverPrimitive.Root>
-      <PopoverPrimitive.Trigger asChild><button type="button" className={GHOST}>More ▾</button></PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Trigger asChild><button type="button" data-ws-more aria-label={more ? `More views: ${more.title}` : "More views"}
+        className={cn(GHOST, more && "bg-foreground/[0.08] text-foreground")}>{more?.title ?? "More"} ▾</button></PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal>
         <PopoverPrimitive.Content {...scope} align="start" sideOffset={4} className={cn("z-50 grid w-44 rounded-lg border border-border bg-popover p-1 text-[12px] shadow-md outline-none", POINTER_CURSORS)}>
-          {OTHER_VIEWS.map((item) => <button key={item.id} type="button" onClick={() => run({ kind: "view", view: item.id })}
-            className={cn("rounded px-2 py-1 text-left hover:bg-foreground/[0.06]", RING)}>{item.title}</button>)}
+          <MoreItems view={props.view} go={go} />
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
-    <span className="flex-1" />
-    <span role={read.error ? "alert" : "status"} className={cn("truncate text-[11.5px]", read.error ? "text-destructive" : "text-muted-foreground")}>{read.error ?? read.text}</span>
-    {seen.note ? <span role="status" className="shrink-0 text-[11.5px] text-muted-foreground"><span className={TONE.green.text}>✓</span> {seen.note}</span>
-      : seen.available ? <button type="button" data-deck-focus="seen" onClick={() => run({ kind: "action", id: "seen" })}
-        title="Settles this view only: rows a read changed, rows that left, and rows you acted on"
-        className={cn("inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-sky-500/10 px-2 text-[11.5px] text-sky-800 hover:bg-sky-500/20 dark:text-sky-200", RING)}>
-        {seen.changed ? <><Changed title="Changed here" /><b>{seen.changed}</b> changed here ·</> : null} Mark seen <Kbd>s</Kbd></button> : null}
-    <button type="button" data-deck-focus="palette" onClick={onPalette} title="Every action and its key (⌘K)" className={cn(BUTTON, "border-border text-muted-foreground hover:text-foreground")}>
-      <Kbd>⌘K</Kbd><span className="hidden @min-[720px]:inline">all actions</span></button>
-    <button type="button" data-deck-focus="help" onClick={onHelp} title="Keys and colors (?)" aria-label="Keys and colors (?)"
-      className={cn(BUTTON, "w-6 justify-center border-border px-0 text-muted-foreground hover:text-foreground")}>?</button>
+    {props.tools}
+    <div className="ml-auto flex min-w-0 items-center gap-2">
+      <span role={read.error ? "alert" : "status"} title={read.title} className={cn("inline-flex min-w-0 items-center gap-1.5 text-[11.5px]", read.error ? "text-destructive" : "text-muted-foreground")}>
+        {read.busy && !read.error ? <Icon name="Loading" className="size-3 shrink-0 motion-safe:animate-spin" aria-hidden /> : null}<span className="truncate">{read.error ?? read.text}</span></span>
+      {seen?.note ? <span role="status" className="shrink-0 text-[11.5px] text-muted-foreground"><span className={TONE.green.text}>✓</span> {seen.note}</span>
+        : seen?.available ? <button type="button" data-deck-focus="seen" onClick={props.onSeen}
+          title={seen.title ?? "Settles this view only: rows a read changed, rows that left, and rows you acted on"}
+          className={cn("inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-sky-500/10 px-2 text-[11.5px] text-sky-800 hover:bg-sky-500/20 dark:text-sky-200", RING)}>
+          {seen.changed ? <><Changed title="Changed here" /><b>{seen.changed}</b> changed here ·</> : null} Mark seen <Kbd>{seen.key}</Kbd></button> : null}
+      <button type="button" data-deck-focus="palette" onClick={props.onPalette} title={props.palette === "all actions" ? "Every action and its key (⌘K)" : "Go to a view (⌘K)"}
+        className={cn(BUTTON, "border-border text-muted-foreground hover:text-foreground")}><Kbd>⌘K</Kbd><span className="hidden @min-[720px]:inline">{props.palette}</span></button>
+      <button type="button" data-deck-focus="help" onClick={props.onHelp} title={`${props.help} (?)`} aria-label={`${props.help} (?)`}
+        className={cn(BUTTON, "w-6 justify-center border-border px-0 text-muted-foreground hover:text-foreground")}>?</button>
+    </div>
   </header>;
+}
+
+/** More ▾'s items, each closing it: the other views, the current one marked, then How it works. */
+export function MoreItems({ view, go }: { view: HeaderProps["view"]; go(target: HeaderTarget): void }) {
+  return <>
+    {MORE_VIEWS.map((item) => <PopoverPrimitive.Close key={item.id} asChild><button type="button" data-ws-more-item={item.id} aria-current={item.id === view ? "page" : undefined}
+      onClick={() => go(item.id)} className={cn("rounded px-2 py-1 text-left hover:bg-foreground/[0.06]", item.id === view && "font-medium", RING)}>{item.title}</button>
+    </PopoverPrimitive.Close>)}
+    <PopoverPrimitive.Close asChild><button type="button" data-ws-more-item="how" onClick={() => go("how")}
+      className={cn("mt-1 rounded border-t border-border/60 px-2 py-1 text-left hover:bg-foreground/[0.06]", RING)}>How it works</button></PopoverPrimitive.Close>
+  </>;
+}
+
+/** ⌘K on a view without actions of its own: every view, then How it works. */
+export function viewPaletteItems(view: HeaderProps["view"]): PaletteItem[] {
+  return [...[...TABS, ...MORE_VIEWS].map((item) => ({ key: item.id, group: "Go to", title: item.title, keys: [], on: item.id !== view, why: "you're here", action: null })),
+    { key: "how", group: "Help", title: "How it works", keys: [], on: true, why: "", action: null }];
 }
 
 /**
@@ -1058,7 +1105,8 @@ export function DeckPane(props: DeckPaneProps) {
   const behind = cardsBehind(props.chips, props.cur);
   const keyless = props.advanceScope === "row" || props.advanceScope === "selected";
   return <div ref={props.rootRef} role="region" aria-label="Effort deck" className={cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS)}>
-    <TopBar view="deck" read={props.read} seen={props.seen} run={props.run} onPalette={props.onPalette} onHelp={props.onHelp} />
+    <WorkstreamsHeader view="deck" read={props.read} seen={{ ...props.seen, key: "s" }} palette="all actions" help="Keys and colors" onView={(view) => props.run({ kind: "view", view })}
+      onSeen={() => props.run({ kind: "action", id: "seen" })} onPalette={props.onPalette} onHelp={props.onHelp} />
     <Strip chips={props.chips} cur={props.cur} deck held={props.held} done={props.done} pile={props.pile} run={props.run} chipsRef={props.chipsRef} />
     <div ref={props.scrollerRef} data-deck-scroller className="@container relative min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]">
       {stuck && card ? <CardBar name={card.card.name} color={card.color} hollow={card.card.kind !== "effort"} status={card.status}

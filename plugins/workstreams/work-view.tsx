@@ -28,8 +28,8 @@ const key = (url: string) => (canonicalPrUrl(url) ?? url).toLowerCase();
 const time = (value: number) => new Date(value).toLocaleString();
 const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function WorkView({ board, now, onPipeline, onMap, onHow }: {
-  board: Board; now: number; onPipeline: () => void; onMap: () => void; onHow: () => void;
+export function WorkView({ board, now, onPipeline }: {
+  board: Board; now: number; onPipeline: () => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
@@ -200,16 +200,6 @@ export function WorkView({ board, now, onPipeline, onMap, onHow }: {
   };
 
   return <div ref={rootRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
-    <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-2.5">
-      <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
-        <button type="button" role="tab" aria-selected={false} onClick={() => navigate.toPluginPanel("board", { subPath: "inventory" })} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Inventory</button>
-        <button type="button" role="tab" aria-selected={false} onClick={onMap} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Map</button>
-        <button type="button" role="tab" aria-selected={false} onClick={onPipeline} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Pipeline</button>
-        <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">Work</button>
-        <button type="button" role="tab" aria-selected={false} onClick={() => navigate.toPluginPanel("board", { subPath: "efforts" })} className="rounded px-1 py-1 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Efforts</button>
-      </div>
-      <button type="button" onClick={onHow} className="rounded px-2 py-1 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">How it works</button>
-    </header>
     <div className="flex min-h-0 flex-1">
       <main className={cn("min-w-0 flex-1 overflow-y-auto overscroll-contain pb-8", selected && (wide ? "border-r border-border/70" : "hidden"))}>
         <div className="px-4 pb-2 pt-6">

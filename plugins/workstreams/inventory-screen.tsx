@@ -7,18 +7,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
-import { Icon } from "./components/ui/icon";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
 import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
 import type { DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
-import { HelpBody, HintBar, PaletteBody } from "./deck-screen";
+import { HelpBody, HintBar, PaletteBody, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
 import { DeckDialog, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 
-export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
-export type OtherView = "deck" | (typeof OTHER_VIEWS)[number]["id"];
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
 
@@ -36,21 +33,15 @@ export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; 
   return { turn, other };
 }
 
-function Header({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
-  return <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-2.5">
-    <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
-      <button type="button" role="tab" aria-selected={false} onClick={() => onView("deck")} className={cn("rounded px-1 py-1 text-muted-foreground hover:text-foreground", FOCUS)}>Efforts</button>
-      <button type="button" role="tab" aria-selected className="rounded px-1 py-1 font-semibold">All PRs</button>
-      {OTHER_VIEWS.map((view) => <button key={view.id} type="button" role="tab" aria-selected={false} onClick={() => onView(view.id)}
-        className={cn("rounded px-1 py-1 text-muted-foreground hover:text-foreground", FOCUS)}>{view.title}</button>)}
-    </div>
-    <button type="button" onClick={onHow} className={cn("rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground", FOCUS)}>How it works</button>
-  </header>;
+/** The shared header, with this read's freshness; ⌘K and ? open the deck's palette and key sheet. */
+function Header({ read, onView, onPalette, onHelp }: { read: HeaderProps["read"]; onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void }) {
+  return <WorkstreamsHeader view="inventory" read={read} palette="all actions" help="Keys and colors" onView={onView} onPalette={onPalette} onHelp={onHelp} />;
 }
 
-export function InventoryPending({ error, onRetry, onView, onHow }: { error: string | null; onRetry(): void; onView(view: OtherView): void; onHow(): void }) {
+export function InventoryPending({ error, onRetry, onView, onPalette, onHelp }: { error: string | null; onRetry(): void; onView(target: HeaderTarget): void;
+  onPalette(): void; onHelp(): void }) {
   return <div role="region" aria-label="PR inventory" className={REGION}>
-    <Header onView={onView} onHow={onHow} />
+    <Header read={{ text: error ? "Read failed" : "Reading…", error: null }} onView={onView} onPalette={onPalette} onHelp={onHelp} />
     <div className="p-4 text-[12px]" role={error ? "alert" : "status"}>
       {error ? <>Couldn't read the inventory: {error} <button type="button" onClick={onRetry} className={cn("ml-1 rounded-sm underline", FOCUS)}>Retry</button></>
         : <span className="text-muted-foreground">Reading your open PRs…</span>}
@@ -64,7 +55,7 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
 }
 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
-  onView(view: OtherView): void; onHow(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
+  onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void; onAsk(line: InventoryLine): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
@@ -73,14 +64,10 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
     onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onAsk: props.onAsk };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
-    <Header onView={props.onView} onHow={props.onHow} />
+    <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null }} onView={props.onView}
+      onPalette={props.onPalette} onHelp={props.onHelp} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 pt-4">
-        <h1 className="text-[18px] font-semibold tracking-tight">All PRs</h1>
-        <p role="status" title={props.screen.read.title} className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          {props.screen.read.refreshing ? <Icon name="Loading" className="size-3 motion-safe:animate-spin" aria-hidden /> : null}{props.screen.read.text}
-        </p>
-      </div>
+      <h1 className="px-4 pt-4 text-[18px] font-semibold tracking-tight">All PRs</h1>
       {props.error || props.screen.notices.length ? <div className="grid gap-1 px-4 pt-3">
         {props.error ? <p role="alert" className="text-[12px] text-destructive">Couldn't read the inventory: {props.error}</p> : null}
         {primaryNotice ? <Notice notice={primaryNotice} /> : null}
@@ -131,7 +118,7 @@ export function useInventory() {
   return { view, error, load };
 }
 
-export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
+export function InventoryNavView({ onView }: { onView(target: HeaderTarget): void }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const { view, error, load } = useInventory();
@@ -228,13 +215,13 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
   const runPalette = (entry: PaletteItem) => { setDialog(null); window.setTimeout(() => { if (entry.action) runKey(entry.action.id); }, 0); };
 
-  if (!screen) return <InventoryPending error={error} onRetry={load} onView={onView} onHow={onHow} />;
   return <>
-    <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
-      onView={onView} onHow={onHow} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
+    {screen ? <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
+      onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }} onAsk={ask}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
+      : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}
     {batch.element}
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>
       {dialog?.kind === "palette" ? <div onKeyDown={(event) => {

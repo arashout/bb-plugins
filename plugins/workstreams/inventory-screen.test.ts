@@ -10,7 +10,7 @@ import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merg
 const VIEW = inkwellInventory();
 const SCREEN = inventoryScreen(VIEW, { now: NOW, filter: null });
 const noop = () => {};
-const CALLBACKS = { busyKey: null, onView: noop, onHow: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop };
+const CALLBACKS = { busyKey: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop };
 function pane(view: InventoryView = VIEW) {
   return renderToStaticMarkup(createElement(InventoryPane, { screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS }));
 }
@@ -114,7 +114,7 @@ describe("simple All PRs list", () => {
   });
 
   it("keeps tabs and retry visible when the first inventory read fails", () => {
-    const html = renderToStaticMarkup(createElement(InventoryPending, { error: "HTTP 500", onRetry: noop, onView: noop, onHow: noop }));
+    const html = renderToStaticMarkup(createElement(InventoryPending, { error: "HTTP 500", onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
     expect(html).toContain("All PRs");
     expect(html).toContain("Couldn&#x27;t read the inventory: HTTP 500");
     expect(html).toContain("Retry");
@@ -172,7 +172,8 @@ describe("simple All PRs list", () => {
   it("keeps every text size at 11px or larger, uses no amber, and animates only when motion is allowed", () => {
     const busy = { ...VIEW, refreshing: true };
     for (const html of [pane(), pane(busy)]) {
-      expect(html).not.toMatch(/text-\[(?:[0-9]|10)(?:\.\d+)?px\]|text-\[0\.\d+rem\]|text-xs/u);
+      // The shared header's key badges are the deck's own, whose contrast deck-badges.test.ts checks; All PRs' text stays 11px or larger.
+      expect(html.replace(/<header data-ws-header[\s\S]*?<\/header>/u, "")).not.toMatch(/text-\[(?:[0-9]|10)(?:\.\d+)?px\]|text-\[0\.\d+rem\]|text-xs/u);
       expect(html).not.toMatch(/\bamber-/u);
       expect(html).not.toMatch(/(?<!motion-safe:)\banimate-/u);
       expect(html).not.toMatch(/#[0-9a-f]{6}\b/iu);
@@ -212,11 +213,12 @@ describe("All PRs beside the effort deck", () => {
 });
 
 describe("the inventory before its first read", () => {
-  it("keeps the view tabs while it reads or when the read failed, so every other view stays one click away", () => {
-    const pending = (error: string | null) => renderToStaticMarkup(createElement(InventoryPending, { error, onRetry: noop, onView: noop, onHow: noop }));
+  it("keeps the shared header while it reads or when the read failed, so every other view stays one click away", () => {
+    const pending = (error: string | null) => renderToStaticMarkup(createElement(InventoryPending, { error, onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
     for (const html of [pending(null), pending("HTTP 500")]) {
-      expect([...html.matchAll(/role="tab"[^>]*>([^<]+)</gu)].map((match) => match[1])).toEqual(["Efforts", "All PRs", "Map", "Pipeline", "Work", "Manage efforts"]);
-      expect(text(html)).toContain("How it works");
+      expect(html).toContain('data-ws-header="inventory"');
+      expect([...html.matchAll(/<nav aria-label="Workstreams views"[^>]*>(.*?)<\/nav>/gu)].map((match) => text(match[1]!).trim())).toEqual(["Efforts All PRs"]);
+      expect(text(html)).toContain("More ▾");
     }
     expect(text(pending(null))).toContain("Reading your open PRs…");
     const failed = pending("HTTP 500");

@@ -116,7 +116,6 @@ export function PipelineView({
   now,
   focusTicket,
   onFocusTicket,
-  onMap,
   onHow,
   onRescan,
 }: {
@@ -126,7 +125,6 @@ export function PipelineView({
   now: number;
   focusTicket: string | null;
   onFocusTicket: (ticket: string | null) => void;
-  onMap: () => void;
   onHow: () => void;
   onRescan: () => Promise<void>;
 }) {
@@ -969,56 +967,6 @@ export function PipelineView({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
       <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
-        <div
-          role="tablist"
-          aria-label="Workstreams views"
-          className="flex shrink-0 items-center gap-2 text-[11.5px]"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={false}
-            onClick={() => navigate.toPluginPanel("board", { subPath: "inventory" })}
-            className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            Inventory
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={false}
-            onClick={onMap}
-            className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground"
-          >
-            Map
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected
-            className="rounded px-1 py-0.5 font-semibold"
-          >
-            Pipeline
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={false}
-            onClick={() => navigate.toPluginPanel("board", { subPath: "work" })}
-            className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            Work
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={false}
-            onClick={() => navigate.toPluginPanel("board", { subPath: "efforts" })}
-            className="rounded px-1 py-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            Efforts
-          </button>
-        </div>
         <div
           role="group"
           aria-label="Pipeline layout"

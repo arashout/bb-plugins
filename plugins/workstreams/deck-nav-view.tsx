@@ -18,7 +18,7 @@ import { anchorScroll, deckRing, EMPTY_VIEW, focusFallback, keepOrder, landAfter
 import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
   paletteItems, paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
   type PaletteItem, type RowFacts } from "./deck-view-model";
-import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
+import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
   type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 import { useNotesConfirm } from "./notes-flow";
@@ -27,7 +27,6 @@ import { MergePreviewDialog } from "./roster-merge-dialog";
 import type { SeedProposal } from "./linear-seed";
 import { deckLinkStep } from "./view-preference";
 
-type OtherView = "prs" | "map" | "pipeline" | "work" | "efforts";
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** The last deck read, so coming back to the deck draws it at once instead of "Reading…" (PLACE-LOSS #1). */
 let cachedDeck: DeckView | null = null;
@@ -94,7 +93,7 @@ type Dialogs =
   | { kind: "weak"; group: string; lines: readonly DeckLine[] };
 
 /** `openCard`: a card a link asked for, such as a thread's effort chip, opened once the deck has read it; a held effort opens its pile. */
-export function DeckNavView({ onView, openCard = null }: { onView(view: OtherView): void; openCard?: string | null }) {
+export function DeckNavView({ onView, openCard = null }: { onView(target: HeaderTarget): void; openCard?: string | null }) {
   const navigate = useBbNavigate();
   const placeRef = useRef<Place>(readStore("sessionStorage", PLACE_KEY, readPlace));
   const [seen, setSeen] = useState<Seen>(() => readStore("localStorage", SEEN_KEY, (raw) => readSeen(raw, Date.now())));
@@ -671,7 +670,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "next": case "prev": go({ step: id === "next" ? 1 : -1 }); return;
       case "jump": { const target = n ? numberedEffort(order, n) : null; if (target) go({ id: target }); return; }
       case "services": if (context.service) go({ id: context.service }); return;
-      case "view": onView("prs"); return;
+      case "view": onView("inventory"); return;
       case "seen": markSeen(); return;
       case "hold-pile": setPile("hold"); return;
       case "done-pile": setPile("done"); return;

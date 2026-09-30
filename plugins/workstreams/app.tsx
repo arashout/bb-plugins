@@ -35,6 +35,9 @@ import { RosterNavView, RosterPanelTab } from "./roster-view";
 import { InventoryNavView, useInventory } from "./inventory-screen";
 import { yourTurnRows } from "./inventory-view-model";
 import { DeckNavView } from "./deck-nav-view";
+import { PaletteBody, viewPaletteItems, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
+import { DeckDialog } from "./deck-flow";
+import { paletteMatch, type PaletteItem } from "./deck-view-model";
 import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
 import { rosterPanelOpen, rosterParents } from "./roster-parents";
 
@@ -237,15 +240,44 @@ function Warnings({ warnings }: { warnings: string[] }) {
 /**
  * Each view has an explicit path so panel history keeps walking with browser
  * back and forward. The panel root redirects to the last view opened here.
+ * `V` cycles these outside the deck and All PRs.
  */
-const VIEWS = [
-  { id: "deck", title: "Efforts", icon: "Target" },
-  { id: "inventory", title: "All PRs", icon: "List" },
-  { id: "map", title: "Map", icon: "GridView" },
-  { id: "pipeline", title: "Pipeline", icon: "Columns2" },
-  { id: "work", title: "Work", icon: "List" },
-  { id: "efforts", title: "Manage efforts", icon: "Target" },
-] as const;
+const CYCLE: readonly ViewId[] = ["deck", "inventory", "map", "pipeline", "work", "efforts"];
+
+/** How fresh the board is, as the shared header says it on the views that read it. */
+function boardRead(board: Board | null, now: number): HeaderProps["read"] {
+  if (board === null) return { text: "Loading…", error: null };
+  return { error: null, text: `${board.lastScanAt === null ? "Not scanned" : `Scanned ${relativeTime(board.lastScanAt, now)}`} · ${board.lastPrCheckedAt === null
+    ? "GitHub not checked" : `GitHub ${relativeTime(board.lastPrCheckedAt, now)}`}`,
+  title: `Checkouts: ${board.lastScanAt === null ? "no scan yet" : new Date(board.lastScanAt).toLocaleString()}. GitHub PRs: ${board.lastPrCheckedAt === null
+    ? "no check yet" : new Date(board.lastPrCheckedAt).toLocaleString()}.` };
+}
+
+/** ⌘K on a view with no actions palette of its own: go to any view, or How this works. */
+function ViewsPalette({ open, view, onClose, onPick }: { open: boolean; view: HeaderProps["view"]; onClose(): void; onPick(target: HeaderTarget): void }) {
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const opener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setHighlight(0);
+    opener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+  }, [open]);
+  const items = paletteMatch(viewPaletteItems(view), query);
+  const live = items.filter((item) => item.on);
+  const pick = (item: PaletteItem) => { onClose(); onPick(item.key as HeaderTarget); };
+  return <DeckDialog open={open} title="Go to" bare onClose={onClose} onReturn={() => { if (opener.current?.isConnected) opener.current.focus({ preventScroll: true }); }}>
+    {open ? <div onKeyDown={(event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setHighlight((current) => Math.max(0, Math.min(live.length - 1, current + (event.key === "ArrowDown" ? 1 : -1))));
+      } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); const item = live[highlight]; if (item) pick(item); }
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); onClose(); }
+    }}><PaletteBody query={query} items={items} highlight={highlight} onQuery={(next) => { setQuery(next); setHighlight(0); }} onRun={pick} onHighlight={setHighlight} /></div>
+      : null}
+  </DeckDialog>;
+}
 
 /** Typing in a field is never a view switch. */
 function isEditable(target: EventTarget | null): boolean {
@@ -346,17 +378,33 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.clearTimeout(timer);
   }, [view]);
 
+  const go = useCallback((target: HeaderTarget) => {
+    if (target === "how") openHow();
+    else navigate.toPluginPanel("board", { subPath: target });
+  }, [navigate, openHow]);
+  const [palette, setPalette] = useState(false);
+  const pageRef = useRef<HTMLDivElement | null>(null);
+
   // `V` cycles the views from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
-  // `?` opens How this works from any view. A roster, the effort deck, and All PRs own their keys, `?` included.
+  // `?` opens How this works from any view, and ⌘K the Go to palette. The effort deck and All PRs own their keys, ⌘K and `?` included;
+  // a roster owns its keys but ⌘K.
   useEffect(() => {
-    if (view === "roster" || view === "deck" || view === "inventory") return;
+    if (view === "deck" || view === "inventory") return;
     const onKey = (event: KeyboardEvent) => {
+      const active = document.activeElement;
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+        if (active && active !== document.body && !pageRef.current?.contains(active)) return;
+        event.preventDefault();
+        setPalette(true);
+        return;
+      }
+      if (view === "roster") return;
       if (event.key !== "v" && event.key !== "V" && event.key !== "?") return;
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
       event.preventDefault();
       if (event.key === "?") openHow();
-      else navigate.toPluginPanel("board", { subPath: VIEWS[(VIEWS.findIndex((entry) => entry.id === view) + 1) % VIEWS.length]!.id });
+      else navigate.toPluginPanel("board", { subPath: CYCLE[(CYCLE.indexOf(view) + 1) % CYCLE.length]! });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -366,23 +414,52 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
   const rosterPath = useRef(subPath);
   if (view === "roster") rosterPath.current = subPath;
 
+  const read = boardRead(board, now);
+  const header = (id: Exclude<ViewId, "deck" | "inventory" | "roster">, tools?: ReactNode) => <WorkstreamsHeader view={id} read={read} palette="go to" help="How this works"
+    tools={tools} onView={go} onPalette={() => setPalette(true)} onHelp={openHow} />;
+  // The Map and the legacy Board keep their Approved filter, Rescan, and scan notices beside More.
+  const boardTools = <>
+    <Tip label={`Approved open PRs ${view === "map" ? "with scanned checkouts on the Map" : "across tracked checkouts and the PR inventory"}. Approval can still need comment, check, or branch work.`}>
+      <button type="button" aria-pressed={prefs.approvedOnly} disabled={board === null} onClick={() => update({ approvedOnly: !prefs.approvedOnly })}
+        className={cn("shrink-0 rounded-md border px-2 py-1 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50", prefs.approvedOnly ? "border-ring/50 bg-foreground/[0.08]" : "border-border text-muted-foreground")}>Approved {approvedCount}</button>
+    </Tip>
+    <Tip label={board?.scanning === true ? "A scan is running" : "Rescan every checkout now"}>
+      <button
+        type="button"
+        disabled={board?.scanning === true}
+        aria-label={board?.scanning === true ? "A scan is running" : "Rescan every checkout now"}
+        onClick={() => {
+          rpc.call("board_refresh").then(refetch, refetch);
+        }}
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] text-muted-foreground transition-colors duration-150 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-60"
+      >
+        <Icon
+          name={board?.scanning === true ? "Loading" : "ArrowReloadHorizontal"}
+          className={cn("size-3.5", board?.scanning === true && "animate-spin")}
+        />
+        {board?.scanning === true ? "Scanning…" : "Rescan"}
+      </button>
+    </Tip>
+    {board === null ? null : <Warnings warnings={board.warnings} />}
+  </>;
+
   const render = (id: ViewId) =>
     id === "deck" ? (
-      <DeckNavView openCard={deckRoute(subPath)} onView={(next) => navigate.toPluginPanel("board", { subPath: next === "prs" ? "inventory" : next })} />
+      <DeckNavView openCard={deckRoute(subPath)} onView={go} />
     ) : id === "inventory" ? (
-      <InventoryNavView onView={(next) => navigate.toPluginPanel("board", { subPath: next })} onHow={openHow} />
+      <InventoryNavView onView={go} />
     ) : id === "roster" ? (
-      <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} />
+      <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} chrome={{ read, onView: go, onPalette: () => setPalette(true), onHow: openHow }} />
     ) : id === "pipeline" ? (
-      board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
-        <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />
+      <>{header("pipeline")}{board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
+        <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />}</>
     ) : id === "work" ? (
-      board === null ? <div className="p-4"><Notice>Loading work…</Notice></div> :
-        <WorkView board={board} now={now} onPipeline={() => navigate.toPluginPanel("board", { subPath: "pipeline" })} onMap={() => navigate.toPluginPanel("board", { subPath: "map" })} onHow={openHow} />
+      <>{header("work")}{board === null ? <div className="p-4"><Notice>Loading work…</Notice></div> :
+        <WorkView board={board} now={now} onPipeline={() => navigate.toPluginPanel("board", { subPath: "pipeline" })} />}</>
     ) : id === "efforts" ? (
-      <EffortsView board={board} />
+      <>{header("efforts")}<EffortsView board={board} /></>
     ) : id === "board" ? (
-      board === null ? (
+      <>{header("board", boardTools)}{board === null ? (
         <div className="p-4">
           <Notice>Loading the board…</Notice>
         </div>
@@ -396,86 +473,19 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
           onFocusTicket={setFocusTicket}
           onShowOnMap={() => navigate.toPluginPanel("board", { subPath: "map" })}
         />
-      )
+      )}</>
     ) : (
-      <MapView
+      <>{header("map", boardTools)}<MapView
         board={board}
         prefs={prefs}
         onPrefs={update}
         selected={focusTicket}
         onSelect={setFocusTicket}
-      />
+      /></>
     );
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
-      {view === "deck" || view === "inventory" || view === "pipeline" || view === "work" || view === "efforts" || view === "roster" ? null : <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1">
-        {/* Efforts, All PRs, Map, Pipeline, Work, Manage efforts, and the legacy Board share this panel. */}
-        <div role="tablist" aria-label="Workstreams views" className="flex shrink-0 items-center gap-3">
-          {VIEWS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="tab"
-              aria-selected={view === entry.id}
-              title={`${entry.title} (V cycles the views)`}
-              onClick={() => navigate.toPluginPanel("board", { subPath: entry.id })}
-              className={cn(
-                "text-xs transition-colors duration-150",
-                view === entry.id
-                  ? "font-medium text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {entry.title}
-            </button>
-          ))}
-        </div>
-        <Tip label={`Approved open PRs ${view === "map" ? "with scanned checkouts on the Map" : "across tracked checkouts and the PR inventory"}. Approval can still need comment, check, or branch work.`}>
-          <button type="button" aria-pressed={prefs.approvedOnly} disabled={board === null} onClick={() => update({ approvedOnly: !prefs.approvedOnly })}
-            className={cn("shrink-0 rounded-md border px-2 py-1 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50", prefs.approvedOnly ? "border-ring/50 bg-foreground/[0.08]" : "border-border text-muted-foreground")}>Approved {approvedCount}</button>
-        </Tip>
-        {board === null ? (
-          <p className="truncate text-[11px] text-muted-foreground">Loading…</p>
-        ) : (
-          <Tip label={`Checkouts: ${board.lastScanAt === null ? "no scan yet" : new Date(board.lastScanAt).toLocaleString()}. GitHub PRs: ${board.lastPrCheckedAt === null ? "no check yet" : new Date(board.lastPrCheckedAt).toLocaleString()}.`}>
-            <p tabIndex={0} className="truncate text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              {board.lastScanAt === null ? "Checkouts not scanned" : `Checkouts scanned ${relativeTime(board.lastScanAt, now)}`}
-              {board.lastPrCheckedAt === null ? " · GitHub not checked" : ` · Latest GitHub check ${relativeTime(board.lastPrCheckedAt, now)}`}
-            </p>
-          </Tip>
-        )}
-        <span className="flex-1" />
-        <Tip label={board?.scanning === true ? "A scan is running" : "Rescan every checkout now"}>
-          <button
-            type="button"
-            disabled={board?.scanning === true}
-            aria-label={board?.scanning === true ? "A scan is running" : "Rescan every checkout now"}
-            onClick={() => {
-              rpc.call("board_refresh").then(refetch, refetch);
-            }}
-            className="flex h-7 items-center gap-1.5 rounded-full px-2 text-[11px] text-muted-foreground transition-colors duration-150 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-60"
-          >
-            <Icon
-              name={board?.scanning === true ? "Loading" : "ArrowReloadHorizontal"}
-              className={cn("size-3.5", board?.scanning === true && "animate-spin")}
-            />
-            {board?.scanning === true ? "Scanning…" : "Rescan"}
-          </button>
-        </Tip>
-        {board === null ? null : <Warnings warnings={board.warnings} />}
-        <Tip label="How this works (?)">
-          <button
-            type="button"
-            aria-label="How this works (?)"
-            onClick={openHow}
-            className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-foreground/[0.06] hover:text-foreground"
-          >
-            <Icon name="Info" className="size-4" />
-          </button>
-        </Tip>
-      </header>}
-
+    <div ref={pageRef} className={cn("flex h-full min-h-0 flex-1 flex-col", POINTER_CURSORS)}>
       {error === null ? null : (
         <p role="alert" className="shrink-0 px-3 pt-2 text-sm text-destructive">
           {error}
@@ -491,6 +501,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
           ) : null,
         )}
       </div>
+      <ViewsPalette open={palette} view={view} onClose={() => setPalette(false)} onPick={go} />
     </div>
   );
 }

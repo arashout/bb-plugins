@@ -4,7 +4,7 @@
 // output, and every write goes through effort_reconcile or effort_command.
 // RosterPane and its parts take data and callbacks as props and call no SDK
 // hook, with relative imports, so static-markup tests can render them.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   experimental_useSidebarThreads,
@@ -22,6 +22,7 @@ import { Icon } from "./components/ui/icon";
 import { EASE_CSS } from "./layout";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
+import { WorkstreamsHeader, type HeaderProps } from "./deck-screen";
 import { AsksBlock, type AsksProps } from "./roster-asks";
 import { CommandBox, type CommandBoxProps, type RosterNote } from "./roster-command";
 import { MergePreviewDialog } from "./roster-merge-dialog";
@@ -53,7 +54,12 @@ export type RosterPaneProps = RowActions & {
   onHeader(action: "keys" | "full" | "parent" | "all"): void;
   onKeyDown?(event: KeyboardEvent<HTMLDivElement>): void;
   rootRef?: RefObject<HTMLDivElement | null>;
+  /** The shared Workstreams header on the full-width roster, which holds Mark seen there. */
+  header?: ReactNode;
 };
+
+/** The page's part of the shared header on the full-width roster: freshness, where its views go, ⌘K, and How this works. */
+export type RosterChrome = Pick<HeaderProps, "read" | "onView" | "onPalette"> & { onHow(): void };
 
 const RIBBON_CELL: Record<GroupKey, string> = {
   decision: TONE_CLASS.decision, issue: TONE_CLASS.issue, doing: "border-transparent bg-foreground/[0.12]", waiting: "border-transparent bg-foreground/[0.05]",
@@ -158,7 +164,7 @@ function SinceChips({ part }: { part: SincePart }) {
 }
 
 /** What changed since you last pressed Mark seen, and how many steps v2 took on its own. */
-function SinceLine({ view, onMarkSeen }: Pick<RosterPaneProps, "view" | "onMarkSeen">) {
+function SinceLine({ view, onMarkSeen, button }: Pick<RosterPaneProps, "view" | "onMarkSeen"> & { button: boolean }) {
   const { since } = view;
   return <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 text-[12px]">
     {since.at === null ? <span className="text-muted-foreground">Mark seen to follow what changes from here</span> : <>
@@ -168,8 +174,8 @@ function SinceLine({ view, onMarkSeen }: Pick<RosterPaneProps, "view" | "onMarkS
       {since.handled ? <span className="text-muted-foreground">{since.handled} {since.handled === 1 ? "step" : "steps"} handled without you</span> : null}
     </>}
     {since.settling ? <span className="text-muted-foreground">{since.settling} {since.settling === 1 ? "row changed state in place; it settles" : "rows changed state in place; they settle"} on Mark seen</span> : null}
-    <button type="button" onClick={onMarkSeen} title="Mark seen (space): settle rows into their groups and restart the since-line"
-      className="ml-auto rounded-md border border-border px-2 py-0.5 text-[11px] outline-none hover:bg-foreground/[0.05] focus-visible:ring-2 focus-visible:ring-ring">Mark seen</button>
+    {button ? <button type="button" onClick={onMarkSeen} title="Mark seen (space): settle rows into their groups and restart the since-line"
+      className="ml-auto rounded-md border border-border px-2 py-0.5 text-[11px] outline-none hover:bg-foreground/[0.05] focus-visible:ring-2 focus-visible:ring-ring">Mark seen</button> : null}
   </div>;
 }
 
@@ -186,11 +192,12 @@ export function RosterPane(props: RosterPaneProps) {
     onMenu: props.onMenu, onAction: props.onAction, onToggleGroup: props.onToggleGroup, onOpenUrl: props.onOpenUrl };
   return <div ref={props.rootRef} role="region" aria-label={`${view.header.name} roster`} tabIndex={-1} onKeyDown={props.onKeyDown}
     className={cn("flex h-full min-h-0 flex-col bg-background text-foreground outline-none", POINTER_CURSORS)}>
+    {props.header}
     <RosterHeader {...props} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-3">
       <NumberRibbon view={view} onFocus={props.onFocus} />
       <RollupBlock view={view} wide={wide} />
-      <SinceLine view={view} onMarkSeen={props.onMarkSeen} />
+      <SinceLine view={view} onMarkSeen={props.onMarkSeen} button={!props.header} />
       <AsksBlock {...props.asks} />
       {view.empty ? <EmptyAsks text={view.empty} /> : null}
       <div data-roster-rows className="mt-2">{wide ? <RosterTable {...rows} /> : <RosterList {...rows} />}</div>
@@ -206,7 +213,7 @@ export function RosterPicker({ efforts, onPick }: { efforts: readonly RosterList
   return <div className={cn("h-full overflow-y-auto px-3 py-3 text-foreground", POINTER_CURSORS)}>
     <h2 className="text-[14px] font-semibold tracking-tight">Rosters</h2>
     <p className="mt-0.5 text-[11px] text-muted-foreground">Pick an effort to see its numbered PRs.</p>
-    {shown.length === 0 ? <p className="mt-4 text-[12px] text-muted-foreground">No saved efforts yet. Create one in the Efforts view.</p> :
+    {shown.length === 0 ? <p className="mt-4 text-[12px] text-muted-foreground">No saved efforts yet. Create one in Efforts admin.</p> :
       <ul className="mt-3 border-t border-border/60">{shown.map((effort) => <li key={effort.id} className="border-b border-border/60">
         <button type="button" onClick={() => onPick(effort.id)}
           className="flex w-full items-baseline gap-2 px-1 py-2 text-left outline-none hover:bg-foreground/[0.03] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
@@ -339,7 +346,7 @@ function useRosterMotion(rootRef: RefObject<HTMLElement | null>, view: View | nu
 }
 
 /** The roster for one effort, in the thread's side panel or the full-width nav view. Callers key it by effort. */
-export function RosterView({ effortId, mount, focus = null }: { effortId: string; mount: "nav" | "tab"; focus?: number | null }) {
+export function RosterView({ effortId, mount, focus = null, chrome }: { effortId: string; mount: "nav" | "tab"; focus?: number | null; chrome?: RosterChrome }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const connection = useRealtimeConnectionState();
@@ -562,12 +569,25 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     if (step.effect) run(step.effect);
   }, [view, asks, pane, wide, domFocus, run]);
 
-  if (error && !roster) return <div className="p-4 text-[12px] text-destructive" role="alert">Could not read the roster: {error}
-    <button type="button" onClick={load} className="ml-2 underline">Retry</button></div>;
-  if (!roster || !view) return <div className="p-4 text-[12px] text-muted-foreground" role="status">Reading the roster…</div>;
+  const keys = <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
+    <DialogContent className={cn("max-w-sm", POINTER_CURSORS)}>
+      <DialogHeader><DialogTitle>Roster keys</DialogTitle><DialogDescription>They work while the roster has focus, never while you type.</DialogDescription></DialogHeader>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
+        {ROSTER_KEYS.map(([key, what]) => <div key={key} className="contents"><dt className="font-mono text-[11px]">{key}</dt><dd className="text-muted-foreground">{what}</dd></div>)}
+      </dl>
+    </DialogContent>
+  </Dialog>;
+  // The full-width roster's Mark seen lives in the shared header, beside ⌘K and ?.
+  const header = chrome ? <WorkstreamsHeader view="roster" read={chrome.read} palette="go to" help="Roster keys" onView={chrome.onView} onPalette={chrome.onPalette}
+    onHelp={() => setKeysOpen(true)} seen={view ? { changed: view.since.settling, available: true, note: null, key: "space",
+      title: "Settle rows into their groups and restart the since-line" } : undefined} onSeen={markSeen} /> : null;
+  const waiting = (body: ReactNode) => <div className="flex h-full min-h-0 flex-col">{header}{body}{keys}</div>;
+  if (error && !roster) return waiting(<div className="p-4 text-[12px] text-destructive" role="alert">Could not read the roster: {error}
+    <button type="button" onClick={load} className="ml-2 underline">Retry</button></div>);
+  if (!roster || !view) return waiting(<div className="p-4 text-[12px] text-muted-foreground" role="status">Reading the roster…</div>);
   const parent = roster.effort.coordinatorThreadId;
   return <>
-    <RosterPane view={view} wide={wide} mount={mount} live={connection === "connected"} order={order} focusN={focusN} menuN={menuN} liveThreads={liveThreads}
+    <RosterPane header={header} view={view} wide={wide} mount={mount} live={connection === "connected"} order={order} focusN={focusN} menuN={menuN} liveThreads={liveThreads}
       command={{ value: commandText, onValue: setCommandText, onSubmit: () => void submit(), inputRef, ack, open: ackOpen ?? Boolean(ack?.fresh && wide),
         onToggle: () => setAckOpen((current) => !(current ?? Boolean(ack?.fresh && wide))), onLeave: () => rootRef.current?.focus(),
         note: error ? { command: "read", lines: [`The roster may be behind: ${error}`], tone: "error" } : note }}
@@ -598,14 +618,7 @@ export function RosterView({ effortId, mount, focus = null }: { effortId: string
     <ResetDialog reset={resetting} thread={resetting?.threadId ? titles.get(resetting.threadId) ?? null : null} onClose={() => setResetConfirm(null)}
       onOpenThread={(id) => navigate.toThread(id)} onReset={(reset) => { setResetConfirm(null); void send(reset.command, "row", reset.numbers); }} />
     <MergePreviewDialog targets={merging} rows={roster.rows} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} />
-    <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
-      <DialogContent className={cn("max-w-sm", POINTER_CURSORS)}>
-        <DialogHeader><DialogTitle>Roster keys</DialogTitle><DialogDescription>They work while the roster has focus, never while you type.</DialogDescription></DialogHeader>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
-          {ROSTER_KEYS.map(([key, what]) => <div key={key} className="contents"><dt className="font-mono text-[11px]">{key}</dt><dd className="text-muted-foreground">{what}</dd></div>)}
-        </dl>
-      </DialogContent>
-    </Dialog>
+    {keys}
   </>;
 }
 
@@ -660,15 +673,19 @@ function useRosterList() {
 }
 
 /** The full-width roster at board/roster/<effortId>[/<n>], or the picker at board/roster. */
-export function RosterNavView({ route }: { route: { effortId: string | null; n: number | null } }) {
+export function RosterNavView({ route, chrome }: { route: { effortId: string | null; n: number | null }; chrome: RosterChrome }) {
   const navigate = useBbNavigate();
-  if (route.effortId) return <RosterView key={route.effortId} effortId={route.effortId} mount="nav" focus={route.n} />;
-  return <RosterNavPicker onPick={(id) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(id)}` })} />;
+  if (route.effortId) return <RosterView key={route.effortId} effortId={route.effortId} mount="nav" focus={route.n} chrome={chrome} />;
+  return <RosterNavPicker chrome={chrome} onPick={(id) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(id)}` })} />;
 }
 
-function RosterNavPicker({ onPick }: { onPick(id: string): void }) {
+function RosterNavPicker({ chrome, onPick }: { chrome: RosterChrome; onPick(id: string): void }) {
   const efforts = useRosterList();
-  return efforts === null ? <div className="p-4 text-[12px] text-muted-foreground" role="status">Reading efforts…</div> : <RosterPicker efforts={efforts} onPick={onPick} />;
+  return <div className="flex h-full min-h-0 flex-col">
+    <WorkstreamsHeader view="roster" read={chrome.read} palette="go to" help="How this works" onView={chrome.onView} onPalette={chrome.onPalette} onHelp={chrome.onHow} />
+    <div className="min-h-0 flex-1">{efforts === null ? <div className="p-4 text-[12px] text-muted-foreground" role="status">Reading efforts…</div>
+      : <RosterPicker efforts={efforts} onPick={onPick} />}</div>
+  </div>;
 }
 
 const effortParam = (params: JsonValue | null) =>
