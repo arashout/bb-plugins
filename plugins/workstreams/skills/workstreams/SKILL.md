@@ -683,8 +683,8 @@ checkout's facts or their roster's last read, until the board's latest read
 finds them merged or closed.
 
 The Workstreams panel shows this inventory as **All PRs**, one tab from the
-effort deck it opens on. Map, Pipeline, Work, Manage efforts, and each effort's
-roster stay one tab or link away.
+effort deck it opens on. Map, Pipeline, Work, Board, and Efforts admin sit under
+the header's More, and each effort's name opens its roster.
 
 ```
 bb workstreams inventory [--attention draft|reviewer|nudge] [--json]

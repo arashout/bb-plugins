@@ -1,9 +1,9 @@
 // "How this works": the secondary information the header used to carry, in
 // one quiet panel. It is a fixed tab in BB's own right panel, so it can stay
 // open beside any view. Short sections, in the order a reader asks: the
-// effort deck, its piles and holds, sorting PRs into efforts, Seed from
-// Linear, All PRs, the keys, then the Map and the legacy Board, and whether
-// the board is healthy.
+// views, the effort deck, its piles and holds, sorting PRs into efforts, Seed
+// from Linear, All PRs, the keys, then the Map and the legacy Board, and
+// whether the board is healthy.
 import type { ReactNode } from "react";
 import type { Board, BoardMode } from "./server";
 import { relativeTime } from "./workstreams";
@@ -61,7 +61,8 @@ const DECK_KEYS: [string, string][] = (["next", "prev", "jump", "row-next", "row
 
 const BOTH_KEYS: [string, string][] = [
   ["v", "Next view; in Efforts and All PRs, switch between the two"],
-  ["?", "Open this panel; in Efforts and All PRs, list their keys"],
+  ["⌘K", "Go to a view; in Efforts and All PRs, list every action"],
+  ["?", "Open this panel; in Efforts and All PRs, list their keys; on a roster, list its keys"],
 ];
 
 const STATES: [string, string][] = [
@@ -112,9 +113,22 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
   const enrichment = board?.health.enrichment ?? null;
   return (
     <div className="text-[12px]">
+      <Section title="Views">
+        <p>
+          Every view shares one header: Efforts, All PRs, and More, which holds Map, Pipeline, Work, Board, Efforts
+          admin, and How it works. Its right side shows when the view last read its data, Mark seen where the view
+          has it, ⌘K, and ?.
+        </p>
+      </Section>
+
       <Section title="The effort deck">
         <p>
-          Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card shows the
+          Overview comes first in Efforts and takes no number key. Its action matrix shows what needs you and what&apos;s blocked
+          in each effort, Aging blockers lists the oldest waits on others, and each effort&apos;s tile names its next
+          step. Select any of them to open that effort&apos;s card.
+        </p>
+        <p>
+          After Overview, Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card shows the
           effort&apos;s status, next steps, what&apos;s blocked, Linear, people, threads, and recent activity. Its
           open PRs sit below it in sections by the move each needs, with one button per section.
         </p>

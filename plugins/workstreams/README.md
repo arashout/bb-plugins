@@ -169,22 +169,34 @@ implemented.
 
 ## Use the views
 
-- **Inventory:** Workstreams opens here. It lists every open PR you author,
-  and every open PR an effort names, by effort, with **No effort** last. Three
-  counts filter it: **Forgotten in draft**, **Missing a reviewer**, and **Needs
-  a nudge**. Each row shows the PR, its reviewers, its state, the next step
-  with who owns it and how long it has waited, and when GitHub last answered
-  for it. Stacked PRs appear under their parent, and a hold shows as a pin.
-  Each action is one click, checked again on fresh facts: **Mark ready**,
-  **Request review…**, **Nudge**, **Confirm handled**, **Refresh**, and
-  **Open thread**. **Confirm handled** records that you handled an
-  approval's comments on the head the row shows, which lets the PR merge; it
-  writes nothing to GitHub. **Merge…** opens the fresh merge preview, which
-  merges only on a click or ⌘↵. A refused action shows the reason on its row.
-  Each effort's name opens its roster.
-- **Efforts:** Administer explicitly saved efforts from one list. Create an
-  effort without starting a thread, edit its name and goal, archive it, or
-  restore it. Archived efforts retain their work and history. **Merge into…**
+Every view shares one header. Its tabs are **Efforts** and **All PRs**, and
+**More** opens **Map**, **Pipeline**, **Work**, **Board**, **Efforts admin**,
+and **How it works**. On its right, the header shows when the view last read
+its data, **Mark seen** on a view that has it, **⌘K**, and **?**. In Efforts
+and All PRs, ⌘K lists every action and ? lists the keys. On other views, ⌘K
+goes to a view, and ? opens How this works, or a roster's keys on a roster.
+
+- **Efforts:** Workstreams first opens here, then on the last view you chose.
+  **Overview** comes first, before the effort cards, and takes no number key.
+  Its action matrix shows what needs you and what's blocked in each effort,
+  **Aging blockers** lists the oldest waits on others, and each effort's tile
+  names its next step. Select any of them to open that effort's card. Flip
+  cards with [ and ], or press 1–9 for an effort. A card lists its open PRs by
+  the move each needs. Every GitHub write lists each PR in a confirm, then
+  waits with Undo, and a merge runs only from the fresh merge preview.
+- **All PRs:** Every open PR you author and every open PR an effort names, in
+  two lists. **Your turn** comes first: your PRs where a reviewer's
+  feedback waits on you, by effort, with **No effort** last. **Open thread**
+  goes to the PR's thread. On a PR that has a thread, **Ask its thread** lists
+  what the thread gets for you to confirm, then sends it after its Undo
+  window. **Other open PRs** follows, by effort; each row shows the PR's state
+  and next step. **Nudge** appears only where a reviewer has waited long
+  enough, and the server checks again before it sends. All PRs never confirms
+  review notes or merges; those run from the effort's card. Each effort's name
+  opens its roster.
+- **Efforts admin:** Administer explicitly saved efforts from one list.
+  Create an effort without starting a thread, edit its name and goal, archive
+  it, or restore it. Archived efforts retain their work and history. **Merge into…**
   previews combined membership and thread routing before applying the change.
   The destination keeps its identity, and old effort IDs resolve to it.
   Thread conversations remain separate. Resolve any preview blockers before
@@ -266,7 +278,7 @@ implemented.
   and the legacy Board; the selection persists across views and reloads. Map dims
   nonmatching work without changing its layout and counts checkout-backed PRs;
   Board also includes the PR inventory.
-- **Legacy Board:** Open **Legacy Board** from Pipeline options. **Efforts**
+- **Legacy Board:** Open **Board** from **More**. **Efforts**
   groups all tracked checkouts by effort. Open PRs
   without a scanned checkout join an effort when a saved PR link or an
   unambiguous ticket match connects them. Other PRs appear under **No effort
