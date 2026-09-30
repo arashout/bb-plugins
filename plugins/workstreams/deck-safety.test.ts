@@ -27,6 +27,15 @@ describe("the deck's write safety", () => {
     expect(nav.match(/(?<!function )acceptWeak\(\)/gu)).toHaveLength(2);
   });
 
+  // A17.1: promoting a service card makes an effort of all its PRs at once, so it goes through the new effort dialog's one confirm.
+  it("promotes a service card only from the new effort dialog's Create button or ⌘↵", () => {
+    const nav = source("deck-nav-view.tsx");
+    expect(nav).toMatch(/case "promote": \{[^}]+openDialog\(\{ kind: "new", prUrls: list\.map/u);
+    expect(nav.match(/"classify_new_effort"/gu)).toHaveLength(1);
+    expect(nav).toMatch(/function createEffort\(\) \{\n\s+if \(dialog\?\.kind !== "new" \|\| busy/u);
+    expect([...nav.matchAll(/(on\w+)=\{\(\) => createEffort\(\)\}/gu)].map((match) => match[1])).toEqual(["onConfirmKey", "onCreate"]);
+  });
+
   it("never calls a GitHub write or a merge from the deck: only the batch confirm and the fresh merge preview do", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);

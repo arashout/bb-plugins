@@ -152,7 +152,8 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         </p>
         <p>
           Nothing moves until you press a group&apos;s button, and Undo takes it back. A weak group asks again first. You
-          can also move PRs to any effort, start a new effort from a selection, or mark PRs as one-offs.
+          can also move PRs to any effort, start a new effort from a selection, or mark PRs as one-offs. Promote to effort
+          makes an effort of all the card&apos;s PRs in one confirm.
         </p>
         <p>
           A standing rule places new PRs on every read by ticket prefix, branch, repository, Linear project, or stack.

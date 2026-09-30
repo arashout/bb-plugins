@@ -819,6 +819,7 @@ is history. `deck-shared.ts` holds this one rule for every view.
   read model draws it, so every open PR is on a card and an explicit effort
   always wins. Its `suggestions` are `classify_get`'s groups cut to its PRs.
   `deck_batch_plan` takes its id as the `effortId`, and it is always active.
+  Promoting one is `classify_new_effort` with all its PRs.
 - `oneOffsId`: One-offs, once it exists.
 - `held`: held efforts' cards, which ask nothing. `done`: each done effort's
   name, merges, and still-open PRs, and each archived effort (`archived`)

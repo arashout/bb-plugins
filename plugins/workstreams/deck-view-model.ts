@@ -394,6 +394,7 @@ export function availability(context: KeyContext): Availability {
   const stays = card?.card.oneOff ? "One-offs stays active" : service ? "a service card stays active" : "it's on hold";
   set("hold", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
   set("complete", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
+  set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }

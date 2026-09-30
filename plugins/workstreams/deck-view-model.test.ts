@@ -222,13 +222,13 @@ describe("what the keys act on", () => {
     const on = availability(context(shelf));
     expect([on.merge.on, on.advance.on, on.nudge.on, on.nudge.why, on.accept.on, on.hold.on]).toEqual([true, false, false, "no nudge is due", false, true]);
     const oneOffs = availability(context(card(inkwellDeck(), ONE_OFFS)));
-    expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on, oneOffs.accept.on]).toEqual([false, "One-offs stays active", false, false]);
-    // A service card acts like an effort's and sorts its rows into efforts, but never holds or completes: it isn't an effort yet.
+    expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on, oneOffs.promote.on, oneOffs.accept.on]).toEqual([false, "One-offs stays active", false, false, false]);
+    // A service card acts like an effort's, sorts its rows into efforts, and promotes, but never holds or completes: it isn't an effort yet.
     const folio = card(inkwellDeck(), FOLIO);
     const focused = folio.sections[0]!.lines[0]!;
     const sorting = availability(context(folio, { focused }));
-    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting.request.on, sorting.advance.on, sorting.hold.on, sorting.hold.why,
-      sorting["new-effort"].on]).toEqual([true, true, true, true, true, false, "a service card stays active", false]);
+    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting.request.on, sorting.advance.on, sorting.promote.on, sorting.hold.on, sorting.hold.why,
+      sorting["new-effort"].on]).toEqual([true, true, true, true, true, true, false, "a service card stays active", false]);
     expect(availability(context(folio, { focused, selected: [focused] }))["new-effort"].on).toBe(true);
     // u goes to the first service card, while one exists.
     expect([sorting.services.on, availability(context(folio, { service: null })).services.why]).toEqual([true, "every PR is in an effort"]);

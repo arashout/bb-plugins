@@ -78,6 +78,17 @@ describe("the effort deck on the server", () => {
       .toMatchObject({ ok: true, batchId: null, items: [], skipped: [{ ref: "folio #402", reason: "Not an open PR on this card." }] });
   });
 
+  it("promotes a service card to an effort with its PRs on one confirm, and Undo puts the service card back", async () => {
+    const env = await setup();
+    const made = await env.rpc("classify_new_effort", { name: "folio", goal: "", prUrls: [url(403)], requestId: crypto.randomUUID() }) as { ok: true; actionId: string };
+    expect(made).toMatchObject({ ok: true, effort: { name: "folio" }, added: 1 });
+    const view = await env.deck();
+    expect(view.active.map((card) => [card.name, card.kind, card.sections.flatMap((section) => section.rows.map((row) => row.number))])).toEqual([
+      ["Shelf order", "effort", [402, 401]], ["folio", "effort", [403]]]);
+    expect(await env.rpc("classify_undo", { actionId: made.actionId })).toEqual({ ok: true });
+    expect((await env.deck()).active.map((card) => card.name)).toEqual(["Shelf order", "folio · service"]);
+  });
+
   it("counts a merge a read saw on the card of the effort whose ticket it carries, after the PR leaves the inventory", async () => {
     const env = await setup();
     env.current.set(402, { ...env.current.get(402)!, state: "MERGED", mergedAt: daysAgo(1) });

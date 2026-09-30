@@ -2,7 +2,7 @@
 // deck_get live from the server, the one key registry, and every write
 // through a listing confirm that waits out its Undo window, or through the
 // fresh merge preview. Membership changes (accept, move, one-off, new effort,
-// rules) and pile moves are each one explicit click or key with Undo.
+// promote, rules) and pile moves are each one explicit click or key with Undo.
 //
 // This is the part that talks to BB and the DOM: it keeps your place per view
 // in the session (deck-place.ts), holds rows at their pixel through reads,
@@ -77,7 +77,9 @@ function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void)
 type Dialogs =
   | { kind: "hold"; id: string; effortKey: string; name: string; reason: string } | { kind: "complete"; id: string }
   | { kind: "hold-pr"; prUrl: string; ref: string; reason: string }
-  | { kind: "rule"; draft: RuleDraft; matches: number | null } | { kind: "new"; prUrls: string[]; refs: string[]; name: string; goal: string; group: string | null }
+  | { kind: "rule"; draft: RuleDraft; matches: number | null }
+  /** `promote`: the service card whose PRs all go. */
+  | { kind: "new"; prUrls: string[]; refs: string[]; name: string; goal: string; group: string | null; promote?: { id: string; name: string } }
   | { kind: "move"; prUrls: string[]; refs: string[]; group: string | null } | { kind: "palette"; query: string; highlight: number } | { kind: "help" }
   | { kind: "seed"; proposals: SeedProposal[] | null; keyed: boolean; picked: string[]; requestId: string }
   | { kind: "weak"; group: string; lines: readonly DeckLine[] };
@@ -116,6 +118,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const [accepted, setAccepted] = useState<Accepted>(new Map());
   /** PRs you moved to an effort from a service card, by the effort's name, until you mark that card seen. */
   const [moved, setMoved] = useState<ReadonlyMap<string, string>>(new Map());
+  /** A card an action made, which the deck opens once a read has it: a promoted service card goes on as its effort. */
+  const follow = useRef<string | null>(null);
   const [dialog, setDialog] = useState<Dialogs | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -180,6 +184,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     [view, seen, now, details, accepted, moved]);
   const order = useMemo(() => keepOrder(place.order, view?.active.map((item) => item.id) ?? []), [view, place.order]);
   const ring = order;
+  if (follow.current && ring.includes(follow.current)) { place.cur = follow.current; follow.current = null; }
   const cur: string | null = place.cur && ring.includes(place.cur) ? place.cur : ring[0] ?? null;
   const card = cur ? cards.get(cur) ?? null : null;
   const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
@@ -367,9 +372,12 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const cardOf = (id: string) => view?.active.find((item) => item.id === id) ?? view?.held.find((item) => item.id === id) ?? null;
 
   // ---- membership: accept, move, one-off, new effort, rules ---------------
-  /** `note`: what else an Accept across groups did, said with its result so the result doesn't hide it. */
+  /**
+   * `note`: what else an Accept across groups did, said with its result so the result doesn't hide it. `promote`: the service card it
+   * promotes, which the deck leaves for the new effort's card, and comes back to on Undo.
+   */
   async function classify(call: () => Promise<{ ok: true; actionId: string; effort: { id: string; name: string }; added: number } | { ok: false; error: string }>,
-    group: string | null, prUrls: readonly string[], note?: string | null) {
+    group: string | null, prUrls: readonly string[], note?: string | null, promote: string | null = null) {
     setBusy(true);
     let result: Awaited<ReturnType<typeof call>>;
     try { result = await call(); } catch (cause) { result = { ok: false, error: message(cause) }; }
@@ -384,6 +392,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     const undoIt = async () => {
       const undone = await rpc.call("classify_undo", { actionId });
       if (undone.ok) {
+        if (promote) follow.current = promote;
         if (group) setAccepted((current) => { const next = new Map(current); next.delete(group); return next; });
         setMoved((current) => new Map([...current].filter(([url]) => !prUrls.includes(url))));
       }
@@ -395,6 +404,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     closeDialog();
     say(note ? `${text} · ${note}` : text, true);
     if (group) nextSortFocus(prUrls);
+    if (promote) follow.current = effort.id;
     load();
     return true;
   }
@@ -602,6 +612,13 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "move": { const list = scopeRows(); if (list.length) openDialog({ kind: "move", prUrls: list.map((item) => item.prUrl), refs: refs(list), group: null }); return; }
       case "one-off": { const list = scopeRows(); if (list.length) void oneOff(list.map((item) => item.prUrl), null); return; }
       case "new-effort": { const list = scopeRows(); if (list.length) openDialog({ kind: "new", prUrls: list.map((item) => item.prUrl), refs: refs(list), name: "", goal: "", group: null }); return; }
+      case "promote": {
+        // Every open PR on the service card, as one new effort named for its repository; its threads follow their PRs.
+        const list = lines.filter((line) => line.row && !line.ghost);
+        if (card?.card.kind === "service" && list.length) openDialog({ kind: "new", prUrls: list.map((item) => item.prUrl), refs: refs(list),
+          name: card.card.repo?.split("/").at(-1) ?? "", goal: "", group: null, promote: { id: card.card.id, name: card.card.name } });
+        return;
+      }
       case "rule": {
         loadRules();
         const first = view?.active.find((item) => !item.oneOff && item.kind === "effort");
@@ -748,8 +765,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       {dialog?.kind === "rule" ? <RuleBody draft={dialog.draft} efforts={moveTargets} rules={rules} matches={dialog.matches} busy={busy} error={dialogError}
         onDraft={(draft) => setDialog({ ...dialog, draft })} onAdd={() => addRule()} onRemove={(id) => run({ kind: "rule-remove", id })} onCancel={closeDialog} /> : null}
     </DeckDialog>
-    <DeckDialog open={dialog?.kind === "new"} title="New effort" sub="A new card joins the end of the pile. You stay where you are." onClose={closeDialog} onReturn={returnFocus}
-      onConfirmKey={() => createEffort()}>
+    <DeckDialog open={dialog?.kind === "new"} title={dialog?.kind === "new" && dialog.promote ? `Promote ${dialog.promote.name}` : "New effort"}
+      sub={dialog?.kind === "new" && dialog.promote ? "It becomes an effort with all its open PRs. Their threads go with them."
+        : "A new card joins the end of the pile. You stay where you are."} onClose={closeDialog} onReturn={returnFocus} onConfirmKey={() => createEffort()}>
       {dialog?.kind === "new" ? <NewEffortBody name={dialog.name} goal={dialog.goal} refs={dialog.refs} busy={busy} error={dialogError}
         onName={(value) => setDialog({ ...dialog, name: value })} onGoal={(value) => setDialog({ ...dialog, goal: value })} onCreate={() => createEffort()} onCancel={closeDialog} /> : null}
     </DeckDialog>
@@ -853,8 +871,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   }
   function createEffort() {
     if (dialog?.kind !== "new" || busy || !dialog.name.trim()) return;
-    const { prUrls, name, goal, group } = dialog;
-    void classify(() => rpc.call("classify_new_effort", { name: name.trim(), goal: goal.trim(), prUrls, requestId: crypto.randomUUID() }), group, prUrls);
+    const { prUrls, name, goal, group, promote } = dialog;
+    void classify(() => rpc.call("classify_new_effort", { name: name.trim(), goal: goal.trim(), prUrls, requestId: crypto.randomUUID() }), group, prUrls, null,
+      promote?.id ?? null);
   }
 }
 

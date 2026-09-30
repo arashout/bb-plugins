@@ -136,11 +136,12 @@ describe("the effort deck's markup", () => {
     expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
   });
 
-  it("draws a service card as an effort's with a hollow dot and no Hold or Complete, and its suggestions and rules above its rows", () => {
+  it("draws a service card as an effort's with a hollow dot, Promote in place of Hold and Complete, and its suggestions and rules above its rows", () => {
     const html = pane(inkwellDeck(), FOLIO);
     expect(html).toMatch(/data-deck-card="service:inkwell\/folio"/u);
     expect(text(html)).toContain("folio · service 2 need you Work in folio that no effort has yet.");
     expect(button(html, "act-advance")).toEqual({ text: "Advance · 2 a", disabled: false });
+    expect(button(html, "act-promote")).toEqual({ text: "Promote to effort…", disabled: false });
     expect(html).not.toContain("act-hold");
     expect(html).not.toContain("act-complete");
     // Suggestions sit above the rows, which stay in their sections by the move each needs, each naming where its suggestion points.

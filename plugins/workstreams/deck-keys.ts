@@ -19,7 +19,7 @@ export type KeyGroup = (typeof KEY_GROUPS)[number];
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
   | "tiles" | "merge" | "confirm" | "nudge" | "request" | "ready" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
-  | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "rule" | "seed" | "palette" | "help";
+  | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
 /** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine. */
 export type DeckAction = { id: DeckActionId; group: KeyGroup; title: string; keys: readonly string[]; effect: KeyEffect };
 
@@ -56,6 +56,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "move", group: "Sort", title: "Move to an effort…", keys: ["e"], effect: "dialog" },
   { id: "one-off", group: "Sort", title: "Mark as one-offs", keys: [], effect: "local" },
   { id: "new-effort", group: "Sort", title: "New effort from the selection…", keys: [], effect: "dialog" },
+  { id: "promote", group: "Sort", title: "Promote to an effort…", keys: [], effect: "dialog" },
   { id: "rule", group: "Sort", title: "Standing rules…", keys: [], effect: "dialog" },
   { id: "seed", group: "Sort", title: "Seed efforts from Linear…", keys: [], effect: "dialog" },
   { id: "palette", group: "Anywhere", title: "All actions", keys: ["⌘K"], effect: "dialog" },

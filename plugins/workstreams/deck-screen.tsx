@@ -330,7 +330,8 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
       <div className="flex flex-wrap gap-1.5">
         {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, "border-foreground bg-foreground text-background")}>Resume</button> : <>
           <ActionButton id="advance" on={on} run={run} primary label={`Advance${screen.advance.length ? ` · ${screen.advance.length}` : ""}`} />
-          {card.oneOff || service ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
+          {service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
+            : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
         </>}
       </div>
     </div>
