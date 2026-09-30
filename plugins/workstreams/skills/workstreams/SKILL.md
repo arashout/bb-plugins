@@ -712,9 +712,13 @@ reason names, whom it re-requests, and `inventory_confirm_handled` the row's
 `approval-comments` reason (approved, green, merge-clean, every review thread
 resolved, and the approval's comments unverified on this head) by recording
 your verification of those comments on that head, which the merge gate accepts
-as it accepts a worker's evidence. Each reads the PR again first. It refuses
-under a hold, a v2 claim, or another writer, and when the facts the step
-depends on differ from what the row showed. The row's `lastAction` records
+as it accepts a worker's evidence. It reads the approval's notes from GitHub
+first and needs evidence of handling since the newest: a commit, a reply from
+the PR's author, or every thread that note opened resolved. Without any, it
+refuses unless `anyway` is set, and the record says there was no evidence;
+every confirmation writes an audit row. Each of the four reads the PR again
+first. It refuses under a hold, a v2 claim, or another writer, and when the
+facts the step depends on differ from what the row showed. The row's `lastAction` records
 each outcome, refusals included. **Merge** opens `action_merge_preview`, and
 nothing merges outside it.
 

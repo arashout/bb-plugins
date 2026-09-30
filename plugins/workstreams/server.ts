@@ -171,7 +171,9 @@ import { PIN_AFTER, planClusterAsks, type AskMemory } from "./asks.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
 import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
-import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified } from "./approval-feedback.js";
+import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState,
+  feedbackVerified } from "./approval-feedback.js";
+import type { ApprovalHandling } from "./approval-evidence.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -434,13 +436,16 @@ export const rpcContract = defineRpcContract({
    * One click, one write, on facts read again first: refused under a hold, a v2 claim, or another writer, and when the facts it depends on
    * changed since the row was shown. Each sends those facts back from its row: mark ready its `head`, a request its `reviewers`, a nudge
    * the reviewers its attention reason names, and a confirmation its `head` and `feedbackFingerprint`. A confirmation writes nothing to
-   * GitHub: it records the approval's comments verified on that head, as yours. Merge opens action_merge_preview instead.
+   * GitHub: it records the approval's comments verified on that head, as yours, and without a commit, reply, or resolved thread since the
+   * approval only with `anyway`. Merge opens action_merge_preview instead.
    */
   inventory_mark_ready: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(), output: writeResult },
   inventory_request_review: { input: prUrlInput.extend({ logins: z.array(z.string().max(140)).min(1).max(20), shown: inventoryRowSchema.shape.reviewers }).strict(),
     output: writeResult },
   inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
-  inventory_confirm_handled: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u), fingerprint: z.string().regex(/^[0-9a-f]{64}$/u) }).strict(),
+  inventory_confirm_handled: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u), fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
+    /** Confirm though nothing since the approval shows its notes handled; the record says so. */
+    anyway: z.boolean().optional() }).strict(),
     output: writeResult },
   dispatch_set: {
     input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
@@ -694,6 +699,7 @@ export const MIGRATIONS = [
   PR_MERGES_MIGRATION,
   DECK_BATCH_MIGRATION,
   LINEAR_SEED_MIGRATION,
+  APPROVAL_CONFIRMATION_AUDIT_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -5705,6 +5711,17 @@ export default async function plugin(bb: BbPluginApi) {
     const [word, undo] = STOPPED[pile];
     return `Its effort is ${word}. ${undo} it ${merging ? "before merging this PR." : "first; nothing was written."}`;
   }
+  /** An approval's notes and what came after them, read from GitHub now; see approval-evidence.ts. */
+  async function approvalHandling(prUrl: string): Promise<ApprovalHandling> {
+    const hostId = (await bb.sdk.system.config()).primaryHostId;
+    if (hostId === null) return { ok: false, error: "No primary BB host is available to read GitHub." };
+    try { return await host.call("approvalHandling", { prUrl }, { hostId, signal: disposal.signal, timeoutMs: HOST_ACTION_TIMEOUT_MS }); }
+    catch (error) { return { ok: false, error: String(error).slice(0, 300) }; }
+  }
+  /** One audit row per confirmation you record or revoke, with what it covered. */
+  const auditConfirmation = (prUrl: string, action: "confirm" | "revoke", body: Record<string, unknown>) =>
+    db.prepare("INSERT INTO approval_confirmation_audit (pr_url, at, action, body) VALUES (?, ?, ?, ?)").run(canonicalPrUrl(prUrl) ?? prUrl, Date.now(), action,
+      JSON.stringify(body));
   /** The inventory's one-click GitHub writes. Each is one click's authorization, checked again on fresh facts; see inventory-actions.ts. */
   const inventoryActions = createInventoryActions({
     now: Date.now,
@@ -5747,9 +5764,11 @@ export default async function plugin(bb: BbPluginApi) {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       return hostId === null ? { ok: false, error: "No primary BB host is available to write to GitHub." } : writeOf(hostId)(request);
     },
+    handling: (prUrl) => approvalHandling(prUrl),
     // The board and the roster panes, which read on board-changed, gate on this record.
-    confirm: (prUrl, headOid, feedback) => {
-      approvalFeedback.confirm(prUrl, feedback, headOid, Date.now());
+    confirm: (prUrl, headOid, feedback, evidence) => {
+      const record = approvalFeedback.confirm(prUrl, feedback, headOid, Date.now(), evidence);
+      auditConfirmation(prUrl, "confirm", { headOid, fingerprint: record.fingerprint, evidence });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
     },
     record: (entry) => {
@@ -6213,7 +6232,7 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
-    inventory_confirm_handled: ({ prUrl, headOid, fingerprint }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint),
+    inventory_confirm_handled: ({ prUrl, headOid, fingerprint, anyway }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint, anyway),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };
       void refreshInventory();

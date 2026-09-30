@@ -5,6 +5,7 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema, checkoutInspectionInputSchema, checkoutInspectionSchema } from "./advance-contract.js";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
+import { approvalHandlingSchema } from "./approval-evidence.js";
 import { prAttentionSchema } from "./pr-attention.js";
 
 /**
@@ -288,6 +289,11 @@ export const hostContract = defineRpcContract({
   advanceInspect: {
     input: z.object({ prUrl: z.string().max(500) }).strict(),
     output: advanceInspectionSchema,
+  },
+  /** Read-only: an approval's notes and what since shows them handled, for the confirm. */
+  approvalHandling: {
+    input: z.object({ prUrl: z.string().max(500) }).strict(),
+    output: approvalHandlingSchema,
   },
   equalHeadTrees: {
     input: z.object({ prUrl: z.string().max(500), priorHeadOid: z.string().regex(/^[0-9a-f]{40}$/u),

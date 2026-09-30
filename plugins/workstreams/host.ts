@@ -18,7 +18,7 @@ import {
   parsePrList,
   repoFromRemote,
 } from "./gh.js";
-import { prTarget, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runRerunFailed, runUpdateBranch, type GhRunner } from "./ghactions.js";
+import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runRerunFailed, runUpdateBranch, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
@@ -563,6 +563,10 @@ export default experimental_defineHostEntry({
       return { path: await realpath(path) };
     },
     advanceInspect: ({ prUrl }, context) => readAdvancePr(ghRunner(context.signal), prUrl),
+    approvalHandling: async ({ prUrl }, context) => {
+      const target = prTarget(prUrl);
+      return target === null ? { ok: false as const, error: "That is not a pull request URL." } : readApprovalHandling(ghRunner(context.signal), target);
+    },
     equalHeadTrees: ({ prUrl, priorHeadOid, currentHeadOid }, context) =>
       readEqualHeadTrees(ghRunner(context.signal), prUrl, priorHeadOid, currentHeadOid),
     advanceWorkspace: (input, context) => prepareAdvanceWorkspace(

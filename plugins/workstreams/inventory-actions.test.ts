@@ -4,6 +4,7 @@ import { parsePrList } from "./gh.js";
 import { createInventoryActions, suggestReviewers, type ActionRecord, type InventoryActionDeps } from "./inventory-actions.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
+import type { ApprovalEvidence } from "./approval-evidence.js";
 
 const URL = "https://github.com/inkwell/folio/pull/42";
 const HEAD = "a".repeat(40);
@@ -20,8 +21,11 @@ const commented = (extra: Partial<Pr> = {}): Pr => ({ ...pr({ reviewDecision: "A
 const earned: InventoryActionDeps["attention"] = async (facts) => attentionReasons(facts, {}, { now: 1_000, thresholds: DEFAULT_ATTENTION_THRESHOLDS,
   utcOffsetMinutes: 0 });
 
+/** The live case that read as ready: the note is in the approval's review body, with no thread, reply, or commit after it. */
+const NONE: ApprovalEvidence = { since: "2026-09-28T12:00:00Z", commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true };
+
 /** Doubles for every dependency, each overridable; `log` records the order reads and writes happen in. */
-function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<InventoryActionDeps> } = {}) {
+function setup(options: { listed?: boolean; fresh?: Pr | null; evidence?: ApprovalEvidence; deps?: Partial<InventoryActionDeps> } = {}) {
   const log: string[] = [];
   const records: ActionRecord[] = [];
   const writes: PrWrite[] = [];
@@ -38,6 +42,7 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; deps?: Partial<In
     read: vi.fn(async () => { log.push("read"); return { ok: true as const, pr: fresh }; }),
     attention: async (facts) => facts.reviewRequests.length ? [waiting([...facts.reviewRequests])] : [],
     write: vi.fn(async (request: PrWrite) => { log.push("write"); writes.push(request); return { ok: true as const, detail: "Done." }; }),
+    handling: async () => { log.push("notes"); return { ok: true as const, headOid: HEAD, fingerprint: FEEDBACK.fingerprint, sources: [], evidence: options.evidence ?? NONE }; },
     confirm: (...args) => { log.push("confirm"); confirmed.push(args); },
     record: async (entry) => { records.push(entry); },
     ...options.deps,
@@ -142,13 +147,49 @@ describe("inventory actions", () => {
 
   // Confirming clears the merge gate, so it must bind to exactly what the row showed and never stand in for a newer push or comment.
   it("confirms an approval's comments on the head and comments the row showed, as yours, writing nothing to GitHub", async () => {
-    const env = setup({ fresh: commented(), deps: { attention: earned } });
-    expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: true, detail: "Confirmed the approval's comments handled on aaaaaaa." });
-    expect(env.log).toEqual(["read", "confirm"]);
-    expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK]]);
+    const replied = { ...NONE, replies: 1 };
+    const env = setup({ fresh: commented(), evidence: replied, deps: { attention: earned } });
+    const detail = "Confirmed the approval's comments handled on aaaaaaa: 1 reply since this approval.";
+    expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: true, detail });
+    expect(env.log).toEqual(["read", "notes", "confirm"]);
+    expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK, replied]]);
     expect(env.writes).toEqual([]);
-    expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "confirm-handled", ok: true, detail: "Confirmed the approval's comments handled on aaaaaaa.",
-      reviewers: [] }]);
+    expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "confirm-handled", ok: true, detail, reviewers: [] }]);
+  });
+
+  // The false readiness this guards against: one click recorded "handled" on a note nobody answered, and the PR read as ready to merge.
+  it("never confirms in one click without evidence, and confirming anyway records that there was none", async () => {
+    const env = setup({ fresh: commented(), deps: { attention: earned } });
+    expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: false,
+      error: "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written." });
+    expect(env.confirmed).toEqual([]);
+    expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint, true)).toEqual({ ok: true,
+      detail: "Confirmed the approval's comments handled on aaaaaaa without evidence: no commits, reply, or resolved threads since this approval." });
+    expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK, NONE]]);
+    // A read GitHub cut short is no evidence either.
+    const cut = setup({ fresh: commented(), evidence: { ...NONE, commits: 3, complete: false }, deps: { attention: earned } });
+    expect(await cut.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("cut short") });
+    expect(cut.confirmed).toEqual([]);
+  });
+
+  it("confirms in one click on each kind of evidence: a commit, an author's reply, or the approval's threads resolved", async () => {
+    for (const evidence of [{ ...NONE, commits: 1 }, { ...NONE, replies: 1 }, { ...NONE, threads: { total: 2, resolved: 2 } }]) {
+      const env = setup({ fresh: commented(), evidence, deps: { attention: earned } });
+      expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: true });
+      expect(env.confirmed).toEqual([[URL, HEAD, FEEDBACK, evidence]]);
+    }
+    const open = setup({ fresh: commented(), evidence: { ...NONE, threads: { total: 2, resolved: 1 } }, deps: { attention: earned } });
+    expect(await open.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false });
+  });
+
+  it("refuses to confirm on notes it couldn't read, or read on another head or feedback than the row's", async () => {
+    const failed = setup({ fresh: commented(), deps: { attention: earned, handling: async () => ({ ok: false, error: "HTTP 502" }) } });
+    expect(await failed.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint, true)).toEqual({ ok: false,
+      error: "GitHub couldn't be read for the approval's notes, so nothing was written: HTTP 502" });
+    const moved = setup({ fresh: commented(), deps: { attention: earned, handling: async () => ({ ok: true, headOid: "b".repeat(40),
+      fingerprint: FEEDBACK.fingerprint, sources: [], evidence: { ...NONE, commits: 1 } }) } });
+    expect(await moved.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("changed while they were read") });
+    expect([...failed.confirmed, ...moved.confirmed]).toEqual([]);
   });
 
   it("refuses to confirm under a hold or a v2 claim, or once the head, the comments, their verification, or what else the row showed moved", async () => {

@@ -4,10 +4,13 @@
 // the click sends back: a GitHub write, or for a confirmation, a verification
 // recorded as yours. Before writing, it reads the PR again, and it refuses
 // under a hold (the PR's or its effort's), a v2 claim or another writer, and
-// when the facts the step depends on changed since the row was shown. Every
+// when the facts the step depends on changed since the row was shown. A
+// confirmation also reads what came after the approval, and without evidence
+// that its notes were handled it records only when you confirm anyway. Every
 // outcome is recorded, refusals included. Merge is not here: the row opens the
 // existing fresh merge preview, and nothing merges outside it.
 import type { ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+import { evidenceText, handled, type ApprovalEvidence, type ApprovalHandling } from "./approval-evidence.js";
 import type { Pr, PrWrite } from "./contract.js";
 import { REVIEWER } from "./ghactions.js";
 import type { AttentionReason } from "./pr-attention.js";
@@ -35,12 +38,15 @@ export type InventoryActionDeps = {
   /** The attention these facts earn, as the inventory computes it. */
   attention(pr: Pr): Promise<readonly AttentionReason[]>;
   write(request: PrWrite): Promise<ActionResult>;
-  /** Record your verification of this approval feedback on this head, with your provenance. */
-  confirm(prUrl: string, headOid: string, feedback: ApprovalFeedbackSnapshot): void;
+  /** Read the approval's notes and what came after them from GitHub now. */
+  handling(prUrl: string): Promise<ApprovalHandling>;
+  /** Record your verification of this approval feedback on this head, with your provenance and the evidence you confirmed on. */
+  confirm(prUrl: string, headOid: string, feedback: ApprovalFeedbackSnapshot, evidence: ApprovalEvidence): void;
   record(entry: ActionRecord): Promise<void>;
 };
 
-type Step = { write: PrWrite; reviewers?: string[] } | { confirm: { headOid: string; feedback: ApprovalFeedbackSnapshot } } | { refuse: string };
+type Step = { write: PrWrite; reviewers?: string[] } | { confirm: { headOid: string; feedback: ApprovalFeedbackSnapshot; evidence: ApprovalEvidence } }
+  | { refuse: string };
 const logins = (values: readonly string[]) => [...new Set(values.map((login) => login.toLowerCase()))].sort().join(", ");
 const mentions = (values: readonly string[]) => values.map((login) => `@${login}`).join(", ");
 /** Who a nudge re-requests: every reviewer an overdue request or an answered change request names. */
@@ -92,8 +98,10 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if ("refuse" in step) return refuse(step.refuse);
       // GitHub doesn't change, so there's nothing to read back.
       if ("confirm" in step) {
-        deps.confirm(prUrl, step.confirm.headOid, step.confirm.feedback);
-        return finish({ ok: true, detail: `Confirmed the approval's comments handled on ${step.confirm.headOid.slice(0, 7)}.` });
+        const { headOid, feedback, evidence } = step.confirm;
+        deps.confirm(prUrl, headOid, feedback, evidence);
+        return finish({ ok: true, detail: handled(evidence) ? `Confirmed the approval's comments handled on ${headOid.slice(0, 7)}: ${evidenceText(evidence)}.`
+          : `Confirmed the approval's comments handled on ${headOid.slice(0, 7)} without evidence: ${evidenceText(evidence).toLowerCase()}.` });
       }
       const result = await deps.write(step.write);
       // Read it once more so its row shows what the write did.
@@ -129,8 +137,11 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (logins(shown) !== logins(after)) return { refuse: `Who needs a nudge changed since the row was shown (now ${mentions(after)}). Review it and try again; nothing was written.` };
       return { write: { kind: "nudge", prUrl, reviewers: after, comment: null }, reviewers: after };
     }),
-    /** Record the approval's comments handled, bound to the head and feedback the row showed, and only while fresh facts still ask for it. */
-    confirmHandled: (prUrl: string, headOid: string, fingerprint: string) => act("confirm-handled", prUrl, async (fresh) => {
+    /**
+     * Record the approval's comments handled, bound to the head and feedback the row showed, and only while fresh facts still ask for it.
+     * With no commit, reply, or resolved thread since the approval, only `anyway` records it, and the record says there was no evidence.
+     */
+    confirmHandled: (prUrl: string, headOid: string, fingerprint: string, anyway = false) => act("confirm-handled", prUrl, async (fresh) => {
       if (fresh.headRefOid !== headOid) return { refuse: "New commits landed since the row was shown. Review them and try again; nothing was written." };
       const feedback = fresh.approvalFeedback;
       if (feedback?.status !== "present") return { refuse: feedback?.status === "none" ? "The approval has no comments to confirm now; nothing was written."
@@ -142,7 +153,11 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (!(await deps.attention(fresh)).some((reason) => reason.kind === "approval-comments")) {
         return { refuse: "Its approval, checks, merge state, or review threads changed since the row was shown. Review it and try again; nothing was written." };
       }
-      return { confirm: { headOid, feedback } };
+      const notes = await deps.handling(prUrl);
+      if (!notes.ok) return { refuse: `GitHub couldn't be read for the approval's notes, so nothing was written: ${notes.error}` };
+      if (notes.headOid !== headOid || notes.fingerprint !== fingerprint) return { refuse: "The approval's notes or head changed while they were read. Read them again; nothing was written." };
+      if (!handled(notes.evidence) && !anyway) return { refuse: `${evidenceText(notes.evidence)}. Ask its thread to address it, or confirm anyway; nothing was written.` };
+      return { confirm: { headOid, feedback, evidence: notes.evidence } };
     }),
   };
 }

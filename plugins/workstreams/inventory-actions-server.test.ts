@@ -33,6 +33,8 @@ const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sour
  */
 async function setup() {
   const calls: { method: string; input: unknown }[] = [];
+  // What GitHub shows after mira's approval of #319: at first nothing, as in the live case that read as ready.
+  const notes = { evidence: { since: daysAgo(2), commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true } };
   const current = new Map<number, Pr>([
     [313, pr(313, { isDraft: true })], [314, pr(314)],
     [315, { ...pr(315, { reviewRequests: [{ login: "mira" }] }), reviewRequestedAt: [{ reviewer: "mira", at: daysAgo(10) }] }],
@@ -61,6 +63,11 @@ async function setup() {
       return { ok: true, detail: `Wrote ${request.kind}.` };
     }
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
+    if (method === "approvalHandling") {
+      const facts = current.get(Number((input as { prUrl: string }).prUrl.split("/").pop()))!;
+      return { ok: true, headOid: facts.headRefOid, fingerprint: facts.approvalFeedback!.fingerprint, evidence: notes.evidence,
+        sources: [{ id: "review-319", kind: "review", author: "mira", at: daysAgo(2), body: "Wrap spine labels at 40 characters.", truncated: false, resolved: null }] };
+    }
     if (method === "prLive") {
       const live = current.get(Number((input as { prUrl: string }).prUrl.split("/").pop()))!;
       return { ok: true, live: { state: live.state, isDraft: live.isDraft, reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus,
@@ -86,7 +93,7 @@ async function setup() {
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
   const since = () => { const at = calls.length; return () => calls.slice(at); };
   const row = async (number: number) => ((await harness.callRpc("inventory_get", {})) as InventoryView).groups.flatMap((group) => group.rows).find((entry) => entry.number === number)!;
-  return { harness, calls, current, spawn, db, since, row, rpc: (method: string, input: unknown) => harness.callRpc(method as never, input as never) };
+  return { harness, calls, current, notes, spawn, db, since, row, rpc: (method: string, input: unknown) => harness.callRpc(method as never, input as never) };
 }
 
 describe("inventory actions on the server", () => {
@@ -248,15 +255,24 @@ describe("inventory actions on the server", () => {
     expect(stored()).toEqual([]);
 
     env.current.set(319, original);
+    // Nothing since mira's approval shows her note handled: one click records nothing.
+    expect(await confirm()).toEqual({ ok: false,
+      error: "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written." });
+    expect(stored()).toEqual([]);
+    // The author replies on the PR; now the same click confirms, with that evidence on the record and an audit row.
+    env.notes.evidence = { ...env.notes.evidence, replies: 1 };
     const after = env.since();
     const signals = env.harness.inspection.realtimeSignals.length;
-    expect(await confirm()).toEqual({ ok: true, detail: `Confirmed the approval's comments handled on ${HEAD.slice(0, 7)}.` });
-    expect(after().map((call) => call.method)).toEqual(["inspectPrs"]);
+    expect(await confirm()).toEqual({ ok: true, detail: `Confirmed the approval's comments handled on ${HEAD.slice(0, 7)}: 1 reply since this approval.` });
+    expect(after().map((call) => call.method)).toEqual(["inspectPrs", "approvalHandling"]);
     // The board, roster, and deck panes gate on the record, so they're told after it's saved, not only by the read before it.
     expect(env.harness.inspection.realtimeSignals.slice(signals).map((signal) => signal.channel).slice(-3))
       .toEqual(["board-changed", "inventory-changed", "deck-changed"]);
     expect(stored().map((row) => JSON.parse((row as { body: string }).body))).toMatchObject([{ prUrl: url(319), headOid: HEAD,
-      fingerprint: FEEDBACK.fingerprint, provenance: { kind: "user" } }]);
+      fingerprint: FEEDBACK.fingerprint, provenance: { kind: "user", evidence: env.notes.evidence } }]);
+    expect(env.db.prepare("SELECT pr_url AS prUrl, action, body FROM approval_confirmation_audit").all().map((row) => ({ ...row as object,
+      body: JSON.parse((row as { body: string }).body) }))).toEqual([{ prUrl: url(319), action: "confirm",
+      body: { headOid: HEAD, fingerprint: FEEDBACK.fingerprint, evidence: env.notes.evidence } }]);
     expect(await env.row(319)).toMatchObject({ attention: [{ kind: "merge-waiting", action: "merge" }], lastAction: { action: "confirm-handled", ok: true } });
     expect((await preview()).refusals).toEqual([]);
   });

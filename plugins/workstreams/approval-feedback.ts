@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { RunDb } from "./runstore.js";
 import { canonicalPrUrl } from "./pr-holds.js";
+import { approvalEvidenceSchema, evidenceText, handled, type ApprovalEvidence } from "./approval-evidence.js";
 
 export const approvalFeedbackSchema = z.object({
   status: z.enum(["none", "present", "unknown"]),
@@ -39,7 +40,8 @@ export const approvalFeedbackProvenanceSchema = z.discriminatedUnion("kind", [
     evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100) }).strict(),
   // You confirmed the feedback handled from the inventory: your word, not a worker's evidence. The gates, the merge preview, and the
   // roster's evidence read it as verified all the same, as they read every variant: provenance is the record's audit trail, not a gate.
-  z.object({ kind: z.literal("user") }).strict(),
+  // `evidence` is what GitHub showed since the approval when you confirmed; a record without it predates that check.
+  z.object({ kind: z.literal("user"), evidence: approvalEvidenceSchema.optional() }).strict(),
 ]);
 export type ApprovalFeedbackProvenance = z.infer<typeof approvalFeedbackProvenanceSchema>;
 const recordSchema = feedbackReportSchema.extend({
@@ -56,6 +58,9 @@ const recordSchema = feedbackReportSchema.extend({
 export type ApprovalFeedbackRecord = z.input<typeof recordSchema>;
 export const APPROVAL_FEEDBACK_MIGRATION =
   "CREATE TABLE IF NOT EXISTS approval_feedback_verifications (pr_url TEXT PRIMARY KEY, body TEXT NOT NULL)";
+/** Append-only: server.ts adds this after Linear seed provenance (id 65). Each confirmation you record or revoke, with what it covered. */
+export const APPROVAL_CONFIRMATION_AUDIT_MIGRATION =
+  "CREATE TABLE IF NOT EXISTS approval_confirmation_audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, pr_url TEXT NOT NULL, at INTEGER NOT NULL, action TEXT NOT NULL, body TEXT NOT NULL)";
 export const FEEDBACK_REPORT_PREFIX = "Workstreams approval feedback evidence: ";
 
 /** A worker's final report is evidence to check, never a clearance by itself. */
@@ -138,16 +143,18 @@ export function createApprovalFeedbackStore(db: RunDb) {
     },
     /**
      * Your confirmation that approval feedback is handled, bound to exactly this head and feedback: one finding per source that says it
-     * is your word and that no check ran. No thread or attempt did the work, so those fields name the inventory and when you confirmed.
+     * is your word, what GitHub showed since the approval, and that no check ran. No thread or attempt did the work, so those fields name
+     * the inventory and when you confirmed.
      */
-    confirm(prUrl: string, snapshot: ApprovalFeedbackSnapshot, headOid: string, at: number): ApprovalFeedbackRecord {
+    confirm(prUrl: string, snapshot: ApprovalFeedbackSnapshot, headOid: string, at: number, evidence: ApprovalEvidence): ApprovalFeedbackRecord {
       if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) {
         throw new Error("Only approval feedback read on a known head can be confirmed");
       }
+      const seen = handled(evidence) ? `You confirmed this approval feedback handled; since the approval: ${evidenceText(evidence).replace(/ since this approval$/u, "")}.`
+        : `You confirmed this approval feedback handled without evidence: ${evidenceText(evidence)}.`;
       return store.save(prUrl, "inventory", { attemptId: `confirmed-${at}`, headOid, fingerprint: snapshot.fingerprint, blockers: [],
-        findings: snapshot.sourceIds.map((sourceId) => ({ sourceId, resolution: "already-satisfied" as const,
-          evidence: "You confirmed in the PR inventory that this approval feedback is handled.",
-          validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user" });
+        findings: snapshot.sourceIds.map((sourceId) => ({ sourceId, resolution: "already-satisfied" as const, evidence: seen,
+          validation: { outcome: "not-needed" as const, detail: "Your confirmation; no check ran." } })) }, at, { kind: "user", evidence });
     },
   };
   return store;

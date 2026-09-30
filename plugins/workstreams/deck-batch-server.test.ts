@@ -63,6 +63,9 @@ async function setup() {
       return { ok: true, detail: `Wrote ${request.kind}.` };
     }
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
+    // #504's note is in mira's approval body, and nothing came after it: no commit, reply, or thread.
+    if (method === "approvalHandling") return { ok: true, headOid: HEAD, fingerprint: FEEDBACK.fingerprint, sources: [],
+      evidence: { since: daysAgo(2), commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true } };
     throw new Error(`Unexpected host method ${method}`);
   } });
   await plugin(bb);
@@ -109,15 +112,15 @@ describe("deck batches on the server", () => {
     await settled(env, planned.batchId);
     expect(env.writes).toEqual([{ kind: "nudge", prUrl: url(503), reviewers: ["mira"], comment: null }, { kind: "nudge", prUrl: url(502), reviewers: ["mira"], comment: null },
       { kind: "ready", prUrl: url(501), headOid: HEAD }]);
-    expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state])).toEqual([["folio #504", "sent"], ["folio #503", "sent"],
-      ["folio #502", "sent"], ["folio #501", "sent"]]);
-    // The confirmation is recorded as yours, on the head it was planned for.
-    expect(env.db.prepare("SELECT body FROM approval_feedback_verifications WHERE pr_url = ?").all(url(504)).map((row) => JSON.parse((row as { body: string }).body)))
-      .toMatchObject([{ headOid: HEAD, fingerprint: FEEDBACK.fingerprint, provenance: { kind: "user" } }]);
-    // Each landed write keeps its row out of Needs you, and out of the next plan, until the view marks it seen. Seen, #504 merges and #501,
-    // out of draft, needs a reviewer.
-    expect(await env.card()).toMatchObject({ needsYou: 1 });
-    expect(await env.card({ [url(504)]: Date.now(), [url(501)]: Date.now() })).toMatchObject({ needsYou: 3 });
+    expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
+      ["folio #504", "refused", "No commits, reply, or resolved threads since this approval. Ask its thread to address it, or confirm anyway; nothing was written."],
+      ["folio #503", "sent", "Wrote nudge."], ["folio #502", "sent", "Wrote nudge."], ["folio #501", "sent", "Wrote ready."]]);
+    // Nothing since mira's approval shows her note handled, so no confirmation is recorded and #504 still doesn't read as ready.
+    expect(env.db.prepare("SELECT COUNT(*) AS n FROM approval_feedback_verifications").get()).toEqual({ n: 0 });
+    // Each landed write keeps its row out of Needs you, and out of the next plan, until the view marks it seen; the refused #504 still
+    // counts. Seen, #501, out of draft, needs a reviewer.
+    expect(await env.card()).toMatchObject({ needsYou: 2 });
+    expect(await env.card({ [url(501)]: Date.now() })).toMatchObject({ needsYou: 3 });
   });
 
   it("stops a confirmed batch at each PR whose effort you hold or complete before it sends, and won't start one for a paused effort", async () => {
@@ -153,7 +156,7 @@ describe("deck batches on the server", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     await settled(env, planned.batchId);
     expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
-      ["folio #504", "sent", expect.stringContaining("Confirmed")],
+      ["folio #504", "refused", expect.stringContaining("No commits, reply, or resolved threads")],
       ["folio #503", "refused", "On hold: Store layout first. Release the hold first; nothing was written."],
       ["folio #502", "refused", expect.stringContaining("is writing this PR")],
       ["folio #501", "sent", "Wrote ready."]]);
@@ -288,7 +291,7 @@ describe("deck batches on the server", () => {
     await vi.waitFor(() => expect(env.writes).toHaveLength(2));
     await env.restart();
     await settled(env, cut.batchId);
-    expect((await env.batch(cut.batchId)).items.map((item) => [item.ref, item.state])).toEqual([["folio #504", "sent"], ["folio #503", "unknown"],
+    expect((await env.batch(cut.batchId)).items.map((item) => [item.ref, item.state])).toEqual([["folio #504", "refused"], ["folio #503", "unknown"],
       ["folio #501", "sent"], ["folio #502", "sent"]]);
     expect(env.writes.slice(1)).toEqual([{ kind: "nudge", prUrl: url(503), reviewers: ["mira"], comment: null },
       { kind: "nudge", prUrl: url(501), reviewers: ["mira"], comment: null }, { kind: "nudge", prUrl: url(502), reviewers: ["mira"], comment: null }]);

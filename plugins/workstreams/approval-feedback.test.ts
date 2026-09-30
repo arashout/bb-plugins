@@ -83,17 +83,23 @@ describe("approval feedback verification", () => {
     const snapshot = read.approvalFeedback;
     const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
     const store = createApprovalFeedbackStore(db);
-    const confirmed = store.confirm(url, snapshot, head, 5_000);
+    // Confirmed anyway, with nothing since the approval: the record keeps that it rests on your word alone.
+    const none = { since: review.submittedAt, commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true };
+    const confirmed = store.confirm(url, snapshot, head, 5_000, none);
     expect(store.get(url)).toEqual(confirmed);
-    expect(confirmed).toMatchObject({ provenance: { kind: "user" }, threadId: "inventory", headOid: head, fingerprint: snapshot.fingerprint, verifiedAt: 5_000,
-      findings: [{ sourceId: review.id, validation: { outcome: "not-needed", detail: "Your confirmation; no check ran." } }] });
+    expect(confirmed).toMatchObject({ provenance: { kind: "user", evidence: none }, threadId: "inventory", headOid: head, fingerprint: snapshot.fingerprint,
+      verifiedAt: 5_000, findings: [{ sourceId: review.id, evidence: "You confirmed this approval feedback handled without evidence: No commits, reply, or resolved threads since this approval.",
+        validation: { outcome: "not-needed", detail: "Your confirmation; no check ran." } }] });
+    expect(store.confirm(url, snapshot, head, 5_500, { ...none, commits: 2 }).findings[0]!.evidence)
+      .toBe("You confirmed this approval feedback handled; since the approval: 2 commits.");
+    store.confirm(url, snapshot, head, 5_000, none);
     expect(feedbackVerified(snapshot, head, store.get(url))).toBe(true);
     expect(feedbackVerificationState(snapshot, "b".repeat(40), store.get(url))).toBe("head-changed");
     expect(feedbackVerificationState({ ...snapshot, fingerprint: "c".repeat(64), sourceIds: [...snapshot.sourceIds, "review-43"] }, head, store.get(url)))
       .toBe("feedback-changed");
     const unnamed: [ApprovalFeedbackSnapshot, string][] = [[{ status: "unknown", fingerprint: null, sourceIds: [] }, head],
       [{ status: "none", fingerprint: null, sourceIds: [] }, head], [snapshot, "not-a-head"]];
-    for (const [feedback, at] of unnamed) expect(() => store.confirm(url, feedback, at, 6_000)).toThrow();
+    for (const [feedback, at] of unnamed) expect(() => store.confirm(url, feedback, at, 6_000, none)).toThrow();
     expect(store.get(url)).toEqual(confirmed);
     db.close();
   });

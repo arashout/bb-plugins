@@ -69,7 +69,11 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
       read: async (prUrl) => ({ ok: true, pr: inkwellInventoryPrs(store.get).find((pr) => pr.url === prUrl) ?? null }),
       attention: async (fresh) => inkwellInventory(store.get).groups.flatMap((group) => group.rows).find((row) => row.prUrl === fresh.url)!.attention,
       write: async () => { throw new Error("Confirming writes nothing to GitHub"); },
-      confirm: (prUrl, headOid, feedback) => { store.confirm(prUrl, feedback, headOid, NOW); }, record: async () => {} });
+      // Each author replied after the approval, so one click may confirm it.
+      handling: async (prUrl) => { const pr = inkwellInventoryPrs(store.get).find((item) => item.url === prUrl)!;
+        return { ok: true, headOid: pr.headRefOid!, fingerprint: pr.approvalFeedback!.fingerprint!, sources: [],
+          evidence: { since: new Date(NOW - 86_400_000).toISOString(), commits: 0, replies: 1, threads: { total: 0, resolved: 0 }, complete: true } }; },
+      confirm: (prUrl, headOid, feedback, evidence) => { store.confirm(prUrl, feedback, headOid, NOW, evidence); }, record: async () => {} });
     for (const pr of approvedWithComments) {
       const call = actionCall(rowOf(pr), action(find(pr), "confirm-handled")!);
       if (call.kind !== "rpc" || call.method !== "inventory_confirm_handled") throw new Error(`${pr} offers no confirmation`);

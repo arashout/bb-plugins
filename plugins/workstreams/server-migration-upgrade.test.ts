@@ -9,7 +9,7 @@ import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
 import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS } from "./effort-work-store.js";
-import { APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
+import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION } from "./approval-feedback.js";
 import { INVENTORY_MIGRATIONS } from "./inventory-store.js";
 import { PR_MERGES_MIGRATION, PR_OBSERVATION_CLOSED_MIGRATION, PR_OBSERVATION_ERROR_MIGRATION, PR_OBSERVATIONS_MIGRATION, PR_STATE_SINCE_MIGRATION }
   from "./inventory-store.js";
@@ -234,8 +234,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends Linear seed provenance after deck batches", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 64 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 64 ORDER BY id").all())
       .toEqual([{ id: 64, hash: statementHash(LINEAR_SEED_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends the confirmation audit after Linear seed provenance", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 65 ORDER BY id").all())
+      .toEqual([{ id: 65, hash: statementHash(APPROVAL_CONFIRMATION_AUDIT_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

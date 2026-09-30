@@ -8,6 +8,7 @@ import { parseMergeStateStatus } from "./gh.js";
 import { SHA, type LiveMergeFacts, type MergeMethod } from "./actions.js";
 import { createHash } from "node:crypto";
 import { approvalFeedbackSchema, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+import { NOTE_MAX, type ApprovalHandling, type ApprovalSource } from "./approval-evidence.js";
 
 export type Run = { ok: true; stdout: string } | { ok: false; error: string };
 /** Runs `gh` with these arguments, optionally writing `stdin` to it. */
@@ -213,7 +214,12 @@ function isThread(value: unknown): value is Thread {
     connection(thread.comments, "next") !== null;
 }
 
-async function approvalFeedbackOf(run: GhRunner, target: PrTarget, pr: Record<string, unknown>): Promise<{ snapshot: ApprovalFeedbackSnapshot; threadNodes?: Thread[] }> {
+/** What a present feedback snapshot was computed from: its approving and follow-up reviews, the threads they opened, every review, and the PR's author. */
+type FeedbackDetail = { approvals: Review[]; followups: Review[]; linked: { thread: Thread; review: Review; comments: ThreadComment[] }[]; reviews: Review[];
+  author: string | null };
+
+async function approvalFeedbackOf(run: GhRunner, target: PrTarget, pr: Record<string, unknown>):
+  Promise<{ snapshot: ApprovalFeedbackSnapshot; threadNodes?: Thread[]; detail?: FeedbackDetail }> {
   const head = pr.headRefOid;
   if (typeof head !== "string" || !SHA.test(head)) return { snapshot: UNKNOWN_FEEDBACK };
   const reviews = connection(pr.reviews, "previous");
@@ -332,7 +338,8 @@ async function approvalFeedbackOf(run: GhRunner, target: PrTarget, pr: Record<st
   const snapshot = { status: "present", fingerprint: createHash("sha256").update(contents).digest("hex"), sourceIds };
   if (contents.length > 50_000 || !approvalFeedbackSchema.safeParse(snapshot).success) return { snapshot: UNKNOWN_FEEDBACK };
   return { snapshot: snapshot as ApprovalFeedbackSnapshot,
-    threadNodes: allThreads as Thread[] };
+    threadNodes: allThreads as Thread[],
+    detail: { approvals, followups, linked, reviews: allReviews as Review[], author: typeof prAuthor === "string" ? prAuthor : null } };
 }
 
 /** Read all available review, thread, and linked comment pages before claiming feedback is clear. */
@@ -405,6 +412,65 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
     ...(reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted }),
     ...(approvalHistory === undefined ? {} : { approvalNotes: approvalHistory.notes, approvalNotesMore: approvalHistory.more, approvalNotesComplete: approvalHistory.complete }),
   };
+}
+
+const ACTIVITY_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid commits(last:100){pageInfo{hasPreviousPage}nodes{commit{oid committedDate}}}}}}";
+
+/**
+ * Read-only: an approval's notes, as the approval feedback's own sources, and what came after the newest of them: commits, replies from
+ * the PR's author (PR comments, reviews, and thread comments), and the inline threads the newest note opened resolved. The notes come from the same
+ * paged read as the feedback's fingerprint, and the commits from one more read that must see the same head.
+ */
+export async function readApprovalHandling(run: GhRunner, target: PrTarget): Promise<ApprovalHandling> {
+  const result = await run(threadsArgv(target, true));
+  if (!result.ok) return { ok: false, error: result.error };
+  const body = json(result) as { errors?: unknown; data?: { repository?: { pullRequest?: Record<string, unknown> } } } | undefined;
+  const pr = body?.data?.repository?.pullRequest;
+  if (body?.errors !== undefined || !pr) return { ok: false, error: "GitHub did not return the PR's reviews." };
+  const { snapshot, detail } = await approvalFeedbackOf(run, target, pr);
+  if (snapshot.status !== "present" || !detail) return { ok: false, error: snapshot.status === "none" ? "The approval left no notes."
+    : "GitHub didn't return the approval's notes in full. Refresh and try again." };
+  const head = pr.headRefOid as string;
+  const activity = json(await run(pageArgs(target, ACTIVITY_QUERY, []))) as { data?: { repository?: { pullRequest?: { headRefOid?: unknown;
+    commits?: { pageInfo?: { hasPreviousPage?: unknown }; nodes?: unknown } } } } } | undefined;
+  const later = activity?.data?.repository?.pullRequest;
+  if (later?.headRefOid !== head) return { ok: false, error: "The PR's head changed while it was read. Try again." };
+  const commits = Array.isArray(later.commits?.nodes) ? (later.commits.nodes as { commit?: { oid?: unknown; committedDate?: unknown } }[]) : null;
+  if (commits === null || !commits.every((node) => typeof node?.commit?.oid === "string" && typeof node.commit.committedDate === "string")) {
+    return { ok: false, error: "GitHub did not return the PR's commits." };
+  }
+  const noted = [...detail.approvals, ...detail.followups].filter((review) => review.body.trim() !== "");
+  // The newest note, and the head it was left on: only what came after it counts.
+  const last = [...noted, ...detail.linked.map(({ review }) => review)].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt)).at(-1)!;
+  const since = Date.parse(last.submittedAt);
+  const after = (at: unknown) => typeof at === "string" && Date.parse(at) > since;
+  const oids = commits.map((node) => node.commit!.oid as string);
+  const at = oids.indexOf(last.commit.oid);
+  // Its head gone from the last 100 commits means more than that many since, or history rewritten after it: either way, new commits.
+  const newCommits = at >= 0 ? oids.length - 1 - at : head === last.commit.oid ? 0
+    : Math.max(1, commits.filter((node) => after(node.commit!.committedDate)).length);
+  const author = detail.author;
+  const comments = pr.comments as { pageInfo?: { hasPreviousPage?: unknown }; nodes?: unknown } | undefined;
+  const commentNodes = Array.isArray(comments?.nodes) ? comments.nodes as { createdAt?: unknown; author?: { login?: unknown } | null }[] : null;
+  const byAuthor = (login: unknown) => author !== null && login === author;
+  const reviews = detail.reviews.filter((review) => byAuthor(review.author.login) && after(review.submittedAt));
+  const reviewIds = new Set(reviews.map((review) => review.id));
+  const replies = (commentNodes ?? []).filter((comment) => byAuthor(comment?.author?.login) && after(comment?.createdAt)).length + reviews.length +
+    detail.linked.flatMap(({ comments: thread }) => thread).filter((comment) => byAuthor(comment.author.login) && after(comment.createdAt) &&
+      !reviewIds.has(comment.pullRequestReview?.id ?? "")).length;
+  // A reply older than the last 100 PR comments would still be newer than the note only when all 100 are: that page can't rule one out.
+  const cut = commentNodes === null || (comments?.pageInfo?.hasPreviousPage === true && commentNodes.every((comment) => after(comment?.createdAt)));
+  // A thread's resolution has no date, so only the threads the newest note opened can show it was resolved after that note.
+  const current = detail.linked.filter(({ review }) => Date.parse(review.submittedAt) >= since);
+  const note = (text: string) => ({ body: text.trim().slice(0, NOTE_MAX), truncated: text.trim().length > NOTE_MAX });
+  const sources: ApprovalSource[] = [
+    ...noted.map((review): ApprovalSource => ({ id: review.id, kind: "review", author: review.author.login, at: review.submittedAt, ...note(review.body), resolved: null })),
+    ...detail.linked.map(({ thread, comments: [first] }): ApprovalSource => ({ id: thread.id, kind: "thread", author: first!.author.login, at: first!.createdAt,
+      ...note(first!.body), resolved: thread.isResolved })),
+  ].sort((a, b) => a.at.localeCompare(b.at));
+  return { ok: true, headOid: head, fingerprint: snapshot.fingerprint!, sources,
+    evidence: { since: last.submittedAt, commits: newCommits, replies, complete: author !== null && !cut,
+      threads: { total: current.length, resolved: current.filter(({ thread }) => thread.isResolved).length } } };
 }
 
 /**
