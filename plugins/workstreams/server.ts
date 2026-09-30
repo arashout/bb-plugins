@@ -174,7 +174,7 @@ import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
 import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
 import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState,
-  feedbackVerified } from "./approval-feedback.js";
+  feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { confirmReadSchema, type ApprovalHandling, type ConfirmRead } from "./approval-evidence.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
@@ -450,6 +450,8 @@ export const rpcContract = defineRpcContract({
    * GitHub now, with the thread Ask would send the approval-feedback recipe to.
    */
   inventory_confirm_read: { input: prUrlInput, output: confirmReadSchema },
+  /** Take back your confirmation of a PR's review notes, at any age, with an audit row; its notes need you again. Writes nothing to GitHub. */
+  inventory_confirm_revoke: { input: prUrlInput, output: writeResult },
   inventory_confirm_handled: { input: prUrlInput.extend({ headOid: z.string().regex(/^[0-9a-f]{40}$/u), fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
     /** Confirm though nothing since the approval shows its notes handled; the record says so. */
     anyway: z.boolean().optional() }).strict(),
@@ -5556,7 +5558,8 @@ export default async function plugin(bb: BbPluginApi) {
     const current = read ?? await board();
     const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
-    const shared = (prUrl: string) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
+    const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
+      confirmation: userConfirmation(approvalFeedback.get(prUrl), pr?.approvalFeedback, pr?.headRefOid ?? null),
       links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
     const entries = current.prInventory.entries;
     const scannedPrs = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [{ repo: unit.githubRepo ?? "", pr: unit.pr }] : [])));
@@ -5567,7 +5570,8 @@ export default async function plugin(bb: BbPluginApi) {
       const repository = [...entries, ...scannedPrs].filter((other) => other.repo.toLowerCase() === entry.repo.toLowerCase() && other.pr.url !== entry.pr.url);
       return { effort, ...inventoryRow({ prUrl: prWorkItemKey(entry.pr.url), pr: entry.pr, authored: true, stale: entry.stale, read: null,
         reasons: entry.attention?.reasons ?? [], observation: inventory.observation(entry.pr.url), stackedOn: stackParent(entry, entries)?.pr.number ?? null,
-        suggestedReviewers: suggestReviewers(entry.pr, repository.map((other) => other.pr)), lastAction: lastAction(prWorkItemKey(entry.pr.url)), ...shared(entry.pr.url) }) };
+        suggestedReviewers: suggestReviewers(entry.pr, repository.map((other) => other.pr)), lastAction: lastAction(prWorkItemKey(entry.pr.url)),
+        ...shared(entry.pr.url, entry.pr) }) };
     });
     const listed = new Set(rows.map((row) => row.prUrl));
     const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
@@ -5586,7 +5590,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;
       const effort = owner(prUrl);
       rows.push({ effort, ...inventoryRow({ prUrl, pr, authored: false, stale: false, reasons: [], observation, stackedOn: null, suggestedReviewers: [], lastAction: null,
-        read: kept?.facts ? { title: kept.facts.title, isDraft: kept.facts.isDraft, headOid: kept.facts.headOid } : null, ...shared(prUrl) }) });
+        read: kept?.facts ? { title: kept.facts.title, isDraft: kept.facts.isDraft, headOid: kept.facts.headOid } : null, ...shared(prUrl, pr) }) });
     }
     // Each group says its effort's pile, so All PRs offers no write on a held, done, or archived effort's PRs.
     const pileOfEffort = (id: string) => { const effort = effortStore.get(id); return !effort ? "active" as const : effort.archivedAt ? "archived" as const : piles.get(effort).pile; };
@@ -5655,8 +5659,9 @@ export default async function plugin(bb: BbPluginApi) {
     const rows = view.groups.flatMap((group) => group.rows.map((row) => {
       const pr = inventory.get(row.prUrl)?.pr ?? scanned.get(row.prUrl) ?? null;
       // The newer of a deck batch's write and a click on the PR's inventory row.
-      const clicked: RowActed | null = row.lastAction && { kind: DECK_KIND[row.lastAction.action], state: row.lastAction.ok ? "sent" : "refused",
-        at: row.lastAction.at, batchId: null };
+      // Revoking a confirmation leaves the notes yours again, so it marks nothing.
+      const clicked: RowActed | null = row.lastAction && row.lastAction.action !== "revoke-confirmation" ? { kind: DECK_KIND[row.lastAction.action],
+        state: row.lastAction.ok ? "sent" : "refused", at: row.lastAction.at, batchId: null } : null;
       const batched = batches.get(row.prUrl) ?? null;
       return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [], decision: decisions.get(row.prUrl) ?? null,
         acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
@@ -5792,6 +5797,15 @@ export default async function plugin(bb: BbPluginApi) {
   const auditConfirmation = (prUrl: string, action: "confirm" | "revoke", body: Record<string, unknown>) =>
     db.prepare("INSERT INTO approval_confirmation_audit (pr_url, at, action, body) VALUES (?, ?, ?, ?)").run(canonicalPrUrl(prUrl) ?? prUrl, Date.now(), action,
       JSON.stringify(body));
+  /** Keep what an inventory action did, newest first, and tell the views. */
+  const recordAction = (entry: ActionRecord) => {
+    const next = recording.then(async () => {
+      await bb.storage.kv.set("inventoryActions", [entry, ...await actionRecords()].slice(0, 200));
+      inventoryChanged();
+    });
+    recording = next.catch(() => undefined);
+    return next;
+  };
   /** The inventory's one-click GitHub writes. Each is one click's authorization, checked again on fresh facts; see inventory-actions.ts. */
   const inventoryActions = createInventoryActions({
     now: Date.now,
@@ -5851,15 +5865,19 @@ export default async function plugin(bb: BbPluginApi) {
       const sent = await rpcHandlers.thread_message({ prUrl, threadId: route.id, message });
       return sent.ok ? { ok: true, detail: `Asked “${route.title}” to address the notes.` } : sent;
     },
-    record: (entry) => {
-      const next = recording.then(async () => {
-        await bb.storage.kv.set("inventoryActions", [entry, ...await actionRecords()].slice(0, 200));
-        inventoryChanged();
-      });
-      recording = next.catch(() => undefined);
-      return next;
-    },
+    record: recordAction,
   });
+  /** Take back your confirmation, with an audit row and a record on its row; a worker's evidence is never yours to revoke. */
+  async function revokeConfirmation(prUrl: string): Promise<{ ok: true; detail: string } | { ok: false; error: string }> {
+    const record = approvalFeedback.revoke(prUrl);
+    if (!record) return { ok: false, error: "There's no confirmation of yours on this PR; nothing changed." };
+    auditConfirmation(prUrl, "revoke", { headOid: record.headOid, fingerprint: record.fingerprint, confirmedAt: record.verifiedAt,
+      evidence: record.provenance?.kind === "user" ? record.provenance.evidence ?? null : null });
+    bb.realtime.publish(BOARD_CHANGED, { scanning });
+    const detail = "Revoked your confirmation; its notes need you again.";
+    await recordAction({ at: Date.now(), prUrl, action: "revoke-confirmation", ok: true, detail, reviewers: [] });
+    return { ok: true, detail };
+  }
 
   /** Hold or release a PR: the board and every view hear of it, and a v2 row pauses on the hold, or resumes on its release, now. */
   async function setHold(prUrl: string, held: boolean, reason?: string) {
@@ -6313,6 +6331,7 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
     inventory_confirm_read: ({ prUrl }) => confirmRead(prWorkItemKey(prUrl)),
+    inventory_confirm_revoke: ({ prUrl }) => revokeConfirmation(prWorkItemKey(prUrl)),
     inventory_confirm_handled: ({ prUrl, headOid, fingerprint, anyway }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint, anyway),
     inventory_refresh: () => {
       if (inventoryRefreshing || inventoryTargeting) return { started: false };

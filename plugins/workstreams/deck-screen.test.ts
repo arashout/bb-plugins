@@ -136,6 +136,14 @@ describe("the effort deck's markup", () => {
     expect(html.match(new RegExp(`data-deck-row="${url("folio", 343)}"`, "gu"))).toHaveLength(1);
   });
 
+  it("offers Revoke confirmation in the details of a row carrying your confirmation, and only there", () => {
+    const pr340 = url("folio", 340);
+    const expanded = { state: { selected: new Set<string>(), expanded: new Set([pr340]), focus: null } };
+    const confirmed = inkwellDeck({}, (row) => row.number === 340 ? { confirmation: { at: NOW, current: true, evidence: false } } : {});
+    expect(pane(confirmed, SHELF, expanded)).toMatch(/<button type="button" data-deck-revoke[^>]*>Revoke confirmation<\/button>/u);
+    expect(pane(inkwellDeck(), SHELF, expanded)).not.toContain("data-deck-revoke");
+  });
+
   it("puts Refresh on each row, shown on the row you point at, and spins it in sight while GitHub reads the PR", () => {
     const pr340 = url("folio", 340);
     const idle = section(pane(inkwellDeck(), SHELF), "merge").split("data-deck-row=").find((part) => part.startsWith(`"${pr340}"`))!;

@@ -720,7 +720,11 @@ every confirmation writes an audit row. `inventory_confirm_read` returns what
 the confirm dialog shows and writes nothing: each note, the `evidence` since
 the newest, the `headOid` and `fingerprint` a confirmation binds to, and `ask`,
 where Ask would send (the PR's `thread`, a `new` thread `under` a parent that
-already exists, or `none` with `why`). Each of the four reads the PR again
+already exists, or `none` with `why`). `inventory_confirm_revoke` takes back
+your own confirmation, however old and even while the PR or its effort is
+held, with an audit row; a worker's evidence is never revoked. The notes then
+need you again. Each row's `confirmation` says when you confirmed, whether it
+still covers this head and these notes, and whether evidence backed it. Each of the four reads the PR again
 first. It refuses under a hold, a v2 claim, or another writer, and when the
 facts the step depends on differ from what the row showed. The row's `lastAction` records
 each outcome, refusals included. **Merge** opens `action_merge_preview`, and

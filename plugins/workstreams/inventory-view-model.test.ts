@@ -7,7 +7,7 @@ import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW
 import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
-import { actionCall, INVENTORY_CHANGED, INVENTORY_HOW, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+import { actionCall, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
   type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
@@ -251,6 +251,18 @@ describe("the PR inventory screen view model", () => {
     const refused = "The approval's comments changed since the row was shown. Read them and try again; nothing was written.";
     expect(find("folio #301", withRow("folio #301", { lastAction: { at: NOW - 60_000, action: "confirm-handled", ok: false, detail: refused, reviewers: [] } })).last)
       .toEqual({ ok: false, text: `Confirm handled refused 1m ago: ${refused}` });
+  });
+
+  // Your word on review notes can always be taken back: on any row with your confirmation, however old, and while its effort is held.
+  it("offers Revoke confirmation on any row with your confirmation, even a held effort's, and sends only the PR", () => {
+    const confirmed = withRow("folio #340", { confirmation: { at: NOW - 30 * 86_400_000, current: true, evidence: false } });
+    const line = find("folio #340", confirmed);
+    expect(action(line, "revoke")).toMatchObject({ enabled: true, label: "Revoke confirmation" });
+    expect(actionCall(rowOf("folio #340", confirmed), action(line, "revoke")!)).toEqual({ kind: "rpc", method: "inventory_confirm_revoke",
+      input: { prUrl: "https://github.com/inkwell/folio/pull/340" } });
+    expect(action(find("folio #340"), "revoke")).toBeUndefined();
+    const held = inventoryLine(rowOf("folio #340", confirmed), new Map(), { now: NOW, limitedUntil: null, effortPile: "held" });
+    expect(held.actions.map((item) => item.id)).toEqual(["revoke", "refresh", "thread"]);
   });
 
   it("re-requests the reviewers an answered change request names, with the same Nudge", () => {

@@ -41,7 +41,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
 /** A GitHub login or org/team slug, as ghactions.ts's REVIEWER reads one; a test keeps the two equal. */
 export const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99})?$/u;
 
-export type ActionId = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "merge" | "refresh" | "thread";
+export type ActionId = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "revoke" | "merge" | "refresh" | "thread";
 /** Who acts next: you, the reviewers a step names, or the PR this one is stacked on. */
 export type Owner = { kind: "you" | "reviewers" | "parent"; label: string };
 export type Step = { text: string; owner: Owner; age: string | null; ageTitle: string | null };
@@ -98,9 +98,11 @@ export type Pending = ReadonlyMap<string, ActionId>;
 export type Outcome = { at: number; action: ActionId; ok: boolean; text: string };
 
 const WORD: Record<ActionId, string> = { "mark-ready": "Mark ready", "request-review": "Request review", nudge: "Nudge", "confirm-handled": "Confirm handled",
-  merge: "Merge", refresh: "Refresh", thread: "Open thread" };
+  revoke: "Revoke confirmation", merge: "Merge", refresh: "Refresh", thread: "Open thread" };
 const RUNNING: Record<ActionId, string> = { "mark-ready": "Marking ready…", "request-review": "Requesting…", nudge: "Nudging…", "confirm-handled": "Confirming…",
-  merge: "Merge…", refresh: "Reading…", thread: "Open thread" };
+  revoke: "Revoking…", merge: "Merge…", refresh: "Reading…", thread: "Open thread" };
+/** What a recorded action no row button names was, as a refusal says it. */
+const RECORDED: Record<"ask-thread" | "revoke-confirmation", string> = { "ask-thread": "Ask its thread", "revoke-confirmation": "Revoke confirmation" };
 const STEP_ACTION: Record<AttentionReason["action"], ActionId> = { "mark-ready": "mark-ready", "request-review": "request-review", nudge: "nudge",
   rerequest: "nudge", "confirm-handled": "confirm-handled", merge: "merge", "open-thread": "thread" };
 const REVIEW_STATE: Record<string, ReviewerChip["state"]> = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested", COMMENTED: "commented",
@@ -193,6 +195,9 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (nudged.length) actions.push(action("nudge", `Ask ${mentions(nudged)} again to review ${target}`, blocked, { reviewers: nudged }));
   if (asks("confirm-handled")) actions.push(action("confirm-handled", `Read the approval's notes on ${target} and what came after, then confirm ` +
     "them handled or ask its thread; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
+  // Your confirmation can always be taken back, at any age, while its effort or the PR is held too: it only makes the PR need you again.
+  if (row.confirmation) actions.push(action("revoke", `Take back your confirmation of ${target}'s review notes; it needs you again before it merges`,
+    context.running !== null ? "Another action on this PR is running" : null));
   if (mergeable(row)) actions.push(action("merge", `Open a fresh merge preview of ${target}; only a click or ⌘↵ there merges`, null));
   else if (inOrder(row, parents)) actions.push(action("merge", `Merges after #${row.stackedOn}`, `Merge #${row.stackedOn} first; this one follows it`));
   // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither has only its roster's reads.
@@ -200,7 +205,7 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   actions.push(action("refresh", `Read ${target} from GitHub now`, unread ?? (context.running === "refresh" ? "Reading GitHub now" : null)));
   actions.push(action("thread", thread ? `Open "${thread.title}"` : `Open ${target}'s thread`, thread ? null : "No thread is linked to this PR yet",
     { threadId: thread?.id ?? null }));
-  const reads = (item: LineAction) => item.id === "refresh" || item.id === "thread";
+  const reads = (item: LineAction) => item.id === "refresh" || item.id === "thread" || item.id === "revoke";
   if (context.effortPile === "held") return actions.filter(reads);
   const stopped = context.effortPile && EFFORT_STOPPED[context.effortPile];
   return stopped ? actions.map((item) => reads(item) ? item : { ...item, enabled: false, why: stopped }) : actions;
@@ -242,7 +247,7 @@ function lastOf(row: InventoryRow, outcome: Outcome | undefined, now: number): I
   const last = outcome && (!server || outcome.at >= server.at) ? outcome : server;
   if (!last) return null;
   const when = `${age(last.at, now)} ago`;
-  const word = last.action === "ask-thread" ? "Ask its thread" : WORD[last.action];
+  const word = last.action === "ask-thread" || last.action === "revoke-confirmation" ? RECORDED[last.action] : WORD[last.action];
   return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${word} ${last.action === "refresh" ? "failed" : "refused"} ${when}: ${last.text}` };
 }
 
@@ -338,6 +343,7 @@ export type ActionCall =
   | { kind: "rpc"; method: "inventory_mark_ready"; input: { prUrl: string; headOid: string } }
   | { kind: "rpc"; method: "inventory_request_review"; input: { prUrl: string; logins: string[]; shown: InventoryRow["reviewers"] } }
   | { kind: "rpc"; method: "inventory_nudge"; input: { prUrl: string; reviewers: string[] } }
+  | { kind: "rpc"; method: "inventory_confirm_revoke"; input: { prUrl: string } }
   /** Review notes open their confirm, which reads them and what came after from GitHub first. */
   | { kind: "notes"; prUrl: string }
   | { kind: "preview"; target: string }
@@ -354,6 +360,7 @@ export function actionCall(row: InventoryRow, action: LineAction, logins: readon
     input: { prUrl: row.prUrl, logins: [...logins], shown: row.reviewers } } : { kind: "refuse", why: "Pick or type a reviewer first" };
   if (action.id === "nudge") return { kind: "rpc", method: "inventory_nudge", input: { prUrl: row.prUrl, reviewers: action.reviewers } };
   if (action.id === "confirm-handled") return row.head && row.feedbackFingerprint ? { kind: "notes", prUrl: row.prUrl } : { kind: "refuse", why: UNCONFIRMABLE };
+  if (action.id === "revoke") return { kind: "rpc", method: "inventory_confirm_revoke", input: { prUrl: row.prUrl } };
   if (action.id === "merge") return { kind: "preview", target: row.prUrl };
   if (action.id === "refresh") return { kind: "refresh", prUrl: row.prUrl };
   return action.threadId ? { kind: "thread", threadId: action.threadId } : { kind: "refuse", why: "No thread is linked to this PR yet" };

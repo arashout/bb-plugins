@@ -18,7 +18,7 @@ import { REVIEWER } from "./ghactions.js";
 import type { AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
 
-export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "ask-thread";
+export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "ask-thread" | "revoke-confirmation";
 export type ActionResult = { ok: true; detail: string } | { ok: false; error: string };
 export type ActionRecord = { at: number; prUrl: string; action: InventoryAction; ok: boolean; detail: string; reviewers: string[] };
 /** The reviewers a row showed: those asked, and those who reviewed, with their latest review's state. */

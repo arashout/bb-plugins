@@ -802,6 +802,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "reopen": { const item = view?.done.find((entry) => entry.id === command.id); if (item) void movePile("reopen", item); return; }
       case "rule-remove": void rpc.call("classify_rule_remove", { ruleId: command.id }).then((result) => { if (!result.ok) say(result.error); loadRules(); }); return;
       case "pile": setPile(command.pile); return;
+      case "revoke": void rpc.call("inventory_confirm_revoke", { prUrl: command.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); },
+        (cause: unknown) => say(message(cause))); return;
     }
   };
 

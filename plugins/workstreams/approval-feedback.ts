@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { RunDb } from "./runstore.js";
 import { canonicalPrUrl } from "./pr-holds.js";
-import { approvalEvidenceSchema, evidenceText, handled, type ApprovalEvidence } from "./approval-evidence.js";
+import { approvalEvidenceSchema, evidenceText, handled, type ApprovalEvidence, type UserConfirmation } from "./approval-evidence.js";
 
 export const approvalFeedbackSchema = z.object({
   status: z.enum(["none", "present", "unknown"]),
@@ -103,6 +103,13 @@ export function feedbackVerificationState(snapshot: ApprovalFeedbackSnapshot | u
   return "verified";
 }
 
+/** Your confirmation on a PR, as its row shows it: when, whether it still covers this head and these notes, and whether evidence backed it. */
+export function userConfirmation(record: ApprovalFeedbackRecord | null, snapshot: ApprovalFeedbackSnapshot | undefined, headOid: string | null): UserConfirmation | null {
+  if (record?.provenance?.kind !== "user") return null;
+  return { at: record.verifiedAt, current: feedbackVerificationState(snapshot, headOid, record) === "verified",
+    evidence: record.provenance.evidence ? handled(record.provenance.evidence) : null };
+}
+
 export function createApprovalFeedbackStore(db: RunDb) {
   const store = {
     get(prUrl: string): ApprovalFeedbackRecord | null {
@@ -140,6 +147,14 @@ export function createApprovalFeedbackStore(db: RunDb) {
         .run(JSON.stringify(next), key, row.body);
       const written = db.prepare("SELECT changes() AS count").get() as { count: number };
       return written.count === 1 ? next : null;
+    },
+    /** Take back your confirmation, at any age; a worker's evidence stays. The record it removed, or null when there was none of yours. */
+    revoke(prUrl: string): ApprovalFeedbackRecord | null {
+      const key = canonicalPrUrl(prUrl);
+      const record = key === null ? null : store.get(key);
+      if (record?.provenance?.kind !== "user") return null;
+      db.prepare("DELETE FROM approval_feedback_verifications WHERE pr_url = ?").run(key);
+      return record;
     },
     /**
      * Your confirmation that approval feedback is handled, bound to exactly this head and feedback: one finding per source that says it

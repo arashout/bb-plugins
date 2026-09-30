@@ -75,3 +75,9 @@ export const confirmReadSchema = z.discriminatedUnion("ok", [
   approvalHandlingSchema.options[1],
 ]);
 export type ConfirmRead = z.infer<typeof confirmReadSchema>;
+
+/** Your confirmation of a PR's notes, as its row shows it: when, whether it still covers this head and these notes, and whether evidence backed it. */
+export const userConfirmationSchema = z.object({ at: z.number(), current: z.boolean(),
+  /** Null for a confirmation made before evidence was read. */
+  evidence: z.boolean().nullable() }).strict();
+export type UserConfirmation = z.infer<typeof userConfirmationSchema>;

@@ -14,10 +14,11 @@ import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } f
 import type { ResolvedThreadLink } from "./work-context.js";
 import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
 import { prTarget } from "./ghactions.js";
+import { userConfirmationSchema } from "./approval-evidence.js";
 
 export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
 /** Every action a row records, as inventory-actions.ts takes them. */
-export const INVENTORY_ACTIONS = ["mark-ready", "request-review", "nudge", "confirm-handled", "ask-thread"] as const;
+export const INVENTORY_ACTIONS = ["mark-ready", "request-review", "nudge", "confirm-handled", "ask-thread", "revoke-confirmation"] as const;
 export type InventoryQuestion = (typeof INVENTORY_QUESTIONS)[number];
 
 const threadSchema = z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict();
@@ -44,6 +45,8 @@ export const inventoryRowSchema = z.object({
   managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
   suggestedReviewers: z.array(z.string()),
+  /** Your confirmation of its approval's notes, at any age: whether it still covers this head and these notes, and whether evidence backed it. */
+  confirmation: userConfirmationSchema.nullable(),
   /** What the last inventory action on the PR did, or why it was refused. */
   lastAction: z.object({ at: z.number(), action: z.enum(INVENTORY_ACTIONS), ok: z.boolean(), detail: z.string(),
     reviewers: z.array(z.string()) }).strict().nullable(),
@@ -78,6 +81,7 @@ export type InventoryRowInput = {
   threads: ReadonlyMap<string, ThreadRef>;
   suggestedReviewers: readonly string[];
   lastAction: NonNullable<InventoryRow["lastAction"]> | null;
+  confirmation?: InventoryRow["confirmation"];
 };
 
 const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
@@ -117,7 +121,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     stale: input.stale, hold: input.hold,
     threads: rowThreads(input),
     managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
-    suggestedReviewers: [...input.suggestedReviewers],
+    suggestedReviewers: [...input.suggestedReviewers], confirmation: input.confirmation ?? null,
     lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,
       reviewers: input.lastAction.reviewers },
   };

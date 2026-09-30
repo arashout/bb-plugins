@@ -221,7 +221,8 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
         result = read.status === "checked" ? null : { ok: false, text: read.error };
       } else {
         const written = call.method === "inventory_mark_ready" ? await rpc.call("inventory_mark_ready", call.input)
-          : call.method === "inventory_request_review" ? await rpc.call("inventory_request_review", call.input) : await rpc.call("inventory_nudge", call.input);
+          : call.method === "inventory_request_review" ? await rpc.call("inventory_request_review", call.input)
+          : call.method === "inventory_confirm_revoke" ? await rpc.call("inventory_confirm_revoke", call.input) : await rpc.call("inventory_nudge", call.input);
         result = written.ok ? { ok: true, text: written.detail } : { ok: false, text: written.error };
       }
     } catch (cause) {

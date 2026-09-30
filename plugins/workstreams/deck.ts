@@ -16,6 +16,7 @@ import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
 import type { InventoryRow } from "./inventory-view.js";
+import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
@@ -52,6 +53,8 @@ export const deckRowSchema = z.object({
   managed: z.string().nullable(),
   /** When GitHub last answered for it; `failed` when its last read didn't, and `stale` when the last full read didn't list it or couldn't read it. */
   checkedAt: z.string().nullable(), failed: z.boolean(), stale: z.boolean(),
+  /** Your confirmation of its review notes, at any age, which Revoke takes back; `current` while it covers this head and these notes. */
+  confirmation: userConfirmationSchema.nullable(),
   acted: z.object({ kind: z.enum(ACTED_KINDS), state: z.enum(["queued", "sending", "sent", "refused", "unknown"]), at: z.number(), batchId: z.string().nullable() })
     .strict().nullable(),
 }).strict();
@@ -213,7 +216,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
-    managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
+    managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };
 }
 

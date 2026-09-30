@@ -25,7 +25,9 @@ export type DeckCommand =
   | { kind: "group"; key: string } | { kind: "undo-group"; key: string } | { kind: "undo-batch"; batchId: string }
   | { kind: "thread"; id: string } | { kind: "jump"; prUrl: string } | { kind: "section"; key: string; prUrl?: string }
   | { kind: "resume"; id: string } | { kind: "reopen"; id: string }
-  | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null };
+  | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null }
+  /** Take back your confirmation of a PR's review notes. */
+  | { kind: "revoke"; prUrl: string };
 export type Run = (command: DeckCommand) => void;
 
 /** The 2px accent ring every control shows on keyboard focus. */
@@ -281,6 +283,8 @@ function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean 
       {row.thread ? <button type="button" onClick={() => run({ kind: "thread", id: row.thread!.id })} className={cn(BUTTON, "border-border")}>Open “{row.thread.title}”<Kbd>o</Kbd></button> : null}
       <button type="button" onClick={() => run({ kind: "action", id: "open-pr", line })} className={GHOST}>Open on GitHub ↗</button>
       <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release…" : "Hold PR…"}</button>
+      {row.confirmation ? <button type="button" data-deck-revoke onClick={() => run({ kind: "revoke", prUrl: line.prUrl })} className={GHOST}
+        title="Its review notes need you again before it merges">Revoke confirmation</button> : null}
       <button type="button" aria-busy={busy || undefined} disabled={busy} onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>
         {busy ? <><span aria-hidden className="inline-block leading-none motion-safe:animate-spin">↻</span>Refreshing…</> : "Refresh"}</button>
     </div>

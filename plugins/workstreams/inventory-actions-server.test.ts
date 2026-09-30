@@ -280,4 +280,32 @@ describe("inventory actions on the server", () => {
     expect(await env.row(319)).toMatchObject({ attention: [{ kind: "merge-waiting", action: "merge" }], lastAction: { action: "confirm-handled", ok: true } });
     expect((await preview()).refusals).toEqual([]);
   });
+
+  // Your word can be taken back whenever you doubt it: the notes need you again, and the merge preview refuses until they're handled.
+  it("revokes your confirmation at any age, even once a push left it stale, with an audit row, and the notes need you again", async () => {
+    const env = await setup();
+    env.notes.evidence = { ...env.notes.evidence, replies: 1 };
+    expect(await env.rpc("inventory_confirm_handled", { prUrl: url(319), headOid: HEAD, fingerprint: FEEDBACK.fingerprint })).toMatchObject({ ok: true });
+    expect(await env.row(319)).toMatchObject({ confirmation: { current: true, evidence: true } });
+    // Nothing about an older or stale confirmation stops a revoke: a push lands, and it's still yours to take back.
+    const original = env.current.get(319)!;
+    env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
+    await env.rpc("pr_refresh", { prUrl: url(319) });
+    expect(await env.row(319)).toMatchObject({ confirmation: { current: false, evidence: true } });
+    env.current.set(319, original);
+    await env.rpc("pr_refresh", { prUrl: url(319) });
+    await env.rpc("pr_hold_set", { prUrl: url(319), held: true, reason: "Store layout first" });
+    const after = env.since();
+    expect(await env.rpc("inventory_confirm_revoke", { prUrl: url(319) })).toEqual({ ok: true, detail: "Revoked your confirmation; its notes need you again." });
+    expect(after().map((call) => call.method)).toEqual([]);
+    expect(env.db.prepare("SELECT body FROM approval_feedback_verifications").all()).toEqual([]);
+    expect(env.db.prepare("SELECT action, body FROM approval_confirmation_audit ORDER BY seq").all().map((row) => ({ ...row as object,
+      body: JSON.parse((row as { body: string }).body) }))).toEqual([{ action: "confirm", body: expect.objectContaining({ headOid: HEAD }) },
+      { action: "revoke", body: { headOid: HEAD, fingerprint: FEEDBACK.fingerprint, confirmedAt: expect.any(Number), evidence: env.notes.evidence } }]);
+    await env.rpc("pr_hold_set", { prUrl: url(319), held: false });
+    expect(await env.row(319)).toMatchObject({ confirmation: null, attention: [{ kind: "approval-comments" }], lastAction: { action: "revoke-confirmation", ok: true } });
+    expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals)
+      .toEqual(["Approval feedback needs verified follow-up on the current head."]);
+    expect(await env.rpc("inventory_confirm_revoke", { prUrl: url(319) })).toEqual({ ok: false, error: "There's no confirmation of yours on this PR; nothing changed." });
+  });
 });

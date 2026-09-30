@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, parseFeedbackReport,
-  type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+  userConfirmation, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { readReviewThreads, type GhRunner } from "./ghactions.js";
 
 const url = "https://github.com/example/widget/pull/42";
@@ -101,6 +101,26 @@ describe("approval feedback verification", () => {
       [{ status: "none", fingerprint: null, sourceIds: [] }, head], [snapshot, "not-a-head"]];
     for (const [feedback, at] of unnamed) expect(() => store.confirm(url, feedback, at, 6_000, none)).toThrow();
     expect(store.get(url)).toEqual(confirmed);
+    db.close();
+  });
+
+  // Your confirmation can be taken back at any age, and says on its row whether it still covers the head and whether evidence backed it.
+  it("revokes only your own confirmation, however old or stale, and never a worker's evidence", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const none = { since: review.submittedAt, commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true };
+    const confirmed = store.confirm(url, snapshot, head, 5_000, none);
+    expect(userConfirmation(store.get(url), snapshot, head)).toEqual({ at: 5_000, current: true, evidence: false });
+    // A later head leaves it stale, but still yours to take back.
+    expect(userConfirmation(store.get(url), snapshot, "b".repeat(40))).toEqual({ at: 5_000, current: false, evidence: false });
+    expect(store.revoke(url)).toEqual(confirmed);
+    expect([store.get(url), store.revoke(url)]).toEqual([null, null]);
+    const parsed = parseFeedbackReport(`${FEEDBACK_REPORT_PREFIX}${JSON.stringify(report("attempt-2", snapshot.fingerprint!))}`, "attempt-2", snapshot, head)!;
+    store.save(url, "thread-1", parsed, 7_000);
+    expect([store.revoke(url), store.get(url)?.provenance, userConfirmation(store.get(url), snapshot, head)]).toEqual([null, { kind: "worker" }, null]);
     db.close();
   });
 
