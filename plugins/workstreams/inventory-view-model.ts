@@ -23,7 +23,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
     ["Your turn", "Changes requested, approval comments, open threads, or new comments since your last push or reply. Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out. Open thread goes to its thread."],
-    ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
+    ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo. Only on a PR with a thread."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
@@ -293,12 +293,13 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
 
 /**
  * How a Your turn row asks its PR's thread to address the feedback, through the deck's listing confirm: the approval's notes while they're
- * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Null where the deck would refuse it.
+ * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Only a PR with a thread already, which
+ * the ask reuses: All PRs never starts one. Null where the deck would refuse it.
  */
 export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile">): "ask" | "fix" | null {
-  if (!line.yourTurn || line.effortPile) return null;
+  if (!onYourTurn(line) || line.effortPile || !line.threads.length) return null;
   if (line.primary === "confirm-handled") return "ask";
-  return line.primary === "thread" && !line.threads.some((thread) => thread.role === "working" && thread.active) ? "fix" : null;
+  return line.primary === "thread" ? "fix" : null;
 }
 
 /**

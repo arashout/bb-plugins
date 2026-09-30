@@ -72,17 +72,21 @@ describe("simple All PRs list", () => {
   });
 
   // Ask goes through the deck's listing confirm, so it shows only where the deck would take it: the approval's notes, or a thread's work
-  // that no thread is doing right now. It never starts a Reviews item or writes on its own.
-  it("offers Ask its thread on Your turn rows the deck's listing takes, and nowhere else", () => {
+  // that no thread is doing right now. It reuses the PR's own thread and never starts one, a Reviews item, or a write on its own.
+  it("offers Ask its thread on Your turn rows with a thread the deck's listing takes, and nowhere else", () => {
     const asks = (html: string) => [...html.matchAll(/data-inventory-row="([^"]+)"(?:(?!data-inventory-row=).)*?data-inventory-action="ask"/gsu)].map((match) => match[1]);
-    expect(asks(pane())).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
+    expect(asks(pane())).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155"]);
+    // The two approvals with comments have no thread yet: nothing to ask, and nothing started for them.
+    expect(rowOf(pane(), "inkwell/folio#301")).not.toContain("Ask its thread");
+    const threaded = patched((row) => row.number === 301 ? { threads: { origin: { id: "thr_folio_301", title: "Spine labels", active: false }, executor: null } } : null);
+    expect(asks(pane(threaded))).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301"]);
+    expect(rowOf(pane(threaded), "inkwell/folio#301")).toMatch(/title="Ask its thread to address the approval&#x27;s notes\. You confirm the listing first, then Undo for 8 s\."/u);
     // A thread working on it now has the work in hand: no other ask, and it's not your turn.
     const working = patched((row) => row.number === 211 ? { threads: { ...row.threads, executor: { ...row.threads.executor!, active: true } } } : null);
     expect(asks(pane(working))).not.toContain("inkwell/quill#211");
     // A held effort's PRs wait with it.
-    const held: InventoryView = { ...VIEW, groups: VIEW.groups.map((group) => group.effort?.id === "effort-store-pickup" ? { ...group, effort: { ...group.effort, pile: "held" } } : group) };
-    expect(asks(pane(held))).toEqual(["inkwell/folio#301", "inkwell/folio#318"]);
-    expect(rowOf(pane(), "inkwell/folio#301")).toMatch(/title="Ask its thread to address the approval&#x27;s notes\. You confirm the listing first, then Undo for 8 s\."/u);
+    const held: InventoryView = { ...threaded, groups: threaded.groups.map((group) => group.effort?.id === "effort-store-pickup" ? { ...group, effort: { ...group.effort, pile: "held" } } : group) };
+    expect(asks(pane(held))).toEqual(["inkwell/folio#301"]);
   });
 
   it("says when no feedback waits on you", () => {

@@ -1,8 +1,8 @@
 // All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
 // you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due. A Your turn row's Ask
-// its thread, and f on it, open the deck's listing confirm, which sends only after its Undo window. It shares the deck's key registry, hint
-// bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write
-// itself.
+// its thread, and f on it, open the deck's listing confirm for the PR's existing thread, which sends only after its Undo window. It shares
+// the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the focused
+// row's Nudge, never a write itself.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";

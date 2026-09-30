@@ -387,9 +387,11 @@ describe("the PR inventory screen view model", () => {
   });
 
   // Ask plans the deck's own batch, so it's offered only where that batch takes the row: never where a thread is working now, or on a
-  // held, done, or archived effort's PR, which the server refuses.
-  it("asks a Your turn row's thread for the approval's notes or its fixes, only where the deck's listing takes it", () => {
-    expect(askKind(find("folio #301"))).toBe("ask");
+  // held, done, or archived effort's PR, which the server refuses. It reuses the PR's thread, so a PR with none has no Ask to start one.
+  it("asks a Your turn row's own thread for the approval's notes or its fixes, only where the deck's listing takes it", () => {
+    const origin = { id: "thr_folio_301", title: "Spine labels", active: false };
+    expect(askKind(find("folio #301", withRow("folio #301", { threads: { origin, executor: null } })))).toBe("ask");
+    expect(askKind(find("folio #301"))).toBeNull();
     expect(askKind(find("quill #211"))).toBe("fix");
     expect(askKind(find("folio #305"))).toBeNull();
     const working = rowOf("quill #211");
