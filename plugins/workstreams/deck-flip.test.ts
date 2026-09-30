@@ -111,7 +111,7 @@ describe("landing a flip in the deck", () => {
   // where the flip draws the card, not where it sits, and a flipper made per press would never see a burst.
   it("ends a flip still playing before it restores the card's place and focus, then plays, then decides what screen readers hear", () => {
     const source = readFileSync(new URL("./deck-nav-view.tsx", import.meta.url), "utf8");
-    const start = source.indexOf("if (!view || shown.current === cur) return;");
+    const start = source.indexOf("if (!view || !cur || shown.current === cur) return;");
     const effect = source.slice(start, source.indexOf("\n  });\n", start));
     const steps = ["settleFlip(viewRef.current)", "restoreAnchor(saved.anchor)", "const before = document.activeElement", "landFocus(saved)",
       "playFlip(viewRef.current, flipped)", "focusNamesCard(before, document.activeElement)", "said ? null : window.setTimeout("];

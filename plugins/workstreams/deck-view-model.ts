@@ -7,7 +7,8 @@
 // imports types, zero-import modules, and the roster's time format only, so
 // no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, type BatchKind, type DeckPile, type DeckSection } from "./deck-shared";
+import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SERVICE_PREFIX, serviceGoal, serviceName, type BatchKind, type DeckPile, type DeckSection }
+  from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
@@ -139,6 +140,25 @@ const threadRow = (thread: DeckCard["threads"][number]) => ({ prUrl: thread.id, 
 /** What Mark seen keeps of a card's threads, whose order holds until then. */
 export const threadSnapshot = (card: DeckCard): SettledRow[] => card.threads.map(threadRow);
 export const threadsKey = (cardId: string) => `threads:${cardId}`;
+
+/**
+ * The service cards in the session's `order` that a read no longer draws, because their last PR left, as empty stand-ins while Mark seen
+ * has something there to settle: a row you last saw there, now a ghost saying Left or → its effort, or a suggestion you accepted there,
+ * with its Undo. So a service card stays put like an effort's card rather than going out from under you; Mark seen lets it go.
+ */
+export function keptServiceCards(order: readonly string[], active: readonly DeckCard[], seen: Readonly<Record<string, readonly SettledRow[]>>,
+  accepted: Accepted): DeckCard[] {
+  const here = new Set(active.map((card) => card.id));
+  return order.filter((id) => id.startsWith(SERVICE_PREFIX) && !here.has(id)
+    && (!!seen[id]?.length || [...accepted.keys()].some((key) => key.startsWith(`${id} `)))).map((id) => {
+    const repo = id.slice(SERVICE_PREFIX.length);
+    return { id, key: id, name: serviceName(repo), goal: serviceGoal(repo), kind: "service", repo, oneOff: false, pile: "active", reason: "", since: 0,
+      status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, medianAgeMs: null, oldestWait: null },
+      progress: { merged: 0, open: 0, criteria: null }, next: [], blocked: [],
+      linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [] },
+      people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [] };
+  });
+}
 
 export type SectionScreen = { key: DeckSection; meta: SectionMeta; count: number; changed: number; lines: DeckLine[];
   action: { id: DeckActionId; label: string; key: string; enabled: boolean; why: string | null } | null };

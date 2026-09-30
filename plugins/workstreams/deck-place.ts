@@ -66,6 +66,17 @@ export function keepOrder(previous: readonly string[], ids: readonly string[]): 
 }
 
 /**
+ * The card to show when the one you were on left the pile, as an emptied service card does once you mark it seen: the next card after it
+ * in the order you last saw, else the one before it, else the first. Null with no card at all.
+ */
+export function landAfter(previous: readonly string[], cur: string | null, ids: readonly string[]): string | null {
+  if (cur && ids.includes(cur)) return cur;
+  const at = cur ? previous.indexOf(cur) : -1;
+  return (at < 0 ? undefined : previous.slice(at + 1).find((id) => ids.includes(id)) ?? previous.slice(0, at).reverse().find((id) => ids.includes(id)))
+    ?? ids[0] ?? null;
+}
+
+/**
  * The scroll that puts an element `want` pixels below the viewport's top, now that it sits `at` pixels below it. A negative scroll grows
  * the spacer above the view instead, and a spacer shrinks before the scroll does, so the content never jumps.
  */

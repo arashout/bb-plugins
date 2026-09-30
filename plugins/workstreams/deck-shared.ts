@@ -25,6 +25,7 @@ export const SERVICE_PREFIX = "service:";
 export const LOOSE_ID = "loose";
 export const serviceId = (repo: string) => `${SERVICE_PREFIX}${repo.toLowerCase()}`;
 export const serviceName = (repo: string) => `${repo.split("/").at(-1) ?? repo} · service`;
+export const serviceGoal = (repo: string) => `Work in ${repo.split("/").at(-1) ?? repo} that no effort has yet.`;
 /** Where a card sits in the strip: stored efforts first, then service cards, then Loose threads. */
 export const cardTier = (id: string) => id === LOOSE_ID ? 2 : id.startsWith(SERVICE_PREFIX) ? 1 : 0;
 /** The batches a section button runs, in the order Advance runs them. Each is one GitHub write or your confirmation per PR: never a merge. */

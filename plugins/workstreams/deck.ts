@@ -10,7 +10,8 @@
 // here: nothing stores them.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
-import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, LOOSE_ID, needsYou, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
+import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, LOOSE_ID, needsYou, serviceGoal, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed }
+  from "./deck-shared.js";
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
@@ -323,7 +324,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
 /** A card no stored effort backs, as the effort it stands in for: always active, and never held, completed, or given a goal to meet. */
 const standIn = (id: string, name: string, goal: string): DeckEffortInput => ({ id, key: id, name, goal, oneOff: false, archived: false,
   pile: { effortId: id, pile: "active", reason: "", since: 0 }, parentThreadId: null, tickets: [], criteria: null });
-const serviceEffort = (repo: string) => standIn(serviceId(repo), serviceName(repo), `Work in ${repo.split("/").at(-1)} that no effort has yet.`);
+const serviceEffort = (repo: string) => standIn(serviceId(repo), serviceName(repo), serviceGoal(repo));
 
 /** Every row as the deck draws it, with the facts it came from, its card, and its card's pile: a PR no effort owns is on its repository's service card. */
 export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (Placed & { pile: DeckPile; cardId: string })[] {

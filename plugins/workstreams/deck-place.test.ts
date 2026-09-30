@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorScroll, focusFallback, keepOrder, meltSlack, readPlace, readSeen, settleRows, snapshotOf, type FocusDom, type SettledRow } from "./deck-place.js";
+import { anchorScroll, focusFallback, keepOrder, landAfter, meltSlack, readPlace, readSeen, settleRows, snapshotOf, type FocusDom, type SettledRow } from "./deck-place.js";
 
 const DAY = 86_400_000;
 const settled = (prUrl: string, section: string, status = "Awaiting review"): SettledRow => ({ prUrl, ref: prUrl, title: `Title ${prUrl}`, section, status });
@@ -46,6 +46,18 @@ describe("the session's card order", () => {
     expect(keepOrder(["shelf", "pickup", "one-offs"], ["shelf", "one-offs"])).toEqual(["shelf", "one-offs"]);
     expect(keepOrder(["shelf", "one-offs"], ["pickup", "shelf", "one-offs"])).toEqual(["shelf", "one-offs", "pickup"]);
     expect(keepOrder([], ["b", "a"])).toEqual(["b", "a"]);
+  });
+
+  // Mark seen on an emptied service card lets it go; the deck lands where the strip closed up, never back at the start.
+  it("lands on the next card when the one shown leaves, else the one before it", () => {
+    const seen = ["shelf", "service:inkwell/folio", "service:inkwell/atlas"];
+    expect(landAfter(seen, "service:inkwell/folio", ["shelf", "service:inkwell/atlas"])).toBe("service:inkwell/atlas");
+    expect(landAfter(seen, "service:inkwell/atlas", ["shelf", "service:inkwell/folio"])).toBe("service:inkwell/folio");
+    expect(landAfter(seen, "shelf", ["shelf", "service:inkwell/atlas"])).toBe("shelf");
+    // A card the session never saw, or none yet, starts at the first; an empty deck shows none.
+    expect(landAfter(seen, "gone", ["shelf"])).toBe("shelf");
+    expect(landAfter([], null, ["pickup", "shelf"])).toBe("pickup");
+    expect(landAfter(seen, "shelf", [])).toBeNull();
   });
 
   // A17.1: service cards stand in for efforts no one made yet, so they follow every real one in the strip, whatever the session saw first.

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, type Accepted, type CardScreen,
-  type KeyContext } from "./deck-view-model.js";
+import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, paletteItems, readText, stripChips, targets, type Accepted,
+  type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -198,6 +198,27 @@ describe("a service card", () => {
     // It moved at your click, so it's no news: no dot, and nothing counts as changed, but Mark seen is there to settle it.
     expect(lines(folio).request).toEqual(["folio #305", "folio #325 · dim ghost [→ Shelf order]"]);
     expect([folio.changed, folio.settleable, folio.needsYou]).toEqual([0, true, 1]);
+  });
+
+  // A17(6) and PLACE-LOSS #2: atlas #410 is the only PR on its service card, so moving it, or its merging on a poll, would take the card
+  // and every result on it away under you. The card stays, empty, until you mark it seen.
+  it("keeps a service card whose last PR left as a stand-in with its ghost rows and accepted groups until Mark seen", () => {
+    const before = inkwellDeck();
+    const snapshot = cardSnapshot(before.active.find((item) => item.id === ATLAS)!);
+    expect(snapshot.map((row) => row.ref)).toEqual(["atlas #410"]);
+    const after = inkwellDeck({}, (row) => row.repo === "inkwell/atlas" && row.number === 410 ? { effort: INVENTORY_EFFORTS.pickup } : {});
+    expect(after.active.map((item) => item.id)).not.toContain(ATLAS);
+    const order = before.active.map((item) => item.id);
+    const accepted: Accepted = new Map([[`${ATLAS} effort:${PICKUP}:high`, { actionId: "a1", text: "1 PR → Store pickup", prUrls: [url("atlas", 410)], index: 0 }]]);
+    const [kept] = keptServiceCards(order, after.active, { [ATLAS]: snapshot }, accepted);
+    expect([kept!.id, kept!.kind, kept!.name, kept!.needsYou, kept!.stats.open]).toEqual([ATLAS, "service", "atlas · service", 0, 0]);
+    const atlas = cardScreen(kept!, { rows: { [ATLAS]: snapshot }, at: {} }, { now: NOW, accepted, moved: new Map([[url("atlas", 410), "Store pickup"]]) });
+    expect(Object.values(lines(atlas)).flat()).toEqual(["atlas #410 · dim ghost [→ Store pickup]"]);
+    expect([atlas.suggest.map((group) => group.accepted?.text), atlas.settleable, atlas.status.text]).toEqual([["1 PR → Store pickup"], true, "No open PRs"]);
+    // Mark seen leaves nothing to settle, so it goes; so does a card this session never showed, and one a read still draws.
+    expect(keptServiceCards(order, after.active, { [ATLAS]: [] }, new Map())).toEqual([]);
+    expect(keptServiceCards(order.filter((id) => id !== ATLAS), after.active, { [ATLAS]: snapshot }, accepted)).toEqual([]);
+    expect(keptServiceCards(order, before.active, { [ATLAS]: snapshot }, accepted)).toEqual([]);
   });
 
   it("keeps a group open while any of it is left here, so accepting part of it hides none of the rest", () => {

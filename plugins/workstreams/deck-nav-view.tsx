@@ -13,10 +13,10 @@ import type { rpcContract } from "./server";
 import type { DeckView } from "./deck";
 import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
-import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
+import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, type Anchor, type FocusKey, type Place,
   type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips, targets, threadSnapshot, threadsKey,
-  type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
+import { acceptLabel, acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips,
+  targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
@@ -180,12 +180,17 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
 
   // ---- what the deck shows -------------------------------------------------
   const place = placeRef.current;
-  const cards = useMemo(() => new Map((view?.active ?? []).map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved })])),
-    [view, seen, now, details, accepted, moved]);
-  const order = useMemo(() => keepOrder(place.order, view?.active.map((item) => item.id) ?? []), [view, place.order]);
+  // A service card whose last PR left stays until you mark it seen.
+  const active = useMemo(() => view ? [...view.active, ...keptServiceCards(place.order, view.active, seen.rows, accepted)] : [],
+    [view, place.order, seen.rows, accepted]);
+  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved })])),
+    [active, seen, now, details, accepted, moved]);
+  const order = useMemo(() => keepOrder(place.order, active.map((item) => item.id)), [active, place.order]);
   const ring = order;
   if (follow.current && ring.includes(follow.current)) { place.cur = follow.current; follow.current = null; }
-  const cur: string | null = place.cur && ring.includes(place.cur) ? place.cur : ring[0] ?? null;
+  // The order this render reads is the one you last saw until the effect below saves the new one, so the card landed on is kept now.
+  const cur = landAfter(place.order, place.cur, ring);
+  if (cur) place.cur = cur;
   const card = cur ? cards.get(cur) ?? null : null;
   const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
   const here = viewPlace(cur);
@@ -230,7 +235,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   });
   // A flip lands on the card's saved place, then plays its motion over the stack (deck-flip.ts).
   useLayoutEffect(() => {
-    if (!view || shown.current === cur) return;
+    if (!view || !cur || shown.current === cur) return;
     const first = shown.current === null;
     shown.current = cur;
     // A flip still playing ends first, so what follows measures where things sit, not where it draws them.
