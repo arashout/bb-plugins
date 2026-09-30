@@ -437,6 +437,19 @@ it("offers a shared PR's other ticket and refuses to move only one side", async 
     .toMatchObject({ ok: false, error: expect.stringContaining("both tickets") });
 });
 
+it("names what else a move of a linked PR takes, beyond the PR and its tickets, so the popover can list it first", async () => {
+  const env = await setup({ shared: true });
+  env.store.establish({ sourceKey: "atlas", name: "Atlas launch", goal: "", projectId: "proj", coordinatorState: "none",
+    members: { tickets: ["ABC-202"], prUrls: [b], checkoutPaths: ["/p/folio-43"] } });
+  const manuscripts = env.store.establish({ sourceKey: "manuscripts", name: "Manuscripts", goal: "", projectId: "proj", coordinatorState: "none",
+    members: { tickets: [], prUrls: [] } });
+  env.metadata.set("thread", { linkedPrUrl: a, workEffortId: manuscripts.id });
+  const { picker } = await env.harness.callRpc("thread_effort_context", { threadId: "thread", seen: {} }) as ThreadEffortReady;
+  // #42 names ABC-101 and ABC-202, so its move takes ABC-202's other PR and the checkout Atlas launch has.
+  expect(picker!.linked.map((pr) => [pr.ref, pr.effortName, pr.sourceIds, pr.also]))
+    .toEqual([["folio #42", "Atlas launch", ["ticket:ABC-101", "ticket:ABC-202"], ["folio #43", "1 checkout"]]]);
+});
+
 it("keeps a ticketless checkout as a standalone PR source", async () => {
   const { harness, board } = await setup({ ticketless: true });
   const linked = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a }) as ThreadEffortReady;

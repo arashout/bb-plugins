@@ -47,7 +47,7 @@ import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreview
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
 import { effortTitle } from "./effort-title.js";
-import { threadEffortAssignmentScope, threadEffortContextSchema, threadEffortMoveScope, type ThreadEffortReady } from "./thread-effort.js";
+import { threadEffortAssignmentScope, threadEffortChip, threadEffortContextSchema, threadEffortMoveScope, threadEffortSignals, type ThreadEffortPicker, type ThreadEffortReady } from "./thread-effort.js";
 import { cardEffortContextSchema, cardEffortMoveScope, cardEffortTargetSchema, type CardEffortReady, type CardEffortTarget } from "./card-effort.js";
 import { suggestThreadEfforts } from "./thread-effort-suggestions.js";
 import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
@@ -382,7 +382,8 @@ export const rpcContract = defineRpcContract({
   effort_admin_archive: { input: z.object({ effortKey: z.string().min(1).max(500), archived: z.boolean(), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminResultSchema },
   effort_admin_merge_preview: { input: z.object({ sourceKey: z.string().min(1).max(500), destinationKey: z.string().min(1).max(500) }).strict(), output: effortAdminPreviewResultSchema },
   effort_admin_merge: { input: z.object({ sourceKey: z.string().min(1).max(500), destinationKey: z.string().min(1).max(500), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminMergeResultSchema },
-  thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: threadEffortContextSchema },
+  /** Read-only. `seen` is when the deck last marked each PR's row seen, so the chip counts Needs you as the deck does. */
+  thread_effort_context: { input: z.object({ threadId: z.string().min(1).max(200), seen: deckSeenSchema.optional() }).strict(), output: threadEffortContextSchema },
   thread_effort_set: { input: z.object({ threadId: z.string().min(1).max(200), destinationKey: z.string().min(1).max(500).nullable(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_create: { input: z.object({ threadId: z.string().min(1).max(200), name: z.string().max(500), requestId: z.string().uuid(), expectedScope: z.string().min(1).max(100_000) }).strict(), output: threadEffortContextSchema },
   thread_effort_suggest: { input: z.object({ threadId: z.string().min(1).max(200) }).strict(), output: z.discriminatedUnion("ok", [
@@ -3439,9 +3440,10 @@ export default async function plugin(bb: BbPluginApi) {
     return efforts;
   }
 
-  async function threadEffortContext(threadId: string): Promise<z.infer<typeof threadEffortContextSchema>> {
+  /** `seen` also reads what the composer's effort chip and popover show (see threadEffortPickerSchema), with Needs you counted as the deck counts it. */
+  async function threadEffortContext(threadId: string, seen?: Readonly<Record<string, number>>): Promise<z.infer<typeof threadEffortContextSchema>> {
     try {
-      const thread = await bb.sdk.threads.get({ threadId });
+      const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
       if (thread.deletedAt !== null) return { ok: false, error: "That thread no longer exists." };
       const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
       const linkedPrUrl = typeof metadata.linkedPrUrl === "string" ? canonicalPrUrl(metadata.linkedPrUrl) : null;
@@ -3452,7 +3454,10 @@ export default async function plugin(bb: BbPluginApi) {
         { url: item.key, label: item.remote ?? item.locals[0] ?? item.key, paths: item.paths, tickets: item.tickets }] as const] : []));
       if (known.size > 1000) return { ok: false, error: "Too many tracked PRs to choose safely. Narrow the workstream inventory." };
       const linked = new Set(work.prUrlsForThread(threadId).filter((url) => known.has(url)));
-      for (const candidate of [linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null]) if (candidate && known.has(candidate)) linked.add(candidate);
+      // The PR in the thread's exact checkout, which its effort takes in (reconcileThreadIntent): listed, so a pick takes nothing unseen.
+      const checkout = confirmedThreadPrUrls({ metadata: {}, recordedUrls: [], environmentPath: "environment" in thread ? thread.environment?.path ?? null : null,
+        scanned: readUnits().filter((unit) => unit.observed?.pr === true), knownUrls: [...known.keys()] });
+      for (const candidate of [linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null, ...checkout]) if (candidate && known.has(candidate)) linked.add(candidate);
       const ticketClusters = new Map<string, { label: string; paths: string[]; threadLinked: boolean }>();
       for (const group of current.groups) for (const cluster of group.clusters) {
         const linkedHere = cluster.threads.some((link) => link.id === threadId);
@@ -3510,12 +3515,94 @@ export default async function plugin(bb: BbPluginApi) {
       const efforts = availableWorkEfforts(current);
       const intended = typeof metadata.workEffortId === "string" ? effortStore.get(metadata.workEffortId) : null;
       const paused = intended && dispatch.policy().mode === "auto" && dispatch.policy().effort_key === intended.key;
+      // Only the thread's own work counts: its recorded PRs and exact checkout, never a link by branch name or worked path alone.
+      const recorded = new Set([linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null, ...checkout]);
+      const direct = [...new Set([...linked, ...sources.flatMap((source) => source.prUrls)])].filter((url) => recorded.has(url) || work.linksForPr(url, false)
+        .some((link) => link.threadId === threadId && (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket"))).sort();
+      const picker = seen && await threadEffortPicker({ threadId, thread, metadata, pattern, work, sources, efforts, intended,
+        direct: direct.map((url) => ({ url, title: known.get(url)!.label })), seen });
       return { ok: true, sources, efforts, linkablePrs: [...known.values()].sort((a, b) => a.label.localeCompare(b.label))
         .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl,
         threadEffort: intended ? { key: intended.key, name: intended.name } : null,
         inheritanceNotice: paused ? "Automatic dispatch is on for this effort. Unassigned thread work will be assigned after dispatch is off."
-          : intentNotes.get(threadId) ?? null };
+          : intentNotes.get(threadId) ?? null, ...picker ? { picker } : {} };
     } catch (error) { return { ok: false, error: `Thread work could not be read: ${String(error).slice(0, 300)}` }; }
+  }
+
+  /** The composer chip's effort, the efforts the deck draws a card for with the signals that point the thread at each, and its linked PRs. */
+  async function threadEffortPicker(input: { threadId: string; thread: { title: string | null; titleFallback: string | null; parentThreadId: string | null };
+    metadata: Record<string, unknown>; pattern: RegExp; work: ReturnType<typeof readWorkContext>; sources: ThreadEffortReady["sources"];
+    efforts: ThreadEffortReady["efforts"]; intended: EstablishedEffort | null; direct: { url: string; title: string }[]; seen: Readonly<Record<string, number>> }):
+    Promise<ThreadEffortPicker> {
+    const { threadId, work, sources } = input;
+    const deck = deckView(await deckInput(input.seen));
+    const oneOffs = effortStore.source(ONE_OFFS_SOURCE)?.id ?? null;
+    const brief = (effort: EstablishedEffort) => ({ id: effort.id, name: effort.name, oneOff: effort.id === oneOffs });
+    const needs = (effortId: string) => deck.active.find((card) => card.id === effortId)?.needsYou ?? (deck.held.some((card) => card.id === effortId) ? 0 : null);
+    const ownerOf = (url: string) => { const owner = work.ownerForPr(url); const effort = owner && effortStore.get(owner.id); return effort && !effort.archivedAt ? effort : null; };
+    const ref = (url: string) => { const target = prTarget(url); return target ? `${target.slug.split("/").at(-1)} #${target.number}` : url; };
+    const linked = input.direct.map(({ url, title }) => {
+      const effort = ownerOf(url);
+      // A move takes the PR's ticket along, and any ticket that shares a PR with what it takes.
+      const own = sources.filter((source) => source.prUrls.includes(url));
+      const taken = new Set(own.map((source) => source.id));
+      for (let grew = true; grew;) {
+        grew = false;
+        const urls = new Set(sources.filter((source) => taken.has(source.id)).flatMap((source) => source.prUrls));
+        for (const source of sources) if (!taken.has(source.id) && source.prUrls.some((other) => urls.has(other))) { taken.add(source.id); grew = true; }
+      }
+      // What else it takes, as thread_effort_move takes it: the other PRs and tickets, and checkouts an effort has.
+      const moving = sources.filter((source) => taken.has(source.id));
+      const paths = new Set(moving.flatMap((source) => source.checkoutPaths.filter((path) => effortStore.owner("checkoutPath", path))));
+      const also = [...[...new Set(moving.flatMap((source) => source.prUrls))].filter((other) => other !== url).sort().map(ref),
+        ...moving.filter((source) => source.ticket && !own.includes(source)).map((source) => source.ticket!).sort(),
+        ...paths.size ? [`${paths.size} checkout${paths.size === 1 ? "" : "s"}`] : []];
+      return { url, ref: ref(url), title, effortId: effort?.id ?? null, effortName: effort?.name ?? null, sourceIds: [...taken].sort(), also };
+    });
+    const coordinates = effortStore.list().find((effort) => !effort.archivedAt && effort.coordinatorThreadId === threadId) ?? null;
+    const chip = threadEffortChip({ own: input.intended && !input.intended.archivedAt ? brief(input.intended) : null, coordinates: coordinates && brief(coordinates),
+      linked: linked.map((pr) => { const effort = pr.effortId ? effortStore.get(pr.effortId) : null; return { repo: prTarget(pr.url)?.slug ?? "", effort: effort && brief(effort) }; })
+        .filter((pr) => pr.repo), needsYou: needs });
+    // Efforts the deck draws a card for: not archived or done.
+    const open = effortStore.list().filter((effort) => !effort.archivedAt && piles.get(effort).pile !== "done");
+    const ticketOwner = (ticket: string) => {
+      const owner = effortStore.owner("ticket", ticket);
+      if (owner) return owner.id;
+      const ids = new Set([...work.items.values()].filter((item) => item.tickets.includes(ticket)).flatMap((item) => work.ownerForPr(item.key)?.id ?? []));
+      return ids.size === 1 ? [...ids][0]! : null;
+    };
+    let parentEffortId: string | null = null;
+    const parentId = input.thread.parentThreadId;
+    if (parentId) {
+      parentEffortId = effortStore.list().find((effort) => effort.coordinatorThreadId === parentId)?.id ?? null;
+      if (!parentEffortId) try {
+        const parent = await bb.sdk.threads.getPluginMetadata({ threadId: parentId });
+        parentEffortId = typeof parent.workEffortId === "string" ? effortStore.get(parent.workEffortId)?.id ?? null : null;
+      } catch { /* A parent that can't be read suggests nothing. */ }
+    }
+    const classified = linked.flatMap((pr) => {
+      if (pr.effortId) return [];
+      const group = deck.unclassified.groups.find((item) => item.prs.some((row) => row.prUrl === pr.url));
+      const target = group?.target;
+      if (target?.kind !== "effort" || !group!.confidence) return [];
+      const own = group!.prs.find((row) => row.prUrl === pr.url)!.signals.find((signal) => signal.effortId === target.effortId);
+      return [{ effortId: target.effortId, confidence: group!.confidence, signal: own?.text ?? group!.reason }];
+    });
+    const signals = new Map(threadEffortSignals({ efforts: open.map((effort) => ({ id: effort.id, name: effort.name })),
+      linked: linked.map((pr) => ({ ref: pr.ref, effortId: pr.effortId })),
+      titleTickets: ticketsIn(input.thread.title ?? input.thread.titleFallback ?? "", input.pattern).map((ticket) => ({ ticket, effortId: ticketOwner(ticket) })),
+      parentEffortId, classified }).map((item) => [item.id, item]));
+    const keyOf = (effort: EstablishedEffort) => input.efforts.find((item) => item.key === effort.key)?.key
+      ?? input.efforts.find((item) => (JSON.parse(item.scope) as { established?: string | null }).established === effort.id)?.key ?? null;
+    const choices = open.flatMap((effort) => {
+      const key = keyOf(effort);
+      if (!key) return [];
+      const signal = signals.get(effort.id);
+      return [{ key, ...brief(effort), held: piles.get(effort).pile === "held", needsYou: needs(effort.id) ?? 0,
+        signal: signal?.signal ?? null, score: signal?.score ?? 0 }];
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    const { typesafeApiKey } = await settings.get();
+    return { chip, choices, linked, jev: typeof typesafeApiKey === "string" && typesafeApiKey.trim() !== "" };
   }
 
   async function cardEffortContext(target: CardEffortTarget, snapshot?: Board): Promise<z.infer<typeof cardEffortContextSchema>> {
@@ -5772,7 +5859,7 @@ export default async function plugin(bb: BbPluginApi) {
     effort_reopen: ({ effortKey }) => movePile(effortKey, "reopen"),
     linear_seed_preview: () => seedPreview(),
     linear_seed_create: ({ projectIds, requestId }) => seedCreate(projectIds, requestId),
-    thread_effort_context: ({ threadId }) => threadEffortContext(threadId),
+    thread_effort_context: ({ threadId, seen }) => threadEffortContext(threadId, seen ?? {}),
     thread_effort_create: ({ threadId, name, requestId, expectedScope }) => serialIntent(threadId, async () => {
       intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
       const trimmed = name.trim();
