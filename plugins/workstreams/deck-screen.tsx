@@ -1077,8 +1077,6 @@ export type DeckPaneProps = {
   card: CardScreen | null; rules: readonly RuleItem[];
   /** Overview's panels while it shows; null before the first read. */
   overview?: OverviewScreen | null;
-  /** A read landed and found no card to draw. */
-  empty?: boolean;
   held: readonly Pile[]; done: readonly Pile[];
   read: { text: string; error: string | null };
   seen: { changed: number; available: boolean; note: string | null };
@@ -1121,8 +1119,7 @@ export function DeckPane(props: DeckPaneProps) {
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
             {props.filter ? <FilterLine kind={props.filter} n={card.sections.reduce((sum, section) => sum + section.lines.length, 0)} run={props.run} /> : null}
             {props.filter && !card.sections.length ? null : <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} />}</div></>
-          : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck."
-            : props.empty ? "Nothing is open." : "Reading your efforts…"}</p>}
+          : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>
     <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} sorting={card?.card.kind === "service"}

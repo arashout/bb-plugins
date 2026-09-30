@@ -909,7 +909,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     open: item.card.stats.open }] : []; })];
 
   return <>
-    <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} empty={!!view && !card && cur !== "overview"} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
+    <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
