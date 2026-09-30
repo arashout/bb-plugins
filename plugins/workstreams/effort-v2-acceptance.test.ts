@@ -44,20 +44,23 @@ const fingerprint = (number: number) => number.toString(16).padStart(64, "e");
 /** GitHub's side of one PR. */
 type Live = { state: "OPEN" | "MERGED" | "CLOSED"; headOid: string; checks: "passed" | "pending" | "failed"; mergeStateStatus: string; mergeable: string;
   reviewDecision: string | null; unresolvedThreads: number; basePrNumber: number | null; isDraft: boolean; isCrossRepository: boolean; reviewRequests: string[];
-  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean; approvalFeedback?: AdvanceFacts["approvalFeedback"] };
+  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean; approvalFeedback?: AdvanceFacts["approvalFeedback"];
+  reviewFeedback?: AdvanceFacts["reviewFeedback"] };
 const conflicting = { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" } satisfies Partial<Live>;
 const feedback = (number: number) => ({ status: "present" as const, fingerprint: fingerprint(number), sourceIds: [`review:${number}`] });
+/** The legacy worker replied on the PR after the approval's note, so only verification stood between it and Ready. */
+const REPLIED = { openThreads: 0, comment: null, repliedAt: "2026-09-28T10:00:00Z", noteAt: "2026-09-28T09:00:00Z", followUpAt: null };
 /** GitHub as the case starts, by fixture index; every other PR is an approved, green merge candidate. */
 const SHAPE: Record<number, Partial<Live>> = {
   0: { unresolvedThreads: 1 },
-  1: { approvalFeedback: feedback(312) },
+  1: { approvalFeedback: feedback(312), reviewFeedback: REPLIED },
   2: { checks: "failed", mergeStateStatus: "BLOCKED" },
   3: { reviewDecision: "REVIEW_REQUIRED", reviewRequests: ["ada"], latestReviews: [], mergeStateStatus: "BLOCKED" },
   4: { basePrNumber: 95 },
   5: conflicting,
   6: { checks: "pending", mergeStateStatus: "BLOCKED" },
   7: conflicting,
-  8: { approvalFeedback: feedback(404) },
+  8: { approvalFeedback: feedback(404), reviewFeedback: REPLIED },
   9: { basePrNumber: 404 },
   11: conflicting,
   12: { reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true, mergeStateStatus: "BLOCKED", latestReviews: [{ login: "bea", state: "CHANGES_REQUESTED" }] },
@@ -86,7 +89,7 @@ function full(url: string, live: Live): AdvanceFacts {
   return { prUrl: url, number: pull.number, title: pull.title, repo: pull.repo, headRefName: pull.branch, baseRefName: "main",
     headOid: live.state === "OPEN" ? live.headOid : "", baseOid: live.state === "OPEN" ? BASE : "", state: live.state, isDraft: live.isDraft,
     isCrossRepository: live.isCrossRepository, reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable,
-    needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: live.unresolvedThreads, threadsComplete: true, checks: live.checks,
+    needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: live.unresolvedThreads, threadsComplete: true, reviewFeedback: live.reviewFeedback ?? { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: live.checks,
     basePrNumber: live.basePrNumber, ...live.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: live.reviewFollowupPosted },
     approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] } };
 }

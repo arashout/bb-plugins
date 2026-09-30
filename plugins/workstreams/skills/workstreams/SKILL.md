@@ -971,8 +971,11 @@ Each row is one of:
   Advance, GitHub, or you) and when it looks again.
 - **Decision**: one numbered decision per real choice, such as `D1`,
   shared by every PR that asks it.
-- **Ready**: a verified merge candidate on a fresh GitHub read. Merging is never
-  part of an instruction; it stays a separate action with its own preview.
+- **Ready**: a verified merge candidate on a fresh GitHub read, with no
+  feedback to address. A worker's evidence verifies feedback but doesn't
+  answer it, so a row whose reviewer saw no reply, follow-up, or confirmation
+  waits on you first. Merging is never part of an instruction; it stays a
+  separate action with its own preview.
 - **Done**: merged or closed.
 
 A **system issue** is separate from these and names its recovery, such as

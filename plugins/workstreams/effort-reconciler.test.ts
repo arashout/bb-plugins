@@ -53,7 +53,8 @@ const head = (n: number, version = 0) => `${n}${version}`.padEnd(40, "a");
 /** GitHub's side of one PR. */
 type Live = { state: "OPEN" | "MERGED" | "CLOSED"; headOid: string; checks: "passed" | "pending" | "failed"; mergeStateStatus: string; mergeable: string;
   reviewDecision: string | null; unresolvedThreads: number; basePrNumber: number | null; isDraft: boolean; reviewRequests: string[];
-  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean; approvalFeedback?: AdvanceFacts["approvalFeedback"] };
+  latestReviews: { login: string; state: string }[]; reviewFollowupPosted?: boolean; approvalFeedback?: AdvanceFacts["approvalFeedback"];
+  reviewFeedback?: AdvanceFacts["reviewFeedback"] };
 const ready = (n: number): Live => ({ state: "OPEN", headOid: head(n), checks: "passed", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", reviewDecision: "APPROVED",
   unresolvedThreads: 0, basePrNumber: null, isDraft: false, reviewRequests: [], latestReviews: [] });
 const conflicting = { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" } satisfies Partial<Live>;
@@ -68,7 +69,7 @@ const cheap = (n: number, live: Live) => ({ ...parsePrList(JSON.stringify([{ num
 const full = (n: number, live: Live): AdvanceFacts => ({ prUrl: url(n), number: n, title: title(n), repo: "inkwell/folio", headRefName: `abc-${n}`, baseRefName: "main",
   headOid: live.state === "OPEN" ? live.headOid : "", baseOid: live.state === "OPEN" ? BASE : "", state: live.state, isDraft: live.isDraft, isCrossRepository: false,
   reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus, mergeable: live.mergeable, needsPreparation: false, readiness: "ready", detail: "",
-  unresolvedThreads: live.unresolvedThreads, threadsComplete: true, checks: live.checks, basePrNumber: live.basePrNumber,
+  unresolvedThreads: live.unresolvedThreads, threadsComplete: true, reviewFeedback: live.reviewFeedback ?? { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: live.checks, basePrNumber: live.basePrNumber,
   ...live.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: live.reviewFollowupPosted },
   approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] } });
 /** BB's turn.failed for a worker's turn, with no rate limit to wait out. */
@@ -1154,7 +1155,8 @@ describe("the v2 reconciler's bounded repairs", () => {
   });
 
   it("clears a settled legacy worker's report that matches fresh facts through the adapter, with no send, and launches only where it doesn't match", async () => {
-    const env = await setup([802, 803], { live: (n) => ({ approvalFeedback: feedback(n) }), execution: "on" });
+    // Each legacy worker replied on its PR after the note, so its evidence is all Ready waits on.
+    const env = await setup([802, 803], { live: (n) => ({ approvalFeedback: feedback(n), reviewFeedback: { openThreads: 0, comment: null, repliedAt: "2026-09-28T10:00:00Z", noteAt: "2026-09-28T09:00:00Z", followUpAt: null } }), execution: "on" });
     // 803's report names a head that is no longer the PR's.
     const { work, reconciler } = await legacyReports(env, [802, 803], (n) => n === 802 ? head(n) : head(n, 9));
     await reconciler.recoverAll();

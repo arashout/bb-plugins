@@ -19,11 +19,12 @@ const AUTHOR = "/Users/reader/src/folio-abc-340";
 const facts = (overrides: Partial<AdvanceFacts> = {}): AdvanceFacts => ({
   prUrl: PR_URL, number: 313, title: "ABC-340 Keep shelf order on reload", repo: "inkwell/folio", headRefName: "abc-340", baseRefName: "main",
   headOid: HEAD, baseOid: "b".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED",
-  mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true,
+  mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null },
   checks: "passed", basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, ...overrides,
 });
-/** Approval feedback that needs verified follow-up. */
-const FEEDBACK = { approvalFeedback: { status: "present" as const, fingerprint: FINGERPRINT, sourceIds: ["review:811"] } };
+/** Approval feedback that needs verified follow-up, which a reply on the PR answered. */
+const FEEDBACK = { approvalFeedback: { status: "present" as const, fingerprint: FINGERPRINT, sourceIds: ["review:811"] },
+  reviewFeedback: { openThreads: 0, comment: null, repliedAt: new Date(NOW - MINUTE).toISOString(), noteAt: new Date(NOW - 60 * MINUTE).toISOString(), followUpAt: null } };
 const verified = (headOid: string): ApprovalFeedbackRecord => ({ attemptId: "A-0", headOid, fingerprint: FINGERPRINT, blockers: [], prUrl: PR_URL,
   threadId: "thr_origin", verifiedAt: NOW - 5 * MINUTE,
   findings: [{ sourceId: "review:811", resolution: "fixed", evidence: "Shelf order now survives a reload", validation: { outcome: "passed", detail: "npm test -- shelf" } }] });
@@ -106,6 +107,20 @@ describe("decide()", () => {
     expect(decide(row({}, FEEDBACK))).toMatchObject({ nextAction: ["address_review_feedback"], resource: { kind: "reuse", threadId: "thr_origin" } });
     expect(decide(row({ resources: { ...RESOURCES, units: [source] } }, FEEDBACK)))
       .toMatchObject({ resource: { kind: "worktree", reason: `no checkout on ${HOST}`, workspace: { batchId: `effort-${EFFORT}`, jobId: "pr-313" } } });
+  });
+
+  // A worker's evidence verifies the head, but only your reply, a follow-up, or your confirmation answers the reviewer: the row waits on
+  // you, launches nothing more, and is never Ready until then, whatever CI says.
+  it("waits on you for an approval comment a worker verified but nothing answered, and never calls it Ready", () => {
+    const unanswered = { ...FEEDBACK, reviewFeedback: { ...FEEDBACK.reviewFeedback, repliedAt: null } };
+    expect(decide(row({ feedback: verified(HEAD) }, unanswered))).toMatchObject({ phase: "waiting", cause: "feedback", owner: { kind: "user" },
+      detail: "Approval comment to address: reply, link a follow-up, or confirm it", nextAction: null });
+    expect(decide(row({ feedback: verified(HEAD) }, { ...unanswered, checks: "pending" }))).toMatchObject({ phase: "waiting", cause: "feedback" });
+    const mine: ApprovalFeedbackRecord = { ...verified(HEAD), provenance: { kind: "user" } };
+    expect(decide(row({ feedback: mine }, unanswered)).phase).toBe("prepared");
+    // A read that didn't say who spoke last proves no answer.
+    expect(decide(row({ feedback: verified(HEAD) }, { ...FEEDBACK, reviewFeedback: undefined }))).toMatchObject({ phase: "waiting", cause: "merge-requirements",
+      detail: "Short of Ready: feedback-answered" });
   });
 
   it("gives an open stack parent's child its preparation work, then waits on the parent, never Ready", () => {

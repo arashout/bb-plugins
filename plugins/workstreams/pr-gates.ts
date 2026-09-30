@@ -3,7 +3,8 @@
 // wait, a repair, and a decision stay distinguishable instead of one attention
 // bucket. `null` means the facts cannot decide the gate yet: observe again.
 import type { AdvanceFacts } from "./advance-contract.js";
-import { feedbackVerificationState, type ApprovalFeedbackRecord } from "./approval-feedback.js";
+import { feedbackVerificationState, userConfirmation, type ApprovalFeedbackRecord } from "./approval-feedback.js";
+import { feedbackToAddress, type FeedbackItem } from "./feedback-to-address.js";
 import type { Pr } from "./contract.js";
 
 export const GATE_IDS = [
@@ -82,6 +83,16 @@ export function prGates({ facts, observedAt, now, held, feedback, reviewers }: G
     "parent-merged": facts.basePrNumber === null,
     "merge-clean": mergeClean(facts),
   };
+}
+
+/**
+ * Feedback to address on this read (feedback-to-address.ts), which no gate names: a worker's evidence verifies feedback, but only your
+ * reply, a follow-up, or your confirmation answers it, so this holds Ready and waits on you instead of launching work. Null when the read
+ * didn't say who spoke last, which proves no answer.
+ */
+export function unansweredFeedback(facts: Pick<AdvanceFacts, "approvalFeedback" | "reviewFeedback" | "headOid">, feedback: ApprovalFeedbackRecord | null): FeedbackItem[] | null {
+  if (facts.reviewFeedback === undefined) return null;
+  return feedbackToAddress(facts, userConfirmation(feedback, facts.approvalFeedback, facts.headOid || null)?.current === true);
 }
 
 /** What a PR short of merge-clean waits on: branch protection, or any other unmet requirement. */

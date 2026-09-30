@@ -65,7 +65,7 @@ const checkout = (number: number): RawUnit => ({ path: `/p/folio-${number}`, dir
 const facts = (number: number): AdvanceFacts => ({ prUrl: url(number), number, title: TITLES[number]!, repo: "inkwell/folio",
   headRefName: `abc-${number}-shelf`, baseRefName: "main", headOid: HEAD, baseOid: BASE, state: "OPEN", isDraft: false, isCrossRepository: false,
   reviewDecision: "APPROVED", mergeStateStatus: "DIRTY", mergeable: "CONFLICTING", needsPreparation: true, readiness: "needs-attention",
-  detail: "Resolve branch conflicts", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
+  detail: "Resolve branch conflicts", unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed", basePrNumber: null,
   approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
 
 /** A legacy Advance batch saved by an earlier run, which the service loads when the plugin starts. */

@@ -177,6 +177,7 @@ import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advance
 import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState,
   feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { confirmReadSchema, type ApprovalHandling, type ConfirmRead } from "./approval-evidence.js";
+import { unansweredFeedback } from "./pr-gates.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -4502,11 +4503,14 @@ export default async function plugin(bb: BbPluginApi) {
       // A v2 roster owns the PR by its targets, or by fresh ownership its targets have not caught up with yet.
       const held = holdMessage(prUrl) ?? v2Managed(prUrl) ?? v2Pointer(scope?.establishedId);
       const eligible = held === null && facts.state === "OPEN" && facts.approvalFeedback.status !== "unknown" && (!needsWriter || (!facts.isCrossRepository && !!source));
+      // Feedback to address waits on you, not on a worker: it holds Ready without asking for one.
+      const unanswered = unansweredFeedback(facts, approvalFeedback.get(prUrl));
       const feedbackDetail = facts.approvalFeedback.status === "unknown" ? "Approval feedback history is incomplete; refresh and verify the current review." :
-        facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." : facts.detail;
+        facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." :
+        unanswered?.length ? "Review feedback waits on your answer: reply, link a follow-up, or confirm it." : facts.detail;
       const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : feedbackDetail);
       return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail,
-        readiness: facts.readiness === "ready" && !feedbackClear ? "needs-attention" : facts.readiness,
+        readiness: facts.readiness === "ready" && (!feedbackClear || unanswered?.length !== 0) ? "needs-attention" : facts.readiness,
         blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
     } catch (error) { return { ...fallback, detail: `Inspection failed: ${String(error).slice(0, 300)}` }; }
   }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
 import { advanceChecks } from "./advance-host.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
-import { FRESH_MS, GATE_IDS, mergeWait, prGates, type GateId, type GateInput, type Gates } from "./pr-gates.js";
+import { FRESH_MS, GATE_IDS, mergeWait, prGates, unansweredFeedback, type GateId, type GateInput, type Gates } from "./pr-gates.js";
 
 const head = "a".repeat(40);
 const url = "https://github.com/inkwell/folio/pull/42";
@@ -109,5 +109,17 @@ describe("PR gates", () => {
     expect(gates({ facts: pending, reviewers: { reviewRequests: ["mira"], latestReviews: [] } })["review-requested"]).toBe(true);
     expect(gates({ facts: pending, reviewers: { reviewRequests: [], latestReviews: [{ login: "otto", state: "COMMENTED" }] } })["review-requested"]).toBe(true);
     expect(gates({ facts: pending, reviewers: null })).toMatchObject({ "review-requested": null, "rereview-requested": null });
+  });
+
+  // No gate names feedback to address, since stored rows keep only these gates; decide() and the roster read it beside them. A worker's
+  // evidence passes feedback-verified but answers no one: only a reply, a follow-up, or your own confirmation on this head does.
+  it("reads feedback to address beside the gates: a worker's evidence doesn't answer it, your confirmation does", () => {
+    const quiet = { openThreads: 0, comment: null, repliedAt: null, noteAt: "2026-09-28T09:00:00Z", followUpAt: null };
+    expect(gates()["feedback-verified"]).toBe(true);
+    expect(unansweredFeedback({ ...facts, reviewFeedback: quiet }, feedback)).toEqual([{ kind: "approval", login: null, since: Date.parse(quiet.noteAt) }]);
+    expect(unansweredFeedback({ ...facts, reviewFeedback: quiet }, { ...feedback, provenance: { kind: "user" } })).toEqual([]);
+    expect(unansweredFeedback({ ...facts, reviewFeedback: { ...quiet, repliedAt: "2026-09-28T10:00:00Z" } }, feedback)).toEqual([]);
+    expect(unansweredFeedback({ ...facts, headOid: "c".repeat(40), reviewFeedback: quiet }, { ...feedback, provenance: { kind: "user" } })).toHaveLength(1);
+    expect(unansweredFeedback(facts, feedback)).toBeNull();
   });
 });

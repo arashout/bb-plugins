@@ -328,7 +328,7 @@ describe("roster dry-run script", () => {
     createPrFactsStore(env.db).full(rotated, { fullAt: Date.now(), signature: null, cheapAt: null, facts: { prUrl: rotated, number: 311, title: "OPS-41 Rotate vault audit keys",
       repo: "inkwell/folio", headRefName: "ops-41-311", baseRefName: "main", headOid: "d".repeat(40), baseOid: "b".repeat(40), state: "OPEN", isDraft: false,
       isCrossRepository: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "",
-      unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } });
+      unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed", basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } });
     const directory = temporary();
     const path = join(directory, "data.db");
     await env.db.backup(path);
@@ -524,7 +524,7 @@ describe("roster refresh", () => {
   const full = (pr: typeof approved, patch: Record<string, unknown> = {}) => ({ ok: true, facts: { prUrl: pr.url, number: pr.number, title: pr.title,
     repo: "inkwell/catalog", headRefName: pr.headRefName!, baseRefName: "main", headOid: pr.headRefOid!, baseOid: "b".repeat(40), state: "OPEN",
     isDraft: false, isCrossRepository: false, reviewDecision: pr.reviewDecision, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE",
-    needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
+    needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed", basePrNumber: null,
     approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, ...patch } });
   const github = (answers: { cheap?: () => unknown; full?: () => unknown }): { call: HostCall } => ({ call: (method) =>
     method === "inspectPrs" ? answers.cheap?.() : method === "advanceInspect" ? answers.full?.() : undefined });
@@ -689,7 +689,7 @@ describe("effort instructions", () => {
     const pr = INKWELL_ROSTER.inventory.find((entry) => entry.pr.url === prUrl)!.pr;
     return { ok: true, facts: { prUrl, number: pr.number, title: pr.title, repo: prUrl.split("/").slice(3, 5).join("/"), headRefName: pr.headRefName!, baseRefName: "main",
       headOid: head, baseOid: "b".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN",
-      mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
+      mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready", detail: "", unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed", basePrNumber: null,
       approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, ...patch } };
   };
   /** GitHub answers for full reads, keyed by PR; the cheap read finds nothing new. */

@@ -14,7 +14,8 @@ import { authorityNeed, recipe, WORKER_RESULTS, WORKER_ROUTES, type CodeRecipe, 
 import { prBlocker, prWriter, selectResource, type Resource, type ResourceAttempt, type ResourceInput } from "./effort-resources.js";
 import type { ExecutionMode } from "./effort-work-store.js";
 import type { ModelChoice, ModelRole } from "./execution.js";
-import { mergeWait, prGates, type GateId } from "./pr-gates.js";
+import { FEEDBACK_LABEL } from "./feedback-to-address.js";
+import { mergeWait, prGates, unansweredFeedback, type GateId } from "./pr-gates.js";
 import { prWorkItemKey } from "./work-item-index.js";
 
 export type Phase = "queued" | "executing" | "verifying" | "waiting" | "paused" | "decision-needed" | "repair-needed" | "prepared" | "finished";
@@ -140,6 +141,7 @@ const WAKES: Record<string, [event: string, pollMs: number]> = {
   draft: ["the draft state changes, or a command names this PR", 15 * MINUTE],
   "merge-blocked": ["the merge state changes", 15 * MINUTE],
   "merge-requirements": ["the merge state changes", 15 * MINUTE],
+  feedback: ["your reply, a follow-up that links it, or your confirmation", 15 * MINUTE],
   "writer-available": ["the other writer goes idle or releases its claim", 2 * MINUTE],
   capacity: ["a v2 worker turn ends", 2 * MINUTE],
   "launch-breaker": ["readback resolves the uncertain launches", 2 * MINUTE],
@@ -442,7 +444,9 @@ export function decide(input: DecideInput): Next {
     if (step) return step;
   }
 
-  // 10. Waits, each with its owner.
+  // 10. Waits, each with its owner, feedback to address first: only you answer it, and no worker's evidence does.
+  const unanswered = unansweredFeedback(facts, input.feedback);
+  if (unanswered?.length) return waiting("feedback", `${FEEDBACK_LABEL[unanswered[0]!.kind]}: reply, link a follow-up, or confirm it`, user);
   if (gates["checks-settled"] === false) return waiting("ci", `Checks running on ${facts.headOid.slice(0, 7)}`, { kind: "ci", ref: null });
   if (gates["parent-merged"] === false) return waiting("parent", `Waiting for parent #${facts.basePrNumber} to merge`, { kind: "pr", ref: `${facts.repo}#${facts.basePrNumber}` });
   if (facts.isDraft) return waiting("draft", "You kept this PR a draft", user);
@@ -461,7 +465,7 @@ export function decide(input: DecideInput): Next {
 
   // 11. Prepared: a verified merge candidate on a fresh read. Merge stays its own confirmed action.
   if (!gates.fresh) return observe("Ready needs a read under two minutes old");
-  const unmet = PREPARED.filter((gate) => gates[gate] !== true);
+  const unmet = [...PREPARED.filter((gate) => gates[gate] !== true), ...unanswered === null ? ["feedback-answered"] : []];
   if (unmet.length || input.criteriaPending) return waiting("merge-requirements", `Short of Ready: ${[...unmet, ...input.criteriaPending ? ["criteria-satisfied"] : []].join(", ")}`, { kind: "github", ref: null });
   return next("prepared", "merge-candidate", "Ready to merge through its fresh preview", { owner: user });
 }

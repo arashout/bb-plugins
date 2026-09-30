@@ -23,7 +23,8 @@ import { prTarget } from "./ghactions.js";
 import type { PrObservation } from "./inventory-store.js";
 import type { LegacyAttempt } from "./legacy-history.js";
 import { checkCounts, checksFailed, checksGreen } from "./pr-checks.js";
-import { GATE_IDS, mergeWait, prGates, type GateId, type Gates } from "./pr-gates.js";
+import { FEEDBACK_LABEL, type FeedbackItem } from "./feedback-to-address.js";
+import { GATE_IDS, mergeWait, prGates, unansweredFeedback, type GateId, type Gates } from "./pr-gates.js";
 import { canonicalPrUrl, prHoldFor, prHoldSchema, type PrHolds } from "./pr-holds.js";
 import { STATE_LABEL } from "./roster-shared.js";
 import type { Run } from "./runs.js";
@@ -187,6 +188,7 @@ function cheapFacts(pr: Pr): AdvanceFacts {
     checks: checksFailed(pr.checkConclusions) ? "failed" : checksGreen(pr.checkConclusions) ? "passed" : "pending",
     basePrNumber: null, reviewFollowupPosted: pr.reviewFollowupPosted,
     approvalFeedback: pr.approvalFeedback ?? { status: "unknown", fingerprint: null, sourceIds: [] },
+    ...(pr.reviewFeedback === undefined ? {} : { reviewFeedback: pr.reviewFeedback }),
   };
 }
 
@@ -205,8 +207,13 @@ function cheapGates(facts: AdvanceFacts, pr: Pr, held: boolean, feedback: Approv
 /** The gates a merge candidate must pass that facts alone decide; freshness shows as age instead. */
 const CANDIDATE: GateId[] = ["checks-green", "threads-resolved", "feedback-verified", "changes-addressed", "approved", "not-draft", "parent-merged", "merge-clean"];
 
-/** What the observed gates ask for next, in decide()'s order: work before waits, waits before readiness. */
-function observedNeed(gates: Gates, facts: Pick<AdvanceFacts, "mergeStateStatus" | "basePrNumber">, requested: readonly string[]): Omit<RosterNeed, "state"> {
+/**
+ * What the observed gates ask for next, in decide()'s order: feedback to address first, then work before waits, waits before readiness.
+ * `unanswered` is the read's feedback to address, null when the read didn't say who spoke last.
+ */
+function observedNeed(gates: Gates, facts: Pick<AdvanceFacts, "mergeStateStatus" | "basePrNumber">, requested: readonly string[],
+  unanswered: readonly FeedbackItem[] | null): Omit<RosterNeed, "state"> {
+  if (unanswered?.length) return { cause: "review-feedback", label: FEEDBACK_LABEL[unanswered[0]!.kind], owner: "you" };
   if (gates["no-conflict"] === false || gates["base-current"] === false) return { cause: "branch", label: "Branch needs updating", owner: "you" };
   if (gates["checks-settled"] === true && gates["checks-green"] === false) return { cause: "checks-failed", label: "Checks failed", owner: "you" };
   if (gates["threads-resolved"] === false || gates["feedback-verified"] === false || gates["changes-addressed"] === false)
@@ -222,7 +229,7 @@ function observedNeed(gates: Gates, facts: Pick<AdvanceFacts, "mergeStateStatus"
     const cause = mergeWait(facts);
     return { cause, label: cause === "merge-blocked" ? "Merge blocked by branch protection" : "Waiting for merge requirements", owner: "github" };
   }
-  const unknown = CANDIDATE.filter((gate) => gates[gate] === null);
+  const unknown = [...CANDIDATE.filter((gate) => gates[gate] === null), ...unanswered === null ? ["feedback-answered"] : []];
   if (unknown.length > 0) return { cause: "observe", label: `Refresh to verify ${unknown.join(", ")}`, owner: null };
   return { cause: "merge-candidate", label: "Ready to merge", owner: "you" };
 }
@@ -358,7 +365,7 @@ function rosterRow(target: string, number: { n: number; provisional: boolean }, 
       // The board read it and then dropped it: it merged or closed, or its only checkout went away.
       : observation?.checkedAt ? { cause: "observe", label: "No longer on the board; refresh to read it", owner: null }
       : { cause: "source-unavailable", label: "Not observed yet", owner: "github" });
-    return outside(observedNeed(gates, facts, pr?.reviewRequests ?? []));
+    return outside(observedNeed(gates, facts, pr?.reviewRequests ?? [], unansweredFeedback(facts, feedback)));
   })();
   const tickets = sources.tickets(item?.tickets ?? []);
   const parsed = prTarget(target);

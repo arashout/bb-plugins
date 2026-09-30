@@ -116,7 +116,7 @@ describe("effort roster rows", () => {
     const kept = (prUrl: string, state: "OPEN" | "MERGED" | "CLOSED", fullAt: number) => ({ fullAt, failedAt: null, error: null, signature: cheapSignature(pr(prUrl)),
       facts: { prUrl, number: 0, title: "", repo: "inkwell/atlas", headRefName: "", baseRefName: "main", headOid: "", baseOid: "", state, isDraft: false, isCrossRepository: false,
         reviewDecision: null, mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN", needsPreparation: false, readiness: "needs-attention" as const, detail: "", unresolvedThreads: 0,
-        threadsComplete: true, checks: "passed" as const, basePrNumber: null, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } } });
+        threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed" as const, basePrNumber: null, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } } });
     const at = (minute: number) => Date.UTC(2026, 8, 27, 12, minute);
     const reads: Record<string, StoredPrFacts> = {
       // A full read saw it merge before the board dropped it, so the board's later read no longer matches the one the full read kept.
@@ -153,7 +153,8 @@ describe("effort roster rows", () => {
   it("names a cheap read's need but never calls a PR a merge candidate from a cheap read", () => {
     const [conflicted, failing, feedback, pending, requested, clean, unobserved, held] = urls;
     const approved = { reviewDecision: "APPROVED", unresolvedReviewThreads: 0, resolvedReviewThreads: 3,
-      approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } };
+      approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] },
+      reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } };
     const rows = byTarget(roster(urls, { holds: { [held!]: { reason: "Waiting on legal", heldAt: 1 } },
       observation: (url) => url === unobserved ? null : { checkedAt: "2026-09-28T00:00:00.000Z", failedAt: null } }, {
       [conflicted!]: pr(conflicted!, { ...approved, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
@@ -175,13 +176,28 @@ describe("effort roster rows", () => {
     expect([...rows.values()].every((row) => row.state === "not-in-instruction")).toBe(true);
   });
 
+  // Feedback to address comes before every other need, CI's included, and a read that didn't say who spoke last is never a merge candidate.
+  it("names feedback to address first on a cheap read, and asks for a read that says who spoke last", () => {
+    const [noted, red, unread] = urls;
+    const approved = { reviewDecision: "APPROVED", unresolvedReviewThreads: 0, resolvedReviewThreads: 3,
+      approvalFeedback: { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] },
+      reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: "2026-09-27T09:00:00Z", followUpAt: null } };
+    const rows = byTarget(roster([noted!, red!, unread!], { observation: () => ({ checkedAt: "2026-09-28T00:00:00.000Z", failedAt: null }) }, {
+      [noted!]: pr(noted!, approved), [red!]: pr(red!, { ...approved, checkConclusions: ["FAILURE"] }),
+      [unread!]: pr(unread!, { ...approved, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] }, reviewFeedback: undefined }),
+    }).rows);
+    expect([noted, red].map((url) => [rows.get(url!)?.cause, rows.get(url!)?.label, rows.get(url!)?.owner]))
+      .toEqual([["review-feedback", "Approval comment to address", "you"], ["review-feedback", "Approval comment to address", "you"]]);
+    expect(rows.get(unread!)?.label).toBe("Refresh to verify parent-merged, feedback-answered");
+  });
+
   it("keeps a full read's proof through unchanged cheap reads, and drops it once a cheap read shows a change", () => {
     const [target] = urls;
     const cheap = pr(target!, { reviewDecision: "APPROVED", approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
     const facts = { prUrl: target!, number: cheap.number, title: cheap.title, repo: "inkwell/atlas", headRefName: cheap.headRefName!, baseRefName: "main",
       headOid: cheap.headRefOid!, baseOid: "b".repeat(40), state: "OPEN" as const, isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED",
       mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready" as const, detail: "", unresolvedThreads: 0,
-      threadsComplete: true, checks: "passed" as const, basePrNumber: null, approvalFeedback: cheap.approvalFeedback! };
+      threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed" as const, basePrNumber: null, approvalFeedback: cheap.approvalFeedback! };
     // The poll read the PR again a minute after the refresh.
     const later = { observation: () => ({ checkedAt: "2026-09-28T00:01:00.000Z", failedAt: null }) };
     const row = (current: Pr, signature: string) => roster([target!], { ...later,
@@ -274,7 +290,7 @@ describe("roster presentation facts", () => {
     const facts = (target: string, basePrNumber: number | null) => ({ facts: { prUrl: target, number: Number(target.split("/").at(-1)), title: "Shelf location", repo: "inkwell/spine",
       headRefName: "abc-215", baseRefName: "abc-212", headOid: "d".repeat(40), baseOid: "b".repeat(40), state: "OPEN" as const, isDraft: false, isCrossRepository: false,
       reviewDecision: null, mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready" as const, detail: "", unresolvedThreads: 0,
-      threadsComplete: true, checks: "passed" as const, basePrNumber, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } },
+      threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed" as const, basePrNumber, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } },
       fullAt: NOW - MINUTE, failedAt: null, error: null, signature: null });
     const result = roster([parent, fullChild, cheapChild, orphan], {
       full: (target) => target === fullChild ? facts(fullChild, 212) : target === orphan ? facts(orphan, 190) : null,
@@ -298,7 +314,7 @@ describe("roster presentation facts", () => {
     const teammate = url("catalog", 362);
     const facts = { prUrl: teammate, number: 362, title: "Shelf labels", repo: "inkwell/catalog", headRefName: "abc-362", baseRefName: "main", headOid: "d".repeat(40),
       baseOid: "b".repeat(40), state: "OPEN" as const, isDraft: false, isCrossRepository: false, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED",
-      mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention" as const, detail: "", unresolvedThreads: 0, threadsComplete: true, checks: "passed" as const,
+      mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention" as const, detail: "", unresolvedThreads: 0, threadsComplete: true, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null }, checks: "passed" as const,
       basePrNumber: null, approvalFeedback: { status: "none" as const, fingerprint: null, sourceIds: [] } };
     const reviewWait = body(1, { cause: "review", owner: { kind: "reviewer", ref: "ines-v" }, wake: { event: "the review decision changes", ref: null, dueAt: NOW } });
     // No checkout and not yours: the board never reads it, and the reconciler reads it cheaply at its review poll.

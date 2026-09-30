@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
+import { reviewFeedbackSchema } from "./feedback-to-address.js";
 
 export const advanceFactsSchema = z.object({
   prUrl: z.string().max(500), number: z.number().int().positive(), title: z.string().max(300), repo: z.string().max(160),
@@ -14,6 +15,8 @@ export const advanceFactsSchema = z.object({
   checks: z.enum(["passed", "pending", "failed", "unknown"]),
   basePrNumber: z.number().int().positive().nullable(), reviewFollowupPosted: z.boolean().optional(),
   approvalFeedback: approvalFeedbackSchema,
+  /** Who said what last and what answered it (feedback-to-address.ts); absent when the read couldn't tell, which proves no answer. */
+  reviewFeedback: reviewFeedbackSchema.optional(),
 }).strict().superRefine((facts, ctx) => {
   if (facts.state !== "OPEN") return;
   for (const key of ["headOid", "baseOid"] as const) if (facts[key] === "") {

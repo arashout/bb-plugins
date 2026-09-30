@@ -168,6 +168,7 @@ export async function readAdvancePr(run: GhRunner, prUrl: string): Promise<Advan
       needsPreparation, readiness, detail, unresolvedThreads: threads.count, threadsComplete: !threads.hasNextPage, checks, basePrNumber,
       approvalFeedback: threads.approvalFeedback,
       ...(threads.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: threads.reviewFollowupPosted }),
+      ...(threads.reviewFeedback === undefined ? {} : { reviewFeedback: threads.reviewFeedback }),
     } };
   }
   return { ok: false, error: "The PR head, base, or reviews changed during verification. Refresh and try again." };
