@@ -320,14 +320,15 @@ async function inspect(
   unit.pr = parsed.pr;
   if (parsed.pr.state === "OPEN" && !parsed.pr.isDraft &&
       (parsed.pr.reviewDecision === "APPROVED" || parsed.pr.reviewDecision === "CHANGES_REQUESTED")) {
-    const threads = await reviewThreadsOf(parsed.pr.url,
-      parsed.pr.reviewDecision === "CHANGES_REQUESTED" || parsed.pr.approvalHasBody === true);
+    // With the conversation and links, which say whether feedback to address was answered.
+    const threads = await reviewThreadsOf(parsed.pr.url, true);
     if (!threads.ok) warn(`${dirName}: cannot check PR review threads: ${threads.error}`);
     else {
       unit.pr.unresolvedReviewThreads = threads.count;
       unit.pr.resolvedReviewThreads = threads.resolvedCount;
       unit.pr.approvalFeedback = threads.approvalFeedback;
       unit.pr.reviewFollowupPosted = threads.reviewFollowupPosted;
+      if (threads.reviewFeedback) unit.pr.reviewFeedback = threads.reviewFeedback;
     }
   }
   if (parsed.pr.state === "MERGED") {
