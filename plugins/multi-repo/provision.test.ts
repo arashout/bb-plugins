@@ -663,3 +663,37 @@ describe("the cache is keyed by repo, not by project", () => {
     );
   });
 });
+
+describe("standing up a brand new project", () => {
+  it("bootstraps a project source whose directory does not exist yet", async () => {
+    // The panel's Commit and `bb repos add --project` both land here on a new
+    // project: a fresh machine's workspace directory is empty, so the repo
+    // set has to be able to create the repo that holds it.
+    const dir = path.join(scratch, "never-created", "acme");
+    expect(await exists(dir)).toBe(false);
+
+    const result = await bootstrapProjectSource(dir, EMPTY_REPOS);
+    expect(result.bootstrapped).toBe(true);
+    expect(await exists(path.join(dir, ".git"))).toBe(true);
+
+    // And the repo set commits straight afterwards, which is the sequence
+    // saveRepoSet performs.
+    const written = await writeReposJson(
+      dir,
+      `{"version":1,"repos":[{"dir":"a","url":"https://example.com/a"}]}\n`,
+      "Update the repo set",
+    );
+    expect(written.committed).toBe(true);
+    expect(parseReposFile((await readReposJson(dir))!).ok).toBe(true);
+  });
+
+  it("writing a repo set without bootstrapping first refuses rather than half-succeeding", async () => {
+    // The old behavior, kept honest: a directory that is not a repo gets a
+    // named failure, not a silent uncommitted write.
+    const dir = path.join(scratch, "plain-directory");
+    await mkdir(dir, { recursive: true });
+    const written = await writeReposJson(dir, `{"version":1,"repos":[]}\n`, "Update the repo set");
+    expect(written.committed).toBe(false);
+    expect(written.message).not.toBeNull();
+  });
+});

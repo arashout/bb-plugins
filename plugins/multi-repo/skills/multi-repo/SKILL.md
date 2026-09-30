@@ -85,3 +85,6 @@ workspace — report what is missing, and suggest the Repos panel or
 - `bb repos add <url> [--dir <name>] [--branch <name>]` — add to the set
   without cloning into this workspace (use `workspace_add_repo` for that).
 - `bb repos remove <dir>`.
+
+`list`, `add` and `remove` take `--project <id>` to act on another project;
+they default to this thread's. `status` is always this thread's.

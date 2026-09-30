@@ -38,12 +38,15 @@ travel.
 **Shared.** Clone an existing `.bb` repo and create the project pointing at it.
 A teammate gets the whole workspace definition from one URL.
 
-Then:
+Then give it a repo set. `--project` targets a project you are not currently
+working in, which is the usual case when setting one up; without it the
+commands act on the project in context. Either this or the Repos panel will
+create `.bb` if it does not exist yet.
 
 ```sh
-bb repos add git@github.com:you/bb-dylan.git
-bb repos add git@github.com:you/bb-plugins.git --branch main
-bb repos list
+bb repos add git@github.com:you/bb-dylan.git  --project proj_abc123
+bb repos add git@github.com:you/bb-plugins.git --project proj_abc123 --branch main
+bb repos list --project proj_abc123
 ```
 
 ## `repos.json`
@@ -79,7 +82,7 @@ parse fails the launch with a message naming the offending entry.
 |---|---|
 | **Repos** nav panel | The repo set, each repo's object-cache state, and an editor for `repos.json` with loud validation. |
 | **Changes** thread panel | Per-repo diff and pull request. Opened from the thread panel's Actions list. |
-| `bb repos` | `list`, `add`, `remove`, `status`. |
+| `bb repos` | `list`, `add`, `remove` (each takes `--project`), and `status` for the current thread. |
 | Agent tools | `workspace_list_repos`, `workspace_add_repo`, `workspace_remove_repo`, `workspace_publish_guidance`. |
 | Agent instructions | A generated table of `repo → branch → path`, plus a `multi-repo` skill. |
 

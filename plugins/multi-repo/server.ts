@@ -708,7 +708,31 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
    * find it; this is the answer for them and for an agent that would rather
    * run a command than open a panel.
    */
-  async function resolveProjectId(ctx: { projectId?: string | null; threadId?: string | null }): Promise<string> {
+  /**
+   * The project a command acts on: an explicit `--project` first, then the
+   * ambient thread or project.
+   *
+   * The explicit flag is what makes the CLI usable for setting a *new*
+   * project up. Without it every command targets wherever it happens to be
+   * run, which is never the project being created.
+   */
+  async function resolveProjectId(
+    ctx: { projectId?: string | null; threadId?: string | null },
+    explicit?: string,
+  ): Promise<string> {
+    if (explicit !== undefined && explicit.length > 0) {
+      // Fail here rather than deeper, where a bad id reads as "this project
+      // has no checkout on any machine".
+      try {
+        await bb.sdk.projects.get({ projectId: explicit });
+      } catch {
+        throw new PluginCliError(`No project with id ${explicit}.`, {
+          code: "unknown_project",
+          hint: "List them with `bb project list`.",
+        });
+      }
+      return explicit;
+    }
     if (typeof ctx.projectId === "string" && ctx.projectId.length > 0) return ctx.projectId;
     if (typeof ctx.threadId === "string" && ctx.threadId.length > 0) {
       const thread = await bb.sdk.threads.get({ threadId: ctx.threadId });
@@ -716,9 +740,16 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     }
     throw new PluginCliError("No project in context.", {
       code: "project_required",
-      hint: "Run this inside a project thread, or from a directory bb associates with a project.",
+      hint: "Pass --project <id> (list them with `bb project list`), or run this inside a project thread.",
     });
   }
+
+  /** The `--project` option, identical on every project-scoped command. */
+  const PROJECT_OPTION = {
+    type: "string",
+    description: "Project ID to act on; defaults to the project in context",
+    aliases: ["project-id", "proj"],
+  } as const;
 
   async function requireSource(projectId: string): Promise<SourceLocation> {
     const location = await projectSource(projectId);
@@ -738,9 +769,12 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       commands: {
         list: cliCommand({
           summary: "List the project's repo set and the state of each one's object cache",
-          options: { json: { type: "boolean", description: "Emit machine-readable JSON" } },
+          options: {
+            project: PROJECT_OPTION,
+            json: { type: "boolean", description: "Emit machine-readable JSON" },
+          },
           async run(input, ctx) {
-            const location = await requireSource(await resolveProjectId(ctx));
+            const location = await requireSource(await resolveProjectId(ctx, input.options.project));
             const set = await readRepoSet(location, { bootstrap: false }, ctx.signal);
             if (set.file === null) {
               throw new PluginCliError(set.error ?? `${REPOS_FILE} could not be read.`, {
@@ -776,11 +810,12 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
           summary: "Add a repo to the project's repo set",
           positionals: [{ name: "url", description: "Anything git can clone, including a local path", required: true }],
           options: {
+            project: PROJECT_OPTION,
             dir: { type: "string", description: "Directory name inside each workspace (default: the repo's name)" },
             branch: { type: "string", description: "Base branch (default: the repo's default branch)" },
           },
           async run(input, ctx) {
-            const location = await requireSource(await resolveProjectId(ctx));
+            const location = await requireSource(await resolveProjectId(ctx, input.options.project));
             const set = await readRepoSet(location, { bootstrap: true }, ctx.signal);
             if (set.file === null) {
               throw new PluginCliError(set.error ?? `${REPOS_FILE} could not be read.`, { code: "invalid_repos_json" });
@@ -810,8 +845,9 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
         remove: cliCommand({
           summary: "Remove a repo from the project's repo set",
           positionals: [{ name: "dir", description: "The directory name in the repo set", required: true }],
+          options: { project: PROJECT_OPTION },
           async run(input, ctx) {
-            const location = await requireSource(await resolveProjectId(ctx));
+            const location = await requireSource(await resolveProjectId(ctx, input.options.project));
             const set = await readRepoSet(location, { bootstrap: false }, ctx.signal);
             if (set.file === null) {
               throw new PluginCliError(set.error ?? `${REPOS_FILE} could not be read.`, { code: "invalid_repos_json" });
@@ -937,6 +973,17 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       const parsed = parseReposFile(reposJson);
       if (!parsed.ok) return { ok: false, error: parsed.error };
       try {
+        // Bootstrap first. On a project whose `.bb` does not exist yet — a
+        // brand new one, on a machine whose workspace directory is still
+        // empty — writing straight through would fail on the missing
+        // directory, which made this panel unable to be the thing that sets a
+        // project up. Committing a repo set is a deliberate enough act to
+        // stand up the repo that holds it.
+        await host.call(
+          "prepareProjectSource",
+          { path: location.path, fetchTtlMs: CACHE_FRESH_MS, bootstrap: true },
+          { hostId: location.hostId, timeoutMs: READ_TIMEOUT_MS },
+        );
         await writeRepoSet(location, parsed.value, `Update the repo set`);
         return { ok: true, error: null };
       } catch (error) {
