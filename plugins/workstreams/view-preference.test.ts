@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readLastView, rosterRoute, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
+import { deckLinkStep, deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -15,6 +15,19 @@ describe("Workstreams view preference", () => {
     expect(viewFromSubPath("board-v2/details")).toBe("board");
     expect(viewFromSubPath("")).toBeNull();
     expect(viewFromSubPath("unknown")).toBeNull();
+  });
+
+  it("opens the deck on the card a thread's effort chip links to", () => {
+    expect(viewFromSubPath("deck/effort-shelf-order")).toBe("deck");
+    expect([deckRoute("deck/effort-shelf-order"), deckRoute(`deck/${encodeURIComponent("effort:a b")}`), deckRoute("deck/unc")]).toEqual(["effort-shelf-order", "effort:a b", "unc"]);
+    expect([deckRoute("deck"), deckRoute("roster/effort-shelf-order")]).toEqual([null, null]);
+  });
+
+  it("waits for a deck read after the link before giving up on a card, since a cached deck can predate one just made", () => {
+    const deck = { ring: ["effort-shelf-order", "unc"], held: ["effort-gift-cards"] };
+    expect([deckLinkStep("effort-shelf-order", deck, false), deckLinkStep("unc", deck, false), deckLinkStep("effort-gift-cards", deck, false)])
+      .toEqual(["open", "open", "hold"]);
+    expect([deckLinkStep("effort-store-pickup", deck, false), deckLinkStep("effort-store-pickup", deck, true)]).toEqual(["read", "drop"]);
   });
 
   it("opens the effort deck first, even over a view remembered before it existed, then remembers the last explicit view", () => {

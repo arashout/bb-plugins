@@ -23,6 +23,7 @@ import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
 import type { SeedProposal } from "./linear-seed";
+import { deckLinkStep } from "./view-preference";
 
 type OtherView = "prs" | "map" | "pipeline" | "work" | "efforts";
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -45,6 +46,8 @@ function useNow(ms: number): number {
 function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void) {
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<DeckView | null>(cachedDeck);
+  /** Reads landed on this visit, so a link can wait for one after it: the cached deck can predate a card just made. */
+  const [reads, setReads] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const reading = useRef(false);
   const again = useRef(false);
@@ -55,7 +58,7 @@ function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void)
   const load = useCallback(function read(): void {
     if (reading.current) { again.current = true; return; }
     reading.current = true;
-    rpc.call("deck_get", { seen: seen.current() }).then((next) => { before.current(); cachedDeck = next; setView(next); setError(null); },
+    rpc.call("deck_get", { seen: seen.current() }).then((next) => { before.current(); cachedDeck = next; setView(next); setReads((count) => count + 1); setError(null); },
       (cause: unknown) => setError(message(cause))).finally(() => {
       reading.current = false;
       if (again.current) { again.current = false; read(); }
@@ -68,7 +71,7 @@ function useDeck(seenAt: () => Record<string, number>, beforeUpdate: () => void)
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [load]);
-  return { rpc, view, error, load };
+  return { rpc, view, reads, error, load };
 }
 
 type Dialogs =
@@ -79,7 +82,8 @@ type Dialogs =
   | { kind: "seed"; proposals: SeedProposal[] | null; keyed: boolean; picked: string[]; requestId: string }
   | { kind: "weak"; group: string; lines: readonly DeckLine[] };
 
-export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
+/** `openCard`: a card a link asked for, such as a thread's effort chip, opened once the deck has read it; a held effort opens its pile. */
+export function DeckNavView({ onView, openCard = null }: { onView(view: OtherView): void; openCard?: string | null }) {
   const navigate = useBbNavigate();
   const placeRef = useRef<Place>(readStore("sessionStorage", PLACE_KEY, readPlace));
   const [seen, setSeen] = useState<Seen>(() => readStore("localStorage", SEEN_KEY, (raw) => readSeen(raw, Date.now())));
@@ -157,7 +161,7 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
     scroller.scrollTop = next.scrollTop;
   }, []);
 
-  const { rpc, view, error, load } = useDeck(() => seenRef.current.at, () => { pendingAnchor.current = captureAnchor(); });
+  const { rpc, view, reads, error, load } = useDeck(() => seenRef.current.at, () => { pendingAnchor.current = captureAnchor(); });
   const flashTimer = useRef<number | null>(null);
   const say = useCallback((text: string, withUndo = false, ms?: number) => {
     setFlash({ text, undo: withUndo });
@@ -659,6 +663,18 @@ export function DeckNavView({ onView }: { onView(view: OtherView): void }) {
   }, [rpc]);
   const loaded = view !== null;
   useEffect(() => { if (loaded && cur === "unc") loadRules(); }, [loaded, cur, loadRules]);
+  // A link opens its card once the deck has it. A deck read before the link can predate the card, so a miss reads again and waits for
+  // that. Then the link leaves the route, so coming Back to the deck keeps your place.
+  const linked = useRef<{ card: string; reads: number } | null>(null);
+  useEffect(() => {
+    if (!loaded || !openCard) { linked.current = null; return; }
+    if (linked.current?.card !== openCard) linked.current = { card: openCard, reads };
+    const step = deckLinkStep(openCard, { ring, held: view?.held.map((item) => item.id) ?? [] }, reads > linked.current.reads);
+    if (step === "read") { load(); return; }
+    if (step === "open" && openCard !== cur) { place.cur = openCard; persist(); bump(); }
+    if (step === "hold") setPile("hold");
+    navigate.toPluginPanel("board", { subPath: "deck", replace: true });
+  }, [loaded, reads, openCard]);
   // A rule's preview counts the PRs it would place now, before you add it.
   const ruleDraft = dialog?.kind === "rule" ? dialog.draft : null;
   useEffect(() => {

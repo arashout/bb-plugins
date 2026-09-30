@@ -29,7 +29,7 @@ import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
-import { readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
+import { deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
 import { RosterNavView, RosterPanelTab } from "./roster-view";
 import { InventoryNavView } from "./inventory-screen";
@@ -367,7 +367,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   const render = (id: ViewId) =>
     id === "deck" ? (
-      <DeckNavView onView={(next) => navigate.toPluginPanel("board", { subPath: next === "prs" ? "inventory" : next })} />
+      <DeckNavView openCard={deckRoute(subPath)} onView={(next) => navigate.toPluginPanel("board", { subPath: next === "prs" ? "inventory" : next })} />
     ) : id === "inventory" ? (
       <InventoryNavView onView={(next) => navigate.toPluginPanel("board", { subPath: next })} onHow={openHow} />
     ) : id === "roster" ? (

@@ -20,6 +20,23 @@ export function rosterRoute(subPath: string): { effortId: string | null; n: numb
   return { effortId: decoded, n: n !== undefined && /^\d+$/u.test(n) ? Number(n) : null };
 }
 
+/** `deck/<card>`: the card to open, such as a thread's effort chip links to (an effort's id, or "unc"); null for any other path. */
+export function deckRoute(subPath: string): string | null {
+  const [head, card] = subPath.split("/").filter(Boolean);
+  if (head !== "deck" || card === undefined) return null;
+  try { return decodeURIComponent(card); } catch { return card; }
+}
+
+/**
+ * What a `deck/<card>` link does with a deck read: open its card on the active ring, open the On hold pile for a held effort, or, when
+ * the deck lacks it, read again if no read has landed since the link (a cached deck can predate a card just made), else let it go.
+ */
+export function deckLinkStep(card: string, deck: { ring: readonly string[]; held: readonly string[] }, readSinceLink: boolean): "open" | "hold" | "read" | "drop" {
+  if (deck.ring.includes(card)) return "open";
+  if (deck.held.includes(card)) return "hold";
+  return readSinceLink ? "drop" : "read";
+}
+
 /** The view the panel root opens: the last one chosen, else the effort deck. */
 export function readLastView(): ViewId {
   try {
