@@ -24,8 +24,8 @@ const view: InventoryView = { ...base, rateLimitedUntil: NOW + 4 * 60_000, group
       : row.number === 96 ? { ...row, lastAction: { at: NOW - 120_000, action: "nudge" as const, ok: false, reviewers: [],
         detail: "Who needs a nudge changed since the row was shown (now @mira-l). Review it and try again; nothing was written." } } : row) })) };
 const pane = () => renderToStaticMarkup(createElement(InventoryPane, {
-  screen: inventoryScreen(view, { now: NOW, filter: null }), feedback: [], feedbackError: null, startError: null, busyKey: null, error: null,
-  onView: noop, onHow: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onStart: noop, onNudge: noop }));
+  screen: inventoryScreen(view, { now: NOW, filter: null }), busyKey: null, error: null,
+  onView: noop, onHow: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop }));
 const frame = (width: number) =>
   `<section style="width:${width}px;height:1100px;border:1px solid #2a2a2a;flex:none;display:flex" data-bb-plugin="workstreams">${pane()}</section>`;
 const html = `<!doctype html><html class="dark"><head><meta charset="utf-8"><title>Inventory preview</title><style>

@@ -360,8 +360,10 @@ describe("the PR inventory screen view model", () => {
 
   it("explains the two lists and why Nudge is conditional", () => {
     const words = new Map(INVENTORY_HOW.rows);
-    expect(INVENTORY_HOW.intro).toContain("Back to me comes from Reviews");
-    expect(words.get("Back to me")).toContain("Start opens a work thread");
+    expect(INVENTORY_HOW.intro).toContain("Your turn lists your PRs where a reviewer's feedback waits on you");
+    expect(INVENTORY_HOW.intro).not.toContain("Reviews");
+    expect(words.get("Your turn")).toContain("Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
+    expect(words.has("Back to me")).toBe(false);
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

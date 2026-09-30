@@ -32,8 +32,8 @@ import { POINTER_CURSORS, cn } from "@/lib/utils";
 import { deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
 import { RosterNavView, RosterPanelTab } from "./roster-view";
-import { InventoryNavView } from "./inventory-screen";
-import { useFeedbackQueue } from "./review-feedback-queue";
+import { InventoryNavView, useInventory } from "./inventory-screen";
+import { yourTurnRows } from "./inventory-view-model";
 import { DeckNavView } from "./deck-nav-view";
 import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
 import { rosterPanelOpen, rosterParents } from "./roster-parents";
@@ -517,9 +517,10 @@ function HowThisWorksTab() {
 }
 
 /**
- * The count beside "Workstreams" in BB's sidebar: agents waiting on you first
- * (rose), else agents running. Nothing at zero. Refetches on the same signal
- * the Board does, so it never polls.
+ * The counts beside "Workstreams" in BB's sidebar: agents waiting on you first
+ * (rose), else agents running, nothing at zero; then, in violet, your PRs
+ * where it's your turn, as All PRs lists them. Each refetches on the signals
+ * its view does, so neither polls.
  */
 function RunsBadge() {
   const rpc = useRpc<typeof rpcContract>();
@@ -529,9 +530,10 @@ function RunsBadge() {
   }, [rpc]);
   useEffect(refetch, [refetch]);
   useRealtime("board-changed", refetch);
-  const queue = useFeedbackQueue();
+  const { view } = useInventory();
+  const turn = view ? yourTurnRows(view, Date.now()).length : null;
   const badge = badgeValue(open);
-  if (badge === null && queue.items === null) return null;
+  if (badge === null && turn === null) return null;
   const label = badge?.needsYou
     ? `${badge.count} ${badge.count === 1 ? "agent needs" : "agents need"} you`
     : badge ? `${badge.count} ${badge.count === 1 ? "agent" : "agents"} running` : "";
@@ -548,9 +550,9 @@ function RunsBadge() {
     >
       {badge.count}
     </span> : null}
-    {queue.items !== null && !queue.error ? <span role="status" aria-label={`${queue.items.length} PRs with feedback for you`}
-      title={`${queue.items.length} PRs with feedback for you`} className="rounded bg-violet-500/10 px-1 py-0.5 text-[10px] font-medium leading-none tabular-nums text-violet-800 dark:text-violet-200">
-      {queue.items.length > 99 ? "99+" : queue.items.length}
+    {turn !== null ? <span role="status" aria-label={`Your turn on ${turn} ${turn === 1 ? "PR" : "PRs"}`}
+      title={`Your turn on ${turn} ${turn === 1 ? "PR" : "PRs"}`} className="rounded bg-violet-500/10 px-1 py-0.5 text-[10px] font-medium leading-none tabular-nums text-violet-800 dark:text-violet-200">
+      {turn > 99 ? "99+" : turn}
     </span> : null}
     </span>
   );

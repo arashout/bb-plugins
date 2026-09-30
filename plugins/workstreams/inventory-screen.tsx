@@ -1,6 +1,7 @@
-// All PRs: Back to me, the Reviews plugin's queued feedback on your PRs, by effort, above every other open PR you author or an effort names.
-// Its only write is Nudge, one click on a row where the server says it's due. It shares the deck's key registry, hint bar, palette, and ?
-// sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write itself.
+// All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
+// you author or an effort names. Its only write is Nudge, one click on a row where the server says it's due. It shares the deck's key
+// registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge,
+// never a write itself.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
@@ -8,8 +9,7 @@ import type { rpcContract } from "./server";
 import { Icon } from "./components/ui/icon";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, INVENTORY_CHANGED, inventoryScreen, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
-import { feedbackItems, startFeedback, useFeedbackQueue, type FeedbackItem } from "./review-feedback-queue";
+import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
 import type { DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
@@ -20,34 +20,19 @@ export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title
 export type OtherView = "deck" | (typeof OTHER_VIEWS)[number]["id"];
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
-const prKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
 
-/** Match Reviews' queue to inventory membership, showing each PR once. */
-export function splitInventory(screen: InventoryScreen, items: readonly FeedbackItem[] | null): { feedback: SimpleGroup[]; other: SimpleGroup[] } {
-  const queued = feedbackItems(items ?? []);
-  const byPr = new Map(queued.map((item) => [prKey(item.repo, item.number), item]));
-  const matched = new Set<string>();
-  const feedback: SimpleGroup[] = [];
+/** Your turn above every other open PR, each by effort; a PR shows in only one. */
+export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; other: SimpleGroup[] } {
+  const turn: SimpleGroup[] = [];
   const other: SimpleGroup[] = [];
   for (const group of screen.groups) {
-    const top: SimpleGroup["rows"] = [];
-    const rest: SimpleGroup["rows"] = [];
-    for (const line of group.lines) {
-      const item = byPr.get(prKey(line.slug, line.number));
-      if (item) { top.push({ item }); matched.add(item.key); }
-      else rest.push({ line });
-    }
     const identity = { key: group.key, label: group.label, effortId: group.effort?.id ?? null };
-    if (top.length) feedback.push({ ...identity, rows: top });
-    if (rest.length) other.push({ ...identity, rows: rest });
+    const mine = group.lines.filter(onYourTurn);
+    const rest = group.lines.filter((line) => !onYourTurn(line));
+    if (mine.length) turn.push({ ...identity, lines: mine });
+    if (rest.length) other.push({ ...identity, lines: rest });
   }
-  const unmatched = queued.filter((item) => !matched.has(item.key));
-  if (unmatched.length) {
-    const noEffort = feedback.find((group) => group.effortId === null);
-    if (noEffort) noEffort.rows.push(...unmatched.map((item) => ({ item })));
-    else feedback.push({ key: "unmatched", label: "No effort", effortId: null, rows: unmatched.map((item) => ({ item })) });
-  }
-  return { feedback, other };
+  return { turn, other };
 }
 
 function Header({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
@@ -77,15 +62,15 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
     className={cn("text-[12px]", notice.tone === "error" ? "text-destructive" : "text-muted-foreground")}>{notice.text}</p>;
 }
 
-export function InventoryPane(props: { screen: InventoryScreen; feedback: FeedbackItem[] | null; feedbackError: string | null; startError: string | null; busyKey: string | null; error: string | null;
+export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(view: OtherView): void; onHow(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
-  onStart(item: FeedbackItem): void; onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
+  onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
-  const { feedback, other } = splitInventory(props.screen, props.feedback);
+  const { turn, other } = splitInventory(props.screen);
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onStart: props.onStart, onNudge: props.onNudge };
+    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header onView={props.onView} onHow={props.onHow} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
@@ -103,15 +88,13 @@ export function InventoryPane(props: { screen: InventoryScreen; feedback: Feedba
           <div className="grid gap-1 pt-2">{otherNotices.map((notice) => <Notice key={notice.text} notice={notice} />)}</div>
         </details> : null}
       </div> : null}
-      <section className="mt-5" aria-label="Back to me">
-        <h2 className="mb-2 px-4 text-[14px] font-semibold">Back to me <span className="font-normal tabular-nums text-muted-foreground">{props.feedback === null ? "…" : props.feedback.length}</span></h2>
-        {props.startError ? <p role="alert" className="px-4 pb-2 text-[11px] text-destructive">Couldn't start feedback: {props.startError}</p> : null}
-        {props.feedbackError ? <p role="status" className="px-4 pb-2 text-[11px] text-muted-foreground">Reviews queue unavailable: {props.feedbackError}. Showing the last available feedback list.</p> : null}
-        {feedback.length ? <SimpleInventoryList groups={feedback} kind="feedback" {...callbacks} />
-          : <p className="px-4 text-[12px] text-muted-foreground">{props.feedback === null ? props.feedbackError ? "Feedback is unavailable right now." : "Reading feedback from Reviews…" : "Nothing waiting for your changes."}</p>}
+      <section className="mt-5" aria-label="Your turn">
+        <h2 className="mb-2 px-4 text-[14px] font-semibold">Your turn <span className="font-normal tabular-nums text-muted-foreground">{turn.reduce((sum, group) => sum + group.lines.length, 0)}</span></h2>
+        {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...callbacks} />
+          : <p className="px-4 text-[12px] text-muted-foreground">No feedback waits on you.</p>}
       </section>
       <section className="mt-7" aria-label="Other open PRs">
-        <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.rows.length, 0)}</span></h2>
+        <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.lines.length, 0)}</span></h2>
         {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
           : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
@@ -121,7 +104,8 @@ export function InventoryPane(props: { screen: InventoryScreen; feedback: Feedba
 }
 
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
-function useInventory() {
+/** inventory_get, read again on each inventory change, a board change you can see, and when the page shows again: never on a timer. */
+export function useInventory() {
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<InventoryView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,26 +134,12 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const { view, error, load } = useInventory();
-  const queue = useFeedbackQueue();
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [startError, setStartError] = useState<string | null>(null);
   const [outcomes, setOutcomes] = useState<ReadonlyMap<string, { at: number; action: "nudge"; ok: boolean; text: string }>>(new Map());
   const now = Date.now();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, outcomes }), [view, now, outcomes]);
   const rows = useMemo(() => new Map<string, InventoryRow>(view?.groups.flatMap((group) => group.rows.map((row) => [row.prUrl, row] as const)) ?? []), [view]);
-  const start = async (item: FeedbackItem) => {
-    if (busyKey) return;
-    setBusyKey(item.key);
-    setStartError(null);
-    try {
-      const started = await startFeedback(item.key);
-      queue.load();
-      if (started.threadId) navigate.toThread(started.threadId);
-      else throw new Error("Started feedback has no thread.");
-    } catch (cause) { setStartError(message(cause)); }
-    finally { setBusyKey(null); }
-  };
   const nudge = async (line: InventoryLine, action: LineAction) => {
     if (busyKey || !action.enabled) return;
     const row = rows.get(line.prUrl);
@@ -215,14 +185,13 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     root.addEventListener("focusin", onIn);
     return () => root.removeEventListener("focusin", onIn);
   });
-  // The focused row is a Back to me row, named by its Reviews item, or another open PR's line; a PR shows in only one list.
-  const item = activeRow ? feedbackItems(queue.items ?? []).find((entry) => `${entry.repo}#${entry.number}` === activeRow) ?? null : null;
-  const focused = activeRow && !item ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
+  // The focused row, in either list: a PR shows in only one.
+  const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
   // Nudge is due exactly where its row shows the button.
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
-  const thread = item ? item.threadId ?? null : focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
+  const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!(item || focused), thread: !!thread, moves: new Set<DeckActionId>(due ? ["nudge"] : []) } };
+    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>(due ? ["nudge"] : []) } };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
@@ -243,7 +212,7 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
       case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
       case "open-thread": if (thread) navigate.toThread(thread); return;
-      case "open-pr": { const url = item?.url ?? focused?.prUrl; if (url) navigate.openUrl(url); return; }
+      case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
       default: return;
     }
   }
@@ -256,10 +225,10 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
 
   if (!screen) return <InventoryPending error={error} onRetry={load} onView={onView} onHow={onHow} />;
   return <>
-    <InventoryPane screen={screen} feedback={queue.items} feedbackError={queue.error} startError={startError} busyKey={busyKey} error={error} rootRef={rootRef}
+    <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
       onView={onView} onHow={onHow} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
-      onStart={(item) => { void start(item); }} onNudge={(line, action) => { void nudge(line, action); }}
+      onNudge={(line, action) => { void nudge(line, action); }}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
     {batch.element}
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>

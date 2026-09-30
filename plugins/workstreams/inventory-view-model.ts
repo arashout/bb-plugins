@@ -20,9 +20,9 @@ export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: 
 
 /** Help copy for the two All PRs lists and their available action. */
 export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
-  intro: "All PRs shows your open pull requests and PRs named by an effort. Back to me comes from Reviews: queued feedback on your PRs. Other open PRs stays below, grouped by effort.",
+  intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
-    ["Back to me", "Feedback waiting for your changes. Start opens a work thread; Open thread returns to one already started."],
+    ["Your turn", "Changes requested, approval comments, open threads, or new comments since your last push or reply. Drafts, held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out. Open thread goes to its thread."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
@@ -73,6 +73,8 @@ export type InventoryLine = {
   managed: { effortId: string; n: number | null; label: string } | null;
   /** What the last action on the PR did, or why it was refused. */
   last: { text: string; ok: boolean } | null;
+  /** Reviewer feedback that waits on you, as the server found it, and how long it has waited. */
+  yourTurn: { text: string; age: string | null } | null;
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
 };
@@ -269,9 +271,21 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
       label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
+    yourTurn: row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) },
     depth: 0, branch: null,
   };
 }
+
+/**
+ * On Your turn: the server found feedback waiting on you, and neither a thread working on it now, which the deck files In flight, nor a held
+ * effort, which asks nothing until you resume it, has it instead.
+ */
+export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile">): boolean => line.yourTurn !== null &&
+  line.effortPile !== "held" && !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active));
+
+/** Your turn's rows, which the badge counts and the list shows. */
+export const yourTurnRows = (view: InventoryView, now: number): InventoryLine[] =>
+  inventoryScreen(view, { now, filter: null }).groups.flatMap((group) => group.lines.filter(onYourTurn));
 
 /** Rows in the server's order, each stack parent followed by the rows stacked on it in the same group, at any depth. */
 function stacked(rows: readonly InventoryRow[], make: (row: InventoryRow) => InventoryLine): InventoryLine[] {

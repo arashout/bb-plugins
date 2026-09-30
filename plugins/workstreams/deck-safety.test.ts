@@ -59,7 +59,7 @@ describe("the deck's write safety", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
-    // All PRs exposes only explicit Start and eligible Nudge buttons. Its keys move focus, and n, its one key that writes, opens the same
+    // All PRs exposes only Open thread and eligible Nudge buttons. Its keys move focus, and n, its one key that writes, opens the same
     // listing confirm as the deck's; its Nudge button stays one click, its only direct call besides the read.
     const inventory = source("inventory-screen.tsx");
     expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
@@ -72,6 +72,7 @@ describe("the deck's write safety", () => {
     const rows = source("inventory-rows.tsx");
     expect(rows).toContain('action.id === "nudge" && action.enabled');
     expect(rows).toContain('onClick={() => props.onNudge(line, nudge)}');
-    expect(rows).toContain('onClick={() => props.onStart(item)}');
+    expect(rows).toContain('onClick={() => props.onOpenThread(thread)}');
+    expect(rows).not.toMatch(/onStart|item_start/u);
   });
 });
