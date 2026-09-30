@@ -1,7 +1,7 @@
 // Fictional Inkwell bookstore data. The shapes copy recorded Workstreams state
 // (batch sizes, overlaps, statuses, checkouts, and ownership); every name,
 // number, path, and thread id is invented.
-import { feedbackVerificationState, type ApprovalFeedbackRecord } from "./approval-feedback.js";
+import { feedbackVerificationState, userConfirmation, type ApprovalFeedbackRecord } from "./approval-feedback.js";
 import { advanceBatchSchema, type AdvanceBatch, type AdvanceJob } from "./bulk-advance.js";
 import { prSchema, type Pr, type RawUnit } from "./contract.js";
 import { deckView, type DeckInput, type DeckRowInput, type DeckView } from "./deck.js";
@@ -437,7 +437,8 @@ function inventoryCase(feedback: ApprovalFeedbackRecords) {
     const repository = entries.filter((other) => other.repo === entry.repo && other !== entry).map((other) => other.pr);
     return { effort: spec.effort ? INVENTORY_EFFORTS[spec.effort] : null, ...inventoryRow({ prUrl: entry.pr.url, pr: entry.pr, authored: true, stale: false, read: null,
       reasons, hold: null, observation: { checkedAt, failedAt: null, error: null }, managed: null, stackedOn, links, attemptThread: null, threads,
-      suggestedReviewers: suggestReviewers(entry.pr, repository), lastAction: null }) };
+      suggestedReviewers: suggestReviewers(entry.pr, repository), lastAction: null,
+      confirmation: userConfirmation(feedback(entry.pr.url), entry.pr.approvalFeedback, entry.pr.headRefOid ?? null) }) };
   });
   return { entries, view: inventoryView(rows, { checkedAt, attemptedAt: checkedAt, refreshing: false, rateLimitedUntil: null, warnings: [] }) };
 }

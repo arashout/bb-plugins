@@ -65,7 +65,10 @@ export type InventoryLine = {
   reviewers: ReviewerChip[];
   /** Whom the reviewer picker suggests: this PR's past reviewers, then its repository's recent ones. */
   suggested: string[];
-  /** The server's state word; "Clear" on an approved PR reads "Ready to merge", and approval comments to confirm "Approved with comments". */
+  /**
+   * The server's state word; "Clear" on an approved PR reads "Ready to merge", or "Ready · your word" while your confirmation
+   * of its review notes is what clears it, and approval comments to confirm read "Approved with comments".
+   */
   status: string;
   hold: { reason: string | null; age: string } | null;
   /** Its effort is on hold, done, or archived: All PRs offers no write on it. */
@@ -113,6 +116,8 @@ const CODE_WORK: Record<string, string> = { "CI failing": "Fix the failing check
 /** An approval whose written notes no one has confirmed handled doesn't merge yet: you read them on GitHub. */
 const APPROVAL_NOTES: Record<string, string> = { "Feedback verification needed": "Read the approval's notes and confirm they're handled",
   "New review feedback": "Read the new review feedback", "Verification needs recheck": "Recheck the approval's notes against the new head" };
+/** Ready only on your word: a later head, or a worker's evidence, replaces it. */
+export const CONFIRMED = "Ready · your word";
 /** Why Confirm handled can't bind to what the row shows. */
 const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 /** A read that left the PR's state open: Refresh reads it again. */
@@ -263,7 +268,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
     status: row.attention.some((reason) => reason.kind === "approval-comments") ? "Approved with comments"
-      : row.status === "Clear" && row.stage === "ready" ? "Ready to merge" : row.status,
+      : row.status === "Clear" && row.stage === "ready" ? row.confirmation?.current ? CONFIRMED : "Ready to merge" : row.status,
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) }, effortPile,
     steps, primary,
     actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile }),

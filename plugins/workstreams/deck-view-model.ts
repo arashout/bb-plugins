@@ -101,8 +101,9 @@ export type LineContext = { now: number; seenAt: Readonly<Record<string, number>
 
 function info(row: DeckRow, section: string): DeckLine["info"] {
   switch (section) {
+    // Ready on your word alone says so, so it never reads as checked.
     case "merge": { const approved = row.reviewers.filter((review) => review.state === "approved").map((review) => review.login);
-      return approved.length ? { text: `✓ ${mentions(approved)}`, tone: null } : null; }
+      return row.confirmation?.current ? { text: row.status, tone: "amber" } : approved.length ? { text: `✓ ${mentions(approved)}`, tone: null } : null; }
     case "confirm": return { text: plural(Math.max(1, row.notes), "note"), tone: "violet" };
     case "nudge": return row.nudge.length ? { text: mentions(row.nudge), tone: null } : null;
     case "request": return row.suggested.length ? { text: `suggest @${row.suggested[0]}`, tone: null } : null;

@@ -303,7 +303,8 @@ describe("mergeVerdict", () => {
     const evidence = { since: "2026-09-28T12:00:00Z", commits: 0, replies: 1, threads: { total: 0, resolved: 0 }, complete: true };
     const confirmed = createApprovalFeedbackStore(db).confirm("https://github.com/example/widget/pull/42", approvalFeedback, pending.headRefOid!, 1_000, evidence);
     expect(confirmed.provenance).toEqual({ kind: "user", evidence });
-    expect(mergeVerdict(pending, confirmed)).toEqual({ refusals: [], warnings: [] });
+    // It merges on your word, and the preview says so, so it never reads as checked.
+    expect(mergeVerdict(pending, confirmed)).toEqual({ refusals: [], warnings: ["Its review notes are confirmed by you; no check ran."] });
     expect(mergeVerdict(live({ ...pending, headRefOid: "b".repeat(40) }), confirmed).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
     expect(mergeVerdict(live({ ...pending, approvalFeedback: { ...approvalFeedback, fingerprint: "a".repeat(64), sourceIds: ["review-1", "review-2", "review-3"] } }),
       confirmed).refusals).toContain("Approval feedback needs verified follow-up on the current head.");

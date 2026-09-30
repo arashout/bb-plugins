@@ -136,6 +136,17 @@ describe("the effort deck's markup", () => {
     expect(html.match(new RegExp(`data-deck-row="${url("folio", 343)}"`, "gu"))).toHaveLength(1);
   });
 
+  // Ready on your word alone never reads as checked: the merge row says so where it would name the approvers.
+  it("says a merge row is confirmed by you with no check ran, in place of its approvers", () => {
+    const row = (html: string) => section(html, "merge").split("data-deck-row=").find((part) => part.startsWith(`"${url("folio", 340)}"`))!;
+    const confirmed = inkwellDeck({}, (item) => item.number === 340 ? { confirmation: { at: NOW, current: true, evidence: false } } : {});
+    expect(text(row(pane(confirmed, SHELF)))).toContain("Ready · your word");
+    expect(text(row(pane(inkwellDeck(), SHELF)))).not.toContain("Ready · your word");
+    // Once a later head leaves it behind, it no longer speaks for the row.
+    const stale = inkwellDeck({}, (item) => item.number === 340 ? { confirmation: { at: NOW, current: false, evidence: false } } : {});
+    expect(text(row(pane(stale, SHELF)))).not.toContain("Ready · your word");
+  });
+
   it("offers Revoke confirmation in the details of a row carrying your confirmation, and only there", () => {
     const pr340 = url("folio", 340);
     const expanded = { state: { selected: new Set<string>(), expanded: new Set([pr340]), focus: null } };

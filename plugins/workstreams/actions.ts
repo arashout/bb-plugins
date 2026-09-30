@@ -322,6 +322,9 @@ export function mergeVerdict(live: LiveMergeFacts, verification: import("./appro
   if (live.mergeStateStatus === "UNSTABLE") warnings.push("Some checks that are not required are failing.");
   if (live.headRefOid === null || !SHA.test(live.headRefOid)) refusals.push("GitHub did not report the head commit.");
   if (!feedbackVerified(live.approvalFeedback, live.headRefOid, verification)) refusals.push("Approval feedback needs verified follow-up on the current head.");
+  else if (live.approvalFeedback.status === "present" && verification?.provenance?.kind === "user") {
+    warnings.push("Its review notes are confirmed by you; no check ran.");
+  }
   return { refusals, warnings };
 }
 

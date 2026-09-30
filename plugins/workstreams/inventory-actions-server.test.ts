@@ -7,6 +7,8 @@ import { createEffortStore } from "./effort-store.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
+import { inventoryLine } from "./inventory-view-model.js";
+import { createApprovalFeedbackStore } from "./approval-feedback.js";
 import plugin from "./server.js";
 
 const HOST = "host-inkwell";
@@ -279,6 +281,30 @@ describe("inventory actions on the server", () => {
       body: { headOid: HEAD, fingerprint: FEEDBACK.fingerprint, evidence: env.notes.evidence } }]);
     expect(await env.row(319)).toMatchObject({ attention: [{ kind: "merge-waiting", action: "merge" }], lastAction: { action: "confirm-handled", ok: true } });
     expect((await preview()).refusals).toEqual([]);
+  });
+
+  // Ready on your word must never read as checked, and must not outlive the head you confirmed on.
+  it("says a PR you confirmed is confirmed by you with no check, until a new head asks for its notes again or a worker's evidence replaces yours", async () => {
+    const env = await setup();
+    const status = async () => inventoryLine(await env.row(319), new Map(), { now: Date.now(), limitedUntil: null }).status;
+    env.notes.evidence = { ...env.notes.evidence, commits: 1 };
+    expect(await env.rpc("inventory_confirm_handled", { prUrl: url(319), headOid: HEAD, fingerprint: FEEDBACK.fingerprint })).toMatchObject({ ok: true });
+    expect([await status(), (await env.row(319)).confirmation]).toEqual(["Ready · your word", { at: expect.any(Number), current: true, evidence: true }]);
+    // A new head with different code lands: the confirmation covers the old one only, so the notes need you again, and nothing merges.
+    const original = env.current.get(319)!;
+    env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
+    await env.rpc("pr_refresh", { prUrl: url(319) });
+    expect([await status(), (await env.row(319)).attention.map((reason) => reason.kind), (await env.row(319)).confirmation?.current])
+      .toEqual(["Approved with comments", ["approval-comments"], false]);
+    expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals)
+      .toEqual(["Approval feedback needs verified follow-up on the current head."]);
+    // A worker's evidence for the new head replaces your word: ready, and checked.
+    const feedback = createApprovalFeedbackStore(env.db);
+    feedback.save(url(319), "thr-worker", { attemptId: "A-9", headOid: "b".repeat(40), fingerprint: FEEDBACK.fingerprint, blockers: [],
+      findings: [{ sourceId: "review-319", resolution: "fixed", evidence: "Labels wrap at 40 characters in src/spine.ts.",
+        validation: { outcome: "passed", detail: "Spine label tests passed." } }] }, Date.now());
+    await env.rpc("pr_refresh", { prUrl: url(319) });
+    expect([await status(), (await env.row(319)).confirmation]).toEqual(["Ready to merge", null]);
   });
 
   // Your word can be taken back whenever you doubt it: the notes need you again, and the merge preview refuses until they're handled.

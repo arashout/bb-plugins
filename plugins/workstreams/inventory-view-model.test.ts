@@ -18,8 +18,8 @@ const find = (pr: string, view: InventoryView = VIEW): InventoryLine => lines(vi
 const rowOf = (pr: string, view: InventoryView = VIEW): InventoryRow => view.groups.flatMap((group) => group.rows).find((row) => `${row.repo.split("/")[1]} #${row.number}` === pr)!;
 const action = (line: InventoryLine, id: InventoryLine["actions"][number]["id"]) => line.actions.find((item) => item.id === id);
 /** The fixture with one row changed, as the server would send it. */
-const withRow = (pr: string, patch: Partial<InventoryRow>): InventoryView => ({ ...VIEW,
-  groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => `${row.repo.split("/")[1]} #${row.number}` === pr ? { ...row, ...patch } : row) })) });
+const withRow = (pr: string, patch: Partial<InventoryRow>, view: InventoryView = VIEW): InventoryView => ({ ...view,
+  groups: view.groups.map((group) => ({ ...group, rows: group.rows.map((row) => `${row.repo.split("/")[1]} #${row.number}` === pr ? { ...row, ...patch } : row) })) });
 const reason = (patch: Partial<AttentionReason>): AttentionReason => ({ question: "needs-nudge", kind: "review-waiting", action: "nudge", nextStep: "Nudge @mira-l",
   owner: "reviewers", reviewers: ["mira-l"], since: NOW - 2 * 86_400_000, ageMs: 2 * 86_400_000, basis: "github", ...patch });
 
@@ -60,7 +60,7 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
 
   // Confirm handled is the one step between these two approvals and a merge. Through the action, store, and attention the server
   // composes, your confirmation of each moves it to Ready to merge with Merge…, and moves nothing else.
-  it("moves folio #301 and #318 from Approved with comments to Ready to merge once you confirm each handled", async () => {
+  it("moves folio #301 and #318 from Approved with comments to mergeable, confirmed by you with no check, once you confirm each handled", async () => {
     const approvedWithComments = ["folio #301", "folio #318"];
     for (const pr of approvedWithComments) expect(action(find(pr), "merge")).toBeUndefined();
     const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
@@ -84,9 +84,16 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
     const confirmed = inkwellInventory(store.get);
     for (const pr of approvedWithComments) {
       const line = find(pr, confirmed);
-      expect([line.status, line.steps.map((step) => step.text), line.steps[0]!.owner.kind, line.primary]).toEqual(["Ready to merge", ["Merge"], "you", "merge"]);
-      expect(line.actions.map((item) => [item.id, item.enabled])).toEqual([["merge", true], ["refresh", true], ["thread", false]]);
+      // Ready on your word alone never reads as "Ready to merge", and your word can be taken back.
+      expect([line.status, line.steps.map((step) => step.text), line.steps[0]!.owner.kind, line.primary])
+        .toEqual(["Ready · your word", ["Merge"], "you", "merge"]);
+      expect(line.actions.map((item) => [item.id, item.enabled])).toEqual([["revoke", true], ["merge", true], ["refresh", true], ["thread", false]]);
     }
+    // A new head on #301 leaves your confirmation behind: it asks for its notes again. A worker's evidence for #318 replaces yours, and reads as ready.
+    const pushed = withRow("folio #301", { head: "d".repeat(40), attention: rowOf("folio #301").attention,
+      confirmation: { ...rowOf("folio #301", confirmed).confirmation!, current: false } }, confirmed);
+    expect(find("folio #301", pushed)).toMatchObject({ status: "Approved with comments", primary: "confirm-handled" });
+    expect(find("folio #318", withRow("folio #318", { confirmation: null }, confirmed)).status).toBe("Ready to merge");
     const others = (view: InventoryView) => lines(view).filter(({ line }) => !approvedWithComments.includes(`${line.repo} #${line.number}`))
       .map(({ group, line }) => [group, line.number, line.status, line.primary]);
     expect(others(confirmed)).toEqual(others(VIEW));
