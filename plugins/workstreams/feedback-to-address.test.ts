@@ -1,6 +1,6 @@
 // Feedback to address is what keeps a PR from reading ready: a reviewer said something and nothing you did on GitHub answered it. Only
-// an answer the reviewer can see (your reply, a follow-up that links the PR) or your evidence-checked Confirm clears it. A push can't:
-// new commits say nothing about a question or a condition.
+// an answer the reviewer sees on the PR (your reply) or your evidence-checked Confirm clears it. A push can't: new commits say nothing
+// about a question or a condition. Neither can a PR or issue that mentions it: the rest of a stack mentions it without answering anyone.
 import { describe, expect, it } from "vitest";
 import { feedbackToAddress, isBot, type FeedbackFacts } from "./feedback-to-address.js";
 
@@ -13,14 +13,19 @@ const noted = (patch: Partial<NonNullable<FeedbackFacts["reviewFeedback"]>> = {}
 describe("feedback to address", () => {
   it("holds an approval that said something until you answer it", () => {
     expect(feedbackToAddress(noted(), false)).toEqual([{ kind: "approval", login: null, since: Date.parse(at(10)) }]);
-    // A reply before the note, or a follow-up linked before it, answers an older question, not this one.
-    expect(feedbackToAddress(noted({ repliedAt: at(9), followUpAt: at(9) }), false)).toHaveLength(1);
+    // A reply before the note answers an older question, not this one.
+    expect(feedbackToAddress(noted({ repliedAt: at(9) }), false)).toHaveLength(1);
   });
 
-  it("clears it with your reply after it, a follow-up PR or issue that links it after it, or your Confirm", () => {
+  it("clears it with your reply after it or your Confirm", () => {
     expect(feedbackToAddress(noted({ repliedAt: at(11) }), false)).toEqual([]);
-    expect(feedbackToAddress(noted({ followUpAt: at(11) }), false)).toEqual([]);
     expect(feedbackToAddress(noted(), true)).toEqual([]);
+  });
+
+  // The live case: a conditional approval, then the rest of its stack mentioned the PR hours later, and it read as answered.
+  it("never clears on a PR or issue that links it, however late", () => {
+    expect(feedbackToAddress(noted({ followUpAt: at(15) }), false)).toEqual([{ kind: "approval", login: null, since: Date.parse(at(10)) }]);
+    expect(feedbackToAddress(noted({ repliedAt: at(9), followUpAt: at(15) }), false)).toHaveLength(1);
   });
 
   // Nothing here reads the head: a new commit is not an answer, whatever it changed.
@@ -35,12 +40,12 @@ describe("feedback to address", () => {
     expect(feedbackToAddress({ approvalFeedback: PRESENT }, false)).toHaveLength(1);
   });
 
-  it("holds a reviewer's comment until you reply or link a follow-up, and Confirm doesn't answer it", () => {
+  it("holds a reviewer's comment until you reply, whatever links it, and Confirm doesn't answer it", () => {
     const facts: FeedbackFacts = { approvalFeedback: { status: "none" },
       reviewFeedback: { openThreads: 0, comment: { login: "theo-k", at: at(10) }, repliedAt: null, noteAt: null, followUpAt: null } };
     expect(feedbackToAddress(facts, true)).toEqual([{ kind: "comment", login: "theo-k", since: Date.parse(at(10)) }]);
     expect(feedbackToAddress({ ...facts, reviewFeedback: { ...facts.reviewFeedback!, repliedAt: at(11) } }, false)).toEqual([]);
-    expect(feedbackToAddress({ ...facts, reviewFeedback: { ...facts.reviewFeedback!, followUpAt: at(11) } }, false)).toEqual([]);
+    expect(feedbackToAddress({ ...facts, reviewFeedback: { ...facts.reviewFeedback!, followUpAt: at(11) } }, false)).toHaveLength(1);
   });
 
   it("names the approval first when both wait", () => {

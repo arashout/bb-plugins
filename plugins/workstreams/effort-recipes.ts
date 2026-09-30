@@ -237,7 +237,7 @@ export function approvalFeedbackAsk(input: { headOid: string; notes: number }): 
 /**
  * The code work a PR in the deck's Work in threads section can ask its thread for, each one worker recipe's job: integrate_base for
  * conflicts or a branch behind its base, fix_failing_checks for red CI, and address_review_feedback for requested changes, open review
- * threads, or another person's comments that no reply or follow-up answered.
+ * threads, or another person's comments that no reply on the PR answered.
  */
 export const FIX_KINDS = ["conflicts", "behind", "checks", "changes", "threads", "comments"] as const;
 export type FixKind = (typeof FIX_KINDS)[number];
@@ -269,7 +269,7 @@ export function fixThreadAsk(input: { fixes: readonly FixKind[]; headOid: string
     `Fix this PR so it can move toward merge: ${input.fixes.map((kind) => FIX_WORDS[kind]).join(", ")}. expectedHead: ${input.headOid}; headBranch: ${input.headBranch ?? "its head branch"}.`,
     steps.map((step, index) => `${index + 1}. ${step}`).join("\n"),
     `${PUSH_RULES} ${DRAFT_RULE}`,
-    // Only a reply or a follow-up answers a comment, so a fix that leaves none keeps the PR on Your turn.
+    // Only a reply on the PR answers a comment, so a fix that leaves none keeps the PR on Your turn.
     ...has("comments") ? ["Answer each comment with one reply on the PR that says what changed or why nothing needs to. A fix or a push alone leaves it waiting."] : [],
     "Work only on this PR, and only on these fixes. Do not merge, deploy, or start another PR. Say what you changed and what still blocks it.",
   ].join("\n\n");

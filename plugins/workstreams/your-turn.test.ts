@@ -1,6 +1,7 @@
 // Your turn lists your PRs where a reviewer's feedback waits on you, and nothing else: each kind of feedback puts a PR in, whatever CI says,
 // and a held PR, one waiting only on CI, and one waiting on its reviewers stay out, so the badge never asks you to act where nothing is
-// yours. A draft is in only for feedback to address, and only your reply or a follow-up answers a comment: a push never does.
+// yours. A draft is in only for feedback to address, and only your reply on the PR answers a comment: a push never does, and neither does
+// a PR that mentions it.
 import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
@@ -75,13 +76,21 @@ describe("Your turn", () => {
     expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approval comment to address");
   });
 
-  // A push says nothing to the reviewer: only your reply, or a follow-up that links the PR, after the comment answers it.
-  it("clears a reviewer's comment once you reply or link a follow-up after it, and never on a push", () => {
+  // The live case: a conditional approval, then the rest of its stack mentioned the PR hours later. Those links date a follow-up, but the
+  // reviewer saw no reply, so it stays yours until you reply on the PR; then only notes a worker verified are off your turn.
+  it("keeps an approval comment on Your turn when a PR that mentions it lands later, until you reply on the PR", () => {
+    const mentioned = { ...approval, approvalFeedbackVerified: true, reviewFeedback: { ...approval.reviewFeedback!, followUpAt: at(14) } };
+    expect(turn(mentioned)).toEqual({ kinds: ["approval"], text: "Approval comment to address", since: Date.parse(at(11)) });
+    expect(turn({ ...mentioned, reviewFeedback: { ...mentioned.reviewFeedback, repliedAt: at(13) } })).toBeNull();
+  });
+
+  // A push says nothing to the reviewer, and neither does a PR that mentions this one: only your reply on the PR after the comment answers it.
+  it("clears a reviewer's comment once you reply after it, and never on a push or a PR that links it", () => {
     expect(turn({ ...comments, headCommittedAt: at(13) })?.kinds).toEqual(["comments"]);
     expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
-    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, followUpAt: at(13) } })).toBeNull();
-    // A reply or follow-up before the comment answers an older one, not this.
-    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11), followUpAt: at(11) } })?.kinds).toEqual(["comments"]);
+    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, followUpAt: at(13) } })?.kinds).toEqual(["comments"]);
+    // A reply before the comment answers an older one, not this.
+    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11) } })?.kinds).toEqual(["comments"]);
   });
 
   // With no push to compare against, the comment still waits: no answer is dated after it. A PR never read for it asks nothing.

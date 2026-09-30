@@ -1,7 +1,7 @@
-// Two live PRs read as ready, or as only red CI, while a reviewer's words waited on an answer. Here they are with Inkwell names, run
-// through every view the server and the deck compose: attention, All PRs' state and Your turn, the deck's sections, the legacy board, and
-// the fresh merge preview. While the feedback waits, nothing reads ready and nothing offers or accepts a merge; your reply or a follow-up
-// that links the PR clears it; a push never does, and a bot's comment neither holds nor answers anything.
+// Three live PRs read as ready, as only red CI, or as off Your turn, while a reviewer's words waited on an answer. Here they are with
+// Inkwell names, run through every view the server and the deck compose: attention, All PRs' state and Your turn, the deck's sections, the
+// legacy board, and the fresh merge preview. While the feedback waits, nothing reads ready and nothing offers or accepts a merge; only your
+// reply on the PR clears it; a push never does, a PR that mentions it never does, and a bot's comment neither holds nor answers anything.
 import { describe, expect, it } from "vitest";
 import { mergeVerdict, type LiveMergeFacts } from "./actions.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
@@ -61,6 +61,9 @@ const conditional = (patch: Partial<Pr> = {}) => shape(361, "ABC-381 Carry serie
   { headRefOid: PUSHED, headCommittedAt: iso(NOW - 3 * HOUR), checkConclusions: ["FAILURE"], mergeStateStatus: "UNSTABLE", ...patch }, worker(361, HEAD),
   { "ci-red": NOW - 26 * HOUR });
 
+/** The third live case's approval: its condition names work a later PR does. */
+const STACKED_CONDITION = "Approving, on the understanding that series-aware ordering will come in a separate PR, before shelves carry two series.";
+
 /** Everything each view shows for one PR, computed as the server and the deck compose it. */
 function views({ pr, record, since }: Shape) {
   const { reasons } = prAttention(pr, { holds: {}, effort: null, since }, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 });
@@ -76,7 +79,7 @@ function views({ pr, record, since }: Shape) {
     yourTurn: row.yourTurn?.text ?? null, section: deck!.row.section, lifecycle: prLifecycle(pr), board: card!.blocker.label, boardAction: card!.action?.kind ?? null,
     preview: mergeVerdict(live, record).refusals };
 }
-const WAITS = "An approval comment waits on your answer: reply, link a follow-up, or confirm it.";
+const WAITS = "An approval comment waits on your answer: reply on the PR or confirm it.";
 
 describe("feedback to address holds a PR from ready and from merge", () => {
   it("holds an approval whose body asks for more, with no reply, over a worker's evidence, in every view", () => {
@@ -110,16 +113,33 @@ describe("feedback to address holds a PR from ready and from merge", () => {
       lifecycle: "awaiting-merge", board: "Clear", boardAction: "merge", preview: [] });
   });
 
-  it("clears with a follow-up PR that links it after the note", () => {
+  /**
+   * The third: a conditional approval, then, hours later, the rest of its stack: folio #362 on main and catalog #97 in a sibling
+   * repository, whose bodies mention this PR. GitHub cross-references each from ana-w, and the approval dropped off Your turn as if they
+   * answered it, with no reply on the PR. Only ana-w's reply on the PR after the note does.
+   */
+  it("keeps a conditional approval on Your turn when the rest of its stack mentions the PR, until you reply on it", () => {
     const green = conditional({ checkConclusions: ["SUCCESS"], mergeStateStatus: "CLEAN" });
-    const read = reviewFeedbackOf({ author: { login: "ana-w" }, baseRefName: "main",
-      reviews: { nodes: [{ id: "review-361", state: "APPROVED", body: "Approving, on the understanding that series-aware ordering comes in a separate PR.",
-        submittedAt: iso(NOW - 30 * HOUR), author: { __typename: "User", login: "theo-k" } }] }, comments: { nodes: [] },
-      timelineItems: { nodes: [{ createdAt: iso(NOW - 2 * HOUR), isCrossRepository: false, actor: { __typename: "User", login: "ana-w" },
-        source: { __typename: "PullRequest", baseRefName: "main", headRefName: "ana/series-aware-order" } }] } },
+    const mention = (hours: number, repo: string, number: number) => ({ createdAt: iso(NOW - hours * HOUR), isCrossRepository: repo !== "inkwell/folio",
+      actor: { __typename: "User", login: "ana-w" }, source: { __typename: "PullRequest", number, baseRefName: "main", repository: { nameWithOwner: repo } } });
+    const read = (reply: { comments?: unknown[]; reviews?: unknown[] } = {}) => reviewFeedbackOf({ author: { login: "ana-w" }, baseRefName: "main",
+      reviews: { nodes: [{ id: "review-361", state: "APPROVED", body: STACKED_CONDITION, submittedAt: iso(NOW - 30 * HOUR),
+        author: { __typename: "User", login: "theo-k" } }, ...reply.reviews ?? []] }, comments: { nodes: reply.comments ?? [] },
+      timelineItems: { nodes: [mention(6, "inkwell/folio", 362), mention(5, "inkwell/catalog", 97)] } },
       [], { reviewIds: new Set(["review-361"]), threads: new Map(), at: iso(NOW - 30 * HOUR) });
-    const linked = { pr: verified({ ...green.pr, reviewFeedback: read }, worker(361, PUSHED)), record: worker(361, PUSHED), since: {} };
-    expect(views(linked)).toMatchObject({ status: "Ready to merge", section: "merge", lineMerge: true, preview: [] });
+    const shown = (reviewFeedback: Pr["reviewFeedback"]) =>
+      views({ pr: verified({ ...green.pr, reviewFeedback }, worker(361, PUSHED)), record: worker(361, PUSHED), since: {} });
+    // The read still dates the stack's mentions, for the confirm to show; they answer nothing.
+    const mentioned = read();
+    expect(mentioned).toMatchObject({ repliedAt: null, noteAt: iso(NOW - 30 * HOUR), followUpAt: iso(NOW - 5 * HOUR) });
+    expect(shown(mentioned)).toEqual({ reasons: ["approval-note"], status: "Approval comment to address", primary: "confirm-handled", lineMerge: false,
+      yourTurn: "Approval comment to address", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
+      preview: [WAITS] });
+    // ana-w's reply after the note, in the conversation or as a review, answers it.
+    const ready = { status: "Ready to merge", yourTurn: null, section: "merge", lineMerge: true, preview: [] };
+    expect(shown(read({ comments: [{ createdAt: iso(NOW - 2 * HOUR), author: { __typename: "User", login: "ana-w" } }] }))).toMatchObject(ready);
+    expect(shown(read({ reviews: [{ id: "review-362", state: "COMMENTED", body: "Series-aware ordering is catalog #97.", submittedAt: iso(NOW - 2 * HOUR),
+      author: { __typename: "User", login: "ana-w" } }] }))).toMatchObject(ready);
   });
 
   // A deploy preview's or a tracker's comment is no reviewer's word: it neither holds a ready PR nor answers a waiting note.

@@ -798,8 +798,8 @@ export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, on
 }
 
 /**
- * One PR's review notes and the evidence since them, from a fresh read. With evidence, Confirm handled leads (⌘↵); without it, asking
- * its thread leads (⌘↵), and Confirm anyway is a click only, recorded as confirmed without evidence.
+ * One PR's review notes and the evidence since them, from a fresh read, with any follow-ups that linked the PR. With evidence, Confirm
+ * handled leads (⌘↵); without it, asking its thread leads (⌘↵), and Confirm anyway is a click only, recorded as confirmed without evidence.
  */
 export function NotesBody({ screen, failed, busy, error, onConfirm, onAnyway, onAsk, onCancel }: { screen: NotesScreen | null;
   /** Why GitHub couldn't be read for the notes. */
@@ -817,6 +817,7 @@ export function NotesBody({ screen, failed, busy, error, onConfirm, onAnyway, on
       </li>)}
     </ul>
     <p data-notes-evidence className={cn("rounded px-2 py-1 text-[12px]", screen.evidence.handled ? "text-muted-foreground" : TONE.amber.chip)}>{screen.evidence.text}</p>
+    {screen.evidence.linked ? <p data-notes-linked className="px-2 text-[12px] text-muted-foreground">{screen.evidence.linked}</p> : null}
     {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
     {screen.primary !== "confirm" ? <p className="text-[11.5px] text-muted-foreground">{"to" in screen.ask
       ? `Ask ${screen.ask.to} · listed first, then sent after ${Math.round(SEND_DELAY_MS / 1_000)} s with Undo` : screen.ask.why}</p> : null}

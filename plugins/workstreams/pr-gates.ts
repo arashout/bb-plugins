@@ -87,7 +87,7 @@ export function prGates({ facts, observedAt, now, held, feedback, reviewers }: G
 
 /**
  * Feedback to address on this read (feedback-to-address.ts), which no gate names: a worker's evidence verifies feedback, but only your
- * reply, a follow-up, or your confirmation answers it, so this holds Ready and waits on you instead of launching work. Null when the read
+ * reply on the PR or your confirmation answers it, so this holds Ready and waits on you instead of launching work. Null when the read
  * didn't say who spoke last, which proves no answer.
  */
 export function unansweredFeedback(facts: Pick<AdvanceFacts, "approvalFeedback" | "reviewFeedback" | "headOid">, feedback: ApprovalFeedbackRecord | null): FeedbackItem[] | null {

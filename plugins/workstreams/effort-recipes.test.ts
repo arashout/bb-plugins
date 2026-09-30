@@ -181,13 +181,13 @@ describe("asking a PR's thread to fix it", () => {
     expect([checks.includes(CHECKS_WORK), checks.includes(BRANCH_WORK.integrate), checks.includes(FEEDBACK_WORK.address)]).toEqual([true, false, false]);
   });
 
-  // Your turn's feedback is a thread's to address too: comments no reply or follow-up answered, and threads others opened on a PR only
-  // commented on, whose poll count the board doesn't keep. It reads no push, which answers no comment.
-  it("asks a thread to answer a reviewer's comments until you reply or link a follow-up after them, and a push doesn't", () => {
+  // Your turn's feedback is a thread's to address too: comments no reply on the PR answered, and threads others opened on a PR only
+  // commented on, whose poll count the board doesn't keep. It reads no push, and no PR that mentions it, which answer no comment.
+  it("asks a thread to answer a reviewer's comments until you reply after them, and a push or a PR that links it doesn't", () => {
     const commented = facts({ unresolvedReviewThreads: null,
       reviewFeedback: { openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T10:00:00Z" }, repliedAt: null } });
     expect(fixesFor(commented)).toEqual(["threads", "comments"]);
-    expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, followUpAt: "2026-09-29T11:00:00Z" } })).toEqual(["threads"]);
+    expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, followUpAt: "2026-09-29T11:00:00Z" } })).toEqual(["threads", "comments"]);
     expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, openThreads: 0, repliedAt: "2026-09-29T11:00:00Z" } })).toEqual([]);
     const text = fixThreadAsk({ fixes: ["comments"], headOid: "b".repeat(40), headBranch: "abc-96-series" });
     expect(text).toContain("Fix this PR so it can move toward merge: answer comments.");

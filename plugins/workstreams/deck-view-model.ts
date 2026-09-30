@@ -14,7 +14,7 @@ import { settleRows, type RowFilter, type SettledRow, type Shown } from "./deck-
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
-import { evidenceText, handled, type ConfirmRead } from "./approval-evidence";
+import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
 import { firstLine } from "./effort-notes";
 
 const DAY = 86_400_000;
@@ -25,7 +25,7 @@ export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
 export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
 export const SECTIONS: Record<DeckSection, SectionMeta> = {
   merge: { title: "Merge", tone: "green", action: "merge", button: "Preview merge", help: "Approved, checks green, no conflicts, no feedback to address. The preview reads each PR again, and nothing merges until you press Merge or ⌘↵." },
-  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "An approval that said something, waiting on your reply, a follow-up, or your Confirm, whatever CI says. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
+  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "An approval that said something, waiting on your reply on the PR or your Confirm, whatever CI says. A PR that mentions it is no reply; Confirm lists it as evidence. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
   nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
   request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
@@ -653,11 +653,12 @@ export function paletteMatch(items: readonly PaletteItem[], query: string): Pale
 /**
  * The confirm for one PR's review notes: each note (a review body, or a thread the approval opened), the evidence since the newest, and
  * what leads. With evidence, Confirm handled leads; without it, asking the PR's thread leads, and confirming anyway is a second, deliberate
- * choice whose record says there was none.
+ * choice whose record says there was none. Follow-ups that linked the PR since show beside the evidence, whichever leads.
  */
 export type NotesScreen = {
   notes: { id: string; who: string; what: string; age: string; body: string; truncated: boolean }[];
-  evidence: { text: string; handled: boolean };
+  /** `linked`: the issues and PRs that mention this one since the note, in one line; null when none do. */
+  evidence: { text: string; handled: boolean; linked: string | null };
   /** What ⌘↵ does; null when there's no evidence and nowhere to ask, which leaves only Confirm anyway's own click. */
   primary: "confirm" | "ask" | null;
   /** Where Ask sends the approval-feedback recipe, or why it can't. */
@@ -668,7 +669,7 @@ export function notesScreen(read: Extract<ConfirmRead, { ok: true }>, now: numbe
   return {
     notes: read.sources.map((source) => ({ id: source.id, who: `@${source.author}`, age: age(Date.parse(source.at), now), body: source.body, truncated: source.truncated,
       what: source.kind === "review" ? "review" : source.resolved ? "thread, resolved" : "thread, open" })),
-    evidence: { text: evidenceText(read.evidence), handled: yes },
+    evidence: { text: evidenceText(read.evidence), handled: yes, linked: linkedText(read.evidence) },
     primary: yes ? "confirm" : read.ask.kind === "none" ? null : "ask",
     ask: read.ask.kind === "thread" ? { to: `goes to “${read.ask.title}”` } : read.ask.kind === "new" ? { to: `starts a thread under ${read.ask.under}` }
       : { why: read.ask.why },

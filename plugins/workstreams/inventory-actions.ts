@@ -193,7 +193,7 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (fresh.headRefOid !== headOid) return { refuse: "New commits landed since you read the notes. Read them again; nothing was sent." };
       const feedback = fresh.approvalFeedback;
       if (feedback?.status !== "present" || feedback.fingerprint !== fingerprint) return { refuse: "The approval's notes changed since you read them. Read them again; nothing was sent." };
-      // A worker's evidence doesn't answer the reviewer; only your Confirm, a reply, or a follow-up does.
+      // A worker's evidence doesn't answer the reviewer; only your Confirm or a reply on the PR does.
       if (fresh.approvalFeedbackVerified === true && !feedbackToAddress(fresh, fresh.approvalFeedbackConfirmed === true).some((item) => item.kind === "approval")) {
         return { refuse: "These notes are already verified on this head; nothing was sent." };
       }

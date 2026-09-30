@@ -4507,7 +4507,7 @@ export default async function plugin(bb: BbPluginApi) {
       const unanswered = unansweredFeedback(facts, approvalFeedback.get(prUrl));
       const feedbackDetail = facts.approvalFeedback.status === "unknown" ? "Approval feedback history is incomplete; refresh and verify the current review." :
         facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." :
-        unanswered?.length ? "Review feedback waits on your answer: reply, link a follow-up, or confirm it." : facts.detail;
+        unanswered?.length ? "Review feedback waits on your answer: reply on the PR or confirm it." : facts.detail;
       const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : feedbackDetail);
       return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail,
         readiness: facts.readiness === "ready" && (!feedbackClear || unanswered?.length !== 0) ? "needs-attention" : facts.readiness,

@@ -2,9 +2,11 @@
 // your answer. An approval that says anything (a comment, a question, a
 // condition, or a request) and any other person's comment (a review body, an
 // inline thread, or the PR's conversation) wait until you answer: a reply
-// from the PR's author after it, an issue or a PR on its base that the author
-// linked this one from after it, or, for an approval's notes, your
-// evidence-checked Confirm on this head. A push alone answers nothing, and
+// from the PR's author on this PR after it (a conversation comment, a review,
+// or a thread reply) or, for an approval's notes, your evidence-checked
+// Confirm on this head. An issue or a PR that mentions this one, such as the
+// rest of its stack, answers nothing: the reviewer sees no reply, so Confirm
+// shows those links as evidence instead. A push alone answers nothing, and
 // none of it depends on CI, a draft, conflicts, or merge state. While any
 // waits, the PR never reads ready and never merges. Bots (deploy previews,
 // trackers, CI, and code-review apps) never count. This module imports only
@@ -14,7 +16,7 @@ import { z } from "zod";
 /**
  * What a PR's own review read shows of feedback on it (ghactions.ts): open threads someone else started, the newest comment from someone
  * else that no later approval of theirs covers, its author's newest reply, when the approval's newest note was left, and when a follow-up
- * last linked it. `noteAt` and `followUpAt` are absent on a read that predates them, which proves no answer.
+ * last linked it, which answers nothing. `noteAt` and `followUpAt` are absent on a read that predates them.
  */
 export const reviewFeedbackSchema = z.object({
   openThreads: z.number().int().min(0).max(2_000),
@@ -52,8 +54,9 @@ const time = (value: string | null | undefined): number | null => {
  */
 export function feedbackToAddress(facts: FeedbackFacts, confirmed: boolean): FeedbackItem[] {
   const read = facts.reviewFeedback;
-  const answers = [time(read?.repliedAt), time(read?.followUpAt)].filter((at): at is number => at !== null);
-  const answered = (at: number | null) => at !== null && answers.some((answer) => answer > at);
+  // Only your reply on this PR: a follow-up that links it never does.
+  const replied = time(read?.repliedAt);
+  const answered = (at: number | null) => at !== null && replied !== null && replied > at;
   const items: FeedbackItem[] = [];
   if (facts.approvalFeedback?.status === "present" && !confirmed) {
     const at = time(read?.noteAt);

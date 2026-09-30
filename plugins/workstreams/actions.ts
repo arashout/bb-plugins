@@ -332,7 +332,7 @@ export function mergeVerdict(live: LiveMergeFacts, verification: import("./appro
   if (live.reviewFeedback === undefined) refusals.push("GitHub didn't return who commented last. Refresh and try again.");
   const confirmed = userConfirmation(verification, live.approvalFeedback, live.headRefOid)?.current === true;
   for (const item of feedbackToAddress(live, confirmed)) {
-    refusals.push(item.kind === "approval" ? "An approval comment waits on your answer: reply, link a follow-up, or confirm it."
+    refusals.push(item.kind === "approval" ? "An approval comment waits on your answer: reply on the PR or confirm it."
       : `A comment from @${item.login} waits on your answer.`);
   }
   return { refusals, warnings };

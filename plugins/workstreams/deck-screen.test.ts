@@ -522,7 +522,8 @@ describe("the deck's dialogs", () => {
 });
 
 describe("the review notes confirm's markup", () => {
-  const read = (evidence: Partial<{ commits: number; replies: number }> = {}, ask: Extract<ConfirmRead, { ok: true }>["ask"] = { kind: "thread", title: "Spine labels" }) =>
+  const read = (evidence: Partial<{ commits: number; replies: number; linked: { repo: string; number: number }[] }> = {},
+    ask: Extract<ConfirmRead, { ok: true }>["ask"] = { kind: "thread", title: "Spine labels" }) =>
     notesScreen({ ok: true, headOid: "a".repeat(40), fingerprint: "f".repeat(64), ask, evidence: { since: new Date(NOW - 2 * 86_400_000).toISOString(), commits: 0, replies: 0,
       threads: { total: 0, resolved: 0 }, complete: true, ...evidence },
     sources: [{ id: "review-301", kind: "review", author: "mira-l", at: new Date(NOW - 2 * 86_400_000).toISOString(),
@@ -540,6 +541,15 @@ describe("the review notes confirm's markup", () => {
     expect(html).toMatch(/data-notes-anyway[^>]*>Confirm anyway<\/button>/u);
     expect(text(html)).toContain("Ask goes to “Spine labels” · listed first, then sent after 8 s with Undo");
     expect(html).not.toContain("data-notes-confirm");
+  });
+
+  // The rest of a stack that mentions the PR is shown as evidence worth reading, but it's no reply: asking still leads.
+  it("lists the PRs that mention this one under the evidence, and still leads with Ask when nothing else shows the note handled", () => {
+    const html = body(read({ linked: [{ repo: "inkwell/folio", number: 302 }, { repo: "inkwell/catalog", number: 97 }] }));
+    expect(html).toMatch(/data-notes-evidence[^>]*>No commits, reply, or resolved threads since this approval<\/p><p data-notes-linked[^>]*>Linked: folio #302, catalog #97 mention this PR<\/p>/u);
+    expect(html).toMatch(/data-notes-ask[^>]*>Ask its thread to address it<kbd/u);
+    expect(html).toMatch(/data-notes-anyway[^>]*>Confirm anyway<\/button>/u);
+    expect(body(read())).not.toContain("data-notes-linked");
   });
 
   it("says why when there's nowhere to ask, and leaves only Confirm anyway's own click and Cancel", () => {

@@ -205,7 +205,7 @@ describe("unitLifecycle", () => {
     expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, unresolvedReviewThreads: 0 }) }))).toBe("approved-with-note");
   });
 
-  // A worker's evidence verifies the head, but only your reply, a follow-up, or your Confirm answers the reviewer.
+  // A worker's evidence verifies the head, but only your reply on the PR or your Confirm answers the reviewer.
   it("keeps approved feedback visible until current-head evidence is verified and the note is answered", () => {
     const reviewed = pr({ reviewDecision: "APPROVED", approvalHasBody: true,
       approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: true,

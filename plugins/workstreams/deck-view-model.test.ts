@@ -533,7 +533,7 @@ describe("the review notes confirm", () => {
 
   it("leads with asking the PR's thread when nothing since the approval shows the notes handled, and with Confirm handled when something does", () => {
     expect(notesScreen(read(), NOW)).toEqual({ primary: "ask", ask: { to: "starts a thread under Store pickup" },
-      evidence: { text: "No commits, reply, or resolved threads since this approval", handled: false },
+      evidence: { text: "No commits, reply, or resolved threads since this approval", handled: false, linked: null },
       notes: [{ id: "review-318", who: "@theo-k", what: "review", age: "1d", body: "Keep the old label as a fallback.", truncated: false },
         { id: "thread-318", who: "@theo-k", what: "thread, resolved", age: "1d", body: "Wrap here too.", truncated: true }] });
     expect(notesScreen(read({}, { kind: "thread", title: "Spine labels" }), NOW).ask).toEqual({ to: "goes to “Spine labels”" });
@@ -541,6 +541,16 @@ describe("the review notes confirm", () => {
       expect(notesScreen(read(evidence), NOW)).toMatchObject({ primary: "confirm", evidence: { handled: true } });
     }
     expect(notesScreen(read({ commits: 1, complete: false }), NOW).primary).toBe("ask");
+  });
+
+  // A PR that mentions this one may be the follow-up a conditional approval asked for, so the confirm names it, but it's no reply: with
+  // nothing else since the approval, asking still leads and confirming stays Confirm anyway's own click.
+  it("names the PRs that mention this one beside the evidence, and never counts them", () => {
+    const linked = [{ repo: "inkwell/folio", number: 362 }, { repo: "inkwell/catalog", number: 97 }];
+    expect(notesScreen(read({ linked }), NOW)).toMatchObject({ primary: "ask",
+      evidence: { text: "No commits, reply, or resolved threads since this approval", handled: false, linked: "Linked: folio #362, catalog #97 mention this PR" } });
+    expect(notesScreen(read({ linked: linked.slice(1), replies: 1 }), NOW)).toMatchObject({ primary: "confirm",
+      evidence: { text: "1 reply since this approval", handled: true, linked: "Linked: catalog #97 mentions this PR" } });
   });
 
   // Asking never creates an effort or its threads, so a PR with nowhere to ask says why, and ⌘↵ does nothing: Confirm anyway stays a click.

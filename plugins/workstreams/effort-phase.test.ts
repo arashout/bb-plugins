@@ -109,12 +109,12 @@ describe("decide()", () => {
       .toMatchObject({ resource: { kind: "worktree", reason: `no checkout on ${HOST}`, workspace: { batchId: `effort-${EFFORT}`, jobId: "pr-313" } } });
   });
 
-  // A worker's evidence verifies the head, but only your reply, a follow-up, or your confirmation answers the reviewer: the row waits on
+  // A worker's evidence verifies the head, but only your reply on the PR or your confirmation answers the reviewer: the row waits on
   // you, launches nothing more, and is never Ready until then, whatever CI says.
   it("waits on you for an approval comment a worker verified but nothing answered, and never calls it Ready", () => {
     const unanswered = { ...FEEDBACK, reviewFeedback: { ...FEEDBACK.reviewFeedback, repliedAt: null } };
     expect(decide(row({ feedback: verified(HEAD) }, unanswered))).toMatchObject({ phase: "waiting", cause: "feedback", owner: { kind: "user" },
-      detail: "Approval comment to address: reply, link a follow-up, or confirm it", nextAction: null });
+      detail: "Approval comment to address: reply on the PR or confirm it", nextAction: null });
     expect(decide(row({ feedback: verified(HEAD) }, { ...unanswered, checks: "pending" }))).toMatchObject({ phase: "waiting", cause: "feedback" });
     const mine: ApprovalFeedbackRecord = { ...verified(HEAD), provenance: { kind: "user" } };
     expect(decide(row({ feedback: mine }, unanswered)).phase).toBe("prepared");

@@ -154,7 +154,7 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
   if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
   if (blocker.label === "Changes requested" || blocker.label === "New review feedback" || blocker.label === "Feedback verification needed" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
-  if (blocker.label === FEEDBACK_LABEL.approval) return "Answer the approval's comment: reply, link a follow-up, or confirm it.";
+  if (blocker.label === FEEDBACK_LABEL.approval) return "Answer the approval's comment: reply on the PR or confirm it.";
   if (blocker.label === FEEDBACK_LABEL.comment) return "Answer the review comment on GitHub.";
   if (blocker.label === "Review history unknown") return "Advance to verify review history.";
   if (behind !== null) return `Parent PR #${behind} must merge before this PR can merge.`;

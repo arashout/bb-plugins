@@ -1,11 +1,12 @@
 // Your turn: your open PRs where a reviewer's feedback waits on your move,
 // from facts the inventory already keeps. Feedback to address, whatever CI
 // says: an approval that said something, as attention's approval-note reason
-// names it, and another person's comment, that no reply, follow-up, or
-// confirmation answered. Then changes someone asked for that you haven't
-// asked them to review again, review threads someone else opened that are
-// still open, and notes you answered that attention asks you to confirm. A
-// push answers none of it. A PR you hold, and one waiting only on CI or on
+// names it, and another person's comment, that neither your reply on the PR
+// nor your confirmation answered. Then changes someone asked for that you
+// haven't asked them to review again, review threads someone else opened
+// that are still open, and notes you answered that attention asks you to
+// confirm. A push answers none of it, and neither does an issue or a PR that
+// mentions this one. A PR you hold, and one waiting only on CI or on
 // reviewers, are not your turn; a draft is only for its feedback to address.
 // Pure: the server computes it per row; the badge and the list only count
 // and show it.
@@ -51,7 +52,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   if (approval) parts.push({ kind: "approval", text: note ? "Approval comment to address" : "Approved with comments", since: approval.since });
   const open = pr.isDraft ? 0 : pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
-  // Another person's comment that no reply or follow-up answered; a push never does.
+  // Another person's comment that no reply on the PR answered; a push or a PR that mentions this one never does.
   const comment = feedbackToAddress({ reviewFeedback: pr.reviewFeedback }, false).find((item) => item.kind === "comment");
   // A reviewer whose change request it names already has their say there: their review is a comment too, and naming it twice says nothing.
   if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.since });

@@ -112,7 +112,7 @@ describe("PR gates", () => {
   });
 
   // No gate names feedback to address, since stored rows keep only these gates; decide() and the roster read it beside them. A worker's
-  // evidence passes feedback-verified but answers no one: only a reply, a follow-up, or your own confirmation on this head does.
+  // evidence passes feedback-verified but answers no one: only a reply on the PR or your own confirmation on this head does.
   it("reads feedback to address beside the gates: a worker's evidence doesn't answer it, your confirmation does", () => {
     const quiet = { openThreads: 0, comment: null, repliedAt: null, noteAt: "2026-09-28T09:00:00Z", followUpAt: null };
     expect(gates()["feedback-verified"]).toBe(true);

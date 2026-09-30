@@ -22,7 +22,7 @@ export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: 
 export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
-    ["Your turn", "Approval comments or other comments no reply, follow-up, or confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments. Open thread goes to its thread."],
+    ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments. Open thread goes to its thread."],
     ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo. Only on a PR with a thread."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],

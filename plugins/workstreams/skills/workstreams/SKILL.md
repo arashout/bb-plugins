@@ -696,11 +696,11 @@ stacked on (`stackedOn`, whose row it files under), and each attention
 reason with its next step, owner, and age. It also gives when GitHub last
 answered for the PR, its last failed read and why, any hold, and the thread the
 work started in and the one working on it. On your own PRs, `yourTurn` names
-the reviewer feedback waiting on you (`approval` and `comments` that no reply,
-follow-up, or confirmation answered, whatever CI says, then `changes` and
-`threads`), which All PRs lists as Your turn unless a thread is working on it
-or its effort is on hold. Held PRs have none, and a draft has only its
-`approval` and `comments`. The header counts PRs forgotten in
+the reviewer feedback waiting on you (`approval` and `comments` that neither
+your reply on the PR nor your confirmation answered, whatever CI says, then
+`changes` and `threads`), which All PRs lists as Your turn unless a thread is
+working on it or its effort is on hold. Held PRs have none, and a draft has
+only its `approval` and `comments`. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
@@ -711,10 +711,11 @@ an approval with a non-empty body (a comment, question, condition, or request),
 or another person's comment in a review body, an inline thread, or the PR's
 conversation, that nothing after it answers. Bots, such as deploy previews,
 trackers, CI, and code-review apps, never count. An answer is a reply from the
-PR's author after it, an issue or a PR on the same base that the author links
-the PR from after it (a teammate's mention, or a PR stacked on it or under it,
-doesn't count), or, for an approval's notes, your evidence-checked
-confirmation on the current head. A push never answers it, and
+PR's author on the PR after it (a conversation comment, a review, or a thread
+reply) or, for an approval's notes, your evidence-checked confirmation on the
+current head. An issue or a PR that mentions the PR never answers it, even
+the author's own follow-up or the rest of its stack: the confirm shows those
+links as evidence instead. A push never answers it, and
 a worker's evidence doesn't either. It doesn't depend on CI, a draft,
 conflicts, or merge state. Its attention reasons, `approval-note` and
 `review-comments`, come first, and the row's state names it after whatever
@@ -738,11 +739,14 @@ as it accepts a worker's evidence. It reads the approval's notes from GitHub
 first and needs evidence of handling since the newest: a commit, a reply from
 the PR's author, or every thread that note opened resolved. Without any, it
 refuses unless `anyway` is set, and the record says there was no evidence;
-every confirmation writes an audit row. `inventory_confirm_read` returns what
-the confirm dialog shows and writes nothing: each note, the `evidence` since
-the newest, the `headOid` and `fingerprint` a confirmation binds to, and `ask`,
-where Ask would send (the PR's `thread`, a `new` thread `under` a parent that
-already exists, or `none` with `why`). `inventory_confirm_revoke` takes back
+every confirmation writes an audit row. An issue or a PR the author linked the
+PR from since the note (`evidence.linked`) is shown, as "Linked: folio #362
+mentions this PR", but isn't a reply and never counts as handling.
+`inventory_confirm_read` returns what the confirm dialog shows and writes
+nothing: each note, the `evidence` since the newest, the `headOid` and
+`fingerprint` a confirmation binds to, and `ask`, where Ask would send (the
+PR's `thread`, a `new` thread `under` a parent that already exists, or `none`
+with `why`). `inventory_confirm_revoke` takes back
 your own confirmation, however old and even while the PR or its effort is
 held, with an audit row; a worker's evidence is never revoked. The notes then
 need you again. Each row's `confirmation` says when you confirmed, whether it
@@ -974,9 +978,9 @@ Each row is one of:
   shared by every PR that asks it.
 - **Ready**: a verified merge candidate on a fresh GitHub read, with no
   feedback to address. A worker's evidence verifies feedback but doesn't
-  answer it, so a row whose reviewer saw no reply, follow-up, or confirmation
-  waits on you first. Merging is never part of an instruction; it stays a
-  separate action with its own preview.
+  answer it, so a row whose reviewer saw neither your reply on the PR nor your
+  confirmation waits on you first. Merging is never part of an instruction; it
+  stays a separate action with its own preview.
 - **Done**: merged or closed.
 
 A **system issue** is separate from these and names its recovery, such as

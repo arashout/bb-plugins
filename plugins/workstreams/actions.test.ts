@@ -291,7 +291,7 @@ describe("mergeVerdict", () => {
       findings: [{ sourceId: "review-1", resolution: "fixed" as const, evidence: "The fallback is covered in src/fallback.ts.",
         validation: { outcome: "passed" as const, detail: "Focused test passed." } }], blockers: [] };
     // A worker's evidence verifies the head, but only an answer the reviewer sees clears their note: here, your reply after it.
-    expect(mergeVerdict(pending, record).refusals).toEqual(["An approval comment waits on your answer: reply, link a follow-up, or confirm it."]);
+    expect(mergeVerdict(pending, record).refusals).toEqual(["An approval comment waits on your answer: reply on the PR or confirm it."]);
     const replied = live({ ...pending, reviewFeedback: { openThreads: 0, comment: null, repliedAt: "2026-09-28T13:00:00Z", noteAt: "2026-09-28T12:00:00Z", followUpAt: null } });
     expect(mergeVerdict(replied, record).refusals).toEqual([]);
     expect(mergeVerdict(live({ ...pending, headRefOid: "b".repeat(40) }), record).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
@@ -314,13 +314,14 @@ describe("mergeVerdict", () => {
       confirmed).refusals).toContain("Approval feedback needs verified follow-up on the current head.");
     db.close();
   });
-  // Feedback to address refuses the merge whatever else passes, and a push never answers it: only a reply or a follow-up after it does.
+  // Feedback to address refuses the merge whatever else passes, and neither a push nor a PR that mentions it answers it: only a reply does.
   it("refuses while anyone's comment or the approval's note waits on your answer, or when GitHub didn't say who spoke last", () => {
     const said = (patch: Partial<NonNullable<LiveMergeFacts["reviewFeedback"]>>) => live({ reviewFeedback: { openThreads: 0, comment: null, repliedAt: null,
       noteAt: null, followUpAt: null, ...patch } });
     expect(mergeVerdict(said({ comment: { login: "theo-k", at: "2026-09-28T12:00:00Z" } })).refusals).toEqual(["A comment from @theo-k waits on your answer."]);
     expect(mergeVerdict(said({ comment: { login: "theo-k", at: "2026-09-28T12:00:00Z" }, repliedAt: "2026-09-28T13:00:00Z" })).refusals).toEqual([]);
-    expect(mergeVerdict(said({ comment: { login: "theo-k", at: "2026-09-28T12:00:00Z" }, followUpAt: "2026-09-28T13:00:00Z" })).refusals).toEqual([]);
+    expect(mergeVerdict(said({ comment: { login: "theo-k", at: "2026-09-28T12:00:00Z" }, followUpAt: "2026-09-28T13:00:00Z" })).refusals)
+      .toEqual(["A comment from @theo-k waits on your answer."]);
     expect(mergeVerdict(live({ reviewFeedback: undefined })).refusals).toEqual(["GitHub didn't return who commented last. Refresh and try again."]);
   });
   it("allows an open, approved, clean PR", () => {

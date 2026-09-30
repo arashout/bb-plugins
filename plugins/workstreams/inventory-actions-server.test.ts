@@ -28,7 +28,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 // mira's approval of #319 left comments; every review thread on it is resolved.
 const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-319"] };
 /** The merge preview's refusal while an approval's comment waits on your answer. */
-const NOTE_WAITS = "An approval comment waits on your answer: reply, link a follow-up, or confirm it.";
+const NOTE_WAITS = "An approval comment waits on your answer: reply on the PR or confirm it.";
 
 /**
  * You author a green draft (#313), a PR no one was asked to review (#314), a PR mira was asked to review ten days ago (#315), a PR

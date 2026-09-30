@@ -287,8 +287,8 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   projects, including PRs without a checkout. Approved
   is a review decision; **Ready to merge** also requires clear checks, review
   threads, branch state, stack dependencies, and no feedback to address: a
-  reviewer's comment or an approval's note that no reply, follow-up, or
-  confirmation answers. Direct
+  reviewer's comment or an approval's note that neither your reply on the PR
+  nor your confirmation answers. A PR that mentions it is no answer. Direct
   merge, branch update, and reviewer nudge actions ask for confirmation. CI,
   conflict, and review work shows the planned steps before you start a
   dedicated agent thread. You can expand and edit its instructions.

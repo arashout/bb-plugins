@@ -73,7 +73,7 @@ export function stackedArgv(target: PrTarget, headRefName: string): string[] {
 /** Constant: the only variables are passed as typed -f/-F fields, never spliced in. */
 export const REVIEW_THREADS_QUERY =
   "query($owner:String!,$name:String!,$number:Int!,$includeFollowup:Boolean!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid headRefName baseRefOid baseRefName baseRef{name target{oid}} author{login} reviews(last:100){pageInfo{hasPreviousPage startCursor}nodes{id state body submittedAt author{__typename login} commit{oid}}} reviewThreads(first:100){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor}nodes{id body createdAt updatedAt author{__typename login} pullRequestReview{id}}}}} comments(last:100) @include(if:$includeFollowup){pageInfo{hasPreviousPage}nodes{body createdAt author{__typename login}}} commits(last:1) @include(if:$includeFollowup){nodes{commit{oid committedDate}}} " +
-  "timelineItems(itemTypes:[CROSS_REFERENCED_EVENT],last:50) @include(if:$includeFollowup){nodes{...on CrossReferencedEvent{createdAt isCrossRepository actor{__typename login} source{__typename ...on PullRequest{baseRefName}}}}}}}}";
+  "timelineItems(itemTypes:[CROSS_REFERENCED_EVENT],last:50) @include(if:$includeFollowup){nodes{...on CrossReferencedEvent{createdAt isCrossRepository actor{__typename login} source{__typename ...on PullRequest{number baseRefName repository{nameWithOwner}} ...on Issue{number repository{nameWithOwner}}}}}}}}}";
 
 const REVIEWS_PAGE_QUERY = "query($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviews(last:100,before:$cursor){pageInfo{hasPreviousPage startCursor}nodes{id state body submittedAt author{__typename login} commit{oid}}}}}}";
 const THREADS_PAGE_QUERY = "query($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:100){pageInfo{hasNextPage endCursor}nodes{id body createdAt updatedAt author{__typename login} pullRequestReview{id}}}}}}}}";
@@ -374,14 +374,34 @@ type Node = { id?: unknown; state?: unknown; body?: unknown; submittedAt?: unkno
   author?: { __typename?: unknown; login?: unknown } | null; pullRequestReview?: { id?: unknown } | null };
 const nodeOf = (value: unknown): Node => value !== null && typeof value === "object" ? value as Node : {};
 
+/** An issue or a PR the PR's author linked this one from: when, and which, where GitHub said. */
+type FollowUp = { at: string; repo: string | null; number: number | null };
+
+/**
+ * The follow-ups on one read's timeline: issues and PRs the PR's author linked this one from, an issue anywhere, a PR in another repository,
+ * or a PR of this one on its base. A teammate's mention isn't one, and neither is a PR of this repository on another base, such as one
+ * stacked on this one or listing its stack. None answers feedback: the confirm shows them as evidence beside a reply, a commit, or a
+ * resolved thread.
+ */
+function followUpsOf(pr: { timelineItems?: unknown; baseRefName?: unknown }, me: string | null): FollowUp[] {
+  return nodesOf(pr.timelineItems).map((event) => event as { createdAt?: unknown; isCrossRepository?: unknown; actor?: Node["author"];
+    source?: { __typename?: unknown; baseRefName?: unknown; number?: unknown; repository?: { nameWithOwner?: unknown } | null } | null }).flatMap((event) => {
+    const kind = event.source?.__typename, at = dateOf(event.createdAt);
+    // Only you follow up: a teammate's mention says nothing to the reviewer who waits.
+    if (at === null || me === null || loginOf(event.actor) !== me || (kind !== "PullRequest" && kind !== "Issue")) return [];
+    if (kind === "PullRequest" && event.isCrossRepository !== true && (typeof pr.baseRefName !== "string" || event.source?.baseRefName !== pr.baseRefName)) return [];
+    const repo = event.source?.repository?.nameWithOwner, number = event.source?.number;
+    return [{ at, repo: typeof repo === "string" ? repo.slice(0, 200) : null, number: typeof number === "number" && Number.isInteger(number) && number > 0 ? number : null }];
+  });
+}
+
 /**
  * What one review read shows of feedback waiting on the PR's author (feedback-to-address.ts): unresolved threads someone else started;
  * the newest comment from a person other than the author, as a non-empty review body, a thread comment, or a conversation comment, that
- * neither the approval's notes nor a later approval of that person's own covers; the author's newest review or comment; when the approval's
- * newest note was left; and when the author last linked this one from an issue or a PR on its base, which a PR stacked on it isn't. Bots
- * never count. Undefined without the PR's author or its reviews: without them, it can't tell your reply from a reviewer's comment.
- * Conversation comments and links come only with the follow-up read; without them, the note and link dates stay absent, which proves no
- * answer.
+ * neither the approval's notes nor a later approval of that person's own covers; the author's newest review or comment, the only answer;
+ * when the approval's newest note was left; and when a follow-up last linked this one, which answers nothing. Bots never count. Undefined
+ * without the PR's author or its reviews: without them, it can't tell your reply from a reviewer's comment. Conversation comments and
+ * links come only with the follow-up read; without them, the note and link dates stay absent.
  */
 export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comments?: unknown; timelineItems?: unknown; baseRefName?: unknown },
   threads: readonly unknown[], notes: ApprovalNotesRead | null = null): ReviewFeedback | undefined {
@@ -428,16 +448,8 @@ export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comm
     return thread.isResolved === false && loginOf(nodeOf(first).author) !== me;
   }).length;
   const followed = Array.isArray(pr.comments !== null && typeof pr.comments === "object" ? (pr.comments as { nodes?: unknown }).nodes : undefined);
-  const links = nodesOf(pr.timelineItems).map((event) => event as { createdAt?: unknown; isCrossRepository?: unknown; actor?: Node["author"];
-    source?: { __typename?: unknown; baseRefName?: unknown } | null }).filter((event) => {
-    const kind = event.source?.__typename;
-    // Only you answer: a teammate's mention says nothing to the reviewer who waits.
-    if (loginOf(event.actor) !== me || (kind !== "PullRequest" && kind !== "Issue")) return false;
-    // A PR of this repository on another base, such as one stacked on this one or listing its stack, links it by branch, not as a follow-up.
-    return kind === "Issue" || event.isCrossRepository === true || (typeof pr.baseRefName === "string" && event.source?.baseRefName === pr.baseRefName);
-  }).flatMap((event) => dateOf(event.createdAt) ?? []);
   return { openThreads: Math.min(openThreads, 2_000), comment: last && { login: last.who.slice(0, 140), at: last.at }, repliedAt: newest(replies),
-    ...followed ? { noteAt: notes?.at ?? null, followUpAt: newest(links) } : {} };
+    ...followed ? { noteAt: notes?.at ?? null, followUpAt: newest(followUpsOf(pr, me).map((link) => link.at)) } : {} };
 }
 
 /** Read all available review, thread, and linked comment pages before claiming feedback is clear. */
@@ -519,8 +531,9 @@ const ACTIVITY_QUERY = "query($owner:String!,$name:String!,$number:Int!){reposit
 
 /**
  * Read-only: an approval's notes, as the approval feedback's own sources, and what came after the newest of them: commits, replies from
- * the PR's author (PR comments, reviews, and thread comments), and the inline threads the newest note opened resolved. The notes come from the same
- * paged read as the feedback's fingerprint, and the commits from one more read that must see the same head.
+ * the PR's author (PR comments, reviews, and thread comments), the inline threads the newest note opened resolved, and the follow-ups that
+ * linked the PR, which the confirm shows but never counts. The notes come from the same paged read as the feedback's fingerprint, and the
+ * commits from one more read that must see the same head.
  */
 export async function readApprovalHandling(run: GhRunner, target: PrTarget): Promise<ApprovalHandling> {
   const result = await run(threadsArgv(target, true));
@@ -565,6 +578,9 @@ export async function readApprovalHandling(run: GhRunner, target: PrTarget): Pro
   const cut = commentNodes === null || (comments?.pageInfo?.hasPreviousPage === true && commentNodes.every((comment) => after(comment?.createdAt)));
   // A thread's resolution has no date, so only the threads the newest note opened can show it was resolved after that note.
   const current = detail.linked.filter(({ review }) => Date.parse(review.submittedAt) >= since);
+  // Each issue or PR you linked this one from since the note, once: worth showing, but no reply.
+  const linked = [...new Map(followUpsOf(pr, author).filter((link) => after(link.at)).sort((a, b) => a.at.localeCompare(b.at))
+    .flatMap(({ repo, number }) => repo !== null && number !== null ? [[`${repo}#${number}`, { repo, number }] as const] : [])).values()];
   const note = (text: string) => ({ body: text.trim().slice(0, NOTE_MAX), truncated: text.trim().length > NOTE_MAX });
   const sources: ApprovalSource[] = [
     ...noted.map((review): ApprovalSource => ({ id: review.id, kind: "review", author: review.author.login, at: review.submittedAt, ...note(review.body), resolved: null })),
@@ -573,7 +589,7 @@ export async function readApprovalHandling(run: GhRunner, target: PrTarget): Pro
   ].sort((a, b) => a.at.localeCompare(b.at));
   return { ok: true, headOid: head, fingerprint: snapshot.fingerprint!, sources,
     evidence: { since: last.submittedAt, commits: newCommits, replies, complete: author !== null && !cut,
-      threads: { total: current.length, resolved: current.filter(({ thread }) => thread.isResolved).length } } };
+      threads: { total: current.length, resolved: current.filter(({ thread }) => thread.isResolved).length }, ...linked.length ? { linked } : {} } };
 }
 
 /**

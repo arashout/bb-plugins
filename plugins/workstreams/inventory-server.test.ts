@@ -124,7 +124,7 @@ describe("authored backlog server actions", () => {
     const lifecycle = async () => (await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle;
     expect(await lifecycle()).toBe("approved-with-note");
     expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({ ok: true,
-      refusals: ["An approval comment waits on your answer: reply, link a follow-up, or confirm it."] });
+      refusals: ["An approval comment waits on your answer: reply on the PR or confirm it."] });
     expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: false,
       error: expect.stringContaining("approval comment waits") });
     expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);

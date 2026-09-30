@@ -338,14 +338,14 @@ describe("review feedback to address", () => {
     expect(read([], [], [], [child, parent, bot, stackListing])?.followUpAt).toBeNull();
   });
 
-  // Only you answer feedback on your PR: a teammate's issue or PR that mentions it says nothing to the reviewer who is waiting.
+  // Only you follow up on your PR: a teammate's issue or PR that mentions it says nothing to the reviewer who is waiting.
   it("counts only a link you made as a follow-up", () => {
     const teammate = [link(11, { __typename: "Issue" }, "otto-v"), link(12, { __typename: "PullRequest", baseRefName: "main", headRefName: "otto/cleanup" }, "otto-v")];
     const held = read([review("mira-l", "APPROVED", 9)], [], [said("pia-r", 10)], teammate);
     expect(held).toMatchObject({ comment: { login: "pia-r", at: "2026-09-29T10:00:00Z" }, followUpAt: null });
   });
 
-  // Without the follow-up read, a reply or link in the conversation goes unseen, so no date claims an answer.
+  // Without the follow-up read, a reply or link in the conversation goes unseen, so no date claims either.
   it("leaves the note and link dates out of a read without the conversation", () => {
     const partial = reviewFeedbackOf({ author: { login: "ana-w" }, reviews: { nodes: [] } }, []);
     expect(partial).toEqual({ openThreads: 0, comment: null, repliedAt: null });
@@ -373,7 +373,7 @@ describe("current approval feedback snapshot", () => {
     stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET);
 
   // The two shapes that once read ready: an approval whose body asks for more, with no reply; and a conditional approval. Each one's note
-  // is dated for feedback to address and left out of the comments, and a follow-up PR that links it dates the answer.
+  // is dated for feedback to address and left out of the comments, and a follow-up PR that links it is dated, though it answers nothing.
   it("dates an approval's note and a follow-up that links it on the follow-up read", async () => {
     const conditional = review("Approving, on the understanding that series-aware ordering comes in a separate PR.");
     const followUp = { createdAt: "2026-09-24T15:00:00Z", isCrossRepository: false, actor: { __typename: "User", login: "author" },

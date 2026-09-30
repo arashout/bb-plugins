@@ -92,7 +92,8 @@ describe("PR attention", () => {
     ["approved with feedback GitHub couldn't fully read", { ...approved, approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
       approvalFeedbackVerified: false }, {}, []],
     // An approval that said something no one answered is feedback to address, first and whatever CI, a draft, a conflict, a push, or a
-    // worker's evidence says; only your reply, a follow-up that links it, or your Confirm clears it, and until then nothing asks to merge.
+    // worker's evidence says; only your reply on the PR or your Confirm clears it, never a PR that mentions it, and until then nothing asks
+    // to merge.
     ["approved with a comment no one answered", noted, {}, ["approval-note"]],
     ["approved with a comment no one answered, and red checks", { ...noted, checkConclusions: ["FAILURE"] }, { "ci-red": now - 2 * DAY }, ["approval-note", "ci-red"]],
     ["approved with a comment no one answered, and checks running", { ...noted, checkConclusions: ["PENDING"] }, {}, ["approval-note"]],
@@ -104,8 +105,10 @@ describe("PR attention", () => {
     ["approved with a comment no one answered, pushed since", { ...noted, headCommittedAt: iso(now - HOUR) }, {}, ["approval-note"]],
     ["approved with a comment no one answered, and a worker's evidence on this head", { ...noted, approvalFeedbackVerified: true }, {}, ["approval-note"]],
     ["approved with a comment you confirmed on this head", { ...noted, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true }, {}, ["merge-waiting"]],
-    ["approved with a comment a follow-up PR linked since, verified on this head", { ...noted, approvalFeedbackVerified: true,
-      reviewFeedback: { ...noted.reviewFeedback!, followUpAt: iso(now - HOUR) } }, {}, ["merge-waiting"]],
+    ["approved with a comment only a later PR mentioning it followed, verified on this head", { ...noted, approvalFeedbackVerified: true,
+      reviewFeedback: { ...noted.reviewFeedback!, followUpAt: iso(now - HOUR) } }, {}, ["approval-note"]],
+    ["approved with a comment you replied to on the PR, verified on this head", { ...noted, approvalFeedbackVerified: true,
+      reviewFeedback: { ...noted.reviewFeedback!, repliedAt: iso(now - HOUR), followUpAt: iso(now - HOUR) } }, {}, ["merge-waiting"]],
     ["approved, green, and mergeable, with a reviewer's comment no one answered", { ...approved,
       reviewFeedback: { openThreads: 0, comment: { login: "theo", at: iso(now - 2 * HOUR) }, repliedAt: iso(now - DAY), noteAt: null, followUpAt: null } }, {},
       ["review-comments"]],

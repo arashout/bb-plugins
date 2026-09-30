@@ -117,7 +117,8 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
   const submitted = pr.latestReviews.filter((review) => review.state !== "PENDING");
   const green = checksGreen(pr.checkConclusions);
 
-  // Feedback to address first, on any PR: an approval's note, else another person's comment, that you haven't answered.
+  // Feedback to address first, on any PR: an approval's note, else another person's comment, that no reply of yours on the PR answered
+  // (or, for the note, your Confirm). A PR or issue that mentions this one, such as the rest of its stack, answers neither.
   const open = feedbackToAddress(pr, pr.approvalFeedbackConfirmed === true);
   for (const item of open) {
     add(item.kind === "approval"

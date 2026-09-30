@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { evidenceText, handled, NO_EVIDENCE, type ApprovalEvidence } from "./approval-evidence.js";
+import { evidenceText, handled, linkedText, NO_EVIDENCE, type ApprovalEvidence } from "./approval-evidence.js";
 import { readApprovalHandling, type GhRunner } from "./ghactions.js";
 
 const target = { host: "github.com", owner: "inkwell", name: "folio", number: 301, slug: "inkwell/folio" };
 const APPROVED_AT = "a".repeat(40), LATER = "b".repeat(40), EARLIER = "c".repeat(40);
 const approval = { id: "review-301", state: "APPROVED", body: "Ship it, but the spine label should wrap at 40 characters.", submittedAt: "2026-09-28T12:00:00Z",
   author: { login: "mira" }, commit: { oid: APPROVED_AT } };
-/** `older`: GitHub has PR comments before the last 100 it returned. `author`: the PR's author, null for a deleted account. */
-type Facts = { head?: string; reviews?: unknown[]; threads?: unknown[]; comments?: unknown[]; older?: boolean; author?: string | null; commits?: string[] };
+/**
+ * `older`: GitHub has PR comments before the last 100 it returned. `author`: the PR's author, null for a deleted account. `timeline`: the
+ * issues and PRs that cross-reference this one.
+ */
+type Facts = { head?: string; reviews?: unknown[]; threads?: unknown[]; comments?: unknown[]; older?: boolean; author?: string | null; commits?: string[];
+  timeline?: unknown[] };
 /** A commit written before mira's approval and rebased after it, and Update branch's merge of the base after it. */
 const REBASED = "e".repeat(40), MERGE = "f".repeat(40);
 /** When each commit was written: three before mira's approval on the 28th, two after it. */
@@ -22,8 +26,8 @@ function github(facts: Facts = {}): GhRunner {
     if (query.includes("commits(last:100)")) return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head,
       commits: { pageInfo: { hasPreviousPage: false }, nodes: (facts.commits ?? [EARLIER, APPROVED_AT]).map((oid) => ({ commit: { oid,
         authoredDate: AUTHORED[oid], parents: { totalCount: oid === MERGE ? 2 : 1 } } })) } } } } }) };
-    return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head,
-      author: facts.author === null ? null : { login: facts.author ?? "dana" },
+    return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: head, baseRefName: "main",
+      author: facts.author === null ? null : { login: facts.author ?? "dana" }, timelineItems: { nodes: facts.timeline ?? [] },
       reviews: { pageInfo: { hasPreviousPage: false }, nodes: facts.reviews ?? [approval] },
       reviewThreads: { pageInfo: { hasNextPage: false }, nodes: facts.threads ?? [] },
       comments: { pageInfo: { hasPreviousPage: facts.older ?? false }, nodes: facts.comments ?? [] },
@@ -108,6 +112,34 @@ describe("approval handling evidence", () => {
     const some = await read({ threads: [thread(true), { ...thread(false), id: "thread-302" }] });
     expect([some.evidence.threads, handled(some.evidence), evidenceText(some.evidence)])
       .toEqual([{ total: 2, resolved: 1 }, false, "1 of 2 threads resolved; no commits or replies since this approval"]);
+  });
+
+  /**
+   * The live case that dropped off Your turn: a conditional approval, then, hours later, the rest of its stack, whose bodies mention this
+   * PR. The confirm names them, since one may be the separate PR the condition asked for, but none is a reply: with nothing else since,
+   * the confirm still finds no evidence.
+   */
+  it("lists the PRs and issues the author linked this one from since the approval, and never counts them as handling", async () => {
+    const conditional = { ...approval, body: "Approving, on the understanding that spine wrapping comes in a separate PR." };
+    const mention = (at: string, source: Record<string, unknown>, actor = "dana", isCrossRepository = false) => ({ createdAt: at, isCrossRepository,
+      actor: { __typename: "User", login: actor }, source });
+    const pr = (repo: string, number: number, baseRefName = "main") => ({ __typename: "PullRequest", number, baseRefName, repository: { nameWithOwner: repo } });
+    const stack = await read({ reviews: [conditional], timeline: [
+      // An issue linked before the approval says nothing about it.
+      mention("2026-09-28T09:00:00Z", { __typename: "Issue", number: 40, repository: { nameWithOwner: "inkwell/folio" } }),
+      mention("2026-09-28T18:00:00Z", pr("inkwell/folio", 302)),
+      mention("2026-09-28T19:00:00Z", pr("inkwell/catalog", 97), "dana", true),
+      // Edited again, the same PR mentions it twice; a teammate's PR, and a PR stacked on this one's branch, aren't follow-ups.
+      mention("2026-09-28T20:00:00Z", pr("inkwell/folio", 302)),
+      mention("2026-09-28T21:00:00Z", pr("inkwell/folio", 303), "otto"),
+      mention("2026-09-28T22:00:00Z", pr("inkwell/folio", 304, "dana/spine-wrap")),
+    ] });
+    expect(stack.evidence).toEqual({ since: approval.submittedAt, commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true,
+      linked: [{ repo: "inkwell/folio", number: 302 }, { repo: "inkwell/catalog", number: 97 }] });
+    expect([handled(stack.evidence), evidenceText(stack.evidence), linkedText(stack.evidence)])
+      .toEqual([false, NO_EVIDENCE, "Linked: folio #302, catalog #97 mention this PR"]);
+    // With none since the approval, it names none.
+    expect(linkedText((await read({ reviews: [conditional] })).evidence)).toBeNull();
   });
 
   it("calls the read cut short when GitHub's last 100 PR comments all follow the note, or the PR's author is unknown", async () => {

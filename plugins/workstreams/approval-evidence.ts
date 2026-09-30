@@ -5,7 +5,10 @@
 // review reply), and every inline thread the newest note opened resolved.
 // With none of those, one click never confirms: its thread is asked to
 // address the notes, or you confirm anyway and the record says there was no
-// evidence. This module imports only zod, so the browser can use it (A12.1).
+// evidence. Issues and PRs the author linked the PR from since are shown
+// beside it, since one may be the follow-up the note asked for, but a
+// mention is no reply and never counts. This module imports only zod, so the
+// browser can use it (A12.1).
 import { z } from "zod";
 
 /** How much of one note the confirm shows. */
@@ -31,6 +34,8 @@ export const approvalEvidenceSchema = z.object({
   threads: z.object({ total: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() }).strict(),
   /** False when GitHub's answer was cut short, so a commit or reply may be unread: that is never evidence. */
   complete: z.boolean(),
+  /** Issues and PRs the PR's author linked it from since, oldest first: shown, never counted. Absent when there are none. */
+  linked: z.array(z.object({ repo: z.string().max(200), number: z.number().int().positive() }).strict()).max(50).optional(),
 }).strict();
 export type ApprovalEvidence = z.infer<typeof approvalEvidenceSchema>;
 
@@ -49,6 +54,12 @@ export function evidenceText(evidence: ApprovalEvidence): string {
   if (!handled(evidence)) return resolved ? `${resolved} of ${plural(total, "thread")} resolved; no commits or replies since this approval` : NO_EVIDENCE;
   return `${[evidence.commits && plural(evidence.commits, "commit"), evidence.replies && plural(evidence.replies, "reply", "replies"),
     total && `${resolved} of ${plural(total, "thread")} resolved`].filter(Boolean).join(" · ")} since this approval`;
+}
+
+/** The follow-ups since the approval in one line, by repository name and number; null when there are none. */
+export function linkedText(evidence: ApprovalEvidence): string | null {
+  const refs = (evidence.linked ?? []).map(({ repo, number }) => `${repo.split("/").at(-1)} #${number}`);
+  return refs.length ? `Linked: ${refs.join(", ")} ${refs.length === 1 ? "mentions" : "mention"} this PR` : null;
 }
 
 /** The confirm's fresh read: the head and feedback it binds to, each note, and the evidence since the newest. */

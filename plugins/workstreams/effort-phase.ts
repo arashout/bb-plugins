@@ -141,7 +141,7 @@ const WAKES: Record<string, [event: string, pollMs: number]> = {
   draft: ["the draft state changes, or a command names this PR", 15 * MINUTE],
   "merge-blocked": ["the merge state changes", 15 * MINUTE],
   "merge-requirements": ["the merge state changes", 15 * MINUTE],
-  feedback: ["your reply, a follow-up that links it, or your confirmation", 15 * MINUTE],
+  feedback: ["your reply on the PR, or your confirmation", 15 * MINUTE],
   "writer-available": ["the other writer goes idle or releases its claim", 2 * MINUTE],
   capacity: ["a v2 worker turn ends", 2 * MINUTE],
   "launch-breaker": ["readback resolves the uncertain launches", 2 * MINUTE],
@@ -446,7 +446,7 @@ export function decide(input: DecideInput): Next {
 
   // 10. Waits, each with its owner, feedback to address first: only you answer it, and no worker's evidence does.
   const unanswered = unansweredFeedback(facts, input.feedback);
-  if (unanswered?.length) return waiting("feedback", `${FEEDBACK_LABEL[unanswered[0]!.kind]}: reply, link a follow-up, or confirm it`, user);
+  if (unanswered?.length) return waiting("feedback", `${FEEDBACK_LABEL[unanswered[0]!.kind]}: reply on the PR or confirm it`, user);
   if (gates["checks-settled"] === false) return waiting("ci", `Checks running on ${facts.headOid.slice(0, 7)}`, { kind: "ci", ref: null });
   if (gates["parent-merged"] === false) return waiting("parent", `Waiting for parent #${facts.basePrNumber} to merge`, { kind: "pr", ref: `${facts.repo}#${facts.basePrNumber}` });
   if (facts.isDraft) return waiting("draft", "You kept this PR a draft", user);
