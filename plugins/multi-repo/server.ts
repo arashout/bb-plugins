@@ -58,6 +58,7 @@ import {
   MAX_PATCH_BYTES,
   PR_CACHE_TTL_MS,
   REPOS_CHANGED_CHANNEL,
+  THREAD_CHANGES_CHANNEL,
 } from "./shared.js";
 
 const CREATE_TIMEOUT_MS = 60 * 60 * 1000;
@@ -206,6 +207,34 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
   function changed(): void {
     bb.realtime.publish(REPOS_CHANGED_CHANNEL, { at: Date.now() });
   }
+
+  /**
+   * One thread's working tree may have moved.
+   *
+   * `pullRequests` says whether the `gh`-backed half moved too, so a routine
+   * turn-finished signal does not make every open panel shell out to `gh`.
+   */
+  function threadChanged(threadId: string, options: { pullRequests: boolean } = { pullRequests: false }): void {
+    bb.realtime.publish(THREAD_CHANGES_CHANNEL, {
+      at: Date.now(),
+      threadId,
+      pullRequests: options.pullRequests,
+    });
+  }
+
+  /**
+   * A finished turn is the moment the diff is worth looking at again.
+   *
+   * Nothing in bb tells a panel that files on a machine changed, and every
+   * other publisher on these channels fires on environment or repo-set edits
+   * only — which is why an open Changes tab used to keep showing whatever was
+   * on disk when it mounted. The panel also polls while it is open; this is
+   * what makes a finished turn land without waiting for the next tick.
+   */
+  bb.events.on("thread.idle", ({ thread }) => {
+    if (manifestForThread(thread.id) === null) return;
+    threadChanged(thread.id);
+  });
 
   /* ------------------------------------------------- the project source */
 
@@ -1088,7 +1117,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       // Any write invalidates the read, whether or not it succeeded: a failed
       // merge still may have changed the PR's mergeability.
       db.prepare(`DELETE FROM pr_cache WHERE thread_id = ? AND dir = ?`).run(threadId, dir);
-      changed();
+      threadChanged(threadId, { pullRequests: true });
       return result;
     },
   });

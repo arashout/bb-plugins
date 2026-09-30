@@ -231,6 +231,18 @@ This is the expensive part of a diff UI and it comes free.
 
 Reference material in bb (read, don't import): the `gh --json` field list and the checks/review/mergeability normalizers at `packages/host-workspace/src/git-host.ts:35-38,235-282`; the bundled `github` plugin's batched polling into a plugin SQLite table at `plugins/github/server.ts:670-695`.
 
+### Staying current
+
+Nothing in bb tells a panel that a file on a machine changed: there is no
+watcher signal a plugin can subscribe to, so a panel that loads once at mount
+shows the thread's opening snapshot forever. The diff half therefore polls
+while the tab is visible — three short git commands per repo against a warm
+checkout — and a `thread.idle` listener publishes a realtime signal so a
+finished turn lands without waiting for the tick.
+
+The `gh` half is explicitly excluded from that loop, and the two halves fail
+independently: a machine without `gh` must not be able to hide the diffs.
+
 Defer bb's hardening until it's needed: diff tiering and pagination, list virtualization, byte budgeting, patch-section splitting. Cap file count and per-file bytes instead.
 
 Surfaces: `ui.threadPanelAction` for the panel, `ui.fileOpener` to claim workspace file-open targets so timeline file links route in rather than dead-ending.

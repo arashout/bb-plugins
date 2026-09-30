@@ -194,6 +194,14 @@ Pull requests go through `gh`, per repo, cached for a minute. A workspace can
 span two orgs and an Enterprise host, so each repo is asked independently and a
 machine without `gh` is reported per repo rather than failing the panel.
 
+**The two halves refresh independently, and the diff half refreshes itself.**
+Nothing in bb tells a panel that a file on a machine changed, so the diff half
+re-reads itself every few seconds while the tab is visible, and a finished turn
+publishes a signal so it lands sooner than the next tick. Pull requests stay
+out of that loop — they shell out to `gh` over the network — and a `gh` failure
+therefore shows as its own line rather than taking the diffs down with it. The
+Refresh button is the force path for both.
+
 ## Failure policy
 
 A repo that fails to materialize does not fail the environment. It is recorded
