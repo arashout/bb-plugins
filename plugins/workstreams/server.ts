@@ -30,7 +30,7 @@ import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type
 import { createEffortNotesStore, EFFORT_NOTES_MIGRATION, effortNotesContract } from "./effort-notes.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
-import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
+import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch, type PlanRow } from "./deck-batch.js";
 import { DECK_CHANGED, SERVICE_PREFIX, type DeckPile, type RowActed } from "./deck-shared.js";
 import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
@@ -153,7 +153,7 @@ import {
   withinPath,
 } from "./threads.js";
 import { startThread } from "./spawn.js";
-import { approvalFeedbackAsk } from "./effort-recipes.js";
+import { approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
 import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
 import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
@@ -5674,7 +5674,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** An inventory action as the deck batch kind that runs it. */
-  const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm", "ask-thread": "ask" } as const;
+  const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm", "ask-thread": "ask", "ask-fix": "fix" } as const;
   /** Everything the effort deck reads, from one board read. See deck.ts. */
   async function deckInput(seen: Readonly<Record<string, number>> = {}, ghosts: readonly string[] = []): Promise<DeckInput> {
     const current = await board();
@@ -5738,12 +5738,21 @@ export default async function plugin(bb: BbPluginApi) {
     const wanted = prUrls && new Set(prUrls.map(prWorkItemKey));
     const rows = deckRows(await deckInput()).filter(({ input, cardId }) => (!effortId || cardId === (effort?.id ?? effortId)) && (!wanted || wanted.has(input.prUrl)));
     const seenAt = new Map(Object.entries(seen));
-    // Ask names where it goes, and creates nothing to get there.
+    // Ask and Fix name where each goes, and create nothing to get there.
+    const to = (route: Exclude<AskRoute, { kind: "none" }>) => route.kind === "thread" ? `Ask “${route.title}”` : `Start a thread under ${route.under}`;
     const route = kind === "ask" ? await askRoute(prWorkItemKey(prUrls![0]!)) : null;
-    const ask = route && (route.kind === "none" ? { why: route.why }
-      : { to: route.kind === "thread" ? `Ask “${route.title}”` : `Start a thread under ${route.under}` });
+    const ask = route && (route.kind === "none" ? { why: route.why } : { to: to(route) });
+    const work = kind === "fix" ? readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads()) : null;
+    // Each fix keeps where its listing said it goes, so it's refused rather than sent anywhere else.
+    const fixes = new Map(work ? await Promise.all(rows.filter(({ row }) => row.section === "work").map(async ({ row }): Promise<[string, NonNullable<PlanRow["fix"]>]> => {
+      const pr = inventory.get(row.prUrl)?.pr;
+      const route = await askRoute(row.prUrl, work);
+      return [row.prUrl, route.kind === "none" ? { why: route.why } : { to: to(route), fixes: pr ? fixesFor(pr) : [],
+        route: route.kind === "thread" ? { kind: "thread", id: route.id } : { kind: "new", parentThreadId: route.parentThreadId } }];
+    })) : []);
     const planned = planBatch(kind, rows.map(({ row, input, pile }) => ({ row, pile, seenAt: seenAt.get(row.prUrl), head: input.head,
-      fingerprint: input.feedbackFingerprint, shown: input.reviewers, ...ask ? { ask } : {} })), { selected: !!wanted, reviewers });
+      fingerprint: input.feedbackFingerprint, shown: input.reviewers, ...ask ? { ask } : {}, ...fixes.has(row.prUrl) ? { fix: fixes.get(row.prUrl)! } : {} })),
+    { selected: !!wanted, reviewers });
     for (const url of wanted ?? []) if (!rows.some(({ row }) => row.prUrl === url)) {
       const target = prTarget(url);
       planned.skipped.push({ prUrl: url, ref: target ? `${target.name} #${target.number}` : url, reason: effortId ? "Not an open PR on this card." : "Not an open PR on the deck." });
@@ -5792,9 +5801,9 @@ export default async function plugin(bb: BbPluginApi) {
    * in its checkout beneath the parent the board places PR threads under (its effort's repository controller, or its repository's parent
    * when no effort owns it), and only once that parent exists. Asking never stores an effort or starts a coordinator, controller, or parent.
    */
-  async function askRoute(prUrl: string): Promise<AskRoute> {
+  async function askRoute(prUrl: string, read?: ReturnType<typeof readWorkContext>): Promise<AskRoute> {
     const pattern = compilePattern((await settings.get()).ticketPattern);
-    const work = readWorkContext(await board(), pattern, false, prFacts.reads());
+    const work = read ?? readWorkContext(await board(), pattern, false, prFacts.reads());
     const { executor, origin } = rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
       attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null });
     const thread = executor ?? origin;
@@ -5810,8 +5819,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (!parentThreadId) return { kind: "none", why: "This PR has no thread, and nothing to start one under yet." };
     return { kind: "new", under: scope?.name ?? known.repo, path, ticket, parentThreadId };
   }
-  /** A new thread in the PR's checkout, sent the approval-feedback recipe, beneath the parent its route found. */
-  async function startApprovalThread(prUrl: string, message: string, route: Extract<AskRoute, { kind: "new" }>): Promise<{ ok: true; detail: string } | { ok: false; error: string }> {
+  /**
+   * A new worker thread in the PR's checkout on the code-work model, sent one recipe for this PR alone, beneath the parent its route found.
+   * `why` finishes its result: "to address the notes".
+   */
+  async function startPrThread(prUrl: string, message: string, route: Extract<AskRoute, { kind: "new" }>, why: string): Promise<{ ok: true; detail: string } | { ok: false; error: string }> {
     const known = knownPr(prUrl);
     if (!known) return { ok: false, error: "This PR is no longer on the board; nothing was sent." };
     const prompt = `Workstreams row: ${known.repo} #${known.pr.number} — ${known.pr.title}\nPR: ${prWorkItemKey(prUrl)}\nCheckout: ${route.path}\n\n${message}`;
@@ -5822,7 +5834,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!result.ok) return result;
       startedFor.set(result.threadId, result.ticket);
       announceThreads();
-      return { ok: true, detail: `Started a thread under ${route.under} to address the notes.` };
+      return { ok: true, detail: `Started a thread under ${route.under} ${why}.` };
     } catch (error) { return { ok: false, error: `The thread couldn't start, so nothing was sent: ${String(error).slice(0, 300)}` }; }
   }
   /** The confirm's read: the notes and their evidence, and where Ask would send, or why it can't. */
@@ -5900,9 +5912,22 @@ export default async function plugin(bb: BbPluginApi) {
       const message = approvalFeedbackAsk({ headOid, notes: feedback.sourceIds.length });
       const route = await askRoute(prUrl);
       if (route.kind === "none") return { ok: false, error: `${route.why} Open a thread for it first; nothing was sent.` };
-      if (route.kind === "new") return startApprovalThread(prUrl, message, route);
+      if (route.kind === "new") return startPrThread(prUrl, message, route, "to address the notes");
       const sent = await rpcHandlers.thread_message({ prUrl, threadId: route.id, message });
       return sent.ok ? { ok: true, detail: `Asked “${route.title}” to address the notes.` } : sent;
+    },
+    // Each fix goes to the thread the PR's row names, as an ask does; only a PR with no thread gets a worker of its own, and only beneath a
+    // parent that already exists. Either way, only where its listing said: a thread that appeared or went away since refuses it.
+    fix: async (prUrl, { headOid, fixes, headBranch, route: listed }) => {
+      const message = fixThreadAsk({ fixes, headOid, headBranch });
+      const words = `to ${fixes.map((kind) => FIX_WORDS[kind]).join(", ")}`;
+      const route = await askRoute(prUrl);
+      if (route.kind === "none") return { ok: false, error: `${route.why} Open a thread for it first; nothing was sent.` };
+      const same = route.kind === "thread" ? listed?.kind === "thread" && listed.id === route.id : listed?.kind === "new" && listed.parentThreadId === route.parentThreadId;
+      if (!same) return { ok: false, error: "Its thread changed since the listing. Review it and try again; nothing was sent." };
+      if (route.kind === "new") return startPrThread(prUrl, message, route, words);
+      const sent = await rpcHandlers.thread_message({ prUrl, threadId: route.id, message });
+      return sent.ok ? { ok: true, detail: `Asked “${route.title}” ${words}.` } : sent;
     },
     record: recordAction,
   });
@@ -5938,6 +5963,7 @@ export default async function plugin(bb: BbPluginApi) {
   const deckBatches = createDeckBatches({ db, now: Date.now, changed: deckChanged,
     run: (item) => item.kind === "release" ? releaseHold(item.prUrl)
       : item.kind === "ask" ? inventoryActions.askThread(item.prUrl, item.headOid!, item.fingerprint!)
+      : item.kind === "fix" ? inventoryActions.askFix(item.prUrl, item.headOid!, item.fixes ?? [], item.route)
       : item.kind === "ready" ? inventoryActions.markReady(item.prUrl, item.headOid!)
       : item.kind === "nudge" ? inventoryActions.nudge(item.prUrl, item.reviewers)
       : inventoryActions.requestReview(item.prUrl, item.reviewers, item.shown!),

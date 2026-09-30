@@ -13,6 +13,9 @@
 // It writes nothing to GitHub, so it runs on any pile, as holding a PR does.
 // Ask sends one PR's own thread the approval-feedback recipe, from that PR's
 // review notes when nothing since the approval shows them handled; never Advance.
+// Fix sends each PR in Work in threads its own fix (conflicts, CI, requested
+// changes) in its existing thread, or starts a worker for it only when it has
+// none, and only where its listing said; never Advance, and never a merge.
 //
 // A batch lives in one row. Undo and dispatch each claim it from `scheduled`
 // in one statement, so exactly one wins, even while a reload's replacement
@@ -26,6 +29,7 @@ import { z } from "zod";
 import { ACTED_KINDS, ACTED_MS, BATCH_KINDS, DECK_WRITES, needsYou, SEND_DELAY_MS, type BatchKind, type DeckPile, type DeckWrite, type RowActed }
   from "./deck-shared.js";
 import { deckSeenSchema, type DeckRow } from "./deck.js";
+import { FIX_KINDS, FIX_WORDS, type FixKind } from "./effort-recipes.js";
 import type { ActionResult, ShownReviewers } from "./inventory-actions.js";
 
 /** Append-only: server.ts adds this after PR merge sightings (id 63). */
@@ -39,6 +43,10 @@ const LATE_MS = 60_000;
 
 /** A confirmation in a batch planned before confirmations became per PR: it's refused, never sent. */
 const LEGACY_CONFIRM = "Review notes are confirmed one PR at a time now, after reading them. Nothing was recorded.";
+/** Where a fix's listing said it goes: the PR's thread, or a new one beneath this parent. */
+const routeSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("thread"), id: z.string() }).strict(),
+  z.object({ kind: z.literal("new"), parentThreadId: z.string() }).strict()]);
+export type PlannedRoute = z.infer<typeof routeSchema>;
 const itemSchema = z.object({
   /** `confirm` only in a batch planned before confirmations became per PR. */
   prUrl: z.string(), ref: z.string(), title: z.string(), kind: z.enum(ACTED_KINDS),
@@ -46,8 +54,10 @@ const itemSchema = z.object({
   what: z.string(),
   /** Whom a nudge or request asks. */
   reviewers: z.array(z.string()),
-  /** The head Mark ready and an ask bind to, and the approval notes an ask covers. */
+  /** The head Mark ready, an ask, and a fix bind to, and the approval notes an ask covers. */
   headOid: z.string().nullable(), fingerprint: z.string().nullable(), notes: z.number(),
+  /** What a fix asks its thread to do, and where, which it's refused rather than sent elsewhere once that changes. */
+  fixes: z.array(z.enum(FIX_KINDS)).optional(), route: routeSchema.optional(),
   /** The reviewers the row showed, which a request checks before it asks. */
   shown: z.object({ requested: z.array(z.string()), reviewed: z.array(z.object({ login: z.string(), state: z.string() }).strict()) }).strict().nullable(),
   state: z.enum(["pending", "sending", "sent", "refused", "unknown"]),
@@ -96,7 +106,9 @@ export const deckBatchContract = {
 export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
   pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers;
   /** Ask's destination, as the listing names it ("Ask “Spine labels”", "Start a thread under Store pickup"), or why it has none. */
-  ask?: { to: string } | { why: string } };
+  ask?: { to: string } | { why: string };
+  /** A fix's destination, named as Ask's is, with what its PR needs now; or why it has none. */
+  fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string } };
 
 const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
@@ -112,6 +124,7 @@ export function planBatch(kind: DeckWrite | "advance", rows: readonly PlanRow[],
   { items: Omit<BatchItem, "state" | "detail" | "at">[]; skipped: Skipped[] } {
   if (kind === "release") return planRelease(rows, options.selected);
   if (kind === "ask") return planAsk(rows);
+  if (kind === "fix") return planFix(rows, options.selected);
   const kinds: readonly BatchKind[] = kind === "advance" ? BATCH_KINDS : [kind];
   const items: Omit<BatchItem, "state" | "detail" | "at">[] = [], skipped: Skipped[] = [];
   for (const { row, pile, seenAt, head, shown } of rows) {
@@ -153,6 +166,26 @@ function planAsk(rows: readonly PlanRow[]): ReturnType<typeof planBatch> {
     if (ask && "why" in ask) { skip(ask.why); continue; }
     items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "ask", what: `${ask?.to ?? "Ask its thread"} to address ${row.notes === 1 ? "1 note" : `${row.notes} notes`}`,
       reviewers: [], headOid: head, fingerprint, notes: row.notes, shown: null });
+  }
+  return { items, skipped };
+}
+
+/**
+ * Fix: each PR whose next move is its thread's work, with the fixes it needs, bound to the head its row showed. Without a selection, other
+ * rows are simply not in the plan.
+ */
+function planFix(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof planBatch> {
+  const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
+  for (const { row, pile, seenAt, head, fix } of rows) {
+    const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
+    const skip = (reason: string) => skipped.push({ prUrl: row.prUrl, ref, reason });
+    if (row.section !== "work") { if (selected) skip(row.hold ? "On hold. Release it first." : "Its next move isn't a thread's work."); continue; }
+    if (!needsYou(row, pile, seenAt)) { skip(PILE_WHY[pile] ?? "A write on it is waiting or just ran."); continue; }
+    if (!head) { skip("Not read in full yet. Refresh it first."); continue; }
+    if (!fix || "why" in fix) { skip(fix?.why ?? "It has no thread to ask."); continue; }
+    if (!fix.fixes.length) { skip("Nothing a thread can fix: no conflict, failing check, or requested change."); continue; }
+    items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "fix", what: `${fix.to}: ${fix.fixes.map((item) => FIX_WORDS[item]).join(", ")}`, reviewers: [],
+      headOid: head, fingerprint: null, notes: 0, fixes: [...fix.fixes], route: fix.route, shown: null });
   }
   return { items, skipped };
 }

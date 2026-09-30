@@ -18,7 +18,7 @@ import { userConfirmationSchema } from "./approval-evidence.js";
 
 export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
 /** Every action a row records, as inventory-actions.ts takes them. */
-export const INVENTORY_ACTIONS = ["mark-ready", "request-review", "nudge", "confirm-handled", "ask-thread", "revoke-confirmation"] as const;
+export const INVENTORY_ACTIONS = ["mark-ready", "request-review", "nudge", "confirm-handled", "ask-thread", "ask-fix", "revoke-confirmation"] as const;
 export type InventoryQuestion = (typeof INVENTORY_QUESTIONS)[number];
 
 const threadSchema = z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict();

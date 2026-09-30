@@ -74,7 +74,7 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
         return { ok: true, headOid: pr.headRefOid!, fingerprint: pr.approvalFeedback!.fingerprint!, sources: [],
           evidence: { since: new Date(NOW - 86_400_000).toISOString(), commits: 0, replies: 1, threads: { total: 0, resolved: 0 }, complete: true } }; },
       confirm: (prUrl, headOid, feedback, evidence) => { store.confirm(prUrl, feedback, headOid, NOW, evidence); }, record: async () => {},
-      ask: async () => { throw new Error("Confirming asks no thread"); } });
+      ask: async () => { throw new Error("Confirming asks no thread"); }, fix: async () => { throw new Error("Confirming asks no thread"); } });
     for (const pr of approvedWithComments) {
       // The row's click opens its notes; the confirm there binds to the head and notes the read showed.
       const call = actionCall(rowOf(pr), action(find(pr), "confirm-handled")!);

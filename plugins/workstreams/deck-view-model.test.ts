@@ -40,13 +40,15 @@ describe("the effort deck's strip", () => {
 });
 
 describe("an effort card", () => {
-  it("files rows by the move they need, with one batch button per section and none for code work, which each PR's thread does", () => {
+  it("files rows by the move they need, with one batch button per section, code work's asking each PR's thread for its fix", () => {
     const shelf = card(inkwellDeck(), SHELF);
     expect(lines(shelf)).toEqual({ merge: ["folio #340", "folio #341", "folio #342", "folio #343"], work: ["folio #330 [Work on folio #330]"] });
     // Each line says only what its section doesn't: who approved a merge, whom a nudge asks, how many notes wait.
     expect(shelf.sections[0]!.lines[0]!.info).toEqual({ text: "✓ @mira-l", tone: null });
     expect(shelf.sections.map((section) => [section.key, section.count, section.action?.label ?? null, section.action?.key ?? null]))
-      .toEqual([["merge", 4, "Preview merge", "m"], ["work", 1, null, null]]);
+      .toEqual([["merge", 4, "Preview merge", "m"], ["work", 1, "Ask threads to fix (1)", "f"]]);
+    // Advance never includes a thread's work: that's the section's own button, which you press.
+    expect(shelf.advance).toEqual([]);
     const pickup = card(inkwellDeck(), PICKUP);
     expect(pickup.sections.find((section) => section.key === "blocked")!.lines.map((line) => [line.ref, line.needs, line.info?.text]))
       .toEqual([["quill #212", false, "Merges after quill #210"], ["spine #156", false, "Merges after spine #155"]]);

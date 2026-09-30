@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDeckBatches, DECK_BATCH_MIGRATION, planBatch, type PlanRow } from "./deck-batch.js";
+import { createDeckBatches, DECK_BATCH_MIGRATION, planBatch, type PlannedRoute, type PlanRow } from "./deck-batch.js";
 import type { DeckSection } from "./deck-shared.js";
 
 const HEAD = "c".repeat(40);
@@ -75,6 +75,32 @@ describe("planning an ask", () => {
     expect(plan({ to: "Start a thread under Counter redesign" }).items).toEqual(["ask quill #700: Start a thread under Counter redesign to address 1 note"]);
     expect(plan({ why: "This PR has no thread, and nothing to start one under yet." })).toEqual({ items: [],
       skipped: ["quill #701: This PR has no thread, and nothing to start one under yet."] });
+  });
+});
+
+describe("planning a fix", () => {
+  // Code work is each PR's thread's. Asking threads to fix names each PR's own fix and where it goes, and leaves out what can't take it.
+  it("asks each chosen PR in Work in threads for its own fix, bound to the head it showed, and never in Advance", () => {
+    next = 720;
+    const to = (fixes: ("conflicts" | "checks" | "changes")[], where = "Ask “Hold slips”", route: PlannedRoute = { kind: "thread", id: "thr_slips" }) =>
+      ({ fix: { to: where, route, fixes } });
+    const rows = [row("work", {}, to(["conflicts", "checks"])), row("work", {}, to(["changes"], "Start a thread under Store pickup", { kind: "new", parentThreadId: "thr_pickup" })),
+      row("nudge"),
+      row("work", { acted: { kind: "fix", state: "queued", at: 1, batchId: "b" } }, to(["checks"])), row("work", {}, { head: null, ...to(["checks"]) }),
+      row("work", {}, { fix: { why: "This PR has no thread, and nothing to start one under yet." } }), row("work", {}, to([])), row("work", {}, { pile: "held", ...to(["checks"]) }),
+      row("held", { hold: { reason: "Counter redesign", since: 1 } })];
+    expect(brief(planBatch("fix", rows, { selected: true }))).toEqual({ items: [
+      "fix quill #720: Ask “Hold slips”: resolve conflicts, fix CI", "fix quill #721: Start a thread under Store pickup: address changes"], skipped: [
+      "quill #722: Its next move isn't a thread's work.", "quill #723: A write on it is waiting or just ran.", "quill #724: Not read in full yet. Refresh it first.",
+      "quill #725: This PR has no thread, and nothing to start one under yet.", "quill #726: Nothing a thread can fix: no conflict, failing check, or requested change.",
+      "quill #727: Its effort is on hold.", "quill #728: On hold. Release it first."] });
+    // Each keeps where its listing said it goes, which its send checks again.
+    expect(planBatch("fix", rows.slice(0, 2), { selected: true }).items.map(({ kind, headOid, fixes, route }) => ({ kind, headOid, fixes, route }))).toEqual([
+      { kind: "fix", headOid: HEAD, fixes: ["conflicts", "checks"], route: { kind: "thread", id: "thr_slips" } },
+      { kind: "fix", headOid: HEAD, fixes: ["changes"], route: { kind: "new", parentThreadId: "thr_pickup" } }]);
+    // A section's button plans its own rows; Advance never plans a thread's work.
+    expect(brief(planBatch("fix", rows, { selected: false })).items).toHaveLength(2);
+    expect(brief(planBatch("advance", rows, { selected: false })).items).toEqual(["nudge quill #722: Nudge @mira"]);
   });
 });
 

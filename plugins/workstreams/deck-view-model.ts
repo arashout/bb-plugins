@@ -29,17 +29,18 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
   nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
   request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
-  work: { title: "Work in threads", tone: "amber", action: null, button: null, help: "Conflicts, failing checks, and requested changes. Each is fixed in its PR's thread; o opens it." },
+  work: { title: "Work in threads", tone: "amber", action: "fix", button: "Ask threads to fix", help: "Conflicts, failing checks, and requested changes. Each is fixed in its PR's thread; o opens it. Ask threads to fix sends each its own fix, or starts a worker for one with no thread, after 8 s with Undo. Nothing merges." },
   flight: { title: "In flight", tone: "gray", action: null, button: null, fold: true, help: "In review under a business day, checks running, or a thread working on it. Nothing for you yet." },
   blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR or an open decision." },
   held: { title: "Held", tone: "gray", action: "release", button: "Release…", help: "PRs you held, with why and for how long. Nothing acts on one until you release it; Release lists each one first, then waits 8 s with Undo." },
 };
 /** The batch each act key plans. */
-export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { nudge: "nudge", request: "request", ready: "ready", release: "release" };
-const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "held" };
+export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { nudge: "nudge", request: "request", ready: "ready", release: "release", fix: "fix" };
+const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "held",
+  fix: "work" };
 const ACTED: Record<ActedKind, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
   request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"],
-  ask: ["Asking its thread…", "Asked its thread"] };
+  ask: ["Asking its thread…", "Asked its thread"], fix: ["Asking to fix…", "Asked to fix"] };
 /** A held row Release can take: still held, and nothing you did to it waits for Mark seen. */
 const releasable = (line: Pick<DeckLine, "row" | "dim">) => !line.dim && !!line.row?.hold;
 /** Muted effort colors, picked by the effort's id so a card keeps its color across reads and sessions. */
@@ -307,7 +308,8 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     const count = lines.filter((line) => line.needs).length;
     // Held rows never need you; Release takes the ones still held.
     const takes = key === "held" ? lines.filter(releasable).length : count;
-    const action = meta.action && meta.button ? { id: meta.action, label: meta.button, key: ACTION[meta.action].keys[0]!, count: takes,
+    // Asking threads says how many it asks, since each PR gets a thread's work of its own.
+    const action = meta.action && meta.button ? { id: meta.action, label: key === "work" ? `${meta.button} (${takes})` : meta.button, key: ACTION[meta.action].keys[0]!, count: takes,
       enabled: takes > 0 && (card.pile === "active" || key === "held"), why: takes ? null : "Nothing left here; dimmed rows settle on Mark seen" } : null;
     return [{ key, meta, count, changed: lines.filter((line) => line.dot !== null).length, lines, arriving, action }];
   });
@@ -526,7 +528,7 @@ export function advanceTarget(context: Pick<KeyContext, "cur" | "focused" | "sel
 
 const NO_CARD = "open an effort card";
 const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are waiting", nudge: "no nudge is due", request: "every PR has a reviewer",
-  ready: "no draft is ready", release: "nothing here is on hold" } as const;
+  ready: "no draft is ready", release: "nothing here is on hold", fix: "no PR here needs a thread's fix" } as const;
 /** Every action's availability now, with why one can't run, for the keys, the hint bar, the ? sheet, and ⌘K. */
 export function availability(context: KeyContext): Availability {
   const { focused, selected } = context;
@@ -556,7 +558,7 @@ export function availability(context: KeyContext): Availability {
   set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   set("notes", !!card?.notes, card ? "only an effort keeps notes" : deck ? NO_CARD : "Efforts only");
-  for (const id of ["merge", "confirm", "nudge", "request", "ready", "release"] as const) {
+  for (const id of ["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);
   }
@@ -589,9 +591,10 @@ export function availability(context: KeyContext): Availability {
 export function hintKeys(context: KeyContext, on: Availability): [string, string][] {
   const { focused } = context;
   const pick = (...items: ([DeckActionId, string] | false)[]) => items.flatMap((item) => item && on[item[0]].on ? [[ACTION[item[0]].keys.join(" "), item[1]] as [string, string]] : []);
-  const move = (["merge", "confirm", "nudge", "request", "ready", "release"] as const).find((id) => on[id].on
+  const move = (["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const).find((id) => on[id].on
     && (context.view === "prs" || (!!focused && targets(id, { cur: null, focused, selected: [] }).length > 0)));
-  const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : ACTION[move].title.replace("…", "").toLowerCase()] as
+  const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : move === "fix" ? "ask to fix"
+    : ACTION[move].title.replace("…", "").toLowerCase()] as
     [DeckActionId, string] : false;
   if (context.view === "prs") return pick(["row-next", "rows"], moveHint, ["open-thread", "open thread"], ["view", "Efforts"]);
   // a takes the focused row when its step is safe, else the whole card: the hint says which.
@@ -599,7 +602,7 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
     : context.cur?.card.kind === "effort" ? "advance effort" : "advance card"];
   // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
-  const rowHint = move === "merge" || move === "release" || move === "confirm" ? moveHint : false;
+  const rowHint = move === "merge" || move === "release" || move === "confirm" || move === "fix" ? moveHint : false;
   if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);

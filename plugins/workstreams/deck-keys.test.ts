@@ -30,9 +30,11 @@ describe("the deck's key registry", () => {
     expect([ACTION.confirm.effect, actionForKey({ key: "c" })?.id]).toEqual(["dialog", "confirm"]);
     // Release lifts your hold through the same listing and Undo window, though it writes nothing to GitHub.
     expect([ACTION.release.effect, actionForKey({ key: "l" })?.id]).toEqual(["confirm", "release"]);
+    // f asks each PR's thread for its fix, which pushes code, so it lists every PR first and waits out the same window.
+    expect([ACTION.fix.effect, actionForKey({ key: "f" })?.id]).toEqual(["confirm", "fix"]);
     // Nothing else reaches a write: every other action moves, changes the view, or opens a dialog.
     expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "preview").map((action) => action.id).sort())
-      .toEqual([...writes, "release"].sort());
+      .toEqual([...writes, "release", "fix"].sort());
   });
 
   it("repeats only row movement while a key is held, so a held a or n can't open two confirms", () => {

@@ -17,8 +17,10 @@ import type { Pr, PrWrite } from "./contract.js";
 import { REVIEWER } from "./ghactions.js";
 import type { AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
+import { fixesFor, FIX_WORDS, type FixKind } from "./effort-recipes.js";
+import type { PlannedRoute } from "./deck-batch.js";
 
-export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "ask-thread" | "revoke-confirmation";
+export type InventoryAction = "mark-ready" | "request-review" | "nudge" | "confirm-handled" | "ask-thread" | "ask-fix" | "revoke-confirmation";
 export type ActionResult = { ok: true; detail: string } | { ok: false; error: string };
 export type ActionRecord = { at: number; prUrl: string; action: InventoryAction; ok: boolean; detail: string; reviewers: string[] };
 /** The reviewers a row showed: those asked, and those who reviewed, with their latest review's state. */
@@ -49,11 +51,17 @@ export type InventoryActionDeps = {
    * Called without the PR's lock, which the send takes itself.
    */
   ask(prUrl: string, notes: { headOid: string; feedback: ApprovalFeedbackSnapshot }): Promise<ActionResult>;
+  /**
+   * Send the PR's own thread these fixes, starting a worker for it only when it has none, and only where `route` says the listing named.
+   * Called without the PR's lock, as `ask` is.
+   */
+  fix(prUrl: string, work: { headOid: string; fixes: FixKind[]; headBranch: string | null; route: PlannedRoute | undefined }): Promise<ActionResult>;
   record(entry: ActionRecord): Promise<void>;
 };
 
 type Step = { write: PrWrite; reviewers?: string[] } | { confirm: { headOid: string; feedback: ApprovalFeedbackSnapshot; evidence: ApprovalEvidence } }
-  | { ask: { headOid: string; feedback: ApprovalFeedbackSnapshot } } | { refuse: string };
+  | { ask: { headOid: string; feedback: ApprovalFeedbackSnapshot } } | { fix: { headOid: string; fixes: FixKind[]; headBranch: string | null; route: PlannedRoute | undefined } }
+  | { refuse: string };
 const logins = (values: readonly string[]) => [...new Set(values.map((login) => login.toLowerCase()))].sort().join(", ");
 const mentions = (values: readonly string[]) => values.map((login) => `@${login}`).join(", ");
 /** Who a nudge re-requests: every reviewer an overdue request or an answered change request names. */
@@ -108,6 +116,7 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       // GitHub doesn't change, so there's nothing to read back.
       // The thread send takes the PR's lock and checks every writer again itself.
       if ("ask" in step) { release(); return finish(await deps.ask(prUrl, step.ask)); }
+      if ("fix" in step) { release(); return finish(await deps.fix(prUrl, step.fix)); }
       if ("confirm" in step) {
         const { headOid, feedback, evidence } = step.confirm;
         deps.confirm(prUrl, headOid, feedback, evidence);
@@ -170,6 +179,13 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (notes.headOid !== headOid || notes.fingerprint !== fingerprint) return { refuse: "The approval's notes or head changed while they were read. Read them again; nothing was written." };
       if (!handled(notes.evidence) && !anyway) return { refuse: `${evidenceText(notes.evidence)}. Ask its thread to address it, or confirm anyway; nothing was written.` };
       return { confirm: { headOid, feedback, evidence: notes.evidence } };
+    }),
+    /** Ask the PR's thread for the fixes the listing named, where it named, on the head its row showed, and only those fresh facts still call for. */
+    askFix: (prUrl: string, headOid: string, fixes: readonly FixKind[], route: PlannedRoute | undefined) => act("ask-fix", prUrl, (fresh) => {
+      if (fresh.headRefOid !== headOid) return { refuse: "New commits landed since the row was shown. Review it and try again; nothing was sent." };
+      const still = fixesFor(fresh).filter((kind) => fixes.includes(kind));
+      if (!still.length) return { refuse: `It no longer needs to ${fixes.map((kind) => FIX_WORDS[kind]).join(" or ")}; nothing was sent.` };
+      return { fix: { headOid, fixes: still, headBranch: fresh.headRefName, route } };
     }),
     /** Ask the PR's thread to address the approval's notes the row showed, while fresh facts still show them unverified on that head. */
     askThread: (prUrl: string, headOid: string, fingerprint: string) => act("ask-thread", prUrl, (fresh) => {

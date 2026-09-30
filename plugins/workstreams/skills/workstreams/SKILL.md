@@ -876,7 +876,7 @@ whose ticket it carries.
 
 Every write from the deck is a batch the user confirms, and each step is only
 on their click. `deck_batch_plan` takes a `kind` (`nudge`, `request`,
-`ready`, `release`, `ask`, or `advance`) and an `effortId`, `prUrls`, or both. It
+`ready`, `release`, `ask`, `fix`, or `advance`) and an `effortId`, `prUrls`, or both. It
 writes nothing. It returns each PR's write (`items`, with `what` it does and
 the facts it binds to) and why any selected PR is left out (`skipped`). A plan
 covers the Needs you rows of that kind. The deck's per-row Advance is
@@ -897,7 +897,15 @@ A PR with no thread gets a new one in its checkout, beneath its effort's
 repository controller (or its repository's parent when no effort owns it),
 only when that parent already exists: Ask never stores an effort or starts a
 coordinator, controller, or parent, so without one the PR is skipped with why.
-`what` names where it goes. Advance never includes it.
+`what` names where it goes. Advance never includes it. `fix` covers the rows
+in Work in threads: each PR gets its own fix (`fixes`: resolve conflicts,
+update the branch, fix CI, address changes, or resolve review threads, from
+GitHub's facts) in the thread Ask would use, or a new worker on the code-work
+model beneath the same parent when it has none, else it is skipped with why.
+When it sends, it reads the PR again and asks only for the listed fixes still
+needed on the head the row showed, and only where the listing said: a PR whose
+thread appeared or went away since is refused. It never merges, and Advance
+never includes it.
 
 `deck_batch_start` confirms a plan within 10 minutes of it, while each of its
 PRs is on the active pile (a release needn't be). The batch sends 8 seconds later (`dispatchAt`)

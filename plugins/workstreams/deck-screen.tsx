@@ -299,7 +299,7 @@ function Details({ line, run, busy, leaves }: { line: DeckLine; run: Run; busy: 
     </div>
   </div>;
 }
-const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready" };
+const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", work: "fix" };
 
 function Section({ section, state, run, open, stuck, held, leaves }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean;
   leaves: boolean }) {
@@ -669,7 +669,8 @@ export function TopBar({ view, read, seen, run, onPalette, onHelp }: { view: "de
 export function BatchBar({ selected, kinds, sorting, leaves, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; sorting: boolean;
   leaves?: boolean; run: Run }) {
   if (!selected) return null;
-  const safe = kinds.filter((kind) => kind.id !== "merge").reduce((sum, kind) => sum + kind.count, 0);
+  // Advance runs the safe writes only: never a merge, and never a thread's work.
+  const safe = kinds.filter((kind) => kind.id !== "merge" && kind.id !== "fix").reduce((sum, kind) => sum + kind.count, 0);
   return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
     <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]">
       <b className="mr-1 font-semibold">{selected} selected</b>
@@ -714,7 +715,7 @@ export type ConfirmPlan = { title: string; sub: string; verb: string; items: rea
   skipped: readonly Pick<Skipped, "prUrl" | "ref" | "reason">[]; excluded: string | null; request: boolean;
   /** What happens after the window, as its footer says it: "Sends", or "Releases" for a release. */
   when?: string };
-const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray", ask: "violet" };
+const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray", ask: "violet", fix: "amber" };
 
 /**
  * The listing confirm: nothing is written until you press its button (or ⌘↵), and then only after SEND_DELAY_MS, which Undo cancels.

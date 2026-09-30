@@ -31,6 +31,7 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; evidence?: Approv
   const writes: PrWrite[] = [];
   const confirmed: unknown[][] = [];
   const asked: unknown[][] = [];
+  const fixed: unknown[][] = [];
   let hold: PrHold | null = null, writer: string | null = null, effortHold: string | null = null, locked = false;
   const { listed = true, fresh = pr() } = options;
   const deps: InventoryActionDeps = {
@@ -46,10 +47,11 @@ function setup(options: { listed?: boolean; fresh?: Pr | null; evidence?: Approv
     handling: async () => { log.push("notes"); return { ok: true as const, headOid: HEAD, fingerprint: FEEDBACK.fingerprint, sources: [], evidence: options.evidence ?? NONE }; },
     confirm: (...args) => { log.push("confirm"); confirmed.push(args); },
     ask: async (prUrl, notes) => { log.push(locked ? "ask while locked" : "ask"); asked.push([prUrl, notes]); return { ok: true as const, detail: "Asked its thread." }; },
+    fix: async (prUrl, work) => { log.push(locked ? "fix while locked" : "fix"); fixed.push([prUrl, work]); return { ok: true as const, detail: "Asked its thread to fix." }; },
     record: async (entry) => { records.push(entry); },
     ...options.deps,
   };
-  return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed, asked,
+  return { actions: createInventoryActions(deps), deps, log, records, writes, confirmed, asked, fixed,
     hold: (value: PrHold | null) => { hold = value; }, writer: (value: string | null) => { writer = value; },
     effortHold: (value: string | null) => { effortHold = value; }, lock: () => { locked = true; } };
 }
@@ -251,6 +253,33 @@ describe("inventory actions", () => {
       expect(env.asked).toEqual([]);
     }
     expect(held.asked).toEqual([]);
+  });
+
+  // Asking threads to fix sends code work, so it acts only on the head the listing showed and only for fixes GitHub still calls for.
+  const ROUTE = { kind: "thread", id: "thr_shelf" } as const;
+  it("asks the PR's thread for the listed fixes still needed on the head the row showed, after its lock is released, and writes nothing", async () => {
+    const broken = pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", headRefName: "abc-42-shelf" });
+    const env = setup({ fresh: broken });
+    expect(await env.actions.askFix(URL, HEAD, ["conflicts", "checks"], ROUTE)).toEqual({ ok: true, detail: "Asked its thread to fix." });
+    expect(env.log).toEqual(["read", "fix"]);
+    // CI went green since the listing, so only the conflicts are asked for.
+    // Where the listing said it goes travels with it, for the send to check.
+    expect(env.fixed).toEqual([[URL, { headOid: HEAD, fixes: ["conflicts"], headBranch: "abc-42-shelf", route: ROUTE }]]);
+    expect(env.writes).toEqual([]);
+    expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "ask-fix", ok: true, detail: "Asked its thread to fix.", reviewers: [] }]);
+  });
+
+  it("asks no thread to fix under a hold, after new commits, or once nothing listed needs fixing", async () => {
+    const held = setup({ fresh: pr({ mergeable: "CONFLICTING" }) });
+    held.hold({ reason: "Store layout first", heldAt: 0 });
+    expect(await held.actions.askFix(URL, HEAD, ["conflicts"], ROUTE)).toMatchObject({ ok: false, error: expect.stringContaining("On hold") });
+    for (const [fresh, error] of [[pr({ mergeable: "CONFLICTING", headRefOid: "b".repeat(40) }), "New commits landed"],
+      [pr({ mergeable: "MERGEABLE" }), "It no longer needs to resolve conflicts; nothing was sent."]] as const) {
+      const env = setup({ fresh });
+      expect(await env.actions.askFix(URL, HEAD, ["conflicts"], ROUTE)).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+      expect(env.fixed).toEqual([]);
+    }
+    expect(held.fixed).toEqual([]);
   });
 
   it("records a write GitHub refused, and doesn't read back what didn't change", async () => {

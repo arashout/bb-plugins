@@ -130,7 +130,9 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
           Every GitHub write lists each PR in a confirm, then waits {Math.round(SEND_DELAY_MS / 1_000)} s with Undo.
           Advance runs a card&apos;s safe next steps: nudge, request a review, and mark ready. A row with one of those
           steps has its own Advance, and a advances the focused row, else the card; the hint bar says which. Review notes
-          are confirmed one PR at a time, never by Advance. Merges run only from the fresh merge preview, on a click or ⌘↵.
+          are confirmed one PR at a time, never by Advance. Ask threads to fix, or f, sends each PR in Work in threads its own
+          fix in its thread, or starts a worker for one with none; it never merges. Merges run only from the fresh merge
+          preview, on a click or ⌘↵.
         </p>
       </Section>
 

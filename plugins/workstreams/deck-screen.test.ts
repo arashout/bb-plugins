@@ -57,13 +57,14 @@ describe("the effort deck's markup", () => {
     expect(html).toMatch(/<b class="shrink-0 font-medium[^"]*">#\d+<\/b>/u);
   });
 
-  it("gives the card its header actions with their keys, then one section per move with one batch button, and none for code work", () => {
+  it("gives the card its header actions with their keys, then one section per move with one batch button, code work's asking its threads", () => {
     const html = pane(inkwellDeck(), SHELF);
     expect(text(html)).toMatch(/Shelf order 5 need you · 1 in flight|Shelf order 5 need you/u);
     expect(button(html, "act-advance")).toEqual({ text: "Advance a", disabled: true });
     expect(button(html, "act-hold")).toEqual({ text: "Hold h", disabled: false });
     expect(text(section(html, "merge"))).toContain("Merge 4 ? Preview merge m");
-    expect(section(html, "work")).not.toContain("data-deck-focus=\"sec-work\"");
+    // Code work is each PR's thread's: its one button asks them, listing each first, and never runs under Advance.
+    expect(button(section(html, "work"), "sec-work")).toEqual({ text: "Ask threads to fix (1) f", disabled: false });
     expect(text(section(html, "work"))).toContain("Work on folio #330 ↗");
   });
 

@@ -5,9 +5,11 @@
 // worker's result or a code action's result. Code declares readiness: no
 // recipe merges, and a valid report never clears a row by itself.
 import type { AdvanceFacts } from "./advance-contract.js";
+import type { Pr } from "./contract.js";
 import { type Effect, EFFECTS } from "./effort-command.js";
 import type { ModelRole } from "./execution.js";
-import type { GateId } from "./pr-gates.js";
+import { changesAddressed, conflicted, type GateId } from "./pr-gates.js";
+import { checksFailed } from "./pr-checks.js";
 import { BRANCH_WORK, CHECKS_WORK, DRAFT_RULE, FEEDBACK_WORK, PUSH_RULES } from "./preparation-guidance.js";
 
 /** Conditions besides PR gates: instruction scope, writers, criteria, and the attempt a recipe follows. */
@@ -228,5 +230,39 @@ export function approvalFeedbackAsk(input: { headOid: string; notes: number }): 
     steps.map((step, index) => `${index + 1}. ${step}`).join("\n"),
     `${FEEDBACK_WORK.address} ${DRAFT_RULE}`,
     "Leave a commit, a reply on the PR, or resolved threads so Workstreams can see the notes were handled. Do not merge or deploy.",
+  ].join("\n\n");
+}
+
+/**
+ * The code work a PR in the deck's Work in threads section can ask its thread for, each one worker recipe's job: integrate_base for
+ * conflicts or a branch behind its base, fix_failing_checks for red CI, and address_review_feedback for requested changes or open review
+ * threads.
+ */
+export const FIX_KINDS = ["conflicts", "behind", "checks", "changes", "threads"] as const;
+export type FixKind = (typeof FIX_KINDS)[number];
+/** Each fix in a few words, as a listing names it. */
+export const FIX_WORDS: Record<FixKind, string> = { conflicts: "resolve conflicts", behind: "update the branch", checks: "fix CI", changes: "address changes",
+  threads: "resolve threads" };
+
+/** What a thread can fix on this PR now, from GitHub's facts. A branch behind its base needs no update of its own once it conflicts. */
+export function fixesFor(pr: Pick<Pr, "checkConclusions" | "mergeable" | "mergeStateStatus" | "reviewDecision" | "reviewFollowupPosted" | "unresolvedReviewThreads">): FixKind[] {
+  const has: Record<FixKind, boolean> = { conflicts: conflicted(pr), behind: !conflicted(pr) && pr.mergeStateStatus === "BEHIND", checks: checksFailed(pr.checkConclusions),
+    changes: !changesAddressed(pr), threads: (pr.unresolvedReviewThreads ?? 0) > 0 };
+  return FIX_KINDS.filter((kind) => has[kind]);
+}
+
+/**
+ * The fix recipe as a message to one PR's own thread, or to the worker started for it: exactly the fixes listed, on the head the deck
+ * showed, for this PR alone. It grants nothing a thread message doesn't, and never a merge.
+ */
+export function fixThreadAsk(input: { fixes: readonly FixKind[]; headOid: string; headBranch: string | null }): string {
+  const has = (...kinds: FixKind[]) => kinds.some((kind) => input.fixes.includes(kind));
+  const steps = [has("conflicts", "behind") ? BRANCH_WORK.integrate : null, has("checks") ? CHECKS_WORK : null, has("changes", "threads") ? FEEDBACK_WORK.address : null]
+    .filter((step): step is string => step !== null);
+  return [
+    `Fix this PR so it can move toward merge: ${input.fixes.map((kind) => FIX_WORDS[kind]).join(", ")}. expectedHead: ${input.headOid}; headBranch: ${input.headBranch ?? "its head branch"}.`,
+    steps.map((step, index) => `${index + 1}. ${step}`).join("\n"),
+    `${PUSH_RULES} ${DRAFT_RULE}`,
+    "Work only on this PR, and only on these fixes. Do not merge, deploy, or start another PR. Say what you changed and what still blocks it.",
   ].join("\n\n");
 }

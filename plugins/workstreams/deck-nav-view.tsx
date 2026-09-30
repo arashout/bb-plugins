@@ -708,7 +708,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         if (target && card) notes.show(target.prUrl, target.ref, card.card.id);
         return;
       }
-      case "nudge": case "request": case "ready": case "release": {
+      case "nudge": case "request": case "ready": case "release": case "fix": {
         const list = line ? [line] : targets(id, context);
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
         return;
@@ -896,9 +896,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       else if (item.target) run({ kind: item.target.kind, id: item.target.id });
     }, 0);
   };
-  const kinds = (["merge", "nudge", "request", "ready"] as const).flatMap((id) => {
-    const count = selected.filter((line) => line.needs && line.section === id).length;
-    return count ? [{ id, count, tone: SECTIONS[id].tone }] : [];
+  const kinds = (["merge", "nudge", "request", "ready", "fix"] as const).flatMap((id) => {
+    const section = id === "fix" ? "work" : id;
+    const count = selected.filter((line) => line.needs && line.section === section).length;
+    return count ? [{ id, count, tone: SECTIONS[section].tone }] : [];
   });
   const complete = dialog?.kind === "complete" ? cardOf(dialog.id) : null;
   const weakGroup = dialog?.kind === "weak" ? card?.suggest.find((item) => item.key === dialog.group) ?? null : null;

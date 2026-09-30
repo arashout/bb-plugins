@@ -105,7 +105,8 @@ const WORD: Record<ActionId, string> = { "mark-ready": "Mark ready", "request-re
 const RUNNING: Record<ActionId, string> = { "mark-ready": "Marking ready…", "request-review": "Requesting…", nudge: "Nudging…", "confirm-handled": "Confirming…",
   revoke: "Revoking…", merge: "Merge…", refresh: "Reading…", thread: "Open thread" };
 /** What a recorded action no row button names was, as a refusal says it. */
-const RECORDED: Record<"ask-thread" | "revoke-confirmation", string> = { "ask-thread": "Ask its thread", "revoke-confirmation": "Revoke confirmation" };
+const RECORDED: Record<"ask-thread" | "ask-fix" | "revoke-confirmation", string> = { "ask-thread": "Ask its thread", "ask-fix": "Ask its thread to fix",
+  "revoke-confirmation": "Revoke confirmation" };
 const STEP_ACTION: Record<AttentionReason["action"], ActionId> = { "mark-ready": "mark-ready", "request-review": "request-review", nudge: "nudge",
   rerequest: "nudge", "confirm-handled": "confirm-handled", merge: "merge", "open-thread": "thread" };
 const REVIEW_STATE: Record<string, ReviewerChip["state"]> = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested", COMMENTED: "commented",
@@ -252,7 +253,7 @@ function lastOf(row: InventoryRow, outcome: Outcome | undefined, now: number): I
   const last = outcome && (!server || outcome.at >= server.at) ? outcome : server;
   if (!last) return null;
   const when = `${age(last.at, now)} ago`;
-  const word = last.action === "ask-thread" || last.action === "revoke-confirmation" ? RECORDED[last.action] : WORD[last.action];
+  const word = last.action === "ask-thread" || last.action === "ask-fix" || last.action === "revoke-confirmation" ? RECORDED[last.action] : WORD[last.action];
   return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${word} ${last.action === "refresh" ? "failed" : "refused"} ${when}: ${last.text}` };
 }
 
