@@ -64,7 +64,8 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   const open = pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
   const comment = commentsSince(pr);
-  if (comment) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.at });
+  // A reviewer whose change request it names already has their say there: their review is a comment too, and naming it twice says nothing.
+  if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.at });
   if (!parts.length) return null;
   const dated = parts.flatMap((part) => part.since !== null && Number.isFinite(part.since) ? [part.since] : []);
   return { kinds: parts.map((part) => part.kind), text: parts.map((part) => part.text).join(" · "), since: dated.length ? Math.min(...dated) : null };

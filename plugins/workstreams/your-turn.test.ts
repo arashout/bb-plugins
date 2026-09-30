@@ -33,9 +33,15 @@ describe("Your turn", () => {
   });
 
   it("names every kind a PR has, oldest feedback first for its age", () => {
-    const both = pr({ ...changes, reviewFeedback: { openThreads: 1, comment: { login: "otto-v", at: at(10) }, repliedAt: null } });
+    const both = pr({ ...changes, reviewFeedback: { openThreads: 1, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
     expect(turn(both)).toEqual({ kinds: ["changes", "threads", "comments"],
-      text: "Changes requested by @otto-v · 1 open thread · New comments from @otto-v", since: Date.parse(at(10)) });
+      text: "Changes requested by @otto-v · 1 open thread · New comments from @theo-k", since: Date.parse(at(10)) });
+  });
+
+  // A change request is a review, and so a comment: the reviewer it names isn't named again for it.
+  it("names a reviewer's change request once, not again as new comments", () => {
+    const requested = pr({ ...changes, reviewFeedback: { openThreads: 0, comment: { login: "otto-v", at: at(10) }, repliedAt: null } });
+    expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
   it("leaves out a draft, a PR you hold, and a closed PR, whatever feedback they carry", () => {
