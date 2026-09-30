@@ -52,6 +52,8 @@ export const deckRowSchema = z.object({
   tickets: z.array(z.string()),
   stackedOn: z.number().nullable(),
   thread: z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict().nullable(),
+  /** The batch thread whose claim holds it while it addresses the feedback; its id is null while it starts. */
+  addressing: z.object({ threadId: z.string().nullable(), title: z.string().nullable() }).strict().nullable(),
   hold: z.object({ reason: z.string(), since: z.number() }).strict().nullable(),
   /** The v2 roster that manages it. */
   managed: z.string().nullable(),
@@ -195,13 +197,14 @@ const oldest = (a: number | null, b: number | null) => (a ?? Number.POSITIVE_INF
 
 /**
  * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write, and files
- * the row under Held alone. Only a parent or a decision blocks: a review not yet due a nudge, running checks, and code work a thread is
- * doing are in flight.
+ * the row under Held alone. Only a parent or a decision blocks: a review not yet due a nudge, running checks, code work a thread is
+ * doing, and feedback a batch thread's claim holds are in flight.
  */
 function place(row: DeckRowInput, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
   const blocked = (waitsOn: NonNullable<DeckRow["waitsOn"]>) => ({ section: "blocked" as const, waitsOn });
   if (row.hold) return { section: "held", waitsOn: { kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt } };
   if (row.decision) return blocked({ kind: "decision", on: `D${row.decision.n}`, what: row.decision.question, since: row.decision.since });
+  if (row.addressing) return { section: "flight", waitsOn: null };
   const move = primary && MOVES[primary];
   if (move && !(move === "work" && row.threads.executor?.active)) return { section: move, waitsOn: null };
   if (owner === "parent" && row.stackedOn !== null) {
@@ -223,7 +226,8 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     step: first ? { text: first.text, owner: first.owner.label, since: first.since } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
-    thread: thread && { id: thread.id, title: thread.title, active: thread.active }, hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
+    thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing,
+    hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
     managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };
 }

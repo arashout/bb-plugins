@@ -149,6 +149,17 @@ describe("an effort card", () => {
     expect(refreshNote("folio #343", before.get(url("folio", 343))!, null, null)).toBe("folio #343: left this card");
   });
 
+  // A batch thread's claim is the row's news: it's In flight, and its link goes to the thread doing the work, over the start it came from.
+  it("files a row a batch thread holds In flight, linking Addressing · batch thread, until the claim ends", () => {
+    const held = (acted: "queued" | "sent" | null) => inkwellDeck({}, (row) => row.number === 211 ? { addressing: acted === "queued" ? null
+      : { threadId: "thr-batch", title: "Address feedback on 2 PRs" }, acted: acted && { kind: "address", state: acted, at: NOW, batchId: "b2" } } : {});
+    const line = (view: DeckView) => card(view, PICKUP).sections.flatMap((section) => section.lines).find((item) => item.ref === "quill #211")!;
+    expect(line(held("sent"))).toMatchObject({ section: "flight", dim: true, trail: { kind: "thread", text: "Addressing · batch thread", threadId: "thr-batch" } });
+    expect(line(held(null))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Addressing · batch thread" } });
+    // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
+    expect(line(held("queued"))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
+  });
+
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {
     const acted = (state: "queued" | "sent" | "refused", at = NOW) => inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state, at, batchId: "b1" } } : {});
     const nudge = (screen: CardScreen) => screen.sections.find((section) => section.key === "nudge")!;

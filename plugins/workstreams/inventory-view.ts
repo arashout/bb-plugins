@@ -45,6 +45,8 @@ export const inventoryRowSchema = z.object({
   hold: prHoldSchema.nullable(),
   /** The thread the work started in, and the one working on it now or last. */
   threads: z.object({ origin: threadSchema.nullable(), executor: threadSchema.nullable() }).strict(),
+  /** The batch thread whose claim holds the PR while it addresses the feedback, by id and title, both null while it starts. */
+  addressing: z.object({ threadId: z.string().nullable(), title: z.string().nullable() }).strict().nullable(),
   managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
   suggestedReviewers: z.array(z.string()),
@@ -85,6 +87,7 @@ export type InventoryRowInput = {
   suggestedReviewers: readonly string[];
   lastAction: NonNullable<InventoryRow["lastAction"]> | null;
   confirmation?: InventoryRow["confirmation"];
+  addressing?: InventoryRow["addressing"];
 };
 
 const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
@@ -123,7 +126,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
-    threads: rowThreads(input),
+    threads: rowThreads(input), addressing: input.addressing ?? null,
     managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
     suggestedReviewers: [...input.suggestedReviewers], confirmation: input.confirmation ?? null,
     lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,

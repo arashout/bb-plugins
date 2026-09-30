@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
-import { parseCompletion, type ExpectedReport } from "./completion-envelope.js";
+import { batchResults, parseCompletion, type ExpectedReport } from "./completion-envelope.js";
 import { DEFAULT_EFFECTS, VERBS } from "./effort-command.js";
 import { decide, type Attempt, type DecideInput } from "./effort-phase.js";
 import { RESULT_PREFIX } from "./effort-recipes.js";
@@ -176,5 +176,25 @@ describe("compatibility adapter v0", () => {
     expect(parseCompletion(legacy({ finalHeadOid: HEAD }), expected())).toMatchObject({ key: "report-invalid", rejection: "The report has both finalHeadOid and headOid." });
     expect(parseCompletion(legacy({ approvalFeedbackFingerprint: FINGERPRINT }), expected()).rejection).toBe("The report has both approvalFeedbackFingerprint and fingerprint.");
     expect(parseCompletion(v1(envelope({ finalHeadOid: HEAD })), expected()).rejection).toBe("The report has both finalHeadOid and headOid.");
+  });
+});
+
+describe("a batch thread's result lines", () => {
+  const other = "https://github.com/inkwell/quill/pull/9";
+  const line = (patch: Record<string, unknown>) => `${RESULT_PREFIX}${JSON.stringify(envelope({ feedback: undefined, ...patch }))}`;
+  // One thread answers for several claims: each PR's line is found by its claim's id, read strictly, and never taken for another PR's.
+  it("reads each PR's line by its claim, and says why one can't be read", () => {
+    const output = ["Worked #313 then #9.", line({ attemptId: "address-1" }), line({ attemptId: "address-2", target: other, outcome: "blocked",
+      blockers: [{ kind: "product-decision", summary: "The sort order needs a call" }] }), line({ attemptId: "address-3", target: other }),
+      line({ attemptId: "address-4" }), line({ attemptId: "address-4" }), `${RESULT_PREFIX}{"attemptId":"address-5"}`].join("\n");
+    const read = batchResults(output, [{ attemptId: "address-1", target: PR_URL }, { attemptId: "address-2", target: other }, { attemptId: "address-3", target: PR_URL },
+      { attemptId: "address-4", target: PR_URL }, { attemptId: "address-5", target: PR_URL }, { attemptId: "address-6", target: PR_URL }]);
+    expect([...read].map(([id, result]) => [id, result.ok, result.ok && result.changed, result.text])).toEqual([
+      ["address-1", true, true, `Reported changed at ${HEAD.slice(0, 7)}`],
+      ["address-2", true, false, "Blocked: The sort order needs a call"],
+      ["address-3", false, false, `Its result line is for ${other}.`],
+      ["address-4", false, false, "2 result lines for this PR; a report has one."],
+      ["address-5", false, false, expect.stringContaining("Its result line doesn't read:")],
+      ["address-6", false, false, "No result line for this PR."]]);
   });
 });

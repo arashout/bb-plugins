@@ -78,6 +78,8 @@ export type InventoryLine = {
   last: { text: string; ok: boolean } | null;
   /** Reviewer feedback that waits on you, as the server found it, and how long it has waited. */
   yourTurn: { text: string; age: string | null } | null;
+  /** The batch thread addressing that feedback now, which holds the PR's claim until it finishes; its id is null while it starts. */
+  addressing: { threadId: string | null } | null;
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
 };
@@ -301,6 +303,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
       label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
     yourTurn: row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) },
+    addressing: row.addressing && { threadId: row.addressing.threadId },
     depth: 0, branch: null,
   };
 }
@@ -310,18 +313,18 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
  * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Only a PR with a thread already, which
  * the ask reuses: All PRs never starts one. Null where the deck would refuse it.
  */
-export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile">): "ask" | "fix" | null {
+export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing">): "ask" | "fix" | null {
   if (!onYourTurn(line) || line.effortPile || !line.threads.length) return null;
   if (line.primary === "confirm-handled") return "ask";
   return line.primary === "thread" ? "fix" : null;
 }
 
 /**
- * On Your turn: the server found feedback waiting on you, and neither a thread working on it now, which the deck files In flight, nor a held
- * effort, which asks nothing until you resume it, has it instead.
+ * On Your turn: the server found feedback waiting on you, and neither a thread working on it now, nor the batch thread addressing it, which
+ * the deck files In flight, nor a held effort, which asks nothing until you resume it, has it instead.
  */
-export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile">): boolean => line.yourTurn !== null &&
-  line.effortPile !== "held" && !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active));
+export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing">): boolean => line.yourTurn !== null &&
+  line.effortPile !== "held" && !line.addressing && !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active));
 
 /** Your turn's rows, which the badge counts and the list shows. */
 export const yourTurnRows = (view: InventoryView, now: number): InventoryLine[] =>

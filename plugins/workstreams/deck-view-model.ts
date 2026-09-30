@@ -152,7 +152,9 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
-  if (acted) {
+  // The batch thread's claim holds it: that says more than the start it came from, and links to the thread.
+  if (row?.addressing?.threadId && (!acted || acted.state === "sent")) trail = { kind: "thread", text: "Addressing · batch thread", threadId: row.addressing.threadId };
+  else if (acted) {
     const failed = acted.state === "refused" || acted.state === "unknown";
     trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: context.details?.get(item.prUrl) ?? null,
       text: acted.state === "refused" ? "Not sent" : acted.state === "unknown" ? "May not have sent" : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
