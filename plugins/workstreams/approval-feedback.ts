@@ -127,10 +127,14 @@ export function createApprovalFeedbackStore(db: RunDb) {
       db.prepare("INSERT OR REPLACE INTO approval_feedback_verifications (pr_url, body) VALUES (?, ?)").run(key, JSON.stringify(record));
       return record;
     },
+    /**
+     * A worker's evidence onto a new head whose tree is identical. Your confirmation never carries: it covers the head you confirmed on,
+     * and any later head asks for the notes again.
+     */
     carryEquivalent(prUrl: string, expected: ApprovalFeedbackRecord, snapshot: ApprovalFeedbackSnapshot,
       currentHeadOid: string, priorTreeOid: string, currentTreeOid: string, checkedAt: number): ApprovalFeedbackRecord | null {
       const key = canonicalPrUrl(prUrl);
-      if (key === null || expected.headOid === currentHeadOid || priorTreeOid !== currentTreeOid ||
+      if (key === null || expected.provenance?.kind === "user" || expected.headOid === currentHeadOid || priorTreeOid !== currentTreeOid ||
           !sha.safeParse(currentHeadOid).success || !sha.safeParse(priorTreeOid).success ||
           !feedbackVerified(snapshot, expected.headOid, expected)) return null;
       const row = db.prepare("SELECT body FROM approval_feedback_verifications WHERE pr_url = ?").get(key) as { body: string } | undefined;

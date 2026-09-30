@@ -148,6 +148,19 @@ describe("approval feedback verification", () => {
     db.close();
   });
 
+  // Your word covers the head you confirmed on; even one with the same tree asks for the notes again, where its new commit shows as evidence.
+  it("never carries your confirmation to a new head, even one with an identical tree", async () => {
+    const read = await readReviewThreads(gh, target);
+    if (!read.ok) throw new Error(read.error);
+    const snapshot = read.approvalFeedback;
+    const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
+    const store = createApprovalFeedbackStore(db);
+    const confirmed = store.confirm(url, snapshot, head, 1_000, { since: review.submittedAt, commits: 1, replies: 0, threads: { total: 0, resolved: 0 }, complete: true });
+    expect(store.carryEquivalent(url, confirmed, snapshot, "b".repeat(40), "c".repeat(40), "c".repeat(40), 2_000)).toBeNull();
+    expect([store.get(url), feedbackVerificationState(snapshot, "b".repeat(40), store.get(url))]).toEqual([confirmed, "head-changed"]);
+    db.close();
+  });
+
   it("does not carry failed or missing validation into a new head", async () => {
     const read = await readReviewThreads(gh, target);
     if (!read.ok) throw new Error(read.error);
