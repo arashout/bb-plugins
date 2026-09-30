@@ -280,6 +280,11 @@ export type AddressBatchPr = { attemptId: string; prUrl: string; repo: string; n
   baseBranch: string | null; checkout: string | null; feedback: string };
 /** Only a reply on the PR answers a reviewer, so the batch thread replies to each note, whatever it changed. */
 export const REPLY_RULE = "Reply to each reviewer's note on the PR, on its thread or in the conversation, saying what changed or why not. Where you disagree, say so in that reply instead of changing the code. A fix or a push alone leaves the feedback waiting.";
+/**
+ * The feedback work without its lines on replying only when useful, asking PTAL, and an approving reviewer's silence: in a batch thread
+ * REPLY_RULE settles every reply, and nothing requests review.
+ */
+const BATCH_FEEDBACK_WORK = FEEDBACK_WORK.address.split(/(?<=\.) /u).filter((sentence) => !/when useful|PTAL|approving reviewer/u.test(sentence)).join(" ");
 
 /**
  * The address_review_feedback recipe for several of your PRs in one new thread, each in turn, in its own checkout when it has one: read
@@ -293,7 +298,7 @@ export function addressBatchPrompt(prs: readonly AddressBatchPr[]): string {
     prs.map((pr) => JSON.stringify({ attemptId: pr.attemptId, pr: `${pr.repo}#${pr.number}`, title: pr.title, url: pr.prUrl, expectedHead: pr.headOid,
       headBranch: pr.headBranch, base: pr.baseBranch, checkout: pr.checkout, waiting: pr.feedback })).join("\n"),
     `For each PR: read every review, including each approval's body, every review thread, and the PR's comments. Then:\n${steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}`,
-    `${FEEDBACK_WORK.address} ${PUSH_RULES} ${DRAFT_RULE}`,
+    `${BATCH_FEEDBACK_WORK} ${PUSH_RULES} ${DRAFT_RULE}`,
     REPLY_RULE,
     "Work in the PR's own checkout with explicit git -C paths when it has one; with none, in an isolated clone at expectedHead, outside every other checkout. Push only to the PR's head branch. Never touch another PR's branch or checkout. Do not merge, deploy, mark ready, request review, or start another thread.",
     "When every PR is done, report the order you worked in, then for each PR: feedback addressed, feedback unresolved or deferred and why, files changed, and test results.",

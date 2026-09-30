@@ -222,6 +222,14 @@ describe("one batch thread for Your turn feedback", () => {
     for (const step of (recipe("address_review_feedback") as WorkerRecipe).instructions) expect(text).toContain(step);
     expect(text).toContain(REPLY_RULE);
     expect(REPLY_RULE).toContain("Where you disagree, say so in that reply instead of changing the code.");
+    // Every note gets a reply, so the feedback work's lines that reply only when useful, ask PTAL, or keep an approver quiet are left out;
+    // the rest of it stays, and one PR's own recipes keep all of it.
+    for (const line of ["Reply on the PR when useful", "PTAL", "approving reviewer"]) {
+      expect(FEEDBACK_WORK.address).toContain(line);
+      expect(text).not.toContain(line);
+    }
+    expect(text).toContain("Resolve only review threads whose actionable requests you verified are addressed. Never resolve unanswered disagreements");
+    expect(text).toContain("do not impersonate the author. Re-read the live PR after any replies and resolutions");
     expect(text).toContain("Resolve only review threads whose requests are addressed.");
     expect(text).toContain("in the PR's own checkout");
     expect(text).toContain("Push only to the PR's head branch.");
