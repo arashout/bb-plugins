@@ -436,6 +436,15 @@ export const repoSetViewSchema = z
 
 export type RepoSetView = z.infer<typeof repoSetViewSchema>;
 
+/** Another thread working in the same checkout, as the panel names it. */
+export const sharingThreadSchema = z
+  .object({
+    threadId: z.string().min(1).max(100),
+    /** Null when the thread could not be read, or has no title yet. */
+    title: z.string().max(300).nullable(),
+  })
+  .strict();
+
 export const workspaceViewSchema = z
   .object({
     root: absolutePath,
@@ -443,6 +452,12 @@ export const workspaceViewSchema = z
     hostId: z.string().max(100),
     projectSourcePath: absolutePath,
     repos: z.array(workspaceRepoSchema).max(64),
+    /**
+     * The other threads attached to this same checkout — forks, which keep
+     * the environment they were forked from. Empty for the common case of one
+     * thread per workspace.
+     */
+    sharedWith: z.array(sharingThreadSchema).max(16),
   })
   .strict();
 

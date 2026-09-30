@@ -589,7 +589,8 @@ export function ChangesPanel({ threadId }: { threadId: string }) {
     return (
       <div className="p-4 text-sm">
         <p className="text-muted-foreground">
-          This thread does not have a multi-repo workspace. Its environment was created by a different provider.
+          This thread has no multi-repo workspace: no environment created by the Multi-repo workspace provider is
+          attached to it.
         </p>
       </div>
     );
@@ -631,6 +632,28 @@ export function ChangesPanel({ threadId }: { threadId: string }) {
         {prError !== null && (
           <div className="text-muted-foreground rounded-md border px-3 py-2 text-xs">
             Pull requests unavailable: {prError}
+          </div>
+        )}
+
+        {workspace.sharedWith.length > 0 && (
+          <div className="rounded-md border px-3 py-2 text-xs">
+            <div className="flex items-center gap-1.5 font-medium">
+              <Icon name="GitFork" className="size-3" />
+              {workspace.sharedWith.length === 1
+                ? "Another thread shares this checkout"
+                : `${workspace.sharedWith.length} other threads share this checkout`}
+            </div>
+            <ul className="text-muted-foreground mt-1 space-y-0.5">
+              {workspace.sharedWith.map((other) => (
+                <li key={other.threadId}>{other.title ?? other.threadId}</li>
+              ))}
+            </ul>
+            <p className="text-muted-foreground mt-1">
+              A forked thread keeps the environment it was forked from, so these threads work in{" "}
+              <span className="font-mono">{workspace.root}</span> on{" "}
+              <span className="font-mono">{workspace.branchName}</span> together. Commits from either land on the same
+              branch.
+            </p>
           </div>
         )}
 

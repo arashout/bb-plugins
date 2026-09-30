@@ -163,6 +163,26 @@ Take both defaults, deliberately (`packages/plugin-sdk/src/environment-provider.
 
 A repo that fails to materialize should not fail the whole environment. Record per-repo status and surface it in the panel; the thread is still useful with three of four repos present.
 
+### One workspace, several threads
+
+**A thread resolves its workspace through a binding, never through its own id.** Threads are many-to-one with environments — a fork reuses its source thread's environment by default, so `create()` never runs for the fork and no second workspace is provisioned. A `workspaces` row per `(hostId, pathKey)` with a single `thread_id` therefore answered nothing for a fork: the Changes panel, the repo list, the layout block and every `workspace_*` tool went blank while the checkout sat on disk, fully populated.
+
+So `workspace_threads (thread_id → hostId, pathKey)` is the mapping, written in three places:
+
+- `create()`, for the thread the workspace was built for.
+- `thread.created`, for a fork. This is the only moment early enough to matter: `contributeInstructions` is synchronous and can only read a binding that is already persisted, so a fork's *first* turn carries the layout block only if the event bound it.
+- Lazily, in any async path (RPC, tool, CLI) that misses — with a short negative cache and per-thread deduplication, because the file opener asks for a workspace on every file bb opens anywhere.
+
+**Resolution asks core for the environment; it does not walk lineage.** `threads.get({ include: "environment" })` returns `environmentProviderId`, `hostId` and `environmentProviderInstanceKey` — and that instance key is exactly the `pathKey` core hands `create()`, which is half of `workspaces`' primary key. So a fork resolves in one indexed read, and refusing the environment when `environmentProviderId` is not ours is what keeps a child thread's git worktree out of this.
+
+Following `sourceThreadId` back through the fork chain would reach the same row the long way round — `sourceThreadId` is the *immediate* source, so it is a walk, not a lookup — and it would be wrong for a fork that was given its own environment. Lineage is not the fact this plugin needs; the environment is.
+
+**The binding table holds nothing core does not already know.** It exists for the synchronous path only: `contributeInstructions` gets `{ threadId, projectId }` and cannot await, so the answer has to be on hand locally before the first turn. An in-memory cache would do the same job until the next server restart, which is precisely when a session is reconstructed and instructions are resolved. (`bb.agents.configure` *does* receive the environment synchronously and can return instructions — a genuinely mapping-free alternative, at the price of also owning tool and skill selection, where an invalid selection drops this plugin's entire contribution for that resolution.)
+
+The table is also the only way to answer the *inverse* question synchronously — who else is in this checkout. Core has no `environmentId` filter on `threads.list`, so deriving it would mean listing the project's threads and filtering, asynchronously, which the instruction path cannot do.
+
+**Sharing is real and must be visible.** Two threads on one checkout means two agents on one branch in one directory, each seeing the other's uncommitted work as its own. The instruction block gains a shared-checkout warning appended at read time (`withSharedNotice`), the Changes panel names the other threads, and `bb repos status` lists them. Nothing prevents the collision — this is the only warning there is.
+
 ## 7. Sandbox boundaries
 
 | Path | Agent can write |
@@ -300,6 +320,7 @@ Accepted consequences, not bugs:
 - **Cold start is a full network clone per repo**, once per machine. Mitigated by the cache and local mirroring, not eliminated.
 - **`bb project show` displays the `.bb` remote** as the project's git remote, since core probes it from the project source. Defensible — the project *is* the workspace definition — but it reads oddly at first.
 - **`repos.json` sits on the critical path** for every thread creation in the project. Validate with a schema and fail naming the offending entry.
+- **A fork shares its source thread's checkout, branch and all.** Core reuses the environment; a plugin cannot provision a second workspace for an environment core considers provisioned. Both threads are warned, in the layout block and in the panel, and coordinating is left to the user.
 - **The repo set is fixed at `create()`.** Existing workspaces don't gain repos added later except via `workspace_add_repo`. Deliberate: a workspace shouldn't mutate under a running thread.
 
 ## Out of scope

@@ -44,6 +44,11 @@ export interface WorkspaceManifest {
   root: string;
   pathKey: string;
   hostId: string;
+  /**
+   * The thread `create()` ran for. Not the only thread that may be using this
+   * checkout — a fork keeps its source's environment, and therefore this
+   * workspace. Ask the binding table who else is here.
+   */
   threadId: string;
   projectId: string;
   /** The shared thread branch, from `context.suggestedBranchName`. */
@@ -138,6 +143,37 @@ export function formatInstructions(manifest: WorkspaceManifest): string {
   // Cut whole lines from the end and say so.
   const notice = "\n\n(Repo list truncated.)";
   let kept = lines;
+  while (kept.length > 1 && kept.join("\n").length + notice.length > INSTRUCTIONS_MAX) {
+    kept = kept.slice(0, -1);
+  }
+  return kept.join("\n") + notice;
+}
+
+/**
+ * The shared-checkout warning, appended to the stored instruction block.
+ *
+ * Kept out of `formatInstructions` because it is not a fact of the workspace:
+ * `create()` writes the block once, and a second thread can attach to the same
+ * checkout at any time afterwards by being forked from the first. The block is
+ * stored, this is added on the way out.
+ *
+ * It matters enough to spend characters on. Two agents on one branch in one
+ * directory will overwrite each other's work, and neither can see the other
+ * from inside the sandbox — this line is the only warning there is.
+ */
+export function withSharedNotice(instructions: string, args: { others: number; branchName: string }): string {
+  if (args.others <= 0) return instructions;
+  const others =
+    args.others === 1 ? "Another thread is" : `${args.others} other threads are`;
+  const notice = [
+    "",
+    "",
+    `**This checkout is shared.** ${others} working in this same directory on the same branch \`${args.branchName}\` — a forked thread keeps the environment it was forked from. Your commits land on the branch they are committing to, and neither side can see the other's uncommitted work as anything but its own. Check with the user before committing, rebasing, or pushing.`,
+  ].join("\n");
+  if (instructions.length + notice.length <= INSTRUCTIONS_MAX) return instructions + notice;
+  // The warning outranks the tail of the block: a truncated repo table is a
+  // nuisance, two agents silently sharing a branch is lost work.
+  let kept = instructions.split("\n");
   while (kept.length > 1 && kept.join("\n").length + notice.length > INSTRUCTIONS_MAX) {
     kept = kept.slice(0, -1);
   }

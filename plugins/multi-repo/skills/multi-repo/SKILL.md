@@ -71,6 +71,19 @@ The canonical `.bb` checkout lives outside your sandbox, so `git push` from
 That lands your commits on a `guidance-<thread>` branch in the canonical
 checkout, for a person to review and merge.
 
+## A shared checkout
+
+If your instruction block says **this checkout is shared**, another thread — a
+fork of yours, or the thread yours was forked from — is working in the same
+directory on the same branch. You cannot see it from inside the sandbox: its
+uncommitted edits look exactly like your own, and its commits land on the
+branch you are committing to.
+
+Treat that as a coordination problem, not a git problem. `bb repos status`
+names the other threads. Check with the user before committing, rebasing,
+resetting or pushing, and prefer leaving uncommitted work alone over "cleaning
+up" changes you did not make.
+
 ## Missing repos
 
 If a repo in the set failed to clone, the layout block says so by name and the

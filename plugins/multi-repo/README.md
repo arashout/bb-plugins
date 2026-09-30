@@ -202,6 +202,19 @@ out of that loop — they shell out to `gh` over the network — and a `gh` fail
 therefore shows as its own line rather than taking the diffs down with it. The
 Refresh button is the force path for both.
 
+## Forks share a checkout
+
+A forked thread keeps the environment it was forked from — core's behaviour,
+not this plugin's — so it keeps this plugin's workspace too. The fork gets the
+same directory, the same repos and the same branch as its source thread, rather
+than an empty panel and a workspace it cannot see.
+
+Both threads are told. The agent's instruction block gains a shared-checkout
+warning, the Changes panel names the other threads, and `bb repos status` lists
+them. Nothing stops two agents from committing to the same branch in the same
+directory, so treat the warning as one: let one thread work at a time, or give
+the fork its own environment when you create it.
+
 ## Failure policy
 
 A repo that fails to materialize does not fail the environment. It is recorded
@@ -236,6 +249,10 @@ Accepted consequences, not bugs.
 - **The repo set is fixed at `create()`.** Existing workspaces do not gain
   repos added later except through `workspace_add_repo`. Deliberate: a
   workspace should not mutate under a running thread.
+- **A fork cannot get its own checkout of the same environment.** Core reuses
+  the environment for a fork, and a plugin cannot provision a second workspace
+  for an environment core considers provisioned. Sharing is surfaced rather
+  than prevented.
 - **A rebuild re-clones.** `pathKeys: "per-thread"` means a rebuild takes a
   fresh key to avoid dead paths. The object cache keeps that cost local rather
   than networked.

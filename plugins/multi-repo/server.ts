@@ -33,6 +33,7 @@ import {
   describeRepo,
   formatInstructions,
   readyRepos,
+  withSharedNotice,
   type WorkspaceManifest,
   type WorkspaceRepo,
 } from "./layout.js";
@@ -65,6 +66,18 @@ const CREATE_TIMEOUT_MS = 60 * 60 * 1000;
 const REMOVE_TIMEOUT_MS = 10 * 60 * 1000;
 const READ_TIMEOUT_MS = 90_000;
 const ACTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * What this plugin needs off `threads.get({ include: "environment" })`.
+ * Structural on purpose — the SDK's shape is much wider and none of the rest
+ * of it is any of this plugin's business.
+ */
+interface ThreadEnvironment {
+  id: string;
+  hostId: string;
+  environmentProviderId: string | null;
+  environmentProviderInstanceKey: string | null;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -108,6 +121,26 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
        fetched_at INTEGER NOT NULL,
        PRIMARY KEY (thread_id, dir)
      )`,
+    // Threads are many-to-one with workspaces, because environments are
+    // many-to-one with threads: a fork reuses its source thread's environment,
+    // so `create()` never runs for it and no second workspace exists. Resolving
+    // by `workspaces.thread_id` made every thread-scoped surface go blank for a
+    // fork. This table is what a thread now resolves through, and the backfill
+    // keeps every workspace written before it bound to its creating thread.
+    //
+    // It holds no fact core does not already own — core knows which environment
+    // a thread runs on. It exists because `contributeInstructions` is
+    // synchronous and asking core is not, so the answer has to be on hand
+    // locally before a thread's first turn.
+    `CREATE TABLE IF NOT EXISTS workspace_threads (
+       thread_id TEXT PRIMARY KEY,
+       host_id TEXT NOT NULL,
+       path_key TEXT NOT NULL,
+       bound_at INTEGER NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS workspace_threads_workspace ON workspace_threads (host_id, path_key)`,
+    `INSERT OR IGNORE INTO workspace_threads (thread_id, host_id, path_key, bound_at)
+       SELECT thread_id, host_id, path_key, created_at FROM workspaces`,
   ]);
 
   const host = bb.hosts.experimental_client({
@@ -178,29 +211,171 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     }
   }
 
+  /** Where a workspace lives: the one key every read and binding is written against. */
+  interface WorkspaceKey {
+    hostId: string;
+    pathKey: string;
+  }
+
+  /**
+   * Attach a thread to a workspace.
+   *
+   * Many-to-one deliberately. The alternative — one workspace per thread — is
+   * what core already declined to do for forks, and a plugin cannot provision
+   * a second checkout for an environment core considers provisioned.
+   */
+  function bindThread(threadId: string, key: WorkspaceKey): void {
+    db.prepare(
+      `INSERT INTO workspace_threads (thread_id, host_id, path_key, bound_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (thread_id) DO UPDATE SET
+         host_id = excluded.host_id,
+         path_key = excluded.path_key,
+         bound_at = excluded.bound_at`,
+    ).run(threadId, key.hostId, key.pathKey, Date.now());
+    unresolved.delete(threadId);
+  }
+
   /** Synchronous on purpose — `contributeInstructions` cannot await. */
   function manifestForThread(threadId: string): WorkspaceManifest | null {
     const row = db
-      .prepare(`SELECT * FROM workspaces WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .prepare(
+        `SELECT w.* FROM workspace_threads b
+           JOIN workspaces w ON w.host_id = b.host_id AND w.path_key = b.path_key
+          WHERE b.thread_id = ?`,
+      )
       .get(threadId) as Record<string, unknown> | undefined;
     return row === undefined ? null : rowToManifest(row);
   }
 
+  function manifestForKey(key: WorkspaceKey): WorkspaceManifest | null {
+    const row = db
+      .prepare(`SELECT * FROM workspaces WHERE host_id = ? AND path_key = ?`)
+      .get(key.hostId, key.pathKey) as Record<string, unknown> | undefined;
+    return row === undefined ? null : rowToManifest(row);
+  }
+
+  /** The other threads working in one workspace, oldest binding first. */
+  function sharingThreads(key: WorkspaceKey, exceptThreadId: string): string[] {
+    const rows = db
+      .prepare(
+        `SELECT thread_id FROM workspace_threads
+          WHERE host_id = ? AND path_key = ? AND thread_id <> ?
+          ORDER BY bound_at ASC LIMIT 16`,
+      )
+      .all(key.hostId, key.pathKey, exceptThreadId) as { thread_id: string }[];
+    return rows.map((row) => row.thread_id);
+  }
+
+  /**
+   * Threads a lookup has already failed for, and when.
+   *
+   * The file opener calls `workspace` for every file bb opens anywhere, so the
+   * miss path is the hot one and it is the path that costs an SDK round trip.
+   * Short-lived on purpose: a thread whose `create()` is still running is a
+   * miss that becomes a hit, and `bindThread` clears the entry the moment it
+   * does.
+   */
+  const unresolved = new Map<string, number>();
+  const UNRESOLVED_TTL_MS = 60_000;
+
+  /** In-flight `bindInheritedWorkspace` walks, one per thread. */
+  const resolving = new Map<string, Promise<WorkspaceManifest | null>>();
+
+  /**
+   * The workspace a thread is working in, binding it first when it has
+   * inherited one it was never bound to.
+   *
+   * Every asynchronous path goes through this rather than `manifestForThread`:
+   * a fork's first surface — a panel, a tool call, `bb repos status` — is
+   * usually what discovers the binding, and discovering it means persisting it
+   * so the synchronous instruction path can read it on the next turn.
+   */
+  async function resolveManifest(threadId: string): Promise<WorkspaceManifest | null> {
+    const bound = manifestForThread(threadId);
+    if (bound !== null) return bound;
+    const failedAt = unresolved.get(threadId);
+    if (failedAt !== undefined && Date.now() - failedAt < UNRESOLVED_TTL_MS) return null;
+    // One walk per thread at a time: a panel load asks four of these questions
+    // at once, and they would otherwise be four identical SDK walks racing to
+    // write the same binding.
+    const running = resolving.get(threadId);
+    if (running !== undefined) return running;
+    const walk = bindInheritedWorkspace(threadId)
+      .then((manifest) => {
+        if (manifest === null) unresolved.set(threadId, Date.now());
+        return manifest;
+      })
+      .finally(() => resolving.delete(threadId));
+    resolving.set(threadId, walk);
+    return walk;
+  }
+
+  /**
+   * Bind a thread to the workspace its environment already has.
+   *
+   * No lineage is involved, deliberately. Core tells us which environment the
+   * thread runs on and which instance key that environment was provisioned
+   * under — and that key *is* this table's `path_key`, so the answer is one
+   * primary-key read. Walking `sourceThreadId` back through a fork chain would
+   * reach the same row the long way round, and would get a fork that was given
+   * its own environment wrong.
+   */
+  async function bindInheritedWorkspace(threadId: string): Promise<WorkspaceManifest | null> {
+    let environment: ThreadEnvironment | null;
+    try {
+      const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
+      environment = "environment" in thread ? thread.environment ?? null : null;
+    } catch (error) {
+      bb.log.debug(`Could not read thread ${threadId}: ${errorMessage(error)}`);
+      return null;
+    }
+    // No environment yet, or someone else's: nothing of ours to attach to.
+    if (environment === null || environment.environmentProviderId !== ENVIRONMENT_PROVIDER_ID) return null;
+    // Mirrors how core derives the `pathKey` it hands `create()`.
+    const key = {
+      hostId: environment.hostId,
+      pathKey: environment.environmentProviderInstanceKey ?? environment.id,
+    };
+    const manifest = manifestForKey(key);
+    if (manifest === null) return null;
+    bindThread(threadId, key);
+    return manifest;
+  }
+
+  /**
+   * The generated block, as this thread should read it.
+   *
+   * Stored text plus one thing `create()` could not know: whether someone else
+   * is in the same directory by now.
+   */
   function instructionsForThread(threadId: string): string | null {
     const row = db
-      .prepare(`SELECT instructions FROM workspaces WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`)
-      .get(threadId) as { instructions?: unknown } | undefined;
+      .prepare(
+        `SELECT w.instructions, w.host_id, w.path_key, w.branch_name FROM workspace_threads b
+           JOIN workspaces w ON w.host_id = b.host_id AND w.path_key = b.path_key
+          WHERE b.thread_id = ?`,
+      )
+      .get(threadId) as
+      | { instructions?: unknown; host_id: string; path_key: string; branch_name: string }
+      | undefined;
     const text = row?.instructions;
-    return typeof text === "string" && text.length > 0 ? text : null;
+    if (row === undefined || typeof text !== "string" || text.length === 0) return null;
+    const others = sharingThreads({ hostId: row.host_id, pathKey: row.path_key }, threadId);
+    return withSharedNotice(text, { others: others.length, branchName: row.branch_name });
   }
 
   function forgetWorkspace(hostId: string, pathKey: string): void {
-    const row = db
-      .prepare(`SELECT thread_id FROM workspaces WHERE host_id = ? AND path_key = ?`)
-      .get(hostId, pathKey) as { thread_id?: unknown } | undefined;
+    const rows = db
+      .prepare(`SELECT thread_id FROM workspace_threads WHERE host_id = ? AND path_key = ?`)
+      .all(hostId, pathKey) as { thread_id: string }[];
+    db.prepare(`DELETE FROM workspace_threads WHERE host_id = ? AND path_key = ?`).run(hostId, pathKey);
     db.prepare(`DELETE FROM workspaces WHERE host_id = ? AND path_key = ?`).run(hostId, pathKey);
-    if (typeof row?.thread_id === "string") {
+    for (const row of rows) {
       db.prepare(`DELETE FROM pr_cache WHERE thread_id = ?`).run(row.thread_id);
+      // A thread whose workspace just went away may still inherit another
+      // one — let it ask again rather than serving it a cached miss.
+      unresolved.delete(row.thread_id);
     }
   }
 
@@ -452,6 +627,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
           createdAt: Date.now(),
         };
         saveManifest(manifest);
+        bindThread(context.thread.id, manifest);
         changed();
 
         const failed = provisioned.repos.filter((repo) => repo.status === "failed");
@@ -576,12 +752,45 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     return instructionsForThread(threadId);
   });
 
+  /**
+   * Bind a fork to the workspace it inherited, before its first turn.
+   *
+   * The lazy bind in `resolveManifest` is the backstop for every asynchronous
+   * path, but `contributeInstructions` is synchronous and can only read a
+   * binding that is already persisted. This is the one place the binding can
+   * be written early enough for a fork's first turn to carry the layout block,
+   * which is why it runs on `thread.created` rather than on first use.
+   */
+  bb.events.on("thread.created", async ({ thread }) => {
+    if (thread.environmentId === null || manifestForThread(thread.id) !== null) return;
+    const manifest = await bindInheritedWorkspace(thread.id);
+    if (manifest !== null) changed();
+  });
+
+  /**
+   * Release a deleted thread's claim on a shared checkout, so the warning the
+   * other thread reads counts only threads someone might actually be running.
+   * An undeleted thread binds itself again on its next surface.
+   */
+  bb.events.on("thread.deleted", ({ thread }) => {
+    const had = manifestForThread(thread.id);
+    if (had === null) return;
+    db.prepare(`DELETE FROM workspace_threads WHERE thread_id = ?`).run(thread.id);
+    unresolved.delete(thread.id);
+    changed();
+  });
+
   /** The workspace a tool call is running inside, or a thrown explanation. */
-  function requireManifest(threadId: string | null | undefined): WorkspaceManifest {
-    const manifest = threadId === null || threadId === undefined ? null : manifestForThread(threadId);
+  async function requireManifest(threadId: string | null | undefined): Promise<WorkspaceManifest> {
+    const manifest =
+      threadId === null || threadId === undefined ? null : await resolveManifest(threadId);
     if (manifest === null) {
+      // Deliberately does not blame another provider. The overwhelmingly
+      // common way to get here used to be a fork of a thread this very
+      // provider built, and being told the opposite sent people looking in the
+      // wrong place entirely.
       throw new Error(
-        "This thread does not have a multi-repo workspace. Its environment was created by a different provider.",
+        "This thread has no multi-repo workspace: no environment created by the Multi-repo workspace provider is attached to it.",
       );
     }
     return manifest;
@@ -596,7 +805,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     presentation: { label: { pending: "Listing workspace repos", completed: "Listed workspace repos" } },
     parameters: z.object({}),
     async execute(_input, { threadId }) {
-      const manifest = requireManifest(threadId);
+      const manifest = await requireManifest(threadId);
       const lines = manifest.repos.map(describeRepo);
       return [`dir\tbranch\tpath`, ...lines].join("\n");
     },
@@ -620,7 +829,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       branch: z.string().min(1).max(300).optional().describe("Base branch. Defaults to the repo's default branch."),
     }),
     async execute(input, { threadId, signal }) {
-      const manifest = requireManifest(threadId);
+      const manifest = await requireManifest(threadId);
       const location: SourceLocation = { hostId: manifest.hostId, path: manifest.projectSourcePath };
       const current = await readRepoSet(location, { bootstrap: true }, signal);
       if (current.file === null) throw new Error(current.error ?? `${REPOS_FILE} could not be read.`);
@@ -688,7 +897,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     presentation: { label: { pending: "Removing a repo from the repo set", completed: "Removed a repo from the repo set" } },
     parameters: z.object({ dir: z.string().min(1).max(100) }),
     async execute(input, { threadId, signal }) {
-      const manifest = requireManifest(threadId);
+      const manifest = await requireManifest(threadId);
       const location: SourceLocation = { hostId: manifest.hostId, path: manifest.projectSourcePath };
       const current = await readRepoSet(location, { bootstrap: true }, signal);
       if (current.file === null) throw new Error(current.error ?? `${REPOS_FILE} could not be read.`);
@@ -711,7 +920,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     presentation: { label: { pending: "Publishing workspace guidance", completed: "Published workspace guidance" } },
     parameters: z.object({}),
     async execute(_input, { threadId, signal }) {
-      const manifest = requireManifest(threadId);
+      const manifest = await requireManifest(threadId);
       const source = manifest.repos.find((repo) => repo.dir === PROJECT_SOURCE_DIR);
       if (source === undefined || source.status !== "ready") {
         throw new Error("This workspace has no .bb checkout to publish from.");
@@ -721,7 +930,10 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
         {
           projectSourcePath: manifest.projectSourcePath,
           workspaceBbPath: source.path,
-          threadId: manifest.threadId,
+          // The calling thread, not the workspace's creator: two threads
+          // sharing one checkout must not push onto one `guidance-<thread>`
+          // ref and silently overwrite each other's proposal.
+          threadId: threadId ?? manifest.threadId,
         },
         { hostId: manifest.hostId, timeoutMs: ACTION_TIMEOUT_MS, ...(signal === undefined ? {} : { signal }) },
       );
@@ -902,7 +1114,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
                 hint: "Run `bb repos status` from inside a thread.",
               });
             }
-            const manifest = manifestForThread(ctx.threadId);
+            const manifest = await resolveManifest(ctx.threadId);
             if (manifest === null) {
               return { exitCode: 0, stdout: "This thread does not have a multi-repo workspace." };
             }
@@ -915,9 +1127,20 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
               (repo) =>
                 `${repo.dir}\t${repo.branch ?? "-"}\t+${repo.ahead}/-${repo.behind}\t${repo.dirty} changed, ${repo.untracked} untracked${repo.error === null ? "" : `\t${repo.error}`}`,
             );
+            const shared = sharingThreads(manifest, ctx.threadId);
             return {
               exitCode: 0,
-              stdout: [`${manifest.root} (branch ${manifest.branchName})`, "", "dir\tbranch\tahead/behind\tworking tree", ...lines].join("\n"),
+              stdout: [
+                `${manifest.root} (branch ${manifest.branchName})`,
+                ...(shared.length === 0
+                  ? []
+                  : [
+                      `Shared with ${shared.length} other thread(s): ${shared.join(", ")} — same directory, same branch.`,
+                    ]),
+                "",
+                "dir\tbranch\tahead/behind\tworking tree",
+                ...lines,
+              ].join("\n"),
             };
           },
         }),
@@ -1025,8 +1248,8 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       }
     },
 
-    workspace({ threadId }) {
-      const manifest = manifestForThread(threadId);
+    async workspace({ threadId }) {
+      const manifest = await resolveManifest(threadId);
       if (manifest === null) return { workspace: null };
       return {
         workspace: {
@@ -1035,12 +1258,13 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
           hostId: manifest.hostId,
           projectSourcePath: manifest.projectSourcePath,
           repos: manifest.repos,
+          sharedWith: await describeSharing(manifest, threadId),
         },
       };
     },
 
     async workspaceStatus({ threadId }) {
-      const manifest = manifestForThread(threadId);
+      const manifest = await resolveManifest(threadId);
       if (manifest === null) return { repos: [] };
       const result = await host.call(
         "workspaceStatus",
@@ -1051,7 +1275,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     },
 
     async changes({ threadId }) {
-      const manifest = manifestForThread(threadId);
+      const manifest = await resolveManifest(threadId);
       if (manifest === null) return { repos: [] };
       const result = await host.call(
         "diffSummary",
@@ -1062,7 +1286,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     },
 
     async filePatch({ threadId, dir, file, untracked }) {
-      const manifest = manifestForThread(threadId);
+      const manifest = await resolveManifest(threadId);
       const repo = manifest?.repos.find((entry) => entry.dir === dir);
       if (manifest === null || repo === undefined) {
         return { patch: "", truncated: false, error: "That repo is not in this workspace." };
@@ -1081,7 +1305,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     },
 
     async pullRequests({ threadId, refresh }) {
-      const manifest = manifestForThread(threadId);
+      const manifest = await resolveManifest(threadId);
       if (manifest === null) return { repos: [], fetchedAt: null };
       const work = readyRepos(manifest).filter((repo) => repo.dir !== PROJECT_SOURCE_DIR);
 
@@ -1100,7 +1324,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
     },
 
     async pullRequestAction({ threadId, dir, action }) {
-      const manifest = manifestForThread(threadId);
+      const manifest = await resolveManifest(threadId);
       const repo = manifest?.repos.find((entry) => entry.dir === dir);
       if (manifest === null || repo === undefined) {
         return { ok: false, message: "That repo is not in this workspace.", url: null };
@@ -1121,6 +1345,32 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       return result;
     },
   });
+
+  /**
+   * The other threads working in this checkout, named.
+   *
+   * Worth the SDK calls because an id is not an answer: the panel is telling
+   * someone their branch has a second author on it, and "thr_948yb2g8wz" does
+   * not tell them who. Capped by `sharingThreads`, and a thread that cannot be
+   * read is still reported — a warning that disappears on a transient failure
+   * is worse than one with a missing name.
+   */
+  async function describeSharing(
+    manifest: WorkspaceManifest,
+    threadId: string,
+  ): Promise<{ threadId: string; title: string | null }[]> {
+    const ids = sharingThreads(manifest, threadId);
+    return Promise.all(
+      ids.map(async (id) => {
+        try {
+          const thread = await bb.sdk.threads.get({ threadId: id });
+          return { threadId: id, title: thread.title ?? thread.titleFallback };
+        } catch {
+          return { threadId: id, title: null };
+        }
+      }),
+    );
+  }
 
   /** All of a thread's cached PR rows, or null when any is missing or stale. */
   function readPrCache(
