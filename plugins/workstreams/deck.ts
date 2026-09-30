@@ -15,6 +15,7 @@ import { ACTED_KINDS, ACTED_MS, DECK_SECTIONS, LOOSE_ID, needsYou, serviceGoal, 
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
+import { effortNotesSchema, NO_NOTES, type EffortNotes } from "./effort-notes.js";
 import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, type ActionId } from "./inventory-view-model.js";
@@ -108,6 +109,8 @@ export const deckCardSchema = z.object({
   sections: z.array(z.object({ key: z.enum(DECK_SECTIONS), needsYou: z.number(), rows: z.array(deckRowSchema) }).strict()),
   /** On a service card, the classifier's suggestions for its PRs, each group cut to the PRs on this card; empty on an effort's. */
   suggestions: z.array(suggestionGroupSchema),
+  /** A stored effort's Markdown notes, at revision 0 before the first save; null on a card no effort backs, which has nowhere to keep them. */
+  notes: effortNotesSchema.nullable(),
 }).strict();
 export type DeckCard = z.infer<typeof deckCardSchema>;
 export const deckViewSchema = z.object({
@@ -153,6 +156,8 @@ export type DeckEffortInput = {
   tickets: readonly string[];
   /** Its active instruction's criteria; null without one. */
   criteria: readonly Criterion[] | null;
+  /** Its notes; none yet when left out. */
+  notes?: EffortNotes;
 };
 export type DeckInput = {
   now: number;
@@ -336,6 +341,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
       const prs = group.prs.filter((pr) => all.some((row) => row.prUrl === pr.prUrl));
       return prs.length ? [{ ...group, prs }] : [];
     }),
+    notes: kind === "effort" ? effort.notes ?? NO_NOTES : null,
   };
 }
 

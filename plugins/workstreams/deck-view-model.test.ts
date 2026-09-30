@@ -383,6 +383,12 @@ describe("what the keys act on", () => {
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
   });
 
+  it("offers an effort's notes to edit, with ⇧N, and none on a service card", () => {
+    const shelf = card(inkwellDeck(), SHELF);
+    expect([shelf.notes, availability(context(shelf)).notes.on]).toEqual([{ body: "", first: "", revision: 0 }, true]);
+    expect(availability(context(card(inkwellDeck(), FOLIO))).notes).toEqual({ on: false, why: "only an effort keeps notes" });
+  });
+
   // A PR filed in an effort by mistake is a one-off: you move it out from the effort's own card, one row or a selection at a time.
   it("moves a focused or selected row of an effort's card to One-offs, but never One-offs' own rows", () => {
     const shelf = card(inkwellDeck(), SHELF);

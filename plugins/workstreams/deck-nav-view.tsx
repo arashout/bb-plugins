@@ -8,7 +8,7 @@
 // in the session (deck-place.ts), holds rows at their pixel through reads,
 // resizes, flips, and Mark seen, and never leaves focus on the page body.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import type { DeckView } from "./deck";
 import { DECK_CHANGED } from "./deck-shared";
@@ -19,7 +19,7 @@ import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardS
   readText, refreshNote, rowFacts, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type RowFacts }
   from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
-  type RuleDraft, type RuleItem } from "./deck-screen";
+  type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
 import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
@@ -140,6 +140,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const [rules, setRules] = useState<RuleItem[]>([]);
   /** Rows whose Refresh is running, until the read after it lands; with what each was, and the reads so far when GitHub answered. */
   const [refreshing, setRefreshing] = useState<ReadonlyMap<string, { ref: string; was: { status: string; section: keyof typeof SECTIONS } | null; after: number | null }>>(new Map());
+  /** The Notes editor, open on one effort's card, with the revision it edits. */
+  const [notesEdit, setNotesEdit] = useState<(NotesEdit & { effortId: string; revision: number }) | null>(null);
   /** Where each row a Mark seen moves sat on screen, so it slides from there to its new place. */
   const pendingMoves = useRef<Map<string, number> | null>(null);
   const now = useNow(30_000);
@@ -671,8 +673,15 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "hold": if (card) openDialog({ kind: "hold", id: card.card.id, effortKey: card.card.key, name: card.card.name, reason: "" }); return;
       case "complete": if (card) openDialog({ kind: "complete", id: card.card.id }); return;
       case "held": jumpSection("held"); return;
+      case "notes": {
+        if (!card?.notes) return;
+        // A second ⇧N goes back to the editor already open, with what you typed.
+        if (notesEdit?.effortId === card.card.id) { rootRef.current?.querySelector<HTMLElement>("[data-deck-notes-editor]")?.focus(); return; }
+        setNotesEdit({ effortId: card.card.id, draft: card.notes.body, revision: card.notes.revision, busy: false, error: null });
+        return;
+      }
       case "tiles": {
-        const all = ["next", "blocked", "stats", "threads", "linear", "people", "recent"];
+        const all = ["next", "blocked", "stats", "notes", "threads", "linear", "people", "recent"];
         here.tiles = all.every((tile) => here.tiles.includes(tile)) ? [] : all;
         pendingAnchor.current = captureAnchor();
         persist(); bump(); return;
@@ -812,6 +821,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "pile": setPile(command.pile); return;
       case "revoke": void rpc.call("inventory_confirm_revoke", { prUrl: command.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); },
         (cause: unknown) => say(message(cause))); return;
+      case "notes-draft": setNotesEdit((current) => current && { ...current, draft: command.text }); return;
+      case "notes-cancel": setNotesEdit(null); pendingFocus.current = { id: "notes-edit" }; return;
+      case "notes-save": saveNotes(); return;
     }
   };
 
@@ -884,7 +896,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
       open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
-      onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef} />
+      onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
+      notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} />
     {batch.element}
     {notes.element}
     <DeckDialog open={dialog?.kind === "hold" || dialog?.kind === "hold-pr"} title={dialog?.kind === "hold" ? `Hold ${dialog.name}` : dialog?.kind === "hold-pr" ? `Hold ${dialog.ref}` : ""}
@@ -945,6 +958,30 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       rows={(merging ?? []).flatMap(({ target }) => { const row = lines.find((line) => line.prUrl === target)?.row; return row ? [{ target, repo: row.repo, number: row.number, title: row.title }] : []; })} />
   </>;
 
+  /** Save the open notes over the revision they started from; the tile then shows them rendered, and Undo saves what was there before. */
+  function saveNotes() {
+    const edit = notesEdit;
+    if (!edit || edit.busy) return;
+    const before = cardOf(edit.effortId)?.notes?.body ?? "";
+    setNotesEdit({ ...edit, busy: true, error: null });
+    void rpc.call("effort_notes_save", { effortKey: edit.effortId, body: edit.draft, revision: edit.revision }).then((result) => {
+      if (!result.ok) { setNotesEdit((current) => current && { ...current, busy: false, error: result.error }); return; }
+      setNotesEdit(null);
+      const saved = viewPlace(edit.effortId);
+      if (!saved.tiles.includes("notes")) { saved.tiles = [...saved.tiles, "notes"]; persist(); }
+      pendingFocus.current = { id: "notes-edit" };
+      let used = false;
+      setUndo({ label: "Notes saved", live: () => !used, run: async () => {
+        used = true;
+        const back = await rpc.call("effort_notes_save", { effortKey: edit.effortId, body: before, revision: result.notes.revision })
+          .catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
+        say(back.ok ? "Undone." : back.error);
+        load();
+      } });
+      say("Notes saved.", true);
+      load();
+    }, (cause: unknown) => setNotesEdit((current) => current && { ...current, busy: false, error: message(cause) }));
+  }
   function holdNow() {
     if (dialog?.kind === "hold") void movePile("hold", { id: dialog.id, key: dialog.effortKey, name: dialog.name }, dialog.reason.trim());
     if (dialog?.kind === "hold-pr" && !busy) {

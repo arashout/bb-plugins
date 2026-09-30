@@ -24,7 +24,11 @@ const css = new URL("../dist/app.css", import.meta.url);
 if (!existsSync(css)) throw new Error("Run bb plugin build first: the preview reads dist/app.css.");
 const noop = () => {};
 const none = { rows: {}, at: {} };
-const view = inkwellDeck(inkwellThreads());
+/** Sample notes, so the Notes tile shows: Shelf order's collapsed to their first line, Store pickup's open. */
+const NOTES: Record<string, string> = { "effort-shelf-order": "## Flags\n- shelf_v2 on for staff\n\nExperiment: sort by genre first.",
+  "effort-store-pickup": "Pickup window copy waits on legal.\n\n- [ ] confirm hours with the stores" };
+const deck = inkwellDeck(inkwellThreads());
+const view = { ...deck, active: deck.active.map((item) => NOTES[item.id] ? { ...item, notes: { body: NOTES[item.id]!, revision: 1, updatedAt: NOW } } : item) };
 const order = view.active.map((item) => item.id);
 const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
 const ring = order;
@@ -39,7 +43,8 @@ const pane = (cur: string) => {
     held: view.held.map((item) => ({ id: item.id, key: item.key, name: item.name, note: `${item.reason || "No reason given"} · ${item.stats.open} open` })),
     done: view.done.map((item) => ({ id: item.id, key: item.key, name: item.name, archived: item.archived, note: `${item.merged} merged · ${item.open} open` })),
     read: { text: "Read 25s ago", error: null }, seen: { changed: 0, available: false, note: null },
-    state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set<string>(), open: new Set<string>(), pile: null, stuck: false,
+    state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set(cur === "effort-store-pickup" ? ["notes"] : []), open: new Set<string>(),
+    pile: null, stuck: false,
     on, hints: hintKeys(context, on), flash: null, batch: { kinds: [] }, run: noop, onPalette: noop, onHelp: noop, onUndo: noop }));
 };
 // Every card's pane waits in a template. A flip does what the deck does: it lands at once, copying the card it takes away first, then

@@ -27,6 +27,7 @@ import {
 } from "./contract.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
+import { createEffortNotesStore, EFFORT_NOTES_MIGRATION, effortNotesContract } from "./effort-notes.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
@@ -603,6 +604,7 @@ export const rpcContract = defineRpcContract({
   },
   ...effortV2Contract,
   ...effortPilesContract,
+  ...effortNotesContract,
   ...classifyContract,
   /**
    * Read-only: the effort deck. Every unarchived effort's card on its pile, a service card per repository for what no effort has, and Loose
@@ -710,6 +712,7 @@ export const MIGRATIONS = [
   LINEAR_SEED_MIGRATION,
   APPROVAL_CONFIRMATION_AUDIT_MIGRATION,
   EFFORT_ASSIGNMENT_FROM_MIGRATION,
+  EFFORT_NOTES_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -886,6 +889,7 @@ export default async function plugin(bb: BbPluginApi) {
   const effortStore = createEffortStore(db);
   const effortWork = createEffortWorkStore(db);
   const piles = createEffortPileStore(db);
+  const effortNotes = createEffortNotesStore(db);
   const assignments = createAssignmentStore(db, effortStore);
   const seeds = createSeedStore(db);
   /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
@@ -5710,7 +5714,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { now: Date.now(), rows, classify: { groups, oneOffsId }, gone,
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
-        parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work) })),
+        parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work), notes: effortNotes.get(effort.id) })),
       merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id }] : []; }),
       linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
@@ -6099,6 +6103,15 @@ export default async function plugin(bb: BbPluginApi) {
         threads: [...threads].map(([id, title]) => ({ id, title })) } };
     },
     effort_resume: ({ effortKey }) => movePile(effortKey, "resume"),
+    effort_notes_save: ({ effortKey, body, revision }) => {
+      const effort = effortStore.get(effortKey);
+      if (!effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+      try {
+        const saved = effortNotes.save(effort.id, body, revision);
+        deckChanged();
+        return { ok: true as const, notes: saved };
+      } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
+    },
     classify_get: () => classifyGet(),
     deck_get: ({ seen, ghosts }) => deckGet(seen, ghosts),
     deck_batch_plan: (input) => deckBatchPlan(input),

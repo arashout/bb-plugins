@@ -48,6 +48,7 @@ describe("the deck's key registry", () => {
     expect(actionForKey({ key: "0" })).toBeNull();
     expect(actionForKey({ key: "X", shiftKey: true })).toEqual({ id: "select-section" });
     expect(actionForKey({ key: "H", shiftKey: true })).toEqual({ id: "held" });
+    expect([actionForKey({ key: "N", shiftKey: true }), actionForKey({ key: "n" })]).toEqual([{ id: "notes" }, { id: "nudge" }]);
     // Caps Lock types H without Shift: that's no key here, and neither is a Shift letter the registry doesn't name.
     expect(actionForKey({ key: "H" })).toBeNull();
     expect(actionForKey({ key: "Q", shiftKey: true })).toBeNull();

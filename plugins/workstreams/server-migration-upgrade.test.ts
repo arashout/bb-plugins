@@ -6,6 +6,7 @@ import { DECK_BATCH_MIGRATION } from "./deck-batch.js";
 import { DISPATCH_MIGRATIONS } from "./dispatch.js";
 import { EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION } from "./effort-assignments.js";
 import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
+import { EFFORT_NOTES_MIGRATION } from "./effort-notes.js";
 import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS } from "./effort-work-store.js";
@@ -248,8 +249,15 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends where a moved PR came from after the confirmation audit", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 66 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 66 ORDER BY id").all())
       .toEqual([{ id: 66, hash: statementHash(EFFORT_ASSIGNMENT_FROM_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  it("appends effort notes after where a moved PR came from", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 67 ORDER BY id").all())
+      .toEqual([{ id: 67, hash: statementHash(EFFORT_NOTES_MIGRATION) }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

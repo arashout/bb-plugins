@@ -865,8 +865,10 @@ criteria, else the oldest moves of the user's, then the oldest waits, never a
 held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
 tickets (`known` 0 means no Linear data); `people` (reviewers the user waits
 on, and reviewers whose requested changes wait on the user); its parent and PR
-`threads`, read-only; the week's merges, reviews, and pushes; and its rows by
-section. A merge counts once a read sees it: the poll's read of a PR that left
+`threads`, read-only; the week's merges, reviews, and pushes; its rows by
+section; and on an effort's card, its Markdown `notes` (`body`, `revision`),
+null on a service card. `effort_notes_save` saves them with the `revision`
+being edited; one saved since refuses it. A merge counts once a read sees it: the poll's read of a PR that left
 your open PRs, a Refresh, or a checkout scan. A merged PR stays in the effort
 whose ticket it carries.
 

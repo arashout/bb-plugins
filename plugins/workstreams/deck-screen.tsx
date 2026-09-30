@@ -12,6 +12,7 @@ import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
 import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
+import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
@@ -27,7 +28,9 @@ export type DeckCommand =
   | { kind: "resume"; id: string } | { kind: "reopen"; id: string }
   | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null }
   /** Take back your confirmation of a PR's review notes. */
-  | { kind: "revoke"; prUrl: string };
+  | { kind: "revoke"; prUrl: string }
+  /** The Notes tile's editor: what you typed, save (⌘↵), or cancel (esc). */
+  | { kind: "notes-draft"; text: string } | { kind: "notes-save" } | { kind: "notes-cancel" };
 export type Run = (command: DeckCommand) => void;
 
 /** The 2px accent ring every control shows on keyboard focus. */
@@ -332,14 +335,15 @@ function Section({ section, state, run, open, stuck, held, leaves }: { section: 
 // The effort card: a header and a bento of tiles, each with more on expand.
 // ---------------------------------------------------------------------------
 
-/** `more` is "narrow" when only a card under 700 px hides some of the tile. */
-function Tile({ id, title, note, open, more, run, className, children }: { id: string; title: string; note?: ReactNode; open: boolean; more: boolean | "narrow"; run: Run;
-  className?: string; children: ReactNode }) {
+/** `more` is "narrow" when only a card under 700 px hides some of the tile. `action` sits before More. */
+function Tile({ id, title, note, open, more, run, className, action, children }: { id: string; title: string; note?: ReactNode; open: boolean; more: boolean | "narrow";
+  run: Run; className?: string; action?: ReactNode; children?: ReactNode }) {
   return <div data-deck-tile={id} className={cn("min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2.5 pb-2 pt-1.5", className)}>
     <div className="mb-1 flex min-h-5 items-center gap-2">
       <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-muted-foreground">{title}</span>
       {note ? <span className="min-w-0 truncate text-[11px] text-muted-foreground">{note}</span> : null}
       <span className="flex-1" />
+      {action}
       {more ? <button type="button" data-deck-focus={`tile-${id}`} aria-expanded={open} onClick={() => run({ kind: "tile", key: id })} title="More or less (i toggles every tile)"
         className={cn("rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING, more === "narrow" && "@min-[700px]:hidden")}>
         {open ? "Less" : "More"}</button> : null}
@@ -348,8 +352,54 @@ function Tile({ id, title, note, open, more, run, className, children }: { id: s
   </div>;
 }
 
-/** `keyless` drops its Advance's badge while a acts on a focused row or a selection. */
-export function Card({ screen, tiles, run, on, keyless }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability; keyless?: boolean }) {
+/** The Notes tile's editor while it's open: what you typed, the revision it edits, and a save that's running or was refused. */
+export type NotesEdit = { draft: string; busy: boolean; error: string | null };
+
+/** Editing notes in place: Markdown in a plain field, ⌘↵ saves, esc cancels. */
+function NotesEditor({ edit, run }: { edit: NotesEdit; run: Run }) {
+  return <div className="grid gap-1.5">
+    <textarea data-deck-notes-editor autoFocus value={edit.draft} maxLength={NOTES_MAX} rows={Math.min(14, Math.max(4, edit.draft.split("\n").length + 1))}
+      aria-label="Notes, in Markdown" placeholder="Flags, experiments, anything else. Markdown works." spellCheck
+      onChange={(event) => run({ kind: "notes-draft", text: event.target.value })}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); run({ kind: "notes-save" }); }
+        else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); run({ kind: "notes-cancel" }); }
+      }}
+      className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 font-mono text-[12px] leading-[18px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-sky-500" />
+    {edit.error ? <p role="alert" className="text-[12px] text-destructive">{edit.error}</p> : null}
+    <div className="flex items-center justify-end gap-2">
+      <span className="mr-auto text-[11px] text-muted-foreground">Markdown</span>
+      <button type="button" onClick={() => run({ kind: "notes-cancel" })} className={cn(BUTTON, "border-border")}>Cancel<Kbd>esc</Kbd></button>
+      <button type="button" data-deck-notes-save disabled={edit.busy} onClick={() => run({ kind: "notes-save" })}
+        className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{edit.busy ? "Saving…" : "Save"}<Kbd inverted>⌘↵</Kbd></button>
+    </div>
+  </div>;
+}
+
+/**
+ * An effort's notes: collapsed, their first line; More renders them all with `markdown` (bb's Markdown in the panel); Edit, or ⇧N, edits
+ * them in place.
+ */
+function NotesTile({ notes, edit, open, run, markdown }: { notes: NonNullable<CardScreen["notes"]>; edit: NotesEdit | null; open: boolean; run: Run;
+  markdown?: (body: string) => ReactNode }) {
+  const key = ACTION.notes.keys[0];
+  return <Tile id="notes" title="Notes" open={open} more={!!notes.body && !edit} run={run} className="col-span-6 @min-[900px]:col-span-12"
+    note={edit || open ? undefined : <span data-deck-notes-first className={notes.first ? "text-foreground/80" : undefined}>{notes.first || "None yet."}</span>}
+    action={edit ? null : <button type="button" data-deck-focus="notes-edit" onClick={() => run({ kind: "action", id: "notes" })} title={`Edit the notes (${key})`}
+      className={cn("inline-flex items-center gap-1 rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
+      Edit<Kbd>{key}</Kbd></button>}>
+    {edit ? <NotesEditor edit={edit} run={run} />
+      : open && notes.body ? <div data-deck-notes-body className="min-w-0 text-[12.5px]">{markdown ? markdown(notes.body)
+        : <p className="whitespace-pre-wrap break-words">{notes.body}</p>}</div> : null}
+  </Tile>;
+}
+
+/**
+ * `keyless` drops its Advance's badge while a acts on a focused row or a selection. `notes` is the Notes editor while it's open on this
+ * card, and `markdown` renders notes; without it they show as plain text.
+ */
+export function Card({ screen, tiles, run, on, keyless, notes, markdown }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability; keyless?: boolean;
+  notes?: NotesEdit | null; markdown?: (body: string) => ReactNode }) {
   const { card } = screen;
   const held = card.pile === "held";
   const service = card.kind === "service";
@@ -433,6 +483,7 @@ export function Card({ screen, tiles, run, on, keyless }: { screen: CardScreen; 
           {screen.stats.bar.map((item) => <i key={item.key} className={cn("block h-full", TONE[item.tone].bar)} style={{ flex: item.count / total }} />)}</div>
         {open("stats") ? <p className="mt-1 text-[11px] text-muted-foreground">{screen.stats.bar.map((item) => `${item.count} ${item.label}`).join(" · ")}</p> : null}
       </Tile>
+      {screen.notes ? <NotesTile notes={screen.notes} edit={notes ?? null} open={open("notes")} run={run} markdown={markdown} /> : null}
       {threadsTile}
       {/* On a card 700 px or wider, the chips, state bar, and target sit on one line in place of the summary; opened, the fields follow. */}
       <Tile id="linear" title="Linear" note={open("linear") ? undefined : <span className={cn(linearLine && "@min-[700px]:hidden")}>{linear.summary}</span>}
@@ -921,6 +972,8 @@ export type DeckPaneProps = {
   run: Run; onPalette(): void; onHelp(): void; onUndo(): void;
   rootRef?: RefObject<HTMLDivElement | null>; scrollerRef?: RefObject<HTMLDivElement | null>; slackRef?: RefObject<HTMLDivElement | null>;
   chipsRef?: RefObject<HTMLDivElement | null>; viewRef?: RefObject<HTMLDivElement | null>;
+  /** The Notes editor while it's open on the card shown, and what renders notes as Markdown. */
+  notes?: NotesEdit | null; markdown?: (body: string) => ReactNode;
 };
 
 export function DeckPane(props: DeckPaneProps) {
@@ -936,7 +989,8 @@ export function DeckPane(props: DeckPaneProps) {
           keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-3xl px-2 pb-10 pt-3 @min-[720px]:px-4">
-        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} /></Stack>
+        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
+          markdown={props.markdown} /></Stack>
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
             <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></div></>
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck."

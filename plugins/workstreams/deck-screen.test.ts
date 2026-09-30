@@ -197,7 +197,7 @@ describe("the effort deck's markup", () => {
   it("draws every tile with its summary and a More only where there's more", () => {
     const html = pane(inkwellDeck(), SHELF);
     const tiles = [...html.matchAll(/data-deck-tile="([a-z]+)"/gu)].map((match) => match[1]);
-    expect(tiles).toEqual(["next", "blocked", "stats", "threads", "linear", "people", "recent"]);
+    expect(tiles).toEqual(["next", "blocked", "stats", "notes", "threads", "linear", "people", "recent"]);
     expect(text(html)).toContain("Blocked Nothing waits on others.");
     // Closed, the Linear tile summarizes itself on a narrow card and lays its chips and state bar out on one line on a wide one, as the mock does.
     const tile = (from: string) => from.slice(from.indexOf('data-deck-tile="linear"'), from.indexOf('data-deck-tile="people"'));
@@ -210,6 +210,25 @@ describe("the effort deck's markup", () => {
     expect(text(linear)).toContain("Linear Less ▣ Shelf redesign #shelves States 1 in review Read 1 of 5 tickets");
     expect(linear).toMatch(/data-deck-linear-line="true" class="[^"]*mb-1.5 flex"/u);
     expect(text(pane(inkwellDeck(), "effort-store-pickup"))).toContain("Linear no Linear data People");
+  });
+
+  // Notes are a stopgap for what the card doesn't track yet: one line until you open them, bb's Markdown once you do, and edited in place.
+  it("shows an effort's notes as their first line, renders them with the Markdown it's given when opened, and edits them in place", () => {
+    const body = "## Flags\n- shelf_v2 on for staff\n\nExperiment: sort by genre.";
+    const view = inkwellDeck();
+    const noted = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, notes: { body, revision: 3, updatedAt: NOW } } : item) };
+    const tile = (html: string) => html.slice(html.indexOf('data-deck-tile="notes"'), html.indexOf('data-deck-tile="threads"'));
+    const closed = tile(pane(noted, SHELF));
+    expect(text(closed)).toContain("Notes Flags Edit ⇧N More");
+    expect(closed).not.toContain("data-deck-notes-body");
+    const open = tile(pane(noted, SHELF, { tiles: new Set(["notes"]), markdown: (content) => createElement("article", { "data-md": true }, content) }));
+    expect(open).toContain(`<div data-deck-notes-body="true" class="min-w-0 text-[12.5px]"><article data-md="true">${body}</article></div>`);
+    const editing = tile(pane(noted, SHELF, { notes: { draft: body, busy: false, error: "These notes changed since you opened them." } }));
+    expect(editing).toMatch(/<textarea data-deck-notes-editor="true"[^>]*aria-label="Notes, in Markdown"/u);
+    expect(text(editing)).toContain("These notes changed since you opened them. Markdown Cancel esc Save ⌘↵");
+    // Before the first save the tile says there are none; a service card has nowhere to keep them.
+    expect(text(tile(pane(view, SHELF)))).toContain("Notes None yet. Edit ⇧N");
+    expect(pane(view, FOLIO)).not.toContain('data-deck-tile="notes"');
   });
 
   // The card behind the top one is the one ] flips to, so its name on the visible edge says where the next flip lands, and clicking it goes there.

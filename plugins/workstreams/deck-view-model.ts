@@ -15,6 +15,7 @@ import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
 import { evidenceText, handled, type ConfirmRead } from "./approval-evidence";
+import { firstLine } from "./effort-notes";
 
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
@@ -212,7 +213,7 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
       status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, medianAgeMs: null, oldestWait: null },
       progress: { merged: 0, open: 0, criteria: null }, next: [], blocked: [],
       linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [] },
-      people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [] };
+      people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [], notes: null };
   });
 }
 
@@ -263,6 +264,8 @@ export type CardScreen = {
   sections: SectionScreen[];
   /** A service card's suggestions, in the classifier's order; empty on an effort's card. */
   suggest: SuggestGroup[];
+  /** An effort's notes: all of them, and the line the collapsed tile shows; null on a card no effort backs. */
+  notes: { body: string; first: string; revision: number } | null;
 };
 
 const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] }[] = [
@@ -362,6 +365,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     recent: { summary: first ? `${ACTIVITY[first.kind]} ${first.ref} ${age(first.at, now)} ago` : "quiet",
       items: card.activity.map((item) => ({ text: `${ACTIVITY[item.kind]} ${item.ref}${item.who ? ` · @${item.who}` : ""}`, age: age(item.at, now) })) },
     sections, suggest,
+    notes: card.notes && { body: card.notes.body, first: firstLine(card.notes.body), revision: card.notes.revision },
   };
 }
 
@@ -527,6 +531,7 @@ export function availability(context: KeyContext): Availability {
   set("held", !!card && card.held > 0, card ? "nothing here is on hold" : deck ? NO_CARD : "Efforts only");
   set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
+  set("notes", !!card?.notes, card ? "only an effort keeps notes" : deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready", "release"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);

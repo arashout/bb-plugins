@@ -178,4 +178,22 @@ describe("the effort deck on the server", () => {
     const notes = (await env.rpc("thread_effort_context", { threadId: "thr-notes", seen: {} }) as ThreadEffortReady).picker!;
     expect([notes.chip.kind, notes.chip.name]).toEqual(["none", "No effort"]);
   });
+
+  // Two views can edit one effort's notes: a save names the revision it edited, so the later one is refused rather than silently lost.
+  it("keeps each effort's notes with a revision, on its card, and refuses a save over notes that changed since they were opened", async () => {
+    const env = await setup();
+    const card = async () => (await env.deck()).active.find((item) => item.id === env.effort.id)!;
+    expect((await card()).notes).toEqual({ body: "", revision: 0, updatedAt: null });
+    const before = env.signals();
+    const saved = await env.rpc("effort_notes_save", { effortKey: env.effort.key, body: "- `shelf_v2` on for staff\n\n", revision: 0 });
+    expect(saved).toEqual({ ok: true, notes: { body: "- `shelf_v2` on for staff", revision: 1, updatedAt: expect.any(Number) } });
+    expect(env.signals()).toBeGreaterThan(before);
+    expect((await card()).notes).toMatchObject({ body: "- `shelf_v2` on for staff", revision: 1 });
+    expect(await env.rpc("effort_notes_save", { effortKey: env.effort.id, body: "Stale edit", revision: 0 }))
+      .toEqual({ ok: false, error: "These notes changed since you opened them. Copy your text, then open them again." });
+    expect(await env.rpc("effort_notes_save", { effortKey: env.effort.id, body: "", revision: 1 })).toMatchObject({ ok: true, notes: { body: "", revision: 2 } });
+    // A service card has no effort to keep notes in.
+    expect((await env.deck()).active.find((item) => item.kind === "service")?.notes).toBeNull();
+    expect(await env.rpc("effort_notes_save", { effortKey: "effort:missing", body: "x", revision: 0 })).toEqual({ ok: false, error: "The effort changed. Refresh the deck." });
+  });
 });
