@@ -3,8 +3,8 @@ import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { withArrivals } from "./deck-place.js";
-import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, paletteItems, readText,
-  refreshNote, rowFacts, rowFilter, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, overviewScreen, paletteItems,
+  readText, refreshNote, rowFacts, rowFilter, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -16,7 +16,7 @@ const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1]
 const lines = (screen: CardScreen) => Object.fromEntries(screen.sections.map((section) => [section.key, section.lines.map((line) =>
   `${line.ref}${line.needs ? "" : " ·"}${line.dim ? " dim" : ""}${line.ghost ? " ghost" : ""}${line.dot && !line.ghost ? " dot" : ""}${line.change ? ` {${line.info!.text}}` : ""}${
     line.to ? ` ⇢${line.to.key}` : ""}${line.trail ? ` [${line.trail.text}]` : ""}`)]));
-const context = (screen: CardScreen, patch: Partial<KeyContext> = {}): KeyContext =>
+const context = (screen: CardScreen | "overview", patch: Partial<KeyContext> = {}): KeyContext =>
   ({ view: "deck", cur: screen, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1, ...patch });
 
 describe("the effort deck's strip", () => {
@@ -24,11 +24,11 @@ describe("the effort deck's strip", () => {
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
     const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
-    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[1, "Shelf order", 5, false], [2, "Store pickup", 3, false],
+    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[null, "Overview", 0, false], [1, "Shelf order", 5, false], [2, "Store pickup", 3, false],
       [3, "One-offs", 3, false], [4, "folio · service", 2, true], [5, "atlas · service", 1, true], [6, "catalog · service", 1, true]]);
     // A card keeps its number after you flip away and a read reorders the server's pile: the session order wins.
     expect(stripChips([PICKUP, ONE_OFFS, SHELF, CATALOG], cards, SHELF).map((chip) => chip.name))
-      .toEqual(["Store pickup", "One-offs", "Shelf order", "catalog · service"]);
+      .toEqual(["Overview", "Store pickup", "One-offs", "Shelf order", "catalog · service"]);
   });
 
   it("ends with a service card for a repository with only threads, and Loose threads, gray, neither counting in Needs you", () => {
@@ -36,6 +36,30 @@ describe("the effort deck's strip", () => {
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
     expect(stripChips(view.active.map((item) => item.id), cards, SHELF).slice(-2).map((chip) => [chip.n, chip.name, chip.count, chip.service, chip.color]))
       .toEqual([[7, "quill · service", 0, true, "#d3a35a"], [8, "Loose threads", 0, true, "#8f8e8a"]]);
+  });
+});
+
+describe("Overview", () => {
+  it("uses session order and ranks blocked PRs by their recorded wait, including unknown dates last", () => {
+    const view = inkwellDeck();
+    const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
+    const overview = overviewScreen([PICKUP, SHELF, ONE_OFFS], cards);
+    expect(overview.cards.map((item) => item.card.id)).toEqual([PICKUP, SHELF, ONE_OFFS]);
+    // Service cards and Loose threads stay on the strip: Overview sums up efforts.
+    expect(overviewScreen([PICKUP, FOLIO, SHELF, ATLAS, ONE_OFFS], cards).cards.map((item) => item.card.id)).toEqual([PICKUP, SHELF, ONE_OFFS]);
+    expect(overview.blockers.map((item) => item.ref)).toEqual(view.active.find((item) => item.id === PICKUP)!.blocked.map((item) => item.ref));
+    const pickup = cards.get(PICKUP)!;
+    const [first, second] = pickup.card.blocked;
+    const mixed = new Map(cards).set(PICKUP, { ...pickup, card: { ...pickup.card, blocked: [{ ...first!, since: null }, { ...second!, since: NOW - 10 * 86_400_000 }] } });
+    expect(overviewScreen([PICKUP], mixed).blockers.map((item) => item.ref)).toEqual([second!.ref, first!.ref]);
+    expect(overviewScreen([], cards)).toEqual({ cards: [], blockers: [] });
+    expect(availability(context("overview")).seen.on).toBe(false);
+    expect(availability(context("overview")).accept.on).toBe(false);
+    // Overview draws no rows: nothing to step through, advance, or act on, while ] still flips on.
+    const on = availability(context("overview"));
+    expect([on["row-next"].on, on["row-next"].why, on.advance.on, on.merge.on, on.next.on]).toEqual([false, "no rows on Overview", false, false, true]);
+    expect(targets("merge", { cur: "overview", focused: null, selected: [] })).toEqual([]);
+    expect(advanceTarget({ cur: "overview", focused: null, selected: [] })).toBeNull();
   });
 });
 
@@ -383,6 +407,10 @@ describe("what the keys act on", () => {
     // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.
     const prs = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["nudge"]) } });
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
+    // All PRs lists Start and Nudge alone, so no palette entry offers a hold or a refresh its rows don't.
+    expect([prs["hold-pr"].on, prs["hold-pr"].why, prs.refresh.on]).toEqual([false, "the row has no such move", false]);
+    const refreshable = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: false, moves: new Set(["refresh"]) } });
+    expect([refreshable.refresh.on, refreshable["hold-pr"].on]).toEqual([true, false]);
   });
 
   // "3 need you" and "2 blocked" in a card's header each show those rows alone. Acting on one there must not pull it out from under you.
@@ -488,7 +516,8 @@ describe("what the keys act on", () => {
     const items = paletteItems(availability(context(cards.get(SHELF)!)), chips, { held: [{ id: "effort-gift-cards", name: "Gift cards" }],
       done: [{ id: "effort-store-hours", name: "Store hours", archived: false }, { id: "effort-old", name: "Old", archived: true }] }, SHELF, true);
     expect(items.filter((item) => item.action).map((item) => item.key)).toEqual(DECK_ACTIONS.filter((action) => action.id !== "jump").map((action) => action.id));
-    expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Shelf order", "1", false],
+    expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Overview", "", true],
+      ["Go to Shelf order", "1", false],
       ["Go to Store pickup", "2", true], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],
       ["Go to catalog · service", "6", true], ["Resume Gift cards", "", true], ["Reopen Store hours", "", true], ["Reopen Old", "", false]]);
   });

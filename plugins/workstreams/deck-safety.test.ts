@@ -1,6 +1,5 @@
-// The deck's write safety, read from the view modules' source: no key, button, or palette entry writes to GitHub on its own. A batch
-// sends only from the listing confirm, after its Undo window, and a merge only from the fresh merge preview. A new direct call in any
-// of these files fails here.
+// The deck sends batch writes only after the listing confirm and merges only from a fresh preview.
+// All PRs exposes one direct write: an explicit Nudge button when the server-derived action is eligible.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -60,9 +59,19 @@ describe("the deck's write safety", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
-    // All PRs' keys go through the same confirm; its row buttons stay one click each, as before the deck.
-    expect(source("inventory-screen.tsx")).toMatch(/case "nudge": case "request": case "ready": if \(focused\) void batch\.plan\(/u);
-    // Review notes are never a batch: c is the row's own confirm, which refuses without evidence of handling.
-    expect(source("inventory-screen.tsx")).toMatch(/case "confirm": \{ const confirm = action\("confirm-handled"\); if \(focused && confirm\) void run\(focused, confirm\); return; \}/u);
+    // All PRs exposes only explicit Start and eligible Nudge buttons. Its keys move focus, and n, its one key that writes, opens the same
+    // listing confirm as the deck's; its Nudge button stays one click, its only direct call besides the read.
+    const inventory = source("inventory-screen.tsx");
+    expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
+    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(1);
+    expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge"]);
+    // Review notes and merges are the deck's alone: no key or button here confirms or merges.
+    expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);
+    expect(inventory).not.toContain('"inventory_confirm_handled"');
+    expect(inventory).not.toContain('"action_merge"');
+    const rows = source("inventory-rows.tsx");
+    expect(rows).toContain('action.id === "nudge" && action.enabled');
+    expect(rows).toContain('onClick={() => props.onNudge(line, nudge)}');
+    expect(rows).toContain('onClick={() => props.onStart(item)}');
   });
 });

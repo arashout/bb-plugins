@@ -33,6 +33,7 @@ import { deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, t
 import { ThreadEffortControl } from "./thread-effort-control";
 import { RosterNavView, RosterPanelTab } from "./roster-view";
 import { InventoryNavView } from "./inventory-screen";
+import { useFeedbackQueue } from "./review-feedback-queue";
 import { DeckNavView } from "./deck-nav-view";
 import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
 import { rosterPanelOpen, rosterParents } from "./roster-parents";
@@ -528,13 +529,15 @@ function RunsBadge() {
   }, [rpc]);
   useEffect(refetch, [refetch]);
   useRealtime("board-changed", refetch);
+  const queue = useFeedbackQueue();
   const badge = badgeValue(open);
-  if (badge === null) return null;
-  const label = badge.needsYou
+  if (badge === null && queue.items === null) return null;
+  const label = badge?.needsYou
     ? `${badge.count} ${badge.count === 1 ? "agent needs" : "agents need"} you`
-    : `${badge.count} ${badge.count === 1 ? "agent" : "agents"} running`;
+    : badge ? `${badge.count} ${badge.count === 1 ? "agent" : "agents"} running` : "";
   return (
-    <span
+    <span className="inline-flex items-center gap-1">
+    {badge ? <span
       role="status"
       aria-label={label}
       title={label}
@@ -544,6 +547,11 @@ function RunsBadge() {
       )}
     >
       {badge.count}
+    </span> : null}
+    {queue.items !== null && !queue.error ? <span role="status" aria-label={`${queue.items.length} PRs with feedback for you`}
+      title={`${queue.items.length} PRs with feedback for you`} className="rounded bg-violet-500/10 px-1 py-0.5 text-[10px] font-medium leading-none tabular-nums text-violet-800 dark:text-violet-200">
+      {queue.items.length > 99 ? "99+" : queue.items.length}
+    </span> : null}
     </span>
   );
 }

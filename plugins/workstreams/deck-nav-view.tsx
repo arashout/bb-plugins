@@ -13,10 +13,10 @@ import type { rpcContract } from "./server";
 import type { DeckView } from "./deck";
 import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
-import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor, type FocusKey,
-  type Place, type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, paletteItems,
-  paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
+import { anchorScroll, deckRing, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, numberedEffort, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor,
+  type FocusKey, type Place, type Seen, type ViewPlace } from "./deck-place";
+import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
+  paletteItems, paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
   type PaletteItem, type RowFacts } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
@@ -217,12 +217,14 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved, ...fates })])),
     [active, seen, now, details, accepted, moved, fates]);
   const order = useMemo(() => keepOrder(place.order, active.map((item) => item.id)), [active, place.order]);
-  const ring = order;
+  // Overview opens the ring without taking an effort's number key.
+  const ring = useMemo(() => deckRing(view ? order : null), [view, order]);
   if (follow.current && ring.includes(follow.current)) { place.cur = follow.current; follow.current = null; }
   // The order this render reads is the one you last saw until the effect below saves the new one, so the card landed on is kept now.
   const cur = landAfter(place.order, place.cur, ring);
   if (cur) place.cur = cur;
-  const full = cur ? cards.get(cur) ?? null : null;
+  const full = cur && cur !== "overview" ? cards.get(cur) ?? null : null;
+  const overview = useMemo(() => overviewScreen(order, cards), [order, cards]);
   const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
   const here = viewPlace(cur);
   // A header count shows its rows alone until you show all again; everything else on the card counts them all.
@@ -236,7 +238,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const changedHere = card?.changed ?? 0;
   const settleable = card?.settleable ?? false;
   const chips = useMemo(() => stripChips(order, cards, cur), [order, cards, cur]);
-  const context: KeyContext = { view: "deck", cur: card, service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused, selected,
+  const context: KeyContext = { view: "deck", cur: card ?? (view && cur === "overview" ? "overview" : null), service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused, selected,
     seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0, filter: here.filter?.kind ?? null };
   const on = availability(context);
   const persist = useCallback(() => writeStore("sessionStorage", PLACE_KEY, placeRef.current), []);
@@ -303,7 +305,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (flipped && viewRef.current) playFlip(viewRef.current, flipped);
     // Screen readers hear the card once, after the last of a run of flips, and not at all when focus moved onto its heading or chip, which say it.
     const said = focusNamesCard(before, document.activeElement);
-    const name = card?.card.name ?? "";
+    const name = card?.card.name ?? (cur === "overview" ? "Overview" : "");
     setAnnounce("");
     if (announceTimer.current !== null) window.clearTimeout(announceTimer.current);
     announceTimer.current = said ? null : window.setTimeout(() => setAnnounce(name), FLIP_MS);
@@ -555,7 +557,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     if (leaving) {
       const index = order.indexOf(effort.id);
       const nextOrder = order.filter((id) => id !== effort.id);
-      place.cur = nextOrder[Math.min(Math.max(0, index), nextOrder.length - 1)] ?? null;
+      place.cur = nextOrder[Math.min(Math.max(0, index), nextOrder.length - 1)] ?? "overview";
     } else place.cur = effort.id;
     // The card it lands on rises out of the stack; the one that left already flew to its pile.
     if (place.cur !== cur) landing.current = { direction: 1, motion: flipMotion(reduced(), null), ghost: null };
@@ -667,7 +669,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     const row = line ?? focused;
     switch (id) {
       case "next": case "prev": go({ step: id === "next" ? 1 : -1 }); return;
-      case "jump": { const target = n ? ring[n - 1] : undefined; if (target) go({ id: target }); return; }
+      case "jump": { const target = n ? numberedEffort(order, n) : null; if (target) go({ id: target }); return; }
       case "services": if (context.service) go({ id: context.service }); return;
       case "view": onView("prs"); return;
       case "seen": markSeen(); return;
@@ -908,7 +910,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     open: item.card.stats.open }] : []; })];
 
   return <>
-    <DeckPane chips={chips} cur={cur} card={card} empty={!!view && !card} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
+    <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} empty={!!view && !card && cur !== "overview"} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
@@ -1070,4 +1072,3 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       promote?.id ?? null);
   }
 }
-

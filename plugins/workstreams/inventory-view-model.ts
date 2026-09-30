@@ -11,30 +11,21 @@ import { age, clock } from "./roster-view-model";
 /** Realtime: the server publishes it after each inventory read, single-PR read, hold change, and recorded inventory action. */
 export const INVENTORY_CHANGED = "inventory-changed";
 
-/** The three questions, in the order the screen asks them, and what an empty filter says. */
+/** Attention categories retained in the inventory read model. */
 export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: string }[] = [
   { key: "forgotten-draft", label: "Forgotten in draft", none: "No PR is forgotten in draft." },
   { key: "missing-reviewer", label: "Missing a reviewer", none: "Every PR has a reviewer." },
   { key: "needs-nudge", label: "Needs a nudge", none: "Nothing needs a nudge." },
 ];
 
-/**
- * How this works, for the inventory: what it lists, what each question asks at pr-attention.ts's default thresholds (a test keeps the
- * two equal; settings change them), and how to read a row, including why Needs a nudge counts more rows than offer Nudge.
- */
+/** Help copy for the two All PRs lists and their available action. */
 export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
-  intro: "The inventory lists every open PR you author, and every open PR an effort names, by effort, with No effort last. Each count " +
-    "answers one question; press it to show only those PRs, and press it again to show every PR. Settings change the thresholds.",
+  intro: "All PRs shows your open pull requests and PRs named by an effort. Back to me comes from Reviews: queued feedback on your PRs. Other open PRs stays below, grouped by effort.",
   rows: [
-    ["Forgotten in draft", "A draft with green checks and no conflict, ready for Mark ready, or a draft with no push for 3 days."],
-    ["Missing a reviewer", "Open, not a draft, not approved, with no one asked and no review yet."],
-    ["Needs a nudge", "A requested review with no answer after 1 business day, addressed changes whose reviewer isn't asked again, an " +
-      "approval whose comments no one has confirmed handled, or a PR stuck for 1 day: approved and mergeable but unmerged, failing checks, " +
-      "or a conflict. Nudge asks reviewers again on the first two; confirming, merging, and fixing the rest are yours."],
-    ["Next · owner · age", "The step, who takes it (you, the reviewers, or #N, the PR it's stacked on, which merges first), and how long it has waited."],
-    ["2d+", "At least this long. GitHub keeps no time for failing checks or conflicts, so their age starts at the first read that saw them."],
-    ["checked 25s ago", "When GitHub last answered for the row. Read failed, in red, says it didn't; an amber dot says the last full read didn't list it."],
-    ["Refresh", "Reads one PR from GitHub now. A teammate's PR the board doesn't read refreshes from its effort's roster."],
+    ["Back to me", "Feedback waiting for your changes. Start opens a work thread; Open thread returns to one already started."],
+    ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
+    ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending."],
+    ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
   ],
 };
 

@@ -88,6 +88,13 @@ export function landAfter(previous: readonly string[], cur: string | null, ids: 
 }
 
 /**
+ * Overview joins the flip ring without taking an effort's number key. Before the first read there's no ring (`order` null), so the card
+ * the session was on waits for the read rather than landing on Overview.
+ */
+export const deckRing = (order: readonly string[] | null): string[] => order ? ["overview", ...order] : [];
+export const numberedEffort = (order: readonly string[], n: number): string | null => n >= 1 && n <= 9 ? order[n - 1] ?? null : null;
+
+/**
  * The scroll that puts an element `want` pixels below the viewport's top, now that it sits `at` pixels below it. A negative scroll grows
  * the spacer above the view instead, and a spacer shrinks before the scroll does, so the content never jumps.
  */

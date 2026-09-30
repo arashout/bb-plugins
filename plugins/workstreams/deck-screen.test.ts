@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, cardSnapshot, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { availability, cardScreen, cardSnapshot, hintKeys, overviewScreen, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, NotesBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import { notesScreen } from "./deck-view-model.js";
 import type { SeedProposal } from "./linear-seed.js";
@@ -18,10 +18,12 @@ const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu
 function pane(view: DeckView, cur: string, patch: Partial<DeckPaneProps> = {}, accepted: Accepted = new Map()) {
   const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW, accepted })]));
   const card = cards.get(cur) ?? null;
-  const context: KeyContext = { view: "deck", cur: card, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1 };
+  const context: KeyContext = { view: "deck", cur: card ?? (cur === "overview" ? "overview" : null), service: FOLIO, focused: null, selected: [], seenAvailable: false,
+    undo: false, held: 1, done: 1 };
   const on = availability(context);
   return renderToStaticMarkup(createElement(DeckPane, {
     chips: stripChips(view.active.map((item) => item.id), cards, cur), cur, card,
+    overview: cur === "overview" ? overviewScreen(view.active.map((item) => item.id), cards) : null,
     rules: [{ id: "r1", text: "Branch shelf/* → Shelf order · 2 this week" }], held: [{ id: "effort-gift-cards", key: "effort-gift-cards", name: "Gift cards", note: "Waiting on the card vendor" }],
     done: [{ id: "effort-store-hours", key: "effort-store-hours", name: "Store hours", note: "0 merged" }], read: { text: "Read 25s ago", error: null },
     seen: { changed: 0, available: false, note: null }, state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set<string>(), open: new Set<string>(), pile: null, stuck: false,
@@ -42,11 +44,65 @@ describe("the effort deck's markup", () => {
   it("draws the strip in session order with each card's number, color dot, and Needs you, the service cards last and dashed, and both piles", () => {
     const html = pane(inkwellDeck(), SHELF);
     const chips = [...html.matchAll(/data-deck-chip="([^"]+)"[^>]*>(.*?)<\/button>/gu)].map((match) => text(match[2]!).trim());
-    expect(chips).toEqual(["1 Shelf order 5", "2 Store pickup 3", "3 One-offs 3", "4 folio · service 2", "5 atlas · service 1", "6 catalog · service 1"]);
+    expect(chips).toEqual(["Overview", "1 Shelf order 5", "2 Store pickup 3", "3 One-offs 3", "4 folio · service 2", "5 atlas · service 1", "6 catalog · service 1"]);
     expect(html).toMatch(/data-deck-chip="service:inkwell\/folio" title="folio · service: 2 need you \(4\)" class="[^"]*border-dashed/u);
     expect(html).toMatch(/data-deck-chip="effort-shelf-order" aria-current="true"/u);
     expect(text(html)).toContain("Hold 1");
     expect(text(html)).toContain("Done 1");
+  });
+
+  it("shows peer summary panels and one navigable button per active effort", () => {
+    const html = pane(inkwellDeck(), "overview");
+    expect(html).toContain('data-deck-focus="heading"');
+    expect(text(html)).toContain("Action matrix");
+    expect(text(html)).toContain("Aging blockers");
+    expect(text(html)).toContain("Store pickup · quill #212");
+    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(3);
+    expect(html).not.toContain("data-deck-card");
+    expect(html).not.toContain("data-deck-sec=");
+    expect(html).not.toContain('data-deck-focus="seen"');
+  });
+
+  it("uses one PR-count scale across Action matrix efforts and names the scale and colors", () => {
+    const view = inkwellDeck();
+    const cards = view.active.slice(0, 2).map((item, index) => ({ ...cardScreen(item, none, { now: NOW }), needsYou: 0, blocked: [],
+      stats: { ...cardScreen(item, none, { now: NOW }).stats, bar: [{ key: "fix", label: "Fix", count: index ? 4 : 2, tone: "amber" as const }] } }));
+    const html = pane(view, "overview", { overview: { cards, blockers: [] } });
+    expect(text(html)).toContain("0–4 PRs");
+    expect(text(html)).toContain("Your other moves");
+    expect(text(html)).toContain("Waiting");
+    expect(html).toMatch(/aria-label="2 Fix"/u);
+    expect(html).toMatch(/aria-label="4 Fix"/u);
+    const widths = [...html.matchAll(/class="h-full shrink-0 bg-amber-500\/60" style="width:([^"]+)"/gu)].map((match) => match[1]);
+    expect(widths).toEqual(["50%", "100%"]);
+  });
+
+  it("keeps the action matrix compact while every active effort still has a card", () => {
+    const view = inkwellDeck();
+    const first = view.active[0]!;
+    const active = [...view.active, ...[1, 2, 3].map((number) => ({ ...first, id: `extra-${number}`, name: `Extra effort ${number}` }))];
+    const html = pane({ ...view, active }, "overview");
+    expect(html.match(/data-deck-focus="overview-matrix-/gu)).toHaveLength(5);
+    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(6);
+    expect(text(html)).toContain("1 more effort below");
+  });
+
+  it("shows an empty Overview without presenting a service card's content", () => {
+    const html = pane({ ...inkwellDeck(), active: [] }, "overview");
+    expect(text(html)).toContain("No active efforts yet.");
+    expect(text(html)).toContain("Nothing waits on others.");
+    expect(html).not.toContain("Effort coverage");
+    // Service cards alone are no efforts: Overview stays empty and draws none of their rows or suggestions.
+    const services = pane({ ...inkwellDeck(), active: inkwellDeck().active.filter((item) => item.kind !== "effort") }, "overview");
+    expect(text(services)).toContain("No active efforts yet.");
+    expect(services).not.toContain("data-deck-sec=");
+    expect(services).not.toContain("data-deck-row=");
+  });
+
+  it("keeps the loading message until the first deck read supplies Overview", () => {
+    const html = pane({ ...inkwellDeck(), active: [] }, "overview", { overview: null });
+    expect(text(html)).toContain("Reading your efforts…");
+    expect(html).not.toContain("No active efforts yet.");
   });
 
   it("keeps every row's PR number outside the part that truncates, so a long repo name never hides it", () => {
@@ -54,7 +110,23 @@ describe("the effort deck's markup", () => {
     const truncated = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span>/gu)].map((match) => match[1]!);
     expect(truncated.length).toBeGreaterThan(0);
     for (const repo of truncated) expect(repo).not.toMatch(/#\d/u);
+    expect(html).toMatch(/class="flex w-\[124px\] shrink-0 justify-start gap-1 whitespace-nowrap/u);
     expect(html).toMatch(/<b class="shrink-0 font-medium[^"]*">#\d+<\/b>/u);
+  });
+
+  it("nests PR rows under section headings and keeps an opened thread row connected to its details", () => {
+    const view = inkwellDeck();
+    const closed = pane(view, SHELF);
+    expect(section(closed, "work")).toMatch(/<div class="ml-7"><div data-deck-row=/u);
+    // A service card's rows nest the same way.
+    expect(pane(view, FOLIO)).toMatch(/<div class="ml-7"><div data-deck-row="https:\/\/github\.com\/inkwell\/folio\//u);
+
+    const opened = section(pane(view, SHELF, { state: { selected: new Set<string>(), expanded: new Set([url("folio", 330)]), focus: null } }), "work");
+    expect(opened).toMatch(/<div class="ml-7 rounded-md bg-foreground\/\[0\.035\]"><div data-deck-row="https:\/\/github\.com\/inkwell\/folio\/pull\/330"/u);
+    expect(opened).toContain('class="flex min-w-12 items-center justify-end gap-1 text-[11.5px]"');
+    expect(opened).toMatch(/aria-expanded="true"[^>]*class="shrink-0 [^"]*"[^>]*>Less<\/button>/u);
+    expect(opened).toMatch(/aria-expanded="true"[^>]*>Less<\/button><\/span><\/div><div data-deck-details=/u);
+    expect(opened).toContain('data-deck-details="https://github.com/inkwell/folio/pull/330" class="mb-1.5 ml-9 mr-1.5 grid gap-1.5 border-t');
   });
 
   it("gives the card its header actions with their keys, then one section per move with one batch button, code work's asking its threads", () => {
@@ -260,13 +332,16 @@ describe("the effort deck's markup", () => {
     // spans the top card and is clipped at its bottom edge only, so a taller card taken away can't paint over the rows below.
     expect(html.indexOf("data-deck-rows")).toBeLessThan(html.indexOf("data-deck-sec="));
     expect(html).toMatch(/<div data-deck-ghost="true" aria-hidden="true" class="[^"]*\binset-0\b[^"]*" style="clip-path:inset\(-60px -60px 0 -60px\)"><\/div>/u);
-    // The last effort's next card is the first service card; the last service card's wraps to the first effort; a pile of two has one card behind.
+    // The last effort's next card is the first service card; the last service card's wraps to Overview, which opens the ring, named without
+    // a dot; a pile of two, Overview and one card, has one card behind.
     expect(html.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("effort-store-pickup");
     expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(FOLIO);
-    expect(pane(inkwellDeck(), CATALOG).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(SHELF);
+    const last = pane(inkwellDeck(), CATALOG);
+    expect(last.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("overview");
+    expect(last).toMatch(/data-deck-peek="overview" title="Next: Overview \(\] or →\)"[^>]*><span class="truncate">Overview<\/span><\/button>/u);
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-    const two = pane(view, SHELF, { chips: stripChips([SHELF, FOLIO], cards, SHELF) });
+    const two = pane(view, SHELF, { chips: stripChips([SHELF], cards, SHELF) });
     expect(two.match(/data-deck-layer=/gu)).toHaveLength(1);
     expect(two).toMatch(/style="padding-bottom:16px"/u);
   });
@@ -375,10 +450,12 @@ describe("the effort deck's markup", () => {
     const html = pane(view, INVENTORY_EFFORTS.pickup.id);
     expect(html).not.toMatch(/(?:^|[\s"])(?:sm|md|lg|xl):/u);
     expect(html).toMatch(/data-deck-scroller="true" class="@container/u);
+    expect(section(html, "blocked")).toMatch(/<span title="Vendor first\?" class="min-w-0 truncate text-\[11\.5px\][^"]*">Vendor first\?<\/span>/u);
     // What a fix needs stays at every width; who approved a merge drops below 720 px.
     const shelf = pane(inkwellDeck(), SHELF);
-    expect(section(shelf, "work")).toMatch(/<span class="shrink-0 whitespace-nowrap text-\[11\.5px\] rounded[^"]*">Conflicts<\/span>/u);
-    expect(section(shelf, "merge")).toMatch(/class="shrink-0 whitespace-nowrap text-\[11\.5px\] hidden @min-\[720px\]:inline[^"]*">✓ @mira-l/u);
+    expect(section(shelf, "work")).toMatch(/class="min-w-16 flex-1 cursor-pointer truncate @min-\[900px\]:min-w-0/u);
+    expect(section(shelf, "work")).toMatch(/<span title="Conflicts" class="min-w-0 truncate text-\[11\.5px\] rounded[^"]*">Conflicts<\/span>/u);
+    expect(section(shelf, "merge")).toMatch(/class="min-w-0 truncate text-\[11\.5px\] hidden @min-\[720px\]:inline[^"]*">✓ @mira-l/u);
     expect(section(shelf, "work")).toContain('<span class="hidden @min-[720px]:inline">Work on folio #330 </span>↗');
     // Store pickup waits on three things: a card under 700 px wide shows two, with More for the third.
     const blocked = html.slice(html.indexOf('data-deck-tile="blocked"'), html.indexOf('data-deck-tile="stats"'));

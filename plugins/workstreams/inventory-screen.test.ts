@@ -1,243 +1,177 @@
-import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import type { InventoryQuestion, InventoryView } from "./inventory-view.js";
+import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, type InventoryLine } from "./inventory-view-model.js";
-import { ReviewerPickerBody, TABLE_MIN_WIDTH } from "./inventory-rows.js";
-import { InventoryPane, InventoryPending } from "./inventory-screen.js";
+import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
+import { feedbackItems, type FeedbackItem } from "./review-feedback-queue.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
 
 const VIEW = inkwellInventory();
+const SCREEN = inventoryScreen(VIEW, { now: NOW, filter: null });
 const noop = () => {};
-function pane(wide: boolean, view: InventoryView = VIEW, filter: InventoryQuestion | null = null, error: string | null = null) {
-  return renderToStaticMarkup(createElement(InventoryPane, { screen: inventoryScreen(view, { now: NOW, filter }), wide, error, picker: null,
-    onFilter: noop, onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onHold: noop }));
+const item = (repo: string, number: number, state = "queued", rule = "feedback-to-address"): FeedbackItem => ({
+  key: `${repo}#${number}`, repo, number, state, rule, title: `Feedback on ${number}`, url: `https://github.com/${repo}/pull/${number}`,
+  reason: "Changes requested", updatedAt: new Date(NOW - 3_600_000).toISOString(),
+});
+const feedback = [item("inkwell/folio", 330), item("inkwell/catalog", 96), item("inkwell/new-repo", 44)];
+function pane(items: FeedbackItem[] | null = feedback, error: string | null = null, view: InventoryView = VIEW) {
+  return renderToStaticMarkup(createElement(InventoryPane, { screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), feedback: items,
+    feedbackError: error, startError: null, busyKey: null, error: null, onView: noop, onHow: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onStart: noop,
+    onNudge: noop }));
 }
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, '"').replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-/** The column headers, not the effort headers inside the body. */
-const headers = (html: string) => [.../<thead>(.*?)<\/thead>/u.exec(html)![1]!.matchAll(/<th[^>]*>(.*?)<\/th>/gu)].map((match) => match[1]!.replace(/<[^>]+>/gu, ""));
-/** Every row in document order, with its stack depth. */
-const rows = (html: string) => [...html.matchAll(/data-inventory-row="inkwell\/([a-z]+)#(\d+)" data-depth="(\d)"/gu)].map((match) => `${"  ".repeat(Number(match[3]))}${match[1]} #${match[2]}`);
-const line = (pr: string): InventoryLine => inventoryScreen(VIEW, { now: NOW, filter: null }).groups.flatMap((group) => group.lines).find((item) => `${item.repo} #${item.number}` === pr)!;
+const line = (pr: string): InventoryLine => SCREEN.groups.flatMap((group) => group.lines).find((item) => `${item.repo} #${item.number}` === pr)!;
+/** One row's markup, from its start to the next row's. */
+const rowOf = (html: string, ref: string) => { const start = html.indexOf(`data-inventory-row="${ref}"`); return html.slice(start, html.indexOf("data-inventory-row=", start + 20)); };
 
-describe("the PR inventory screen's markup", () => {
-  it("draws the dense table at 900px and up, and two-line rows below it", () => {
-    const wide = pane(true);
-    expect(wide).toContain("<table");
-    expect(headers(wide)).toEqual(["PR", "Title", "Reviewers", "Status", "Next · owner · age", "Checked", "Actions"]);
-    const narrow = pane(false);
-    expect(narrow).not.toContain("<table");
-    expect(narrow).toContain('role="list" aria-label="Open PRs"');
+describe("simple All PRs list", () => {
+  it("puts queued feedback first by effort, with unmatched feedback under No effort and no duplicate PR rows", () => {
+    const parts = splitInventory(SCREEN, feedback);
+    expect(parts.feedback.map((group) => group.label)).toEqual(["Shelf order", "No effort"]);
+    expect(parts.feedback.flatMap((group) => group.rows).map(({ item }) => `${item!.repo}#${item!.number}`))
+      .toEqual(["inkwell/folio#330", "inkwell/catalog#96", "inkwell/new-repo#44"]);
+    expect(parts.other.flatMap((group) => group.rows).some(({ line }) => line?.number === 330 || line?.number === 96)).toBe(false);
+    const html = pane();
+    expect(html).toContain("Back to me");
+    expect(html).toContain("Other open PRs");
+    expect(html).not.toContain("<table");
+    expect(html).not.toContain("Filter by question");
   });
 
-  // At 900px the fixed columns left Title and Next · owner · age about 95px each, too narrow for a step with its owner and age.
-  it("draws the table only in a pane wide enough for Title and Next · owner · age to show a step whole", () => {
-    const cols = [...pane(true).matchAll(/<col(?: style="width:([\d.]+)(px|%)")?\/>/gu)].map((match) => match[1] ? { size: Number(match[1]), unit: match[2] } : null);
-    expect(cols).toHaveLength(7);
-    const fixed = cols.reduce((sum, col) => sum + (col?.unit === "px" ? col.size : 0), 0);
-    const next = cols[4]!.unit === "%" ? TABLE_MIN_WIDTH * cols[4]!.size / 100 : cols[4]!.size;
-    expect(cols[1]).toBeNull();
-    expect(next).toBeGreaterThanOrEqual(240);
-    expect(TABLE_MIN_WIDTH - fixed - next).toBeGreaterThanOrEqual(150);
+  it("filters out nonqueued or nonfeedback Reviews items", () => {
+    expect(feedbackItems([item("inkwell/folio", 330, "started"), item("inkwell/folio", 330, "queued", "review-requested"),
+      item("inkwell/folio", 330), item("inkwell/folio", 330)])).toHaveLength(1);
   });
 
-  it("files stacked children under their parent in stack order, in both layouts", () => {
-    for (const html of [pane(true), pane(false)]) {
-      const order = rows(html);
-      expect(order.slice(0, 5)).toEqual(["folio #330", "folio #340", "  folio #341", "    folio #342", "      folio #343"]);
-      expect(order.slice(5, 10)).toEqual(["quill #210", "  quill #212", "quill #211", "spine #155", "  spine #156"]);
-      expect(order).toHaveLength(17);
-    }
+  it("offers Nudge only where the inventory action is enabled", () => {
+    const html = pane([]);
+    expect((html.match(/data-inventory-action="nudge"/gu) ?? [])).toHaveLength(1);
+    expect(html).not.toContain("data-inventory-action=\"merge\"");
+    expect(html).not.toContain("data-inventory-action=\"request-review\"");
+  });
+
+  it("keeps other PRs visible and names a Reviews failure without claiming zero feedback", () => {
+    const pending = pane(null, "Unavailable");
+    expect(pending).toContain("Reviews queue unavailable: Unavailable");
+    expect(pending).toContain("Back to me");
+    expect(pending).toContain('data-inventory-row="inkwell/folio#330"');
+    expect(pending).toContain("Feedback is unavailable right now.");
+    expect(pending).not.toContain("Reading feedback from Reviews…");
+  });
+
+  it("keeps the primary read notice visible and folds many other notices without dropping their text or roles", () => {
+    const notices = [{ tone: "error" as const, text: "GitHub rate limited this read." },
+      ...Array.from({ length: 24 }, (_, index) => ({ tone: "info" as const, text: `Repository ${index + 1} needs a read.` }))];
+    const html = renderToStaticMarkup(createElement(InventoryPane, { screen: { ...SCREEN, notices }, feedback: [], feedbackError: null,
+      startError: null, busyKey: null, error: "Inventory request failed", onView: noop, onHow: noop, onOpenPr: noop,
+      onOpenThread: noop, onOpenRoster: noop, onStart: noop, onNudge: noop }));
+    expect(html).toMatch(/role="alert"[^>]*>Couldn&#x27;t read the inventory: Inventory request failed/gu);
+    expect(html).toMatch(/role="alert"[^>]*>GitHub rate limited this read\.<\/p><details/gu);
+    expect(html).toContain("<summary");
+    expect(html).toContain("24 more inventory notices");
+    expect(html).not.toContain("<details open");
+    expect(html).toContain("Repository 24 needs a read.");
+    expect(html.indexOf("</details>")).toBeLessThan(html.indexOf("Back to me"));
+  });
+
+  it("keeps tabs and retry visible when the first inventory read fails", () => {
+    const html = renderToStaticMarkup(createElement(InventoryPending, { error: "HTTP 500", onRetry: noop, onView: noop, onHow: noop }));
+    expect(html).toContain("All PRs");
+    expect(html).toContain("Couldn&#x27;t read the inventory: HTTP 500");
+    expect(html).toContain("Retry");
   });
 
   it("links each effort's group to its roster, with No effort last and plain", () => {
-    const html = pane(true);
-    expect(html).toContain('aria-label="Open the Shelf order roster"');
-    expect(html).toContain('aria-label="Open the Store pickup roster"');
+    const html = pane([]);
+    const heading = (label: string) => html.slice(html.indexOf(`data-inventory-group="${label}"`), html.indexOf("</h3>", html.indexOf(`data-inventory-group="${label}"`)));
+    expect(heading("Shelf order")).toMatch(/<button type="button"[^>]*>Shelf order<\/button>$/u);
+    expect(heading("Store pickup")).toMatch(/<button type="button"[^>]*>Store pickup<\/button>$/u);
     expect(html.indexOf('data-inventory-group="No effort"')).toBeGreaterThan(html.indexOf('data-inventory-group="Store pickup"'));
-    expect(html).not.toContain("Open the No effort roster");
+    expect(heading("No effort")).not.toContain("<button");
   });
 
-  it("shows each row's reviewers, state word, next step with owner and age, and when GitHub last answered", () => {
-    const words = text(pane(true));
-    expect(words).toContain("catalog #96 ABC-121 Show series order on catalog pages @mira-l asked , @theo-k asked Awaiting review Nudge @mira-l, @theo-k · reviewers · 2d checked 25s ago");
-    expect(words).toContain("folio #330 ABC-364 Keep shelf filters in the link @mira-l approved Conflicts Resolve the conflicts · you · 2d+ checked 25s ago");
-    expect(words).toContain("quill #212 ABC-372 Email when a hold is ready @otto-v approved Behind #210 Waits on #210 · #210");
-    expect(words).toContain("atlas #410 ABC-210 Show delivery windows at checkout no reviewer Conflicts Request a review · you · 6d Resolve the conflicts · you · 2d+");
+  it("shows each row's state word and next step with its age", () => {
+    const words = text(pane([]));
+    expect(words).toContain("inkwell/catalog #96 ABC-121 Show series order on catalog pages Awaiting review · Nudge @mira-l, @theo-k · 2d Nudge");
+    expect(words).toContain("inkwell/folio #330 ABC-364 Keep shelf filters in the link Conflicts · Resolve the conflicts · 2d+");
+    expect(words).toContain("inkwell/quill #212 ABC-372 Email when a hold is ready Behind #210 · Waits on #210");
   });
 
-  it("shows an approval with comments to confirm as its state, with a Confirm handled… button that opens its notes and no Merge… yet, in both layouts", () => {
-    for (const html of [pane(true), pane(false)]) {
-      const row = html.slice(html.indexOf('data-inventory-row="inkwell/folio#301"'), html.indexOf('data-inventory-row="inkwell/folio#305"'));
-      expect(text(row)).toContain("Approved with comments Confirm the approval's comments are handled · you · 2d");
-      expect(row).toMatch(/<button[^>]*data-inventory-action="confirm-handled" aria-label="Confirm handled… folio #301"[^>]*>Confirm handled…<\/button>/u);
+  // Confirming review notes is the deck's: one PR's notes, read fresh, in its confirm. All PRs shows the wait and offers no way around it.
+  it("shows an approval with comments to confirm as its state and next step, with no Confirm handled or Merge… here", () => {
+    for (const ref of ["inkwell/folio#301", "inkwell/folio#318"]) {
+      const row = rowOf(pane([]), ref);
+      expect(text(row)).toContain("Approved with comments · Confirm the approval's comments are handled · 2d");
+      expect(row).not.toContain('data-inventory-action="confirm-handled"');
       expect(row).not.toContain('data-inventory-action="merge"');
     }
   });
 
-  it("keeps a two-line row to its first step, with how many more outside the step's truncation", () => {
-    const html = pane(false);
-    const atlas = html.slice(html.indexOf('data-inventory-row="inkwell/atlas#410"'), html.indexOf('data-inventory-row="inkwell/catalog#96"'));
-    expect(text(atlas)).toContain("Conflicts Request a review · you · 6d · +1");
-    expect(text(atlas)).not.toContain("Resolve the conflicts · you");
-    // The step truncates on its own; the count sits beside it, so an ellipsis never hides that more steps wait.
-    expect(atlas).toMatch(/<span class="min-w-0 truncate">Request a review.*?<\/span><span class="shrink-0[^"]*"> · \+1<\/span>/u);
+  it("keeps every row's PR number outside the part that truncates, so a long repo name never hides it", () => {
+    const long = "inkwell/a-repository-name-long-enough-to-truncate-in-any-pane";
+    const html = pane([item(long, 44)]);
+    const numbers = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span><span class="shrink-0">#(\d+)<\/span>/gu)];
+    expect(numbers).toHaveLength(18);
+    for (const [, repo] of numbers) expect(repo).not.toMatch(/#\d/u);
+    expect(numbers.map((match) => `${match[1]}#${match[2]}`)).toContain(`${long}#44`);
   });
 
-  it("shows a row's last action, or the server's refusal word for word, under its next step in both layouts", () => {
+  it("shows a row's last action, or the server's refusal word for word, under its next step", () => {
     const refused = "Who needs a nudge changed since the row was shown (now @mira-l). Review it and try again; nothing was written.";
     const view = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 96
       ? { ...row, lastAction: { at: NOW - 60_000, action: "nudge" as const, ok: false, detail: refused, reviewers: [] } } : row) })) };
-    for (const html of [pane(true, view), pane(false, view)]) {
-      expect(html).toMatch(new RegExp(`<p role="status" class="[^"]*text-destructive"[^>]*>Nudge refused 1m ago: ${refused.replace(/[().]/gu, "\\$&")}</p>`, "u"));
-    }
+    expect(pane([], null, view)).toMatch(new RegExp(`<p role="status" class="[^"]*text-destructive"[^>]*>Nudge refused 1m ago: ${refused.replace(/[().]/gu, "\\$&")}</p>`, "u"));
   });
 
-  it("filters to a count's PRs when you press it, and back to every PR when you press it again", () => {
-    const pressed: (InventoryQuestion | null)[] = [];
-    const counts = (filter: InventoryQuestion | null) => {
-      const found: ReactElement<{ "aria-pressed": boolean; onClick(): void }>[] = [];
-      // Render the pane's hook-free parts by hand, down to the count buttons, so their clicks can run without a DOM.
-      const walk = (node: ReactNode): void => {
-        if (Array.isArray(node)) node.forEach(walk);
-        else if (isValidElement<Record<string, unknown>>(node)) {
-          if (typeof node.type === "function" && "onFilter" in node.props) walk((node.type as (props: unknown) => ReactNode)(node.props));
-          else if (node.type === "button" && "aria-pressed" in node.props) found.push(node as ReactElement<{ "aria-pressed": boolean; onClick(): void }>);
-          else walk(node.props.children as ReactNode);
-        }
-      };
-      walk(InventoryPane({ screen: inventoryScreen(VIEW, { now: NOW, filter }), wide: true, error: null, picker: null, onFilter: (question) => pressed.push(question),
-        onView: noop, onHow: noop, onAction: noop, onRequest: noop, onPicker: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onHold: noop }));
-      return found;
-    };
-    counts(null)[1]!.props.onClick();
-    const on = counts("missing-reviewer");
-    expect(on.map((button) => button.props["aria-pressed"])).toEqual([false, true, false]);
-    on[1]!.props.onClick();
-    on[2]!.props.onClick();
-    expect(pressed).toEqual(["missing-reviewer", null, "needs-nudge"]);
-  });
-
-  it("counts the three questions as filters, pressed when one is on", () => {
-    const html = pane(true, VIEW, "missing-reviewer");
-    expect(html).toContain('aria-pressed="true" aria-label="Missing a reviewer: 3. Showing only these; press to show every PR"');
-    expect(html).toContain('aria-pressed="false" aria-label="Needs a nudge: 10. Show only these"');
-    expect(rows(html)).toEqual(["atlas #410", "folio #305", "folio #325"]);
-    expect(text(pane(true, VIEW, "forgotten-draft"))).toContain("No PR is forgotten in draft.");
-  });
-
-  it("names every action for its PR, and keeps a disabled one focusable with why it can't run", () => {
-    for (const html of [pane(true), pane(false)]) {
-      expect(html).toContain('aria-label="Request review… folio #325"');
-      expect(html).toContain('aria-label="Merge… folio #341: unavailable, Merge #340 first; this one follows it" aria-disabled="true"');
-      expect(html).toContain('aria-label="Open thread catalog #97: unavailable, No thread is linked to this PR yet" aria-disabled="true"');
-      // Every action is a button with a name; none is removed from the tab order.
-      const actions = [...html.matchAll(/<button[^>]*data-inventory-action="[^"]+"[^>]*>/gu)].map((match) => match[0]);
-      expect(actions.length).toBeGreaterThan(17 * 2);
-      for (const tag of actions) {
-        expect(tag).toMatch(/aria-label="[^"]+"/u);
-        expect(tag).not.toMatch(/\sdisabled=""/u);
-      }
-      // A button's name starts with the words it shows, so saying "click Nudge" finds it (WCAG 2.5.3, label in name).
-      const shown = [...html.matchAll(/<button[^>]*data-inventory-action="[^"]+"[^>]*aria-label="([^"]+)"[^>]*>([^<]+)<\/button>/gu)];
-      // The fixture's worded buttons: 3 Request review…, 1 Nudge, 2 Confirm handled, 4 Merge…, and a Hold… on each of the 17 rows; Refresh
-      // and Open thread are icons named the same way.
-      expect(shown).toHaveLength(27);
-      for (const [, name, label] of shown) expect(text(name!).startsWith(text(label!))).toBe(true);
-    }
-  });
-
-  it("links each row's existing threads, and where the work started when that's another thread", () => {
-    const html = pane(true);
-    expect(html).toContain('aria-label="Open thread quill #210"');
-    expect(html).toContain('aria-label="Open &quot;Plan Hold books at the counter&quot;, where the work on quill #210 started"');
-  });
-
-  it("never merges from the inventory: Merge… opens the fresh preview dialog, and no control here merges on its own", () => {
-    for (const html of [pane(true), pane(false)]) {
-      const merges = [...html.matchAll(/<button[^>]*data-inventory-action="merge"[^>]*>/gu)].map((match) => match[0]);
-      // The stack's parent and its three children, which say which PR merges first; the two approved with comments wait for your confirmation.
-      expect(merges).toHaveLength(4);
-      for (const tag of merges) expect(tag).toContain('aria-haspopup="dialog"');
-      expect(html).not.toContain("data-merge-go");
-    }
-  });
-
-  it("shows a hold as a pin, a failed read and the rate limit as alerts naming the reset, and a stale row with its dot", () => {
-    const rows = VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 301
-      ? { ...row, hold: { reason: "Wait for the store launch", heldAt: NOW - 3_600_000 }, attention: [], status: "On hold" }
-      : row.number === 318 ? { ...row, failure: { at: new Date(NOW - 60_000).toISOString(), error: "HTTP 502" }, stale: true } : row) }));
-    const html = pane(true, { ...VIEW, groups: rows, rateLimitedUntil: NOW + 5 * 60_000 });
-    expect(html).toContain('aria-label="Held"');
-    expect(text(html)).toContain('On hold Held by you: "Wait for the store launch"');
+  it("shows the rate limit and a failed read as alerts naming the reset", () => {
+    const html = pane([], null, { ...VIEW, rateLimitedUntil: NOW + 5 * 60_000 });
     expect(html).toMatch(/role="alert"[^>]*>.*?GitHub&#x27;s rate limit holds reads until \d{2}:\d{2}\. Rows show the last good read\./u);
-    expect(text(html)).toContain("read failed 1m ago");
-    expect(html).toContain('aria-label="Stale" data-tone="stale"');
-    expect(pane(true, VIEW, null, "HTTP 500")).toContain('role="alert" class="text-[12px] text-destructive">Couldn&#x27;t read the inventory: HTTP 500');
+    const failed = renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, feedback: [], feedbackError: null, startError: null, busyKey: null,
+      error: "HTTP 500", onView: noop, onHow: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onStart: noop, onNudge: noop }));
+    expect(failed).toContain('role="alert" class="text-[12px] text-destructive">Couldn&#x27;t read the inventory: HTTP 500');
   });
 
-  it("keeps every text size at 11px or larger, colors only stale marks amber, and animates only when motion is allowed", () => {
+  it("keeps every text size at 11px or larger, uses no amber, and animates only when motion is allowed", () => {
     const busy = { ...VIEW, refreshing: true };
-    for (const html of [pane(true), pane(false), pane(true, busy), pane(false, VIEW, "needs-nudge")]) {
+    for (const html of [pane(), pane([]), pane(null, "Unavailable"), pane([], null, busy)]) {
       expect(html).not.toMatch(/text-\[(?:[0-9]|10)(?:\.\d+)?px\]|text-\[0\.\d+rem\]|text-xs/u);
-      const amber = [...html.matchAll(/<[^>]*class="[^"]*\bamber-[^"]*"[^>]*>/gu)].map((match) => match[0]);
-      expect(amber.filter((tag) => !tag.includes('data-tone="stale"'))).toEqual([]);
+      expect(html).not.toMatch(/\bamber-/u);
       expect(html).not.toMatch(/(?<!motion-safe:)\banimate-/u);
       expect(html).not.toMatch(/#[0-9a-f]{6}\b/iu);
     }
-    expect(pane(true, busy)).toContain("motion-safe:animate-spin");
-  });
-});
-
-describe("the reviewer picker", () => {
-  it("offers the PR's suggested reviewers to toggle and a labeled login field, and won't send until someone is picked", () => {
-    const html = renderToStaticMarkup(createElement(ReviewerPickerBody, { line: line("folio #325"), onRequest: noop, onCancel: noop }));
-    expect(html).toContain('role="group" aria-label="Suggested reviewers"');
-    expect([...html.matchAll(/aria-pressed="false"[^>]*>@([a-z-]+)</gu)].map((match) => match[1])).toEqual(["mira-l", "theo-k"]);
-    expect(text(html)).toContain("GitHub login");
-    expect(html).toMatch(/<button[^>]*data-inventory-request="true" aria-disabled="true"[^>]*title="Pick or type a reviewer first"/u);
-    const none = renderToStaticMarkup(createElement(ReviewerPickerBody, { line: line("atlas #410"), onRequest: noop, onCancel: noop }));
-    expect(text(none)).toContain("No past reviewers to suggest; type a login.");
+    expect(pane([], null, busy)).toContain("motion-safe:animate-spin");
   });
 });
 
 describe("All PRs beside the effort deck", () => {
-  // Holding an effort holds its PRs, so a row that offered Mark ready or Merge… would only be refused; a done effort's rows say why instead.
-  it("shows On hold in place of a held effort's writes, and disables a done or archived effort's writes with the way back", () => {
-    const piled = (pile: "held" | "done" | "archived"): InventoryView => ({ ...VIEW, groups: VIEW.groups.map((group) => group.effort?.name === "Shelf order"
-      ? { ...group, effort: { ...group.effort, pile } } : group) });
-    const shelf = (html: string) => html.slice(html.indexOf('data-inventory-group="Shelf order"'), html.indexOf('data-inventory-group="Store pickup"'));
-    for (const html of [pane(true, piled("held")), pane(false, piled("held"))]) {
-      const rows = shelf(html);
-      expect(rows.match(/data-inventory-effort-hold/gu)).toHaveLength(5);
-      expect(rows).not.toMatch(/data-inventory-action="(merge|mark-ready|request-review|nudge|confirm-handled)"/u);
-      expect(text(rows)).toContain("Its effort is on hold");
-      expect(rows).toMatch(/data-inventory-action="refresh"/u);
+  // Holding an effort holds its PRs, so a Nudge there would only be refused; a done or archived effort's rows offer none either.
+  it("offers no Nudge on a held, done, or archived effort's rows, and keeps the rows in view", () => {
+    const piled = (pile: "held" | "done" | "archived"): InventoryView => ({ ...VIEW, groups: VIEW.groups.map((group) => group.effort === null
+      ? { ...group, effort: { id: "effort-loose", name: "Loose ends", pile } } : group) });
+    expect(rowOf(pane([]), "inkwell/catalog#96")).toContain('data-inventory-action="nudge"');
+    for (const pile of ["held", "done", "archived"] as const) {
+      const html = pane([], null, piled(pile));
+      expect(html).not.toContain('data-inventory-action="nudge"');
+      expect(html).toContain('data-inventory-row="inkwell/catalog#96"');
     }
-    const done = shelf(pane(true, piled("done")));
-    expect(done).toContain('aria-label="Merge… folio #340: unavailable, Its effort is done. Reopen it first"');
-    expect(done).not.toContain("data-inventory-effort-hold");
-    // Reopen refuses an archived effort, so its rows name Restore, as the server does.
-    expect(shelf(pane(true, piled("archived")))).toContain('aria-label="Merge… folio #340: unavailable, Its effort is archived. Restore it first"');
   });
 
-  it("keeps per-PR Hold on every row, beside the effort-level hold, and offers Release on a held row", () => {
-    const held: InventoryView = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 330
-      ? { ...row, hold: { reason: "Waiting on the shelf redesign", heldAt: NOW - 3_600_000 } } : row) })) };
-    for (const html of [pane(true, held), pane(false, held)]) {
-      const buttons = [...html.matchAll(/data-inventory-action="hold" aria-label="([^"]+)"[^>]*>([^<]+)</gu)].map((match) => [match[1], match[2]]);
-      expect(buttons).toHaveLength(17);
-      expect(buttons).toContainEqual(["Hold… folio #340", "Hold…"]);
-      expect(buttons).toContainEqual(["Release folio #330", "Release"]);
-    }
+  // A per-PR hold suppresses every step the row would name, so its Nudge goes too, until you release it in the deck.
+  it("offers no Nudge on a held PR", () => {
+    const held: InventoryView = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 96
+      ? { ...row, hold: { reason: "Waiting on the catalog redesign", heldAt: NOW - 3_600_000 }, attention: [], status: "On hold" } : row) })) };
+    const row = rowOf(pane([], null, held), "inkwell/catalog#96");
+    expect(text(row)).toContain("On hold");
+    expect(row).not.toContain('data-inventory-action="nudge"');
   });
 
   it("lets j and k focus rows for the deck's keys, with the same accent ring", () => {
-    const html = pane(true);
-    expect([...html.matchAll(/<tr data-inventory-row="[^"]+" data-depth="\d" tabindex="-1" class="([^"]+)"/gu)].every((match) => match[1]!.includes("focus-visible:ring-sky-500")))
-      .toBe(true);
-    expect(html.match(/tabindex="-1"/gu)!.length).toBeGreaterThanOrEqual(17);
+    const html = pane();
+    const rows = [...html.matchAll(/<li data-inventory-row="[^"]+" tabindex="-1" class="([^"]+)"/gu)];
+    expect(rows).toHaveLength(18);
+    expect(rows.every((match) => match[1]!.includes("focus-visible:ring-sky-500"))).toBe(true);
   });
 });
 
@@ -257,16 +191,21 @@ describe("the inventory before its first read", () => {
 });
 
 describe("keyboard safety", () => {
-  it("never merges on Enter: Enter on a row's Merge… only opens the fresh preview, whose Merge button refuses Enter and Space", () => {
+  // All PRs offers no merge at all; the deck's Merge… opens the same fresh preview, whose Merge button refuses Enter and Space.
+  it("never merges from All PRs, and a row's merge only opens the fresh preview, whose Merge refuses Enter", () => {
+    for (const html of [pane(), pane([]), pane(null, "Unavailable")]) {
+      expect(html).not.toContain('data-inventory-action="merge"');
+      expect(html).not.toContain("data-merge-go");
+    }
     const url = "https://github.com/inkwell/folio/pull/340";
-    const row = VIEW.groups.flatMap((group) => group.rows).find((item) => item.prUrl === url)!;
-    // Enter or Space on a focused row button is a click, and a row's Merge… click only opens the preview: it carries no head to merge.
-    expect(actionCall(row, line("folio #340").actions.find((item) => item.id === "merge")!)).toEqual({ kind: "preview", target: url });
+    const row = VIEW.groups.flatMap((group) => group.rows).find((entry) => entry.prUrl === url)!;
+    // A row's merge action carries no head to merge: it only opens the preview.
+    expect(actionCall(row, line("folio #340").actions.find((entry) => entry.id === "merge")!)).toEqual({ kind: "preview", target: url });
     // In the preview, Enter or Space on Merge arrives as a click with detail 0 and is refused; only a pointer click or ⌘↵ merges.
     expect(mergeTrigger({ kind: "click", detail: 0 })).toBe("refuse");
     expect(mergeTrigger({ kind: "key", key: "Enter", metaKey: false, ctrlKey: false })).toBeNull();
     expect(mergeTrigger({ kind: "key", key: "Enter", metaKey: true, ctrlKey: false })).toBe("merge");
-    // The preview names the inventory's unnumbered PR by repository and number, pinned to the head it read.
+    // The preview names an unnumbered PR by repository and number, pinned to the head it read.
     const preview: MergePreview = { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", headRefOid: row.head,
       stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true },
       refusals: [], warnings: [], method: "squash", deleteBranch: true };

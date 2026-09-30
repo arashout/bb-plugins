@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { anchorScroll, focusFallback, keepOrder, landAfter, meltSlack, readPlace, readSeen, settleRows, snapshotOf, withArrivals, type FocusDom, type SettledRow }
-  from "./deck-place.js";
+import { anchorScroll, deckRing, focusFallback, keepOrder, landAfter, meltSlack, numberedEffort, readPlace, readSeen, settleRows, snapshotOf, withArrivals, type FocusDom,
+  type SettledRow } from "./deck-place.js";
 
 const DAY = 86_400_000;
 const settled = (prUrl: string, section: string, status = "Awaiting review"): SettledRow => ({ prUrl, ref: prUrl, title: `Title ${prUrl}`, section, status });
@@ -54,6 +54,20 @@ describe("settling deck rows in place", () => {
 });
 
 describe("the session's card order", () => {
+  it("starts the flip ring on Overview while number keys still select active efforts", () => {
+    expect(deckRing(["shelf", "pickup", "service:inkwell/folio"])).toEqual(["overview", "shelf", "pickup", "service:inkwell/folio"]);
+    expect(deckRing([])).toEqual(["overview"]);
+    expect(numberedEffort(["shelf", "pickup"], 1)).toBe("shelf");
+    expect(numberedEffort(["shelf", "pickup"], 2)).toBe("pickup");
+    expect(numberedEffort(["shelf", "pickup"], 3)).toBeNull();
+    // The deck opens on Overview, and lands there when its last card leaves.
+    expect(landAfter([], null, deckRing(["shelf", "pickup"]))).toBe("overview");
+    expect(landAfter(["shelf"], "shelf", deckRing([]))).toBe("overview");
+    // Before the first read, the card you were on keeps its place: nothing lands, so a reload returns to it rather than to Overview.
+    expect(deckRing(null)).toEqual([]);
+    expect(landAfter(["shelf", "pickup"], "pickup", deckRing(null))).toBeNull();
+    expect(landAfter(["shelf", "pickup"], "pickup", deckRing(["shelf", "pickup"]))).toBe("pickup");
+  });
   it("keeps number keys pointing at the same efforts: new, resumed, and reopened cards join the end", () => {
     expect(keepOrder(["shelf", "pickup", "one-offs"], ["pickup", "shelf", "one-offs", "gifts"])).toEqual(["shelf", "pickup", "one-offs", "gifts"]);
     // Holding pickup drops it; resuming it later puts it back at the end, not in its old slot.

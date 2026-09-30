@@ -10,7 +10,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
-import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
+import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, OverviewScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
 import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
@@ -99,14 +99,14 @@ export function Strip({ chips, cur, deck, held, done, pile, run, chipsRef }: { c
       className={cn("size-7 shrink-0 rounded-md border border-border/70 text-[13px] text-muted-foreground hover:text-foreground", RING)}>←</button>
     <div ref={chipsRef} className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto px-0.5 py-1 [scrollbar-width:none]">
       {chips.map((chip) => <button key={chip.id} type="button" data-deck-focus={`chip-${chip.id}`} data-deck-chip={chip.id} aria-current={deck && chip.id === cur ? "true" : undefined}
-        title={`${chip.name}: ${chip.count} need you${chip.n ? ` (${chip.n})` : ""}`} onClick={() => run({ kind: "go", id: chip.id })}
+        title={chip.id === "overview" ? "Overview" : `${chip.name}: ${chip.count} need you${chip.n ? ` (${chip.n})` : ""}`} onClick={() => run({ kind: "go", id: chip.id })}
         className={cn("relative flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2 text-[12px]", RING,
           chip.service && "border-dashed", deck && chip.id === cur ? "border-foreground/30 bg-foreground/[0.08] text-foreground" : "border-border/70 text-muted-foreground hover:text-foreground")}>
         {chip.n ? <span className="font-mono text-[10.5px] text-muted-foreground/80">{chip.n}</span> : null}
-        <Dot color={chip.color} hollow={chip.service} />
+        {chip.id === "overview" ? null : <Dot color={chip.color} hollow={chip.service} />}
         <span className="max-w-[150px] truncate">{chip.name}</span>
-        <span className={cn("min-w-[18px] rounded-full px-1.5 text-center text-[11px] font-semibold tabular-nums", chip.count ? TONE.amber.chip : "font-normal text-muted-foreground")}>
-          {chip.count}</span>
+        {chip.id === "overview" ? null : <span className={cn("min-w-[18px] rounded-full px-1.5 text-center text-[11px] font-semibold tabular-nums", chip.count ? TONE.amber.chip : "font-normal text-muted-foreground")}>
+          {chip.count}</span>}
         {chip.ping ? <span aria-label="Changed since you looked" className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-sky-500" /> : null}
       </button>)}
     </div>
@@ -177,7 +177,7 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
         {depth === 1 ? <button type="button" tabIndex={-1} data-deck-peek={chip.id} onClick={() => run({ kind: "action", id: "next" })} title={`Next: ${chip.name} (] or →)`}
           aria-label={`Next effort: ${chip.name}`} style={{ height: LAYERS[1].y }}
           className="absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 rounded-b-[14px] px-4 text-[11px] leading-none text-muted-foreground hover:text-foreground">
-          <Dot color={chip.color} hollow={chip.service} /><span className="truncate">{chip.name}</span></button> : null}
+          {chip.id === "overview" ? null : <Dot color={chip.color} hollow={chip.service} />}<span className="truncate">{chip.name}</span></button> : null}
       </div>; })}
       <div data-deck-top className="relative z-[5] origin-bottom rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
       <div data-deck-ghost aria-hidden className="pointer-events-none absolute inset-0" style={{ clipPath: "inset(-60px -60px 0 -60px)" }} />
@@ -211,26 +211,26 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
   const selected = state.selected.has(line.prUrl);
   const busy = state.refreshing?.has(line.prUrl) ?? false;
   const trail = line.trail;
-  return <>
+  return <div className={cn("ml-7", open && "rounded-md bg-foreground/[0.035]")}>
     <div data-deck-row={line.prUrl} data-deck-section={line.section} data-deck-dim={line.dim || undefined} data-deck-dot={line.dot ? true : undefined} tabIndex={state.focus === line.prUrl || (state.focus === null && first) ? 0 : -1}
       aria-label={`${line.ref} ${line.title}${line.dim ? ", settled on Mark seen" : ""}`} onFocus={() => run({ kind: "focus", prUrl: line.prUrl })}
-      className={cn("group relative flex h-[30px] scroll-mt-20 items-center gap-2 rounded-md pl-2 pr-1.5 text-[12.5px] hover:bg-foreground/[0.03]",
+      className={cn("group relative flex h-[30px] scroll-mt-20 items-center gap-2 rounded-md pl-2 pr-1.5 text-[12.5px] hover:bg-foreground/[0.03]", open && "rounded-b-none",
         "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500", selected && "bg-sky-500/[0.07]", state.focus === line.prUrl && "bg-foreground/[0.05]")}>
       {line.needs ? <span aria-hidden className={cn("absolute bottom-[7px] left-0 top-[7px] w-0.5 rounded-full", TONE[line.tone].edge)} /> : null}
       <input type="checkbox" tabIndex={-1} checked={selected} disabled={line.dim} aria-label={`Select ${line.ref}`}
         onChange={() => undefined} onClick={(event) => run({ kind: "select", prUrl: line.prUrl, shift: event.shiftKey })}
         className="size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20" />
       <span className="flex w-1.5 shrink-0">{line.dot ? <Changed title={line.dot} /> : null}</span>
-      <span title={line.ref} className={cn("flex w-[124px] shrink-0 justify-end gap-1 whitespace-nowrap text-muted-foreground @min-[720px]:w-[156px]", line.dim && "opacity-50")}>
+      <span title={line.ref} className={cn("flex w-[124px] shrink-0 justify-start gap-1 whitespace-nowrap text-muted-foreground @min-[720px]:w-[156px]", line.dim && "opacity-50")}>
         <span className="min-w-0 truncate">{line.ref.replace(/ #\d+$/u, "")}</span>
         <b className={cn("shrink-0 font-medium", line.needs ? "text-foreground" : "text-foreground/80")}>#{line.ref.split("#")[1]}</b></span>
       <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
-        className={cn("min-w-0 flex-1 cursor-pointer truncate", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
+        className={cn("min-w-16 flex-1 cursor-pointer truncate @min-[900px]:min-w-0", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
         {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
       {line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
         line.checked.failed ? "text-destructive" : "hidden text-muted-foreground @min-[720px]:inline")}>{line.checked.text}</span> : null}
       {line.signals.map((signal) => <span key={signal} className={cn("hidden shrink-0 rounded px-1.5 text-[11px] @min-[720px]:inline", TONE.gray.chip)}>{signal}</span>)}
-      {line.info ? <span data-deck-change={line.change ? true : undefined} className={cn("shrink-0 whitespace-nowrap text-[11.5px]",
+      {line.info ? <span title={line.info.text} data-deck-change={line.change ? true : undefined} className={cn("min-w-0 truncate text-[11.5px]",
         OPTIONAL_INFO.has(line.section) && !line.change && "hidden @min-[720px]:inline",
         line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)
         // What a read changed is the one thing on a settling row that stays at full strength.
@@ -249,7 +249,7 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
         className={cn("shrink-0 whitespace-nowrap rounded px-1 text-[11.5px] text-sky-700 hover:underline dark:text-sky-300", RING)}>
         → moved to {line.to.title} {line.to.up ? "↑" : "↓"}</button> : null}
       {line.row ? <RefreshControl line={line} busy={busy} run={run} /> : null}
-      <span className="flex min-w-12 shrink-0 items-center justify-end gap-1 text-[11.5px]">
+      <span className="flex min-w-12 items-center justify-end gap-1 text-[11.5px]">
         {trail?.kind === "acted" ? <>
           <span className={cn("max-w-44 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")} title={trail.title ?? trail.text}>{trail.text}</span>
           {trail.undo ? <button type="button" data-deck-focus={`undo-${line.prUrl}`} onClick={() => run({ kind: "undo-batch", batchId: trail.undo! })}
@@ -258,13 +258,13 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
           aria-label={`Open ${trail.text}`} className={cn("max-w-40 truncate rounded px-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
           {/* A narrow pane keeps the title's room: the thread shows as ↗, named in its tooltip. */}
           <span className="hidden @min-[720px]:inline">{trail.text} </span>↗</button>
-        : trail ? <span data-deck-fate className="max-w-44 truncate rounded text-muted-foreground" title={line.dot ?? undefined}>{trail.text}</span>
-        : <button type="button" tabIndex={-1} aria-expanded={open} onClick={() => run({ kind: "expand", prUrl: line.prUrl })}
-          className={cn("rounded px-1 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}>{open ? "Less" : "More"}</button>}
+        : trail ? <span data-deck-fate className="max-w-44 truncate rounded text-muted-foreground" title={line.dot ?? undefined}>{trail.text}</span> : null}
+        {open || !trail ? <button type="button" tabIndex={-1} aria-expanded={open} onClick={() => run({ kind: "expand", prUrl: line.prUrl })}
+          className={cn("shrink-0 rounded px-1 text-muted-foreground hover:text-foreground", !open && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100", RING)}>{open ? "Less" : "More"}</button> : null}
       </span>
     </div>
     {open ? <Details line={line} run={run} busy={busy} leaves={leaves} /> : null}
-  </>;
+  </div>;
 }
 
 /** A row's details: what it waits on, its reviewers and tickets, and every action it can take, each with its key. */
@@ -280,7 +280,7 @@ function Details({ line, run, busy, leaves }: { line: DeckLine; run: Run; busy: 
     ...row.managed ? [["Roster", row.managed] as [string, string]] : [],
     ["Checked", row.failed ? "last read failed" : row.checkedAt ? new Date(row.checkedAt).toLocaleString() : "not yet"],
   ];
-  return <div data-deck-details={line.prUrl} className="mb-1.5 ml-9 mr-1.5 grid gap-2 rounded-lg border border-border/60 bg-foreground/[0.02] px-3 py-2 text-[12px]">
+  return <div data-deck-details={line.prUrl} className="mb-1.5 ml-9 mr-1.5 grid gap-1.5 border-t border-border/50 px-2 py-1.5 text-[12px]">
     <dl className="grid grid-cols-[76px_minmax(0,1fr)] gap-x-3 gap-y-0.5">
       {facts.map(([label, value]) => <div key={label} className="contents"><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="min-w-0 break-words">{value}</dd></div>)}
     </dl>
@@ -340,8 +340,8 @@ function Section({ section, state, run, open, stuck, held, leaves }: { section: 
 /** `more` is "narrow" when only a card under 700 px hides some of the tile. `action` sits before More. */
 function Tile({ id, title, note, open, more, run, className, action, children }: { id: string; title: string; note?: ReactNode; open: boolean; more: boolean | "narrow";
   run: Run; className?: string; action?: ReactNode; children?: ReactNode }) {
-  return <div data-deck-tile={id} className={cn("min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2.5 pb-2 pt-1.5", className)}>
-    <div className="mb-1 flex min-h-5 items-center gap-2">
+  return <div data-deck-tile={id} className={cn("min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-3 py-2", className)}>
+    <div className="mb-1.5 flex min-h-5 items-center gap-2">
       <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-muted-foreground">{title}</span>
       {note ? <span className="min-w-0 truncate text-[11px] text-muted-foreground">{note}</span> : null}
       <span className="flex-1" />
@@ -467,7 +467,7 @@ export function Card({ screen, tiles, run, on, keyless, notes, markdown, filter 
         </>}
       </div>
     </div>
-    {bare ? <div className="mt-2.5 grid grid-cols-6 gap-2 @min-[900px]:grid-cols-12">{threadsTile}</div> : <div className="mt-2.5 grid grid-cols-6 gap-2 @min-[900px]:grid-cols-12">
+    {bare ? <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">{threadsTile}</div> : <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">
       <Tile id="next" title="Next steps" open={open("next")} more={false} run={run} className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-5"
         note={screen.next.criteria ? <span className="inline-flex items-center gap-1.5"><span aria-hidden className="inline-flex gap-0.5">{Array.from({ length: screen.next.criteria.needed },
           (_, index) => <i key={index} className={cn("inline-block size-2 rounded-full border", index < screen.next.criteria!.validated ? "border-transparent bg-emerald-500/60" : "border-border")} />)}</span>
@@ -979,10 +979,57 @@ export function HelpBody({ items }: { items: readonly PaletteItem[] }) {
 // The whole deck.
 // ---------------------------------------------------------------------------
 
+export function Overview({ screen, run }: { screen: OverviewScreen; run: Run }) {
+  const panel = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-3 py-2.5";
+  const priorities = [...screen.cards].sort((a, b) => b.needsYou - a.needsYou || b.blocked.length - a.blocked.length).slice(0, 5);
+  const maxPrs = Math.max(1, ...priorities.map((item) => item.stats.bar.reduce((sum, segment) => sum + segment.count, 0)));
+  return <section data-deck-overview aria-label="Overview">
+    <h1 data-deck-focus="heading" tabIndex={-1} className="mb-3 text-[16px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Overview</h1>
+    <div className="grid gap-3 @min-[680px]:grid-cols-12">
+      <section className={cn(panel, "@min-[680px]:col-span-7")} aria-labelledby="overview-matrix"><div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><h2 id="overview-matrix" className="text-[12px] font-semibold">Action matrix</h2>
+        <span className="text-[10px] tabular-nums text-muted-foreground">{maxPrs > 1 || priorities.some((item) => item.stats.bar.some((part) => part.count)) ? `0–${maxPrs} PRs` : "No open PRs"}</span>
+        <div aria-label="PR state colors" className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+          {([["green", "Merge"], ["blue", "Your other moves"], ["amber", "Fix"], ["gray", "Waiting"]] as const).map(([tone, label]) => <span key={tone} className="inline-flex items-center gap-1"><i aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", TONE[tone].bar)} />{label}</span>)}
+        </div></div>
+        {screen.cards.length ? <div className="grid gap-0.5">{priorities.map((item) => {
+          return <button key={item.card.id} type="button" data-deck-focus={`overview-matrix-${item.card.id}`} onClick={() => run({ kind: "go", id: item.card.id })}
+            className={cn("grid min-w-0 grid-cols-1 items-center gap-x-2 rounded px-1 py-1 text-left hover:bg-foreground/[0.05] @min-[480px]:grid-cols-[minmax(0,1fr)_auto]", RING)}>
+            <span className="flex min-w-0 items-center gap-1.5 text-[12px]"><Dot color={item.color} /><span className="truncate font-medium">{item.card.name}</span>
+              {item.changed ? <Changed title="Changed since you looked" /> : null}</span>
+            <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={item.status.text}>{item.needsYou} need you · {item.blocked.length} blocked · {item.stats.bar.find((part) => part.key === "flight")?.count ?? 0} in flight</span>
+            <span role="img" aria-label={item.stats.bar.map((part) => `${part.count} ${part.label}`).join(", ") || "No open PRs"}
+              className="mt-1 flex h-1 overflow-hidden rounded-full bg-foreground/[0.06] @min-[480px]:col-span-2">
+              {item.stats.bar.map((part) => <i key={part.key} className={cn("h-full shrink-0", TONE[part.tone].bar)} style={{ width: `${part.count / maxPrs * 100}%` }} />)}</span>
+          </button>;
+        })}{screen.cards.length > priorities.length ? <p className="px-1 pt-1 text-[11px] text-muted-foreground">
+          {screen.cards.length - priorities.length} more {screen.cards.length - priorities.length === 1 ? "effort" : "efforts"} below</p> : null}</div>
+          : <p className="text-[12px] text-muted-foreground">No active efforts yet.</p>}
+      </section>
+      <section className={cn(panel, "@min-[680px]:col-span-5")} aria-labelledby="overview-blockers"><h2 id="overview-blockers" className="mb-2 text-[12px] font-semibold">Aging blockers</h2>
+        {screen.blockers.length ? <ol className="grid gap-0.5">{screen.blockers.slice(0, 5).map((item, index) => <li key={`${item.effortId}-${item.ref}-${index}`}>
+          <button type="button" onClick={() => run({ kind: "go", id: item.effortId })}
+            className={cn("grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 rounded px-1 py-1 text-left text-[12px] hover:bg-foreground/[0.05]", RING)}>
+            <span className="truncate font-medium" title={`${item.effort} · ${item.ref}`}>{item.effort} · {item.ref}</span><span className="text-[11px] tabular-nums text-muted-foreground">{item.age ?? "—"}</span>
+            <span className="col-span-2 truncate text-[11px] text-muted-foreground" title={`${item.on}: ${item.cause}`}>{item.on} · {item.cause}</span>
+          </button></li>)}</ol> : <p className="text-[12px] text-muted-foreground">Nothing waits on others.</p>}
+      </section>
+      {screen.cards.map((item, index) => <button key={item.card.id} type="button" data-deck-focus={`overview-effort-${item.card.id}`} onClick={() => run({ kind: "go", id: item.card.id })}
+        className={cn(panel, "grid gap-2 text-left hover:bg-foreground/[0.05]", index === 0 ? "@min-[680px]:col-span-7" : index === 1 ? "@min-[680px]:col-span-5" : "@min-[680px]:col-span-6 @min-[900px]:col-span-4", RING)}>
+        <span className="flex min-w-0 items-center gap-2"><Dot color={item.color} /><strong className="min-w-0 flex-1 truncate text-[13px]">{item.card.name}</strong>
+          {item.changed ? <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Changed title="Changed since you looked" />Changed</span> : null}</span>
+        <span className="line-clamp-2 text-[12px]">{item.next.items[0]?.text ?? "No next action recorded."}</span>
+        <span className="text-[11px] text-muted-foreground">{item.needsYou} need you · {item.blocked.length} blocked · {item.stats.open} open · {item.stats.mergedWeek} merged in 7d</span>
+      </button>)}
+    </div>
+  </section>;
+}
+
 export type DeckPaneProps = {
   chips: readonly Chip[]; cur: string | null;
-  /** The card shown; null before the first read, or when nothing is open. */
+  /** The card shown; null before the first read, on Overview, or when nothing is open. */
   card: CardScreen | null; rules: readonly RuleItem[];
+  /** Overview's panels while it shows; null before the first read. */
+  overview?: OverviewScreen | null;
   /** A read landed and found no card to draw. */
   empty?: boolean;
   held: readonly Pile[]; done: readonly Pile[];
@@ -1020,7 +1067,8 @@ export function DeckPane(props: DeckPaneProps) {
           keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-3xl px-2 pb-10 pt-3 @min-[720px]:px-4">
-        {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
+        {props.cur === "overview" && props.overview ? <Overview screen={props.overview} run={props.run} />
+          : card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
           markdown={props.markdown} filter={props.filter} /></Stack>
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
             {props.filter ? <FilterLine kind={props.filter} n={card.sections.reduce((sum, section) => sum + section.lines.length, 0)} run={props.run} /> : null}

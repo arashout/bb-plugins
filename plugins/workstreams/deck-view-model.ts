@@ -271,6 +271,20 @@ export type CardScreen = {
   notes: { body: string; first: string; revision: number } | null;
 };
 
+export type OverviewScreen = {
+  cards: CardScreen[];
+  blockers: { effortId: string; effort: string; ref: string; age: string | null; on: string; cause: string; since: number | null }[];
+};
+
+/** The active efforts in session order, with their waits ranked by age across efforts; service cards and Loose threads stay on the strip. */
+export function overviewScreen(order: readonly string[], cards: ReadonlyMap<string, CardScreen>): OverviewScreen {
+  const active = order.flatMap((id) => { const card = cards.get(id); return card?.card.kind === "effort" ? [card] : []; });
+  const blockers = active.flatMap((screen) => screen.card.blocked.map((wait) => ({ effortId: screen.card.id, effort: screen.card.name,
+    ref: wait.ref, age: screen.blocked.find((item) => item.prUrl === wait.prUrl)?.age ?? null, on: wait.on, cause: wait.what, since: wait.since })));
+  blockers.sort((a, b) => a.since === null ? 1 : b.since === null ? -1 : a.since - b.since);
+  return { cards: active, blockers };
+}
+
 const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] }[] = [
   { key: "ready", label: "ready to merge", tone: "green", of: ["merge"] }, { key: "yours", label: "your other moves", tone: "blue", of: ["confirm", "nudge", "request", "ready"] },
   { key: "fix", label: "to fix", tone: "amber", of: ["work"] }, { key: "flight", label: "in flight", tone: "gray", of: ["flight"] },
@@ -470,21 +484,21 @@ export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limi
   return `${limited}${view.refreshing ? "Reading now · " : ""}Read ${view.checkedAt ? `${age(Date.parse(view.checkedAt), now)} ago` : "never"}`;
 }
 
-/** One strip chip: the active pile in session order, service cards after the efforts. `service`: no stored effort backs it. */
+/** One strip chip: Overview, then the active pile in session order, service cards after the efforts. `service`: no stored effort backs it. */
 export type Chip = { id: string; n: number | null; name: string; color: string; count: number; ping: boolean; service: boolean };
 export function stripChips(order: readonly string[], cards: ReadonlyMap<string, CardScreen>, cur: string | null): Chip[] {
-  return order.filter((id) => cards.has(id)).map((id, index) => {
+  return [{ id: "overview", n: null, name: "Overview", color: "", count: 0, ping: false, service: false }, ...order.filter((id) => cards.has(id)).map((id, index) => {
     const card = cards.get(id)!;
     return { id, n: index < 9 ? index + 1 : null, name: card.card.name, color: card.color, count: card.needsYou, ping: id !== cur && card.changed > 0,
       service: card.card.kind !== "effort" };
-  });
+  })];
 }
 
 /** What the keys can act on: the view, the card or deck shown, the focused row, and the selection. */
 export type KeyContext = {
   view: "deck" | "prs";
-  /** The card shown on the deck. */
-  cur: CardScreen | null;
+  /** The card shown on the deck, or Overview. */
+  cur: CardScreen | "overview" | null;
   /** The first service card, which u goes to; none when nothing open is outside an effort. */
   service?: string | null;
   focused: DeckLine | null;
@@ -504,13 +518,15 @@ export type Availability = Record<DeckActionId, { on: boolean; why: string }>;
 export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "focused" | "selected">): DeckLine[] {
   const section = SECTION_OF[id];
   if (!section) return [];
+  // Overview draws no rows, so no key takes any from it.
+  const card = context.cur === "overview" ? null : context.cur;
   const take = (lines: readonly DeckLine[]) => lines.filter((line) => (section === "held" ? releasable(line) : line.needs) && line.section === section);
   // Review notes are read and confirmed one PR at a time: the focused row's, else the card's first, never a selection's.
   if (id === "confirm") return context.focused && take([context.focused]).length ? [context.focused]
-    : context.cur ? take(context.cur.sections.flatMap((item) => item.lines)).slice(0, 1) : [];
+    : card ? take(card.sections.flatMap((item) => item.lines)).slice(0, 1) : [];
   if (context.selected.length) return take(context.selected);
   if (context.focused && take([context.focused]).length) return [context.focused];
-  return context.cur ? take(context.cur.sections.flatMap((item) => item.lines)) : [];
+  return card ? take(card.sections.flatMap((item) => item.lines)) : [];
 }
 
 /**
@@ -519,7 +535,7 @@ export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "foc
  */
 export function advanceTarget(context: Pick<KeyContext, "cur" | "focused" | "selected">): { scope: "selected" | "row" | "card"; prUrls: string[] } | null {
   const card = context.cur;
-  if (!card || card.card.pile !== "active") return null;
+  if (!card || card === "overview" || card.card.pile !== "active") return null;
   const safe = (line: DeckLine) => line.inline?.id === "advance";
   if (context.selected.length) return context.selected.some(safe) ? { scope: "selected", prUrls: context.selected.map((line) => line.prUrl) } : null;
   if (context.focused && safe(context.focused)) return { scope: "row", prUrls: [context.focused.prUrl] };
@@ -533,7 +549,7 @@ const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are wai
 export function availability(context: KeyContext): Availability {
   const { focused, selected } = context;
   const deck = context.view === "deck";
-  const card = deck ? context.cur : null;
+  const card = deck && context.cur !== "overview" ? context.cur : null;
   const live = !!card && card.card.pile === "active";
   const service = !!card && card.card.kind === "service";
   const scoped = selected.length ? selected.some((line) => !line.dim) : !!focused?.row && !focused.dim;
@@ -564,9 +580,9 @@ export function availability(context: KeyContext): Availability {
   }
   set("undo", context.undo, "nothing to undo");
   const row = deck ? !!focused?.row && !focused.ghost : !!prs?.row;
-  set("hold-pr", row, "focus a row first");
-  set("refresh", row, "focus a row first");
-  set("row-next", true); set("row-prev", true);
+  // In All PRs, a row holds or refreshes only when its list offers it.
+  for (const id of ["hold-pr", "refresh"] as const) set(id, deck ? row : !!prs?.moves.has(id), deck || !row ? "focus a row first" : "the row has no such move");
+  set("row-next", !deck || context.cur !== "overview", "no rows on Overview"); set("row-prev", !deck || context.cur !== "overview", "no rows on Overview");
   set("select", deck && !!focused && !focused.dim, deck ? "focus a live row first" : "Efforts only");
   set("select-section", deck && !!focused, deck ? "focus a row first" : "Efforts only");
   set("expand", deck && !!focused, deck ? "focus a row first" : "Efforts only");
@@ -590,6 +606,7 @@ export function availability(context: KeyContext): Availability {
 /** The few keys that matter now, for the hint bar: [kbd, what it does]. */
 export function hintKeys(context: KeyContext, on: Availability): [string, string][] {
   const { focused } = context;
+  const card = context.cur === "overview" ? null : context.cur;
   const pick = (...items: ([DeckActionId, string] | false)[]) => items.flatMap((item) => item && on[item[0]].on ? [[ACTION[item[0]].keys.join(" "), item[1]] as [string, string]] : []);
   const move = (["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const).find((id) => on[id].on
     && (context.view === "prs" || (!!focused && targets(id, { cur: null, focused, selected: [] }).length > 0)));
@@ -600,12 +617,12 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   // a takes the focused row when its step is safe, else the whole card: the hint says which.
   const scope = advanceTarget(context)?.scope;
   const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
-    : context.cur?.card.kind === "effort" ? "advance effort" : "advance card"];
+    : card?.card.kind === "effort" ? "advance effort" : "advance card"];
   // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
   const rowHint = move === "merge" || move === "release" || move === "confirm" || move === "fix" ? moveHint : false;
   if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
-  if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
+  if (focused && card?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
   if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
   return pick(["next", "flip"], ["row-next", "rows"], advance, context.filter ? ["clear", "show all"] : ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
 }

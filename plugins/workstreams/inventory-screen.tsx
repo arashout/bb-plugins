@@ -1,67 +1,56 @@
-// The PR inventory, Workstreams' front door (plan amendment A13): every open
-// PR you author, and every PR an effort names, by effort, answering three
-// questions: what's forgotten in draft, what's missing a reviewer, and what
-// needs a nudge. It renders server state only: inventory-view-model.ts shapes
-// inventory_get's output, and every write is one click on one row, through
-// the inventory action RPCs or the existing fresh merge preview. InventoryPane
-// and its parts take data and callbacks as props and call no SDK hook, with
-// relative imports, so static-markup tests can render them. As All PRs beside
-// the effort deck (A15), it shares the deck's key registry: a key that writes
-// opens the deck's listing confirm for the focused row, never a write itself.
+// All PRs: Back to me, the Reviews plugin's queued feedback on your PRs, by effort, above every other open PR you author or an effort names.
+// Its only write is Nudge, one click on a row where the server says it's due. It shares the deck's key registry, hint bar, palette, and ?
+// sheet: j and k move between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write itself.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
+import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { Icon } from "./components/ui/icon";
 import { cn, POINTER_CURSORS } from "./lib/utils";
-import { InventoryList, InventoryTable, TABLE_MIN_WIDTH, type RowCallbacks } from "./inventory-rows";
-import { actionCall, INVENTORY_CHANGED, inventoryScreen, withOutcome, type ActionId, type InventoryLine, type InventoryScreen, type LineAction,
-  type Outcome } from "./inventory-view-model";
-import { MergePreviewDialog } from "./roster-merge-dialog";
+import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
+import { actionCall, INVENTORY_CHANGED, inventoryScreen, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
+import { feedbackItems, startFeedback, useFeedbackQueue, type FeedbackItem } from "./review-feedback-queue";
 import type { DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
-import { availability, hintKeys, KIND_OF, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
-import { HelpBody, HintBar, HoldBody, PaletteBody } from "./deck-screen";
+import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
+import { HelpBody, HintBar, PaletteBody } from "./deck-screen";
 import { DeckDialog, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
-import { useNotesConfirm } from "./notes-flow";
 
-/** The views after All PRs, in tab order; the effort deck comes before it. */
 export const OTHER_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "efforts", title: "Manage efforts" }] as const;
 export type OtherView = "deck" | (typeof OTHER_VIEWS)[number]["id"];
-
-export type InventoryPaneProps = RowCallbacks & {
-  screen: InventoryScreen;
-  /** The PR whose reviewer picker is open. */
-  picker: string | null;
-  /** The pane is 1100px or wider, where the dense table's Title and Next columns fit: the table, else two-line rows. */
-  wide: boolean;
-  /** The read failed before any view arrived, or a later read failed. */
-  error: string | null;
-  onFilter(question: InventoryQuestion | null): void;
-  onView(view: OtherView): void;
-  onHow(): void;
-  rootRef?: RefObject<HTMLDivElement | null>;
-  /** The shared hint bar, under the rows. */
-  footer?: ReactNode;
-};
-
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
+const prKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
 
-/** The three questions as counts; each shows only its rows, and pressing it again shows every row. */
-function Counts({ screen, onFilter }: Pick<InventoryPaneProps, "screen" | "onFilter">) {
-  return <div role="group" aria-label="Filter by question" className="flex flex-wrap gap-2 px-4 pt-3">
-    {screen.counts.map((count) => <button key={count.key} type="button" aria-pressed={count.active} onClick={() => onFilter(count.active ? null : count.key)}
-      aria-label={`${count.label}: ${count.count}. ${count.active ? "Showing only these; press to show every PR" : "Show only these"}`}
-      className={cn("flex min-w-36 items-baseline gap-2 rounded-lg border px-3 py-1.5 text-left", FOCUS,
-        count.active ? "border-foreground/50 bg-foreground/[0.08]" : "border-border hover:bg-foreground/[0.04]")}>
-      <span className={cn("text-[18px] font-semibold tabular-nums", count.count === 0 && "text-muted-foreground")}>{count.count}</span>
-      <span className="text-[12px]">{count.label}</span>
-    </button>)}
-  </div>;
+/** Match Reviews' queue to inventory membership, showing each PR once. */
+export function splitInventory(screen: InventoryScreen, items: readonly FeedbackItem[] | null): { feedback: SimpleGroup[]; other: SimpleGroup[] } {
+  const queued = feedbackItems(items ?? []);
+  const byPr = new Map(queued.map((item) => [prKey(item.repo, item.number), item]));
+  const matched = new Set<string>();
+  const feedback: SimpleGroup[] = [];
+  const other: SimpleGroup[] = [];
+  for (const group of screen.groups) {
+    const top: SimpleGroup["rows"] = [];
+    const rest: SimpleGroup["rows"] = [];
+    for (const line of group.lines) {
+      const item = byPr.get(prKey(line.slug, line.number));
+      if (item) { top.push({ item }); matched.add(item.key); }
+      else rest.push({ line });
+    }
+    const identity = { key: group.key, label: group.label, effortId: group.effort?.id ?? null };
+    if (top.length) feedback.push({ ...identity, rows: top });
+    if (rest.length) other.push({ ...identity, rows: rest });
+  }
+  const unmatched = queued.filter((item) => !matched.has(item.key));
+  if (unmatched.length) {
+    const noEffort = feedback.find((group) => group.effortId === null);
+    if (noEffort) noEffort.rows.push(...unmatched.map((item) => ({ item })));
+    else feedback.push({ key: "unmatched", label: "No effort", effortId: null, rows: unmatched.map((item) => ({ item })) });
+  }
+  return { feedback, other };
 }
 
-/** The view tabs and How it works, which every state of the inventory keeps, so the other views never hang on its read. */
-function Header({ onView, onHow }: Pick<InventoryPaneProps, "onView" | "onHow">) {
+function Header({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
   return <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-2.5">
     <div role="tablist" aria-label="Workstreams views" className="flex items-center gap-3 text-[12px]">
       <button type="button" role="tab" aria-selected={false} onClick={() => onView("deck")} className={cn("rounded px-1 py-1 text-muted-foreground hover:text-foreground", FOCUS)}>Efforts</button>
@@ -73,68 +62,65 @@ function Header({ onView, onHow }: Pick<InventoryPaneProps, "onView" | "onHow">)
   </header>;
 }
 
-const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
-
-/** Before the first read arrives, or when it failed: the tabs stay, and a failed read offers Retry. */
-export function InventoryPending({ error, onRetry, onView, onHow }: { error: string | null; onRetry(): void } & Pick<InventoryPaneProps, "onView" | "onHow">) {
+export function InventoryPending({ error, onRetry, onView, onHow }: { error: string | null; onRetry(): void; onView(view: OtherView): void; onHow(): void }) {
   return <div role="region" aria-label="PR inventory" className={REGION}>
     <Header onView={onView} onHow={onHow} />
     <div className="p-4 text-[12px]" role={error ? "alert" : "status"}>
-      {error ? <span className="text-destructive">Couldn't read the inventory: {error} <button type="button" onClick={onRetry}
-        className={cn("ml-1 rounded-sm underline", FOCUS)}>Retry</button></span>
+      {error ? <>Couldn't read the inventory: {error} <button type="button" onClick={onRetry} className={cn("ml-1 rounded-sm underline", FOCUS)}>Retry</button></>
         : <span className="text-muted-foreground">Reading your open PRs…</span>}
     </div>
   </div>;
 }
 
-export function InventoryPane(props: InventoryPaneProps) {
-  const { screen, wide } = props;
-  const rows = { groups: screen.groups, picker: props.picker, onAction: props.onAction, onRequest: props.onRequest, onPicker: props.onPicker,
-    onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread, onOpenRoster: props.onOpenRoster, onHold: props.onHold };
+function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
+  return <p role={notice.tone === "error" ? "alert" : "status"}
+    className={cn("text-[12px]", notice.tone === "error" ? "text-destructive" : "text-muted-foreground")}>{notice.text}</p>;
+}
+
+export function InventoryPane(props: { screen: InventoryScreen; feedback: FeedbackItem[] | null; feedbackError: string | null; startError: string | null; busyKey: string | null; error: string | null;
+  onView(view: OtherView): void; onHow(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
+  onStart(item: FeedbackItem): void; onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
+  /** The deck's shared hint bar, under the lists. */
+  footer?: ReactNode }) {
+  const { feedback, other } = splitInventory(props.screen, props.feedback);
+  const [primaryNotice, ...otherNotices] = props.screen.notices;
+  const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
+    onOpenRoster: props.onOpenRoster, onStart: props.onStart, onNudge: props.onNudge };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header onView={props.onView} onHow={props.onHow} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 pt-4">
-        <h1 className="text-[18px] font-semibold tracking-tight">PR inventory</h1>
-        <p role="status" title={screen.read.title} className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          {screen.read.refreshing ? <Icon name="Loading" className="size-3 motion-safe:animate-spin" aria-hidden /> : null}{screen.read.text}
+        <h1 className="text-[18px] font-semibold tracking-tight">All PRs</h1>
+        <p role="status" title={props.screen.read.title} className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          {props.screen.read.refreshing ? <Icon name="Loading" className="size-3 motion-safe:animate-spin" aria-hidden /> : null}{props.screen.read.text}
         </p>
       </div>
-      <Counts screen={screen} onFilter={props.onFilter} />
-      {props.error || screen.notices.length ? <div className="grid gap-1 px-4 pt-3">
+      {props.error || props.screen.notices.length ? <div className="grid gap-1 px-4 pt-3">
         {props.error ? <p role="alert" className="text-[12px] text-destructive">Couldn't read the inventory: {props.error}</p> : null}
-        {screen.notices.map((notice) => <p key={notice.text} role={notice.tone === "error" ? "alert" : "status"}
-          className={cn("flex items-start gap-1.5 text-[12px]", notice.tone === "error" ? "text-destructive" : "text-muted-foreground")}>
-          <Icon name={notice.tone === "error" ? "AlertTriangle" : "Info"} className="mt-0.5 size-3.5 shrink-0" aria-hidden />{notice.text}
-        </p>)}
+        {primaryNotice ? <Notice notice={primaryNotice} /> : null}
+        {otherNotices.length ? <details className="text-[11px] text-muted-foreground">
+          <summary className={cn("w-fit rounded-sm hover:text-foreground", FOCUS)}>{otherNotices.length} more inventory {otherNotices.length === 1 ? "notice" : "notices"}</summary>
+          <div className="grid gap-1 pt-2">{otherNotices.map((notice) => <Notice key={notice.text} notice={notice} />)}</div>
+        </details> : null}
       </div> : null}
-      {screen.empty ? <p role="status" className="mx-4 mt-4 flex items-center gap-2 rounded-md border border-border bg-foreground/[0.03] px-3 py-2 text-[12px]">
-        <Icon name="CircleCheck" className="size-4 shrink-0 text-muted-foreground" aria-hidden />{screen.empty}
-      </p> : <div className="mt-2">{wide ? <InventoryTable {...rows} /> : <InventoryList {...rows} />}</div>}
+      <section className="mt-5" aria-label="Back to me">
+        <h2 className="mb-2 px-4 text-[14px] font-semibold">Back to me <span className="font-normal tabular-nums text-muted-foreground">{props.feedback === null ? "…" : props.feedback.length}</span></h2>
+        {props.startError ? <p role="alert" className="px-4 pb-2 text-[11px] text-destructive">Couldn't start feedback: {props.startError}</p> : null}
+        {props.feedbackError ? <p role="status" className="px-4 pb-2 text-[11px] text-muted-foreground">Reviews queue unavailable: {props.feedbackError}. Showing the last available feedback list.</p> : null}
+        {feedback.length ? <SimpleInventoryList groups={feedback} kind="feedback" {...callbacks} />
+          : <p className="px-4 text-[12px] text-muted-foreground">{props.feedback === null ? props.feedbackError ? "Feedback is unavailable right now." : "Reading feedback from Reviews…" : "Nothing waiting for your changes."}</p>}
+      </section>
+      <section className="mt-7" aria-label="Other open PRs">
+        <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.rows.length, 0)}</span></h2>
+        {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
+          : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
+      </section>
     </div>
     {props.footer}
   </div>;
 }
 
-// ---------------------------------------------------------------------------
-// Data, state, and the SDK: everything below talks to BB.
-// ---------------------------------------------------------------------------
-
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
-
-function useNow(ms: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), ms);
-    return () => window.clearInterval(timer);
-  }, [ms]);
-  return now;
-}
-
-/**
- * inventory_get, read on mount, on inventory-changed, on board-changed at most every 3 seconds while visible (effort membership and
- * names move that way), and when the page shows again. A signal during a read reads once more after it.
- */
 function useInventory() {
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<InventoryView | null>(null);
@@ -151,91 +137,58 @@ function useInventory() {
   }, [rpc]);
   useEffect(load, [load]);
   useRealtime(INVENTORY_CHANGED, () => load());
-  const lastBoard = useRef(0);
-  const trailing = useRef<number | null>(null);
-  useRealtime("board-changed", () => {
-    if (document.visibilityState !== "visible" || trailing.current !== null) return;
-    const wait = Math.max(0, lastBoard.current + 3_000 - Date.now());
-    trailing.current = window.setTimeout(() => { trailing.current = null; lastBoard.current = Date.now(); load(); }, wait);
-  });
-  useEffect(() => () => { if (trailing.current !== null) window.clearTimeout(trailing.current); }, []);
+  useRealtime("board-changed", () => { if (document.visibilityState === "visible") load(); });
   useEffect(() => {
-    const onVisible = () => { if (document.visibilityState === "visible") load(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    const visible = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
   }, [load]);
   return { view, error, load };
 }
-
-/** The inventory in the Workstreams panel: live from the server, one click per action, and the fresh merge preview behind Merge…. */
-/** The deck batch each row action is, for the shared keys. */
-const KEY_OF: Partial<Record<ActionId, DeckActionId>> = { merge: "merge", "confirm-handled": "confirm", nudge: "nudge", "request-review": "request", "mark-ready": "ready" };
 
 export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): void; onHow(): void }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const { view, error, load } = useInventory();
-  // "checked 25s ago" moves while you watch.
-  const now = useNow(5_000);
-  const [filter, setFilter] = useState<InventoryQuestion | null>(null);
-  const [pending, setPending] = useState<ReadonlyMap<string, ActionId>>(new Map());
-  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, Outcome>>(new Map());
-  const [picker, setPicker] = useState<string | null>(null);
-  const [merging, setMerging] = useState<{ target: string; n: null }[] | null>(null);
-  const [wide, setWide] = useState(false);
+  const queue = useFeedbackQueue();
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, { at: number; action: "nudge"; ok: boolean; text: string }>>(new Map());
+  const now = Date.now();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const shown = view !== null;
-  // The pane's own width picks the layout, so a narrow panel gets two-line rows even on a wide screen.
-  useEffect(() => {
-    const node = rootRef.current;
-    if (!node) return;
-    const observer = new ResizeObserver(([entry]) => setWide((entry?.contentRect.width ?? node.clientWidth) >= TABLE_MIN_WIDTH));
-    observer.observe(node);
-    setWide(node.clientWidth >= TABLE_MIN_WIDTH);
-    return () => observer.disconnect();
-  }, [shown]);
+  const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, outcomes }), [view, now, outcomes]);
   const rows = useMemo(() => new Map<string, InventoryRow>(view?.groups.flatMap((group) => group.rows.map((row) => [row.prUrl, row] as const)) ?? []), [view]);
-  const screen = useMemo(() => view && inventoryScreen(view, { now, filter, pending, outcomes }), [view, now, filter, pending, outcomes]);
-
-  /** Opens one PR's review notes; set once the notes confirm below exists. */
-  const showNotes = useRef<(line: InventoryLine) => void>(() => undefined);
-  /** One click, one call: the row's facts go with it, and what comes back, a refusal included, shows on the row. */
-  const run = useCallback(async (line: InventoryLine, action: LineAction, logins: string[] = []) => {
+  const start = async (item: FeedbackItem) => {
+    if (busyKey) return;
+    setBusyKey(item.key);
+    setStartError(null);
+    try {
+      const started = await startFeedback(item.key);
+      queue.load();
+      if (started.threadId) navigate.toThread(started.threadId);
+      else throw new Error("Started feedback has no thread.");
+    } catch (cause) { setStartError(message(cause)); }
+    finally { setBusyKey(null); }
+  };
+  const nudge = async (line: InventoryLine, action: LineAction) => {
+    if (busyKey || !action.enabled) return;
     const row = rows.get(line.prUrl);
     if (!row) return;
-    const call = actionCall(row, action, logins);
-    // A disabled action names why in its label and tooltip; clicking it does nothing.
-    if (call.kind === "refuse") return;
-    if (call.kind === "thread") { navigate.toThread(call.threadId); return; }
-    // Review notes open their confirm, which reads them and what came after first; nothing is recorded on this click.
-    if (call.kind === "notes") { showNotes.current(line); return; }
-    // Merge… only opens the fresh merge preview; only a click or ⌘↵ there merges.
-    if (call.kind === "preview") { setMerging([{ target: call.target, n: null }]); return; }
-    if (pending.has(line.prUrl)) return;
-    setPending((current) => new Map([...current, [line.prUrl, action.id]]));
-    let result: { ok: boolean; text: string } | null;
+    const call = actionCall(row, action);
+    if (call.kind !== "rpc" || call.method !== "inventory_nudge") return;
+    setBusyKey(line.prUrl);
     try {
-      if (call.kind === "refresh") {
-        const read = await rpc.call("pr_refresh", { prUrl: call.prUrl });
-        // A good read shows as the row's new age, and clears this visit's failed one; only a failed read needs saying.
-        result = read.status === "checked" ? null : { ok: false, text: read.error };
-      } else {
-        const written = call.method === "inventory_mark_ready" ? await rpc.call("inventory_mark_ready", call.input)
-          : call.method === "inventory_request_review" ? await rpc.call("inventory_request_review", call.input)
-          : call.method === "inventory_confirm_revoke" ? await rpc.call("inventory_confirm_revoke", call.input) : await rpc.call("inventory_nudge", call.input);
-        result = written.ok ? { ok: true, text: written.detail } : { ok: false, text: written.error };
-      }
+      const result = await rpc.call("inventory_nudge", call.input);
+      setOutcomes((current) => new Map([...current, [line.prUrl, { at: Date.now(), action: "nudge", ok: result.ok,
+        text: result.ok ? result.detail : result.error }]]));
+      load();
     } catch (cause) {
-      result = { ok: false, text: message(cause) };
-    }
-    setOutcomes((current) => withOutcome(current, line.prUrl, result && { at: Date.now(), action: action.id, ...result }));
-    setPending((current) => { const next = new Map(current); next.delete(line.prUrl); return next; });
-    load();
-  }, [rows, pending, rpc, navigate, load]);
+      setOutcomes((current) => new Map([...current, [line.prUrl, { at: Date.now(), action: "nudge", ok: false, text: message(cause) }]]));
+    } finally { setBusyKey(null); }
+  };
 
   // ---- the deck's shared keys, hint bar, palette, and ? sheet ----------------
-  const [dialog, setDialog] = useState<{ kind: "hold"; line: InventoryLine; reason: string } | { kind: "palette"; query: string; highlight: number } | { kind: "help" } | null>(null);
-  const [holdError, setHoldError] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<{ kind: "palette"; query: string; highlight: number } | { kind: "help" } | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
   const [flash, setFlash] = useState<{ text: string; undo: boolean } | null>(null);
   const [activeRow, setActiveRow] = useState<string | null>(null);
@@ -255,8 +208,6 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   });
   const batch = useBatchConfirm({ seenAt: () => { try { return readSeen(window.localStorage.getItem(SEEN_KEY), Date.now()).at; } catch { return {}; } },
     scopeName: () => null, say, setUndo, load, onOpen: remember, onReturn: returnFocus, reread: view });
-  const notes = useNotesConfirm({ say, load, onOpen: remember, onReturn: returnFocus, ask: (prUrl) => void batch.plan("ask", null, [prUrl]) });
-  showNotes.current = (line) => notes.show(line.prUrl, `${line.repo} #${line.number}`, null);
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -264,27 +215,18 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
     root.addEventListener("focusin", onIn);
     return () => root.removeEventListener("focusin", onIn);
   });
-  const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
+  // The focused row is a Back to me row, named by its Reviews item, or another open PR's line; a PR shows in only one list.
+  const item = activeRow ? feedbackItems(queue.items ?? []).find((entry) => `${entry.repo}#${entry.number}` === activeRow) ?? null : null;
+  const focused = activeRow && !item ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
+  // Nudge is due exactly where its row shows the button.
+  const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
+  const thread = item ? item.threadId ?? null : focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!focused, thread: !!focused?.actions.find((action) => action.id === "thread")?.enabled,
-      moves: new Set([...(focused?.actions ?? []).flatMap((action) => action.enabled && KEY_OF[action.id] ? [KEY_OF[action.id]!] : []),
-        ...focused?.hold ? ["release" as const] : []]) } };
+    prs: { row: !!(item || focused), thread: !!thread, moves: new Set<DeckActionId>(due ? ["nudge"] : []) } };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
-  /** Hold asks for a reason first; a release lists the PR and waits out its Undo window, as it does in the deck. */
-  const hold = (line: InventoryLine) => {
-    if (!line.hold) { remember(); setHoldError(null); setDialog({ kind: "hold", line, reason: "" }); return; }
-    void batch.plan("release", null, [line.prUrl]);
-  };
-  const saveHold = () => {
-    if (dialog?.kind !== "hold") return;
-    const { line, reason } = dialog;
-    void rpc.call("pr_hold_set", { prUrl: line.prUrl, held: true, reason: reason.trim() || undefined }).then(() => { setDialog(null); say(`Held ${line.repo} #${line.number}.`); load(); },
-      (cause: unknown) => setHoldError(message(cause)));
-  };
   function runKey(id: DeckActionId) {
-    const action = (actionId: ActionId) => focused?.actions.find((item) => item.id === actionId);
     switch (id) {
       case "view": onView("deck"); return;
       case "palette": remember(); setDialog({ kind: "palette", query: "", highlight: 0 }); return;
@@ -297,16 +239,11 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
         next?.scrollIntoView({ block: "nearest" });
         return;
       }
-      case "merge": { const merge = action("merge"); if (focused && merge) { remember(); void run(focused, merge); } return; }
-      // Review notes are never a batch: c opens the focused row's notes.
-      case "confirm": { const confirm = action("confirm-handled"); if (focused && confirm) void run(focused, confirm); return; }
-      case "nudge": case "request": case "ready": if (focused) void batch.plan(KIND_OF[id]!, null, [focused.prUrl]); return;
+      // The key opens the deck's listing confirm, which waits out its Undo window; only the row's own Nudge button is one click.
+      case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
-      case "hold-pr": if (focused) hold(focused); return;
-      case "release": if (focused?.hold) hold(focused); return;
-      case "refresh": { const refresh = action("refresh"); if (focused && refresh) void run(focused, refresh); return; }
-      case "open-thread": { const thread = action("thread")?.threadId; if (thread) navigate.toThread(thread); return; }
-      case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
+      case "open-thread": if (thread) navigate.toThread(thread); return;
+      case "open-pr": { const url = item?.url ?? focused?.prUrl; if (url) navigate.openUrl(url); return; }
       default: return;
     }
   }
@@ -315,33 +252,23 @@ export function InventoryNavView({ onView, onHow }: { onView(view: OtherView): v
   useRegistryKeys(rootRef, { on: () => availability(contextRef.current), run: (id) => runRef.current(id), say, isRow: () => false });
   const palette = paletteItems(on, [], { held: [], done: [] }, null, false);
   const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
-  const runPalette = (item: PaletteItem) => { setDialog(null); window.setTimeout(() => { if (item.action) runKey(item.action.id); }, 0); };
+  const runPalette = (entry: PaletteItem) => { setDialog(null); window.setTimeout(() => { if (entry.action) runKey(entry.action.id); }, 0); };
 
   if (!screen) return <InventoryPending error={error} onRetry={load} onView={onView} onHow={onHow} />;
-  const openRoster = (effortId: string, n: number | null) =>
-    navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}${n === null ? "" : `/${n}`}` });
   return <>
-    <InventoryPane screen={screen} wide={wide} error={error} picker={picker} rootRef={rootRef} onFilter={setFilter} onView={onView} onHow={onHow}
-      onAction={(line, action) => { if (action.id === "merge") remember(); void run(line, action); }} onPicker={setPicker} onHold={hold}
-      onRequest={(line, logins) => { setPicker(null); const action = line.actions.find((item) => item.id === "request-review"); if (action) void run(line, action, logins); }}
-      onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)} onOpenRoster={openRoster}
+    <InventoryPane screen={screen} feedback={queue.items} feedbackError={queue.error} startError={startError} busyKey={busyKey} error={error} rootRef={rootRef}
+      onView={onView} onHow={onHow} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
+      onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
+      onStart={(item) => { void start(item); }} onNudge={(line, action) => { void nudge(line, action); }}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
-    <MergePreviewDialog targets={merging} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} onClosed={returnFocus}
-      rows={(merging ?? []).flatMap(({ target }) => { const row = rows.get(target); return row ? [{ target, repo: row.repo, number: row.number, title: row.title }] : []; })} />
     {batch.element}
-    {notes.element}
-    <DeckDialog open={dialog?.kind === "hold"} title={dialog?.kind === "hold" ? `Hold ${dialog.line.repo} #${dialog.line.number}` : ""}
-      sub="Nothing acts on this PR, and no batch writes to it, until you release it." onClose={() => setDialog(null)} onReturn={returnFocus} onConfirmKey={saveHold}>
-      {dialog?.kind === "hold" ? <HoldBody reason={dialog.reason} onReason={(reason) => setDialog({ ...dialog, reason })} busy={false} error={holdError} onHold={saveHold}
-        onCancel={() => setDialog(null)} /> : null}
-    </DeckDialog>
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>
       {dialog?.kind === "palette" ? <div onKeyDown={(event) => {
-        const live = matches.filter((item) => item.on);
+        const live = matches.filter((entry) => entry.on);
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           setDialog({ ...dialog, highlight: Math.max(0, Math.min(live.length - 1, dialog.highlight + (event.key === "ArrowDown" ? 1 : -1))) });
-        } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); const item = live[dialog.highlight]; if (item) runPalette(item); }
+        } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); const entry = live[dialog.highlight]; if (entry) runPalette(entry); }
         else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setDialog(null); }
       }}><PaletteBody query={dialog.query} items={matches} highlight={dialog.highlight} onQuery={(query) => setDialog({ ...dialog, query, highlight: 0 })}
         onRun={runPalette} onHighlight={(highlight) => setDialog({ ...dialog, highlight })} /></div> : null}

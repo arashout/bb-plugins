@@ -358,17 +358,11 @@ describe("the PR inventory screen view model", () => {
     expect(withOutcome(refused, url, next).get(url)).toEqual(next);
   });
 
-  it("explains the inventory in How this works at the thresholds attention uses by default, with a row for each question", () => {
+  it("explains the two lists and why Nudge is conditional", () => {
     const words = new Map(INVENTORY_HOW.rows);
-    expect(QUESTIONS.map((question) => words.has(question.label))).toEqual([true, true, true]);
-    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = DEFAULT_ATTENTION_THRESHOLDS;
-    expect(words.get("Forgotten in draft")).toContain(`no push for ${draftIdleDays} days`);
-    expect(words.get("Needs a nudge")).toContain(`no answer after ${nudgeAfterBusinessDays} business day,`);
-    expect(words.get("Needs a nudge")).toContain(`stuck for ${stuckAfterDays} day:`);
-    // Needs a nudge counts merges and code work too, so it says why most of its rows offer no Nudge.
-    expect(words.get("Needs a nudge")).toContain("an approval whose comments no one has confirmed handled");
-    expect(words.get("Needs a nudge")).toMatch(/Nudge asks reviewers again on the first two; confirming, merging, and fixing the rest are yours\.$/u);
-    expect(words.get("2d+")).toMatch(/^At least this long\./u);
+    expect(INVENTORY_HOW.intro).toContain("Back to me comes from Reviews");
+    expect(words.get("Back to me")).toContain("Start opens a work thread");
+    expect(words.get("Nudge")).toContain("server checks again");
   });
 
   it("names the roster a v2 effort runs a row from, and each effort's group, with No effort last", () => {

@@ -1,7 +1,7 @@
 // The effort deck as a stack of cards: what lies behind the card shown,
 // where each card behind it sits, and how a flip moves them. The ring is the
-// strip's order, the efforts and then the service cards, so the card behind
-// the top one is the one ] flips to.
+// strip's order, Overview, the efforts, and then the service cards, so the
+// card behind the top one is the one ] flips to.
 //
 // A flip lands at once: where it lands never waits on its motion, so holding
 // ] or clicking fast always ends on the card the presses reach. The motion

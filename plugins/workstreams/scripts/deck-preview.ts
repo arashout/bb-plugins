@@ -4,8 +4,9 @@
 // dist/app.css over host colors and a minimal Preflight, both of which the
 // host supplies. The pane fills the window, so one file serves every
 // screenshot size. The hash picks what it draws: a card's id opens on that
-// card, and "light" uses light host colors (#effort-store-pickup,light),
-// which want the browser's light color scheme, since dark: follows it.
+// card, else it opens on Overview, as the deck does, and "light" uses light
+// host colors (#effort-store-pickup,light), which want the browser's light
+// color scheme, since dark: follows it.
 // The [ ] ← → keys, the strip's arrow buttons, and the next card's edge
 // flip it with the deck's own flip code (deck-flip.ts, bundled in), so the
 // motion shows too. Run: npx vite-node scripts/deck-preview.ts
@@ -17,7 +18,8 @@ import { build } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { inkwellDeck, inkwellThreads, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, stripChips, type KeyContext } from "../deck-view-model.js";
+import { availability, cardScreen, hintKeys, overviewScreen, stripChips, type KeyContext } from "../deck-view-model.js";
+import { deckRing } from "../deck-place.js";
 import { DeckPane } from "../deck-screen.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -31,14 +33,14 @@ const deck = inkwellDeck(inkwellThreads());
 const view = { ...deck, active: deck.active.map((item) => NOTES[item.id] ? { ...item, notes: { body: NOTES[item.id]!, revision: 1, updatedAt: NOW } } : item) };
 const order = view.active.map((item) => item.id);
 const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
-const ring = order;
+const ring = deckRing(order);
 const pane = (cur: string) => {
   const card = cards.get(cur) ?? null;
-  const context: KeyContext = { view: "deck", cur: card, service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused: null, selected: [],
+  const context: KeyContext = { view: "deck", cur: card ?? (cur === "overview" ? "overview" : null), service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused: null, selected: [],
     seenAvailable: false, undo: false, held: view.held.length, done: view.done.length };
   const on = availability(context);
   return renderToStaticMarkup(createElement(DeckPane, {
-    chips: stripChips(order, cards, cur), cur, card,
+    chips: stripChips(order, cards, cur), cur, card, overview: cur === "overview" ? overviewScreen(order, cards) : null,
     rules: [{ id: "r1", text: "Branch shelf/* → Shelf order · 2 this week" }],
     held: view.held.map((item) => ({ id: item.id, key: item.key, name: item.name, note: `${item.reason || "No reason given"} · ${item.stats.open} open` })),
     done: view.done.map((item) => ({ id: item.id, key: item.key, name: item.name, archived: item.archived, note: `${item.merged} merged · ${item.open} open` })),
