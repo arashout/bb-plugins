@@ -45,6 +45,7 @@ import {
   findRepo,
   parseReposFile,
   removeRepo,
+  resolveRepoEntry,
   serializeReposFile,
   type ReposFile,
 } from "./repos.js";
@@ -524,7 +525,7 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       if (dir === null || dir === PROJECT_SOURCE_DIR) continue;
       if (repos.some((repo) => repo.dir === dir)) continue;
       seen.add(key);
-      repos.push({ dir, url: mirror.url });
+      repos.push({ dir, url: mirror.url, inferredDir: true });
     }
     return { version: 1, repos };
   }
@@ -595,16 +596,20 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
       const current = await readRepoSet(location, { bootstrap: true }, signal);
       if (current.file === null) throw new Error(current.error ?? `${REPOS_FILE} could not be read.`);
 
-      const dir = input.dir ?? dirFromUrl(input.url);
-      if (dir === null) {
+      const entry = resolveRepoEntry({
+        ...(input.dir === undefined ? {} : { dir: input.dir }),
+        url: input.url,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
+      if (entry === null) {
         throw new Error(`Could not derive a directory name from ${input.url}. Pass an explicit "dir".`);
       }
+      const dir = entry.dir;
       const clash = findRepo(current.file, { dir, url: input.url });
       if (clash !== null) {
         throw new Error(`${clash.dir} is already in the repo set (${clash.url}).`);
       }
 
-      const entry = { dir, url: input.url, ...(input.branch === undefined ? {} : { branch: input.branch }) };
       const edited = addRepo(current.file, entry);
       if (!edited.ok) throw new Error(edited.error);
 
@@ -821,23 +826,23 @@ export default async function multiRepoPlugin(bb: BbPluginApi): Promise<void> {
               throw new PluginCliError(set.error ?? `${REPOS_FILE} could not be read.`, { code: "invalid_repos_json" });
             }
             const url = input.positionals.url;
-            const dir = input.options.dir ?? dirFromUrl(url);
-            if (dir === null) {
+            const entry = resolveRepoEntry({
+              ...(input.options.dir === undefined ? {} : { dir: input.options.dir }),
+              url,
+              ...(input.options.branch === undefined ? {} : { branch: input.options.branch }),
+            });
+            if (entry === null) {
               throw new PluginCliError(`Could not derive a directory name from ${url}.`, {
                 code: "dir_required",
                 hint: "Pass --dir <name>.",
               });
             }
-            const edited = addRepo(set.file, {
-              dir,
-              url,
-              ...(input.options.branch === undefined ? {} : { branch: input.options.branch }),
-            });
+            const edited = addRepo(set.file, entry);
             if (!edited.ok) throw new PluginCliError(edited.error, { code: "invalid_repo_set" });
-            await writeRepoSet(location, edited.value, `Add ${dir} to the repo set`, ctx.signal);
+            await writeRepoSet(location, edited.value, `Add ${entry.dir} to the repo set`, ctx.signal);
             return {
               exitCode: 0,
-              stdout: `Added ${dir}. New threads in this project will get it; existing workspaces are unchanged.`,
+              stdout: `Added ${entry.dir}. New threads in this project will get it; existing workspaces are unchanged.`,
             };
           },
         }),

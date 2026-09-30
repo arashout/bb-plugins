@@ -55,14 +55,18 @@ bb repos list --project proj_abc123
 {
   "version": 1,
   "repos": [
-    { "dir": "bb-dylan",   "url": "git@github.com:you/bb-dylan.git" },
-    { "dir": "bb-plugins", "url": "git@github.com:you/bb-plugins.git", "branch": "main" }
+    { "url": "git@github.com:you/bb-dylan.git" },
+    { "url": "git@github.com:you/bb-plugins.git", "branch": "main" },
+    { "dir": "bb-plugins-fork", "url": "git@github.com:me/bb-plugins.git" }
   ]
 }
 ```
 
-- `dir` — the directory name inside the workspace. Required and explicit, so
-  two repos sharing a basename are unambiguous.
+- `dir` — the directory name inside the workspace. Optional: it defaults to the
+  repo's own name (the URL's last component, minus `.git`). Spell it out when
+  two repos would otherwise share a basename, or when the URL's name is not the
+  one you want. An entry written without it is also *written back* without it,
+  so the plugin's own edits stay one-line diffs.
 - `url` — anything git can clone, **including a local path**, which makes
   "base this on my local checkout" a first-class option.
 - `branch` — optional base branch; defaults to that repo's default branch.

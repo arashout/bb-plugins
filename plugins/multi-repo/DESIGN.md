@@ -39,7 +39,7 @@ A **thread workspace** is a plain directory holding one clone per repo, plus `.b
     .bb/                     clone of the project-source checkout
 ```
 
-`<pathKey>` is the provider's per-thread path key. Repo directory names come from `repos.json`, not derived from URLs, so two repos sharing a basename are unambiguous.
+`<pathKey>` is the provider's per-thread path key. A repo's directory name is whatever `repos.json` says, defaulting to the repo's own name — so two repos sharing a basename can still be disambiguated explicitly.
 
 ## 2. Configuration
 
@@ -49,13 +49,14 @@ A **thread workspace** is a plain directory holding one clone per repo, plus `.b
 {
   "version": 1,
   "repos": [
-    { "dir": "bb-dylan",   "url": "git@github.com:you/bb-dylan.git" },
-    { "dir": "bb-plugins", "url": "git@github.com:you/bb-plugins.git", "branch": "main" }
+    { "url": "git@github.com:you/bb-dylan.git" },
+    { "url": "git@github.com:you/bb-plugins.git", "branch": "main" },
+    { "dir": "bb-plugins-fork", "url": "git@github.com:me/bb-plugins.git" }
   ]
 }
 ```
 
-- `dir` — directory name inside the workspace. Required, explicit, must be a safe single path segment.
+- `dir` — directory name inside the workspace, and a safe single path segment. Optional: the parser infers it from the URL's last component minus `.git`, and fails the entry by name when nothing usable comes out rather than inventing `repo-1`. Resolution happens once, at parse; everything downstream sees a `dir`. An inferred `dir` is flagged as such so serialization omits it again, keeping an unrelated add or remove a one-line diff.
 - `url` — anything git can clone, including a local path. A local path makes "base this on my local checkout" a first-class option.
 - `branch` — optional base branch. Defaults to that repo's default branch.
 
