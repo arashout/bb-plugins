@@ -458,7 +458,7 @@ export function Card({ screen, tiles, run, on, keyless }: { screen: CardScreen; 
 /** The one-line card header that stays once the card's own header scrolls away. */
 export function CardBar({ name, color, status, advance, hollow }: { name: string; color: string; status?: { text: string; tone: Tone }; advance?: ReactNode; hollow?: boolean }) {
   return <div className="sticky top-0 z-[6] -mb-[34px] h-[34px] border-b border-border/70 bg-background">
-    <div className="mx-auto flex h-full max-w-[1260px] items-center gap-2 px-4">
+    <div className="mx-auto flex h-full max-w-3xl items-center gap-2 px-4">
       <Dot color={color} hollow={hollow} /><b className="truncate text-[13px] font-semibold">{name}</b>
       {status ? <span className={cn("shrink-0 text-[11.5px]", TONE[status.tone].text)}>{status.text}</span> : null}
       <span className="flex-1" />{advance}
@@ -583,7 +583,7 @@ export function BatchBar({ selected, kinds, sorting, run }: { selected: number; 
   if (!selected) return null;
   const safe = kinds.filter((kind) => kind.id !== "merge").reduce((sum, kind) => sum + kind.count, 0);
   return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
-    <div className="mx-auto flex max-w-[1260px] flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]">
+    <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]">
       <b className="mr-1 font-semibold">{selected} selected</b>
       {safe ? <button type="button" onClick={() => run({ kind: "action", id: "advance" })} className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background")}>
         Advance · {safe}<Kbd inverted>a</Kbd></button> : null}
@@ -925,7 +925,7 @@ export function DeckPane(props: DeckPaneProps) {
         advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`}
           keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
-      <div ref={props.viewRef} className="mx-auto max-w-[1260px] px-2 pb-10 pt-3 @min-[720px]:px-4">
+      <div ref={props.viewRef} className="mx-auto max-w-3xl px-2 pb-10 pt-3 @min-[720px]:px-4">
         {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} /></Stack>
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
             <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></div></>
