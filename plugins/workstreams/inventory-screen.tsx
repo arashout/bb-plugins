@@ -1,17 +1,18 @@
 // All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
 // you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
-// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. A Your turn row's Ask
-// its thread, and f on it, open the deck's listing confirm for the PR's existing thread, which sends only after its Undo window. Your turn
-// rows select (x, a click, Shift for a range, ⇧X or the list's box for all), and Address selected, or b, opens the same listing confirm
-// for one batch thread, or each PR's own. It shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and
-// n opens the deck's listing confirm for the focused row's Nudge, never a write itself.
+// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. Your turn rows select (x, a click, Shift
+// for a range, ⇧X or the list's box for all), and Address selected, or b, starts one batch thread for them at once, with 8 s to Undo. Each
+// PR it sent stays on Your turn with one state chip that opens its thread, until GitHub shows its feedback cleared; what it left out, or
+// why nothing started, shows on the rows and the selection bar. f on a row opens the deck's listing confirm for the PR's own thread. It
+// shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the
+// focused row's Nudge, never a write itself.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, yourTurnRows, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
+import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, yourTurnRows, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
@@ -56,14 +57,15 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
     className={cn("text-[12px]", notice.tone === "error" ? "text-destructive" : "text-muted-foreground")}>{notice.text}</p>;
 }
 
-/** The Your turn rows you selected, docked under the lists so it never covers one: Address them together, or clear. */
-function SelectionBar({ count, onAddress, onClear }: { count: number; onAddress(): void; onClear(): void }) {
+/** The Your turn rows you selected, docked under the lists so it never covers one: Address them together, or clear; and why nothing started. */
+function SelectionBar({ count, refusal, onAddress, onClear }: { count: number; refusal?: string | null; onAddress(): void; onClear(): void }) {
   if (!count) return null;
   return <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
     <b className="mr-1 font-semibold">{count} selected</b>
-    <button type="button" data-inventory-action="address" onClick={onAddress} title="Lists each PR first, then sends after 8 s with Undo. Nothing merges."
+    <button type="button" data-inventory-action="address" onClick={onAddress} title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
       className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background", FOCUS)}>
       Address selected ({count})<Kbd inverted>{ACTION.address.keys[0]}</Kbd></button>
+    {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
     <span className="flex-1" />
     <button type="button" onClick={onClear} className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", FOCUS)}>
       Clear<Kbd>esc</Kbd></button>
@@ -72,17 +74,21 @@ function SelectionBar({ count, onAddress, onClear }: { count: number; onAddress(
 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
-  onNudge(line: InventoryLine, action: LineAction): void; onAsk(line: InventoryLine): void; rootRef?: RefObject<HTMLDivElement | null>;
+  onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** Your turn rows selected for Address, by PR; a row's checkbox, the list's box for all or none, Address selected, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
+  /** Why the last Address started nothing, and why it left each PR out, by PR; and a batch's Undo from its row. */
+  refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
   const { turn, other } = splitInventory(props.screen);
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onAsk: props.onAsk };
-  const turnLines = turn.flatMap((group) => group.lines);
+    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge };
+  // Address takes only rows nothing it sent is still working on.
+  const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const picked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
+  const listed = turn.reduce((sum, group) => sum + group.lines.length, 0);
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
@@ -102,8 +108,9 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
             ref={(element) => { if (element) element.indeterminate = picked > 0 && picked < turnLines.length; }}
             aria-label={picked === turnLines.length ? "Clear the selection" : "Select every Your turn PR"} onChange={() => props.onSelectAll!(picked < turnLines.length)}
             className="size-3.5 shrink-0 accent-sky-600" /> : null}
-          Your turn <span className="font-normal tabular-nums text-muted-foreground">{turnLines.length}</span></h2>
-        {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...callbacks} selected={props.selected} onSelect={props.onSelect} />
+          Your turn <span className="font-normal tabular-nums text-muted-foreground">{listed}</span></h2>
+        {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...callbacks} selected={props.selected} onSelect={props.onSelect} notes={props.notes}
+          onUndo={props.onUndo} />
           : <p className="px-4 text-[12px] text-muted-foreground">No feedback waits on you.</p>}
       </section>
       <section className="mt-7" aria-label="Other open PRs">
@@ -112,7 +119,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
           : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
     </div>
-    <SelectionBar count={picked} onAddress={() => props.onAddress?.()} onClear={() => props.onClear?.()} />
+    <SelectionBar count={picked} refusal={props.refusal} onAddress={() => props.onAddress?.()} onClear={() => props.onClear?.()} />
     {props.footer}
   </div>;
 }
@@ -178,10 +185,10 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const [activeRow, setActiveRow] = useState<string | null>(null);
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const anchor = useRef<string | null>(null);
-  // A selected row that leaves Your turn (a batch thread took it, or you answered it) stays unselected if it comes back.
+  // A selected row Address can't take now (a batch took it, or you answered it) stays unselected if it comes back.
   useEffect(() => {
     if (!view) return;
-    const live = new Set(yourTurnRows(view, Date.now()).map((line) => line.prUrl));
+    const live = new Set(yourTurnRows(view, Date.now()).filter(sendable).map((line) => line.prUrl));
     setPicked((current) => [...current].every((prUrl) => live.has(prUrl)) ? current : new Set([...current].filter((prUrl) => live.has(prUrl))));
   }, [view]);
   const opener = useRef<HTMLElement | null>(null);
@@ -213,8 +220,8 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const fix = focused && askKind(focused) === "fix";
-  // Your turn in its drawn order, which a Shift-click's range follows; a selected row that leaves it is no longer selected.
-  const turnLines = screen ? splitInventory(screen).turn.flatMap((group) => group.lines) : [];
+  // Your turn in its drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row that leaves it is no longer selected.
+  const turnLines = screen ? splitInventory(screen).turn.flatMap((group) => group.lines).filter(sendable) : [];
   const selected = turnLines.filter((line) => picked.has(line.prUrl));
   const toggle = (line: InventoryLine, shift: boolean) => {
     setPicked(pickRows(turnLines.map((item) => item.prUrl), picked, line.prUrl, shift, anchor.current));
@@ -223,8 +230,13 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
     prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : []]),
       selectable: !!focused && turnLines.includes(focused), turn: turnLines.length, picked: selected.length } };
-  /** Address the selected Your turn rows: the deck's listing confirm, one batch thread first, then its Undo window. */
-  const address = () => { if (selected.length) void batch.plan("address", null, selected.map((line) => line.prUrl)); };
+  /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
+  const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
+  const undoBatch = async (batchId: string) => {
+    const undone = await rpc.call("deck_batch_undo", { batchId }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
+    say(undone.ok ? "Undone. Nothing was sent." : undone.error);
+    load();
+  };
   /** Ask a Your turn row's thread to address its feedback: the deck's listing confirm, with the PR's own thread named, then its Undo window. */
   const ask = (line: InventoryLine) => { const kind = askKind(line); if (kind) void batch.plan(kind, null, [line.prUrl]); };
   const on = availability(context);
@@ -246,7 +258,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       // The key opens the deck's listing confirm, which waits out its Undo window; only the row's own Nudge button is one click.
       case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
       case "fix": if (focused && fix) ask(focused); return;
-      // The key opens the listing confirm, as the bar's button does; nothing starts before its Undo window ends.
+      // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
       case "select": if (focused && turnLines.includes(focused)) toggle(focused, false); return;
       case "select-section": setPicked(new Set(turnLines.map((line) => line.prUrl))); say(`Selected ${turnLines.length} on Your turn.`); return;
@@ -268,9 +280,9 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     {screen ? <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
       onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
-      onNudge={(line, action) => { void nudge(line, action); }} onAsk={ask}
+      onNudge={(line, action) => { void nudge(line, action); }}
       selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? turnLines.map((line) => line.prUrl) : []))} onAddress={address}
-      onClear={() => setPicked(new Set())}
+      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
       : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}
     {batch.element}

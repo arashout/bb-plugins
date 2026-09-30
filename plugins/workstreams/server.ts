@@ -154,7 +154,7 @@ import {
 } from "./threads.js";
 import { startThread } from "./spawn.js";
 import { addressBatchPrompt, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
-import { turnSummary, yourTurn } from "./your-turn.js";
+import { sentState, turnSummary, yourTurn, type Sent } from "./your-turn.js";
 import { batchResults } from "./completion-envelope.js";
 import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
 import { planAgent, runAgent, type AgentSdk } from "./agent.js";
@@ -5640,8 +5640,9 @@ export default async function plugin(bb: BbPluginApi) {
     const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
     const claims = addressClaims();
+    const sentOf = addressSent();
     const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
-      addressing: claims.get(prWorkItemKey(prUrl)) ?? null,
+      addressing: claims.get(prWorkItemKey(prUrl)) ?? null, sent: (since: number | null) => sentOf(prUrl, since),
       confirmation: userConfirmation(approvalFeedback.get(prUrl), pr?.approvalFeedback, pr?.headRefOid ?? null),
       links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
     const entries = current.prInventory.entries;
@@ -5745,7 +5746,9 @@ export default async function plugin(bb: BbPluginApi) {
       // Revoking a confirmation leaves the notes yours again, so it marks nothing.
       const clicked: RowActed | null = row.lastAction && row.lastAction.action !== "revoke-confirmation" ? { kind: DECK_KIND[row.lastAction.action],
         state: row.lastAction.ok ? "sent" : "refused", at: row.lastAction.at, batchId: null } : null;
-      const batched = batches.get(row.prUrl) ?? null;
+      const found = batches.get(row.prUrl) ?? null;
+      // A started Address batch marks its PRs only while its claim holds them: then they're yours again, and Sent keeps the thread's link.
+      const batched = found?.kind === "address" && found.state === "sent" && !row.addressing ? null : found;
       return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [], decision: decisions.get(row.prUrl) ?? null,
         acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
     }));
@@ -5819,6 +5822,20 @@ export default async function plugin(bb: BbPluginApi) {
       out.set(prWorkItemKey(run.prUrl), { threadId: run.threadId, title: facts ? (facts.title ?? facts.titleFallback ?? null) : null });
     }
     return out;
+  }
+  /**
+   * Where the last Address batch sent each PR, and how that stands: its batch item while it waits out its window or when dispatch refused
+   * it, else its newest claim, open or ended, with that thread's link however it ended.
+   */
+  function addressSent(): (prUrl: string, since: number | null) => Sent | null {
+    const items = deckBatches.addressed();
+    const latest = new Map<string, Run>();
+    for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && run.prUrl !== null && !latest.has(prWorkItemKey(run.prUrl))) latest.set(prWorkItemKey(run.prUrl), run);
+    return (prUrl, since) => {
+      const run = latest.get(prWorkItemKey(prUrl)) ?? null;
+      const facts = run?.threadId ? threadFacts.get(run.threadId) : undefined;
+      return sentState(items.get(prWorkItemKey(prUrl)) ?? null, run, facts ? facts.title ?? facts.titleFallback ?? null : null, since);
+    };
   }
   /**
    * Why an agent or another action already holds this PR or its checkout, or null: an open run on either (a batch thread's claim among

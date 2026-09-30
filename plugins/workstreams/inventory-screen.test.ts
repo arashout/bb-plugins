@@ -6,6 +6,7 @@ import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
+import type { Sent } from "./your-turn.js";
 
 const VIEW = inkwellInventory();
 const SCREEN = inventoryScreen(VIEW, { now: NOW, filter: null });
@@ -61,32 +62,18 @@ describe("simple All PRs list", () => {
     for (const view of [working, held]) expect(yourTurnRows(view, NOW)).toHaveLength(turn(view).flatMap(([, lines]) => lines).length);
   });
 
-  it("says why it's your turn and since when, with Open thread where the PR has a thread", () => {
+  // A Your turn row is its PR, its feedback, and at most one thing beside it: nothing else competes with selecting it for Address.
+  it("says why it's your turn and since when, with no Open thread or Ask its thread competing on the row", () => {
     const html = pane();
-    expect(text(rowOf(html, "inkwell/quill#210"))).toContain("ABC-370 Hold books at the counter Changes requested by @otto-v · 1d Open thread");
+    expect(text(rowOf(html, "inkwell/quill#210"))).toContain("ABC-370 Hold books at the counter Changes requested by @otto-v · 1d");
     expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approval comment to address · 2d");
-    expect(rowOf(html, "inkwell/folio#301")).not.toContain("Open thread");
+    for (const ref of ["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) {
+      expect([ref, rowOf(html, ref).match(/Open thread|Ask its thread/u)]).toEqual([ref, null]);
+    }
+    expect(html).not.toContain('data-inventory-action="ask"');
     // Other open PRs lead with their state and next step, and never with Open thread.
     expect(rowOf(html, "inkwell/folio#330")).not.toContain("Open thread");
     expect(html).not.toContain(">Start<");
-  });
-
-  // Ask goes through the deck's listing confirm, so it shows only where the deck would take it: the approval's notes, or a thread's work
-  // that no thread is doing right now. It reuses the PR's own thread and never starts one, a Reviews item, or a write on its own.
-  it("offers Ask its thread on Your turn rows with a thread the deck's listing takes, and nowhere else", () => {
-    const asks = (html: string) => [...html.matchAll(/data-inventory-row="([^"]+)"(?:(?!data-inventory-row=).)*?data-inventory-action="ask"/gsu)].map((match) => match[1]);
-    expect(asks(pane())).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155"]);
-    // The two approvals with comments have no thread yet: nothing to ask, and nothing started for them.
-    expect(rowOf(pane(), "inkwell/folio#301")).not.toContain("Ask its thread");
-    const threaded = patched((row) => row.number === 301 ? { threads: { origin: { id: "thr_folio_301", title: "Spine labels", active: false }, executor: null } } : null);
-    expect(asks(pane(threaded))).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301"]);
-    expect(rowOf(pane(threaded), "inkwell/folio#301")).toMatch(/title="Ask its thread to address the approval&#x27;s notes\. You confirm the listing first, then Undo for 8 s\."/u);
-    // A thread working on it now has the work in hand: no other ask, and it's not your turn.
-    const working = patched((row) => row.number === 211 ? { threads: { ...row.threads, executor: { ...row.threads.executor!, active: true } } } : null);
-    expect(asks(pane(working))).not.toContain("inkwell/quill#211");
-    // A held effort's PRs wait with it.
-    const held: InventoryView = { ...threaded, groups: threaded.groups.map((group) => group.effort?.id === "effort-store-pickup" ? { ...group, effort: { ...group.effort, pile: "held" } } : group) };
-    expect(asks(pane(held))).toEqual(["inkwell/folio#301"]);
   });
 
   it("says when no feedback waits on you", () => {
@@ -243,9 +230,9 @@ describe("the inventory before its first read", () => {
 });
 
 describe("selecting Your turn PRs to address together", () => {
-  const selectedPane = (selected: ReadonlySet<string>, view: InventoryView = VIEW) => renderToStaticMarkup(createElement(InventoryPane, {
-    screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS, selected, onSelect: noop, onSelectAll: noop,
-    onAddress: noop, onClear: noop }));
+  const selectedPane = (selected: ReadonlySet<string>, view: InventoryView = VIEW, extra: { refusal?: string; notes?: ReadonlyMap<string, string> } = {}) =>
+    renderToStaticMarkup(createElement(InventoryPane, { screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS,
+      selected, onSelect: noop, onSelectAll: noop, onAddress: noop, onClear: noop, onUndo: noop, ...extra }));
   const boxes = (html: string) => [...html.matchAll(/aria-label="Select (inkwell\/[^"]+)"/gu)].map((match) => match[1]);
 
   // Only Your turn's rows take a checkbox, so Address selected never reaches a PR with nothing waiting on you.
@@ -265,20 +252,45 @@ describe("selecting Your turn PRs to address together", () => {
     expect(rowOf(html, "inkwell/quill#210")).toContain('data-inventory-selected="true"');
     expect(rowOf(html, "inkwell/quill#211")).not.toContain("data-inventory-selected");
     expect(text(html)).toContain("2 selected Address selected (2) b Clear esc");
-    expect(html).toMatch(/data-inventory-action="address" title="Lists each PR first, then sends after 8 s with Undo\. Nothing merges\."/u);
+    expect(html).toMatch(/data-inventory-action="address" title="Starts one thread for them now, with 8 s to Undo\. Nothing merges\."/u);
+    expect(html).not.toContain("data-inventory-refusal");
     // Every row selected: the list's box reads as clearing them.
     expect(selectedPane(new Set(yourTurnRows(VIEW, NOW).map((line) => line.prUrl)))).toContain('aria-label="Clear the selection"');
   });
 
-  // A batch thread holds it now: it's off Your turn and can't be picked again, and the row links the thread doing the work.
-  it("lists a PR a batch thread holds under Other open PRs as Addressing, with a link to the thread", () => {
-    const view = patched((row) => row.number === 210 ? { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } }
-      : row.number === 211 ? { addressing: { threadId: null, title: null } } : null);
+  // Sent PRs are tracked in one place: each stays on Your turn with one state chip that opens its thread however it ended, and can't be
+  // picked again while its batch or thread still has it.
+  it("keeps each PR a batch sent on Your turn with one state chip linking its thread, and no box while its thread works", () => {
+    const sent = (state: Sent["state"], detail: string | null = null, threadId: string | null = "thr-batch") => ({ state, threadId, title: "Address feedback on 5 PRs",
+      detail, batchId: state === "sending" ? "b-1" : null });
+    const view = patched((row) => row.number === 210 ? { addressing: { threadId: "thr-batch", title: "Address feedback on 5 PRs" }, sent: sent("working") }
+      : row.number === 211 ? { sent: sent("sending", null, null) } : row.number === 155 ? { sent: sent("no-report") }
+        : row.number === 301 ? { sent: sent("done", "replied") } : row.number === 318 ? { sent: sent("blocked", "mira-l asks for a new sort order") } : null);
     const html = selectedPane(new Set(), view);
+    expect(refs(splitInventory(inventoryScreen(view, { now: NOW, filter: null })).turn)).toEqual([["Store pickup", ["inkwell/quill#210", "inkwell/quill#211",
+      "inkwell/spine#155"]], ["No effort", ["inkwell/folio#301", "inkwell/folio#318"]]]);
     expect(boxes(html)).toEqual(["inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
-    expect(text(rowOf(html, "inkwell/quill#210"))).toContain("Addressing · batch thread");
-    expect(rowOf(html, "inkwell/quill#210")).toMatch(/data-inventory-addressing[^>]*>Addressing · <button type="button"/u);
-    expect(text(rowOf(html, "inkwell/quill#211"))).toContain("Addressing · starting its batch thread");
+    const chip = (ref: string) => { const row = rowOf(html, ref); const at = row.indexOf("data-inventory-sent="); return text(row.slice(row.lastIndexOf("<", at), row.indexOf("</li>", at))).trim(); };
+    expect(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"].map(chip)).toEqual(["Working ↗",
+      "Sending Undo", "Ended without a report ↗", "Done · replied ↗", "Blocked: mira-l asks for a new sort order ↗"]);
+    // Each ended chip is a button to its thread; Sending's Undo takes the batch back.
+    for (const ref of ["inkwell/quill#210", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) expect(rowOf(html, ref)).toMatch(/<button type="button" data-inventory-sent="[\w-]+" title="[^"]+ · open “Address feedback on 5 PRs”"/u);
+    expect(rowOf(html, "inkwell/quill#211")).toMatch(/data-inventory-sent="sending"[^>]*>Sending<button type="button"[^>]*>Undo<\/button>/u);
+    // A dispatch refusal says why on its row; feedback cleared takes the row off Your turn, chip and all.
+    expect(text(rowOf(selectedPane(new Set(), patched((row) => row.number === 210 ? { sent: sent("refused", "Its effort is on hold. Nothing was started.", null) } : null)),
+      "inkwell/quill#210"))).toContain("Not sent: Its effort is on hold. Nothing was started.");
+    expect(refs(splitInventory(inventoryScreen(patched((row) => row.number === 155 ? { sent: sent("no-report"), yourTurn: null } : null), { now: NOW, filter: null })).turn)
+      .flatMap(([, lines]) => lines)).not.toContain("inkwell/spine#155");
+  });
+
+  // Nothing fails quietly: why nothing started shows on the selection bar, and why each PR was left out shows on its own row.
+  it("shows why nothing started on the selection bar, and each left-out PR's reason on its row", () => {
+    const picked = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/folio/pull/301"]);
+    const html = selectedPane(picked, VIEW, { refusal: "Nothing started. quill #210: An agent is already working on it.",
+      notes: new Map([["https://github.com/inkwell/quill/pull/210", "An agent is already working on it."]]) });
+    expect(html).toMatch(/role="alert" data-inventory-refusal[^>]*>Nothing started\. quill #210: An agent is already working on it\.</u);
+    expect(rowOf(html, "inkwell/quill#210")).toMatch(/role="alert" data-inventory-left[^>]*><span class="truncate">Left out: An agent is already working on it\.</u);
+    expect(rowOf(html, "inkwell/folio#301")).not.toContain("Left out");
   });
 });
 

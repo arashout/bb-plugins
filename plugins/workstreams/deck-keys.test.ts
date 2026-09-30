@@ -12,7 +12,7 @@ describe("the deck's key registry", () => {
   it("never binds Enter or Space to a merge or a write: Enter only opens a row's details", () => {
     expect(actionForKey({ key: "Enter" })).toEqual({ id: "expand" });
     expect(actionForKey({ key: " " })).toBeNull();
-    for (const action of DECK_ACTIONS.filter((item) => item.effect === "confirm" || item.effect === "preview")) {
+    for (const action of DECK_ACTIONS.filter((item) => item.effect === "confirm" || item.effect === "start" || item.effect === "preview")) {
       expect(action.keys).not.toContain("↵");
       expect(action.keys).not.toContain(" ");
     }
@@ -32,12 +32,13 @@ describe("the deck's key registry", () => {
     expect([ACTION.release.effect, actionForKey({ key: "l" })?.id]).toEqual(["confirm", "release"]);
     // f asks each PR's thread for its fix, which pushes code, so it lists every PR first and waits out the same window.
     expect([ACTION.fix.effect, actionForKey({ key: "f" })?.id]).toEqual(["confirm", "fix"]);
-    // b hands the selected Your turn PRs to a thread that pushes and replies, so it lists them first and waits out the same window, and
-    // a held b opens one listing.
+    // b starts one thread for the selected Your turn PRs at once, as Reviews does: the thread, not the key, pushes and replies, and the
+    // same Undo window holds it first. A held b starts one.
     expect([ACTION.address.effect, actionForKey({ key: "b" })?.id, actionForKey({ key: "b", repeat: true }), actionForKey({ key: "b", metaKey: true })])
-      .toEqual(["confirm", "address", null, null]);
+      .toEqual(["start", "address", null, null]);
+    expect(DECK_ACTIONS.filter((action) => action.effect === "start").map((action) => action.id)).toEqual(["address"]);
     // Nothing else reaches a write: every other action moves, changes the view, or opens a dialog.
-    expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "preview").map((action) => action.id).sort())
+    expect(DECK_ACTIONS.filter((action) => action.effect === "confirm" || action.effect === "start" || action.effect === "preview").map((action) => action.id).sort())
       .toEqual([...writes, "release", "fix", "address"].sort());
   });
 
@@ -67,6 +68,15 @@ describe("the deck's key registry", () => {
     expect(typingTarget({ closest: (selector: string) => selector.includes("textarea") ? {} : null })).toBe(true);
     expect(typingTarget({ closest: () => null })).toBe(false);
     expect(typingTarget(null)).toBe(false);
+  });
+
+  // A click on a row's selection box focuses it in Chromium, so b after picking rows used to do nothing at all: the box read as typing.
+  it("acts from a focused checkbox or radio, which take no text, and still leaves a text field alone", () => {
+    // closest() as the DOM answers it for one element: a part of the selector list naming its tag matches, unless the part excludes its type.
+    const field = (tag: string, type = "") => ({ closest: (selector: string) => selector.split(",").map((part) => part.trim())
+      .some((part) => part.startsWith(tag) && !part.includes(`:not([type=${type}])`)) ? {} : null });
+    expect([field("input", "checkbox"), field("input", "radio")].map(typingTarget)).toEqual([false, false]);
+    expect([field("input", "text"), field("textarea"), field("select")].map(typingTarget)).toEqual([true, true, true]);
   });
 });
 

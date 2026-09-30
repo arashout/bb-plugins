@@ -5,6 +5,7 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr, RawUnit } from "./contract.js";
 import type { BatchItem, DeckBatch } from "./deck-batch.js";
+import { startAddress } from "./deck-flow.js";
 import type { DeckView } from "./deck.js";
 import { createEffortStore } from "./effort-store.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
@@ -215,11 +216,12 @@ describe("addressing Your turn PRs in one batch thread", () => {
     // Nothing here writes to GitHub, and nothing merges.
     expect(env.hostCalls.filter((method) => !["scan", "inspectPaths", "authoredPrs", "inspectPrs", "contextWorkspace", "advanceInspect"].includes(method))).toEqual([]);
 
-    // Each PR in it reads Addressing, In flight, off Your turn, and the thread shows on the card.
+    // Each PR in it reads Working, In flight on the deck, and stays on Your turn where you sent it from; the thread shows on the card.
     await env.refresh();
     const rows = await env.rows();
-    for (const number of [42, 43, 44]) expect(rows.get(number)).toMatchObject({ section: "flight", addressing: { threadId: "thr-batch-1", title: "Address feedback on 3 PRs" } });
-    expect(await env.turn()).toEqual([45, 46]);
+    for (const number of [42, 43, 44]) expect(rows.get(number)).toMatchObject({ section: "flight", addressing: { threadId: "thr-batch-1", title: "Address feedback on 3 PRs" },
+      sent: { state: "working", threadId: "thr-batch-1", title: "Address feedback on 3 PRs" } });
+    expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
     expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
   });
 
@@ -331,7 +333,9 @@ describe("addressing Your turn PRs in one batch thread", () => {
       expect((await env.rows()).get(43)?.addressing).toEqual({ threadId: null, title: null });
       await vi.advanceTimersByTimeAsync(90_000);
       await vi.waitFor(async () => { await env.refresh(); expect((await env.rows()).get(43)?.addressing?.threadId ?? "none").toBe(made ? "thr-batch-1" : "none"); });
-      expect(await env.turn()).toEqual(made ? [42, 45, 46] : [42, 43, 44, 45, 46]);
+      // Either way the PRs stay on Your turn: working in the thread BB made, or back to you when it made none.
+      expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
+      expect((await env.rows()).get(43)?.sent?.state).toBe(made ? "working" : "refused");
       expect(env.spawn).toHaveBeenCalledTimes(1);
       await env.harness.lifecycle.dispose();
       cleanups.pop();
@@ -470,6 +474,65 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     expect(env.send).not.toHaveBeenCalled();
   });
 
+  // Each sent PR keeps its link to the batch thread however the thread ends, back on Your turn and needing you, until a newer batch takes it.
+  it("keeps each PR's link to a batch thread stopped without a report, lets Address take it again, and a newer batch replaces the link", async () => {
+    const env = await setup();
+    const sent = async () => new Map(((await env.rpc("inventory_get", {})) as InventoryView).groups.flatMap((group) => group.rows)
+      .map((row) => [row.number, row.sent && `${row.sent.state} ${row.sent.threadId}`]));
+    const first = await env.plan([43, 44].map(url));
+    await confirm(env, first.batchId);
+    await env.refresh();
+    expect([(await sent()).get(43), (await sent()).get(44)]).toEqual(["working thr-batch-1", "working thr-batch-1"]);
+    // Stopped by hand: its turn ends with no result line for either PR.
+    env.output.text = "Stopped.";
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr-batch-1", status: "idle" }), lastAssistantText: env.output.text });
+    await vi.waitFor(async () => expect([(await sent()).get(43), (await sent()).get(44)]).toEqual(["no-report thr-batch-1", "no-report thr-batch-1"]));
+    await env.refresh();
+    expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
+    // The claim is gone and so is the start's mark: the deck files it where its feedback does, needing you, and Address takes it again.
+    expect((await env.rows()).get(43)).toMatchObject({ addressing: null, acted: null, sent: { state: "no-report", threadId: "thr-batch-1" } });
+    expect((await env.rows()).get(43)?.section).not.toBe("flight");
+    const again = await env.plan([url(43)]);
+    expect([again.items.map((item) => item.ref), again.skipped]).toEqual([["folio #43"], []]);
+    await confirm(env, again.batchId);
+    await env.refresh();
+    expect([(await sent()).get(43), (await sent()).get(44)]).toEqual(["working thr-batch-2", "no-report thr-batch-1"]);
+    // Once GitHub shows #44's feedback answered, it leaves Your turn, link and all.
+    env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 0, comment: { login: "ines", at: ago(HOUR) }, repliedAt: ago(HOUR / 2) } });
+    await env.refresh();
+    expect(await env.turn()).toEqual([42, 43, 45, 46]);
+  });
+
+  // Address selected's own path, with no listing: its one click schedules the batch, the row reads Sending with Undo, and Undo starts nothing.
+  it("starts Address selected's batch at once through the server, and its Undo starts nothing", async () => {
+    const env = await setup();
+    const rpc = { plan: (input: unknown) => env.rpc("deck_batch_plan", input) as never, start: (batchId: string) => env.rpc("deck_batch_start", { batchId }) as never };
+    const outcome = await startAddress(rpc, null, [42, 43].map(url), {});
+    expect(outcome).toMatchObject({ ok: true, count: 2, skipped: [] });
+    const batchId = (outcome as { batchId: string }).batchId;
+    expect((await env.batch(batchId)).state).toBe("scheduled");
+    expect((await env.rows()).get(42)?.sent).toEqual({ state: "sending", threadId: null, title: null, detail: null, batchId });
+    expect(await env.rpc("deck_batch_undo", { batchId })).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(env.spawn).not.toHaveBeenCalled();
+    expect([(await env.batch(batchId)).state, (await env.rows()).get(42)?.sent ?? null]).toEqual(["cancelled", null]);
+  });
+
+  // Nothing fails quietly: a PR dispatch refuses keeps why on its row, where All PRs and the deck both read it.
+  it("keeps why dispatch refused a PR on its row", async () => {
+    const env = await setup();
+    const plan = await env.plan([url(43)]);
+    const said = await confirm(env, plan.batchId, () => env.rpc("pr_hold_set", { prUrl: url(43), held: true, reason: "Counter redesign" }));
+    const why = said[0]!.replace(/^folio #43: refused: /u, "");
+    expect(why).not.toBe(said[0]);
+    await env.rpc("pr_hold_set", { prUrl: url(43), held: false });
+    await env.refresh();
+    expect((await env.rows()).get(43)?.sent).toEqual({ state: "refused", threadId: null, title: null, detail: why, batchId: null });
+    expect(await env.turn()).toContain(43);
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
   // A batch thread removed while no load listened sends no event. The next list of BB's threads finds it gone and ends its claims, so its
   // PRs don't wait on a thread that no longer exists; a run of another kind in a thread the list leaves out keeps its own rules.
   it("releases the claims of a batch thread deleted or archived unheard, back to Your turn", async () => {
@@ -487,7 +550,8 @@ describe("the checks a batch thread's claims pass as it starts", () => {
       expect(runs.filter((run) => run.action === "address-feedback").map((run) => [run.prNumber, run.status, run.error])).toEqual([44, 43].map((number) =>
         [number, "failed", "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read."]));
       expect(runs.find((run) => run.id === other)?.status).toBe("running");
-      expect((await env.rows()).get(43)).toMatchObject({ addressing: null });
+      // The thread is gone, but each PR keeps its link to it, saying it ended without a report.
+      expect((await env.rows()).get(43)).toMatchObject({ addressing: null, sent: { state: "no-report", threadId: "thr-batch-1" } });
       expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
       await env.harness.lifecycle.dispose();
       cleanups.pop();

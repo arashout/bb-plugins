@@ -16,6 +16,7 @@ import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
 import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
 import { firstLine } from "./effort-notes";
+import { sentChip } from "./your-turn";
 
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
@@ -152,12 +153,19 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
-  // The batch thread's claim holds it: that says more than the start it came from, and links to the thread.
-  if (row?.addressing?.threadId && (!acted || acted.state === "sent")) trail = { kind: "thread", text: "Addressing · batch thread", threadId: row.addressing.threadId };
+  // Why the last Address left it out; else what Address made of it, its thread linked however it ended, until its feedback clears.
+  const left = acted ? null : context.details?.get(item.prUrl) ?? null;
+  const sent = row?.sent && row.sent.state !== "sending" && row.sent.state !== "refused" && (row.addressing || row.yourTurn) && (!acted || acted.kind === "address")
+    ? row.sent : null;
+  if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Left out: ${left}` };
+  else if (sent) trail = sent.threadId ? { kind: "thread", text: sentChip(sent).text, threadId: sent.threadId }
+    : { kind: "acted", failed: false, undo: null, title: null, text: sentChip(sent).text };
   else if (acted) {
     const failed = acted.state === "refused" || acted.state === "unknown";
-    trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: context.details?.get(item.prUrl) ?? null,
-      text: acted.state === "refused" ? "Not sent" : acted.state === "unknown" ? "May not have sent" : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
+    const said = context.details?.get(item.prUrl) ?? (acted.kind === "address" ? row?.sent?.detail : null) ?? null;
+    trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: said,
+      text: acted.state === "refused" ? acted.kind === "address" && said ? `Not sent: ${said}` : "Not sent" : acted.state === "unknown" ? "May not have sent"
+        : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
   } else if (item.ghost) trail = { kind: "ghost", text: moved ? `→ ${moved}` : fate };
   else if (row?.thread && section === "work") trail = { kind: "thread", text: row.thread.title, threadId: row.thread.id };
   const news = [change && `Was ${change.was}; now ${change.now}.`, to ? `Moves to ${to.title} on Mark seen.` : "Settles on Mark seen."].filter(Boolean).join(" ");

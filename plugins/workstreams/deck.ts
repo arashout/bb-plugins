@@ -21,7 +21,7 @@ import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
-import { yourTurnSchema } from "./your-turn.js";
+import { sentSchema, yourTurnSchema } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
 const WEEK_MS = 7 * 86_400_000;
@@ -54,6 +54,8 @@ export const deckRowSchema = z.object({
   thread: z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict().nullable(),
   /** The batch thread whose claim holds it while it addresses the feedback; its id is null while it starts. */
   addressing: z.object({ threadId: z.string().nullable(), title: z.string().nullable() }).strict().nullable(),
+  /** Where the last Address batch sent it, and how that stands, with the thread's link however it ended. */
+  sent: sentSchema.nullable(),
   hold: z.object({ reason: z.string(), since: z.number() }).strict().nullable(),
   /** The v2 roster that manages it. */
   managed: z.string().nullable(),
@@ -226,7 +228,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     step: first ? { text: first.text, owner: first.owner.label, since: first.since } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
-    thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing,
+    thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing, sent: row.sent,
     hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
     managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };

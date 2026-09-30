@@ -35,6 +35,7 @@ import { ACTED_KINDS, ACTED_MS, BATCH_KINDS, counted, DECK_WRITES, needsYou, SEN
 import { deckSeenSchema, type DeckRow } from "./deck.js";
 import { FIX_KINDS, FIX_WORDS, type FixKind } from "./effort-recipes.js";
 import type { ActionResult, ShownReviewers } from "./inventory-actions.js";
+import type { SentItem } from "./your-turn.js";
 
 /** Append-only: server.ts adds this after PR merge sightings (id 63). */
 export const DECK_BATCH_MIGRATION =
@@ -441,6 +442,15 @@ export function createDeckBatches(deps: DeckBatchDeps) {
           batchId: batch!.id };
         if ((out.get(item.prUrl)?.at ?? -1) <= acted.at) out.set(item.prUrl, acted);
       }
+      return out;
+    },
+    /** The newest Address item on each PR in the last day, with what dispatch said of it: a PR's Sent reads it beside its claim. */
+    addressed(): Map<string, SentItem> {
+      const out = new Map<string, SentItem>();
+      const rows = db.prepare(`SELECT id, created_at, state, dispatch_at, body FROM deck_batches WHERE state IN ('scheduled', 'dispatching', 'done') AND created_at >= ?
+        ORDER BY dispatch_at`).all(deps.now() - ACTED_MS);
+      for (const batch of rows.map(parse)) for (const item of batch!.items) if (item.kind === "address") out.set(item.prUrl, { detail: item.detail, batchId: batch!.id,
+        state: item.state !== "pending" ? item.state : batch!.state === "scheduled" ? "queued" : "sending", confirmedAt: batch!.dispatchAt! - SEND_DELAY_MS });
       return out;
     },
     dispose(): void {

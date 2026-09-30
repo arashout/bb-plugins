@@ -714,8 +714,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
         return;
       }
-      // The selection's rows go to one listing, which names why any stays out; nothing starts before its Undo window ends.
-      case "address": if (card && on.address.on) void batch.plan("address", card.card.id, selected.map((item) => item.prUrl)); return;
+      // The selection's Your turn rows go to one batch thread, started now; each row says why any stays out, and Undo takes it back for 8 s.
+      case "address": if (card && on.address.on) void batch.address(card.card.id, selected.filter((item) => !item.dim && item.row?.yourTurn).map((item) => item.prUrl)); return;
       case "undo": if (undo?.live()) { const run = undo; setUndo(null); setFlash(null); void run.run(); } return;
       case "hold-pr": {
         if (!row?.row) return;
@@ -917,7 +917,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
       open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash}
-      batch={{ kinds, address: on.address.on ? selected.filter((line) => line.row?.yourTurn).length : 0 }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
+      batch={{ kinds, address: on.address.on ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : 0, refusal: batch.refusal }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
       notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} filter={here.filter?.kind ?? null} />
     {batch.element}

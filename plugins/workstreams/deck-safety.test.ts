@@ -1,4 +1,5 @@
-// The deck sends batch writes only after the listing confirm and merges only from a fresh preview.
+// The deck sends batch writes only after the listing confirm, except Address selected, which starts one batch thread at once into the same
+// Undo window, and merges only from a fresh preview.
 // All PRs exposes one direct write: an explicit Nudge button when the server-derived action is eligible.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -7,11 +8,15 @@ const source = (file: string) => readFileSync(new URL(file, import.meta.url), "u
 const VIEWS = ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx", "inventory-screen.tsx"];
 
 describe("the deck's write safety", () => {
-  it("starts a batch in one place, which only the listing confirm's button or ⌘↵ on its dialog reaches", () => {
-    expect(VIEWS.flatMap((file) => [...source(file).matchAll(/"deck_batch_start"/gu)].map(() => file))).toEqual(["deck-flow.tsx"]);
+  // Address skips the listing because its thread, not the click, does any GitHub work, and dispatch checks every PR again first.
+  it("starts a batch from the listing confirm's button or ⌘↵, or from Address selected, which starts only an Address batch", () => {
+    expect(VIEWS.flatMap((file) => [...source(file).matchAll(/"deck_batch_start"/gu)].map(() => file))).toEqual(["deck-flow.tsx", "deck-flow.tsx"]);
     const flow = source("deck-flow.tsx");
     expect([...flow.matchAll(/(on\w+)=\{\(\) => void start\(\)\}/gu)].map((match) => match[1])).toEqual(["onConfirmKey", "onConfirm"]);
     expect(flow.match(/void start\(\)/gu)).toHaveLength(2);
+    // The plan Address starts names its kind itself, so no other write rides it; and one hook calls it.
+    expect(flow).toMatch(/await rpc\.plan\(\{ kind: "address", \.\.\.effortId/u);
+    expect(flow.match(/(?<!function )startAddress\(/gu)).toHaveLength(1);
   });
 
   // A weak suggestion rests on one faint signal, so its PRs move only after you check each one's signals.
@@ -59,22 +64,22 @@ describe("the deck's write safety", () => {
     for (const file of ["deck-nav-view.tsx", "deck-screen.tsx", "deck-flow.tsx"]) {
       expect(source(file)).not.toMatch(/"(inventory_(mark_ready|request_review|nudge|confirm_handled)|action_merge)"/u);
     }
-    // The deck's Address selected, and b, open the listing confirm for the selection, and only while the selection has Your turn rows.
+    // The deck's Address selected, and b, start its selected Your turn rows, and only while the selection has some.
     const nav = source("deck-nav-view.tsx");
-    expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.plan\("address", card\.card\.id, selected\.map\(\(item\) => item\.prUrl\)\); return;/u);
+    expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.address\(card\.card\.id, selected\.filter\(\(item\) => !item\.dim && item\.row\?\.yourTurn\)/u);
     expect(source("deck-screen.tsx")).toContain('onClick={() => run({ kind: "action", id: "address" })}');
-    // All PRs exposes only Open thread, Ask its thread, Address selected, and eligible Nudge buttons. Its keys move focus or select; n, f,
-    // and b, its keys that write, open the same listing confirm as the deck's, as Ask its thread and Address selected do. Its Nudge button
-    // stays one click, its only direct call besides the read.
+    // All PRs exposes only Address selected, eligible Nudge buttons, a sent PR's chip, which opens its thread, and a batch's Undo. Its keys
+    // move focus or select; n and f open the same listing confirm as the deck's, and b starts Address selected. Its Nudge button stays one
+    // click, its only direct write besides Address.
     const inventory = source("inventory-screen.tsx");
     expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
     expect(inventory).toMatch(/const ask = \(line: InventoryLine\) => \{ const kind = askKind\(line\); if \(kind\) void batch\.plan\(kind, null, \[line\.prUrl\]\); \};/u);
     expect(inventory).toMatch(/case "fix": if \(focused && fix\) ask\(focused\); return;/u);
-    expect(inventory).toMatch(/const address = \(\) => \{ if \(selected\.length\) void batch\.plan\("address", null, selected\.map\(\(line\) => line\.prUrl\)\); \};/u);
+    expect(inventory).toMatch(/const address = \(\) => \{ if \(selected\.length\) void batch\.address\(null, selected\.map\(\(line\) => line\.prUrl\)\); \};/u);
     expect(inventory).toMatch(/case "address": address\(\); return;/u);
     expect(inventory).toContain("onClick={onAddress}");
-    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(3);
-    expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge"]);
+    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(2);
+    expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge", "deck_batch_undo"]);
     // Review notes and merges are the deck's alone: no key or button here confirms or merges.
     expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);
     expect(inventory).not.toContain('"inventory_confirm_handled"');
@@ -82,8 +87,9 @@ describe("the deck's write safety", () => {
     const rows = source("inventory-rows.tsx");
     expect(rows).toContain('action.id === "nudge" && action.enabled');
     expect(rows).toContain('onClick={() => props.onNudge(line, nudge)}');
-    expect(rows).toContain('onClick={() => props.onOpenThread(thread)}');
-    expect(rows).toContain('onClick={() => props.onAsk(line)}');
+    expect(rows).toContain('onClick={() => onOpenThread(sent.threadId!)}');
+    expect(rows).toContain('onClick={() => onUndo(sent.batchId!)}');
+    expect(rows).not.toContain("onAsk");
     expect(rows).not.toMatch(/onStart|item_start/u);
   });
 });

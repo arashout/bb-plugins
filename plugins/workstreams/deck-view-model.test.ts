@@ -6,6 +6,7 @@ import { withArrivals } from "./deck-place.js";
 import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, overviewScreen, paletteItems,
   readText, refreshNote, rowFacts, rowFilter, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
+import type { Sent } from "./your-turn.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const SHELF = INVENTORY_EFFORTS.shelf.id, PICKUP = INVENTORY_EFFORTS.pickup.id, ONE_OFFS = "effort-one-offs";
@@ -150,14 +151,28 @@ describe("an effort card", () => {
   });
 
   // A batch thread's claim is the row's news: it's In flight, and its link goes to the thread doing the work, over the start it came from.
-  it("files a row a batch thread holds In flight, linking Addressing · batch thread, until the claim ends", () => {
-    const held = (acted: "queued" | "sent" | null) => inkwellDeck({}, (row) => row.number === 211 ? { addressing: acted === "queued" ? null
-      : { threadId: "thr-batch", title: "Address feedback on 2 PRs" }, acted: acted && { kind: "address", state: acted, at: NOW, batchId: "b2" } } : {});
-    const line = (view: DeckView) => card(view, PICKUP).sections.flatMap((section) => section.lines).find((item) => item.ref === "quill #211")!;
-    expect(line(held("sent"))).toMatchObject({ section: "flight", dim: true, trail: { kind: "thread", text: "Addressing · batch thread", threadId: "thr-batch" } });
-    expect(line(held(null))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Addressing · batch thread" } });
+  // A sent PR's row says what its batch thread is doing and, once it ends, how, linking the thread either way; it needs you again then.
+  it("files a row a batch thread holds In flight with its state, links the thread however it ended, and says why a PR was left out", () => {
+    const sent = (state: Sent["state"], extra: Partial<Sent> = {}): Sent => ({ state, threadId: "thr-batch", title: "Address feedback on 2 PRs", detail: null, batchId: null, ...extra });
+    const held = (acted: "queued" | "sent" | "refused" | null, now: Sent | null) => inkwellDeck({}, (row) => row.number === 211 ? { sent: now,
+      addressing: now?.state === "working" || now?.state === "needs-you" ? { threadId: "thr-batch", title: "Address feedback on 2 PRs" } : null,
+      acted: acted && { kind: "address", state: acted, at: NOW, batchId: "b2" } } : {});
+    const line = (view: DeckView, details?: ReadonlyMap<string, string>) => card(view, PICKUP, none, details).sections.flatMap((section) => section.lines)
+      .find((item) => item.ref === "quill #211")!;
+    expect(line(held("sent", sent("working")))).toMatchObject({ section: "flight", dim: true, trail: { kind: "thread", text: "Working", threadId: "thr-batch" } });
+    expect(line(held(null, sent("needs-you")))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Needs you", threadId: "thr-batch" } });
+    // Its thread ended, whether with a report or without: its feedback files it again, needing you, and the row still links the thread.
+    for (const [now, text] of [[sent("no-report"), "Ended without a report"], [sent("blocked", { detail: "otto-v asks for a new order" }), "Blocked: otto-v asks for a new order"],
+      [sent("done", { detail: "pushed" }), "Done · pushed"]] as const) {
+      expect(line(held(null, now))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text, threadId: "thr-batch" } });
+    }
     // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
-    expect(line(held("queued"))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
+    expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
+    // Dispatch refused it, or the last Address left it out: the server's reason, on the row.
+    expect(line(held("refused", sent("refused", { threadId: null, detail: "Its effort is on hold. Nothing was started." })))).toMatchObject({ trail: { kind: "acted", failed: true,
+      text: "Not sent: Its effort is on hold. Nothing was started." } });
+    expect(line(held(null, null), new Map([[url("quill", 211), "An agent is already working on it."]]))).toMatchObject({ trail: { kind: "acted", failed: true,
+      text: "Left out: An agent is already working on it." } });
   });
 
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {
@@ -440,7 +455,7 @@ describe("what the keys act on", () => {
     // A held card's rows wait with it.
     expect(on({ selected: turn }, { ...pickup, card: { ...pickup.card, pile: "held" } })).toEqual({ on: false, why: "this card is paused" });
     const items = paletteItems(availability(context(pickup, { selected: turn })), [], { held: [], done: [] }, PICKUP, true);
-    expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected…", keys: ["b"], on: true });
+    expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected", keys: ["b"], on: true });
     // All PRs: x selects the focused Your turn row, ⇧X all of Your turn, and b addresses the selection.
     const prs = (patch: NonNullable<KeyContext["prs"]>) => ({ ...context(pickup), view: "prs" as const, cur: null, prs: patch });
     const none = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0 });

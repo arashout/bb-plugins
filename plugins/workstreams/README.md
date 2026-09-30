@@ -186,16 +186,16 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   waits with Undo, and a merge runs only from the fresh merge preview.
 - **All PRs:** Every open PR you author and every open PR an effort names, in
   two lists. **Your turn** comes first: your PRs where a reviewer's
-  feedback waits on you, by effort, with **No effort** last. **Open thread**
-  goes to the PR's thread. On a PR that has a thread, **Ask its thread** lists
-  what the thread gets for you to confirm, then sends it after its Undo
-  window. Select Your turn rows (x, a click, Shift for a range, or ⇧X for all)
-  and **Address selected** (b) lists each PR's feedback for one new batch
-  thread, the default, or for each PR's own thread. The batch thread starts on
-  the code-work model after the Undo window, under the effort's parent when
+  feedback waits on you, by effort, with **No effort** last. Select Your turn
+  rows (x, a click, Shift for a range, or ⇧X for all) and **Address selected**
+  (b) starts one batch thread for them at once, with no listing: it waits 8 s
+  for Undo, then starts on the code-work model, under the effort's parent when
   every PR shares one. It holds each PR until it finishes, replies to each
-  reviewer's note, and never merges. Rows it holds read **Addressing · batch
-  thread** and file In flight. The deck's selection offers the same.
+  reviewer's note, and never merges. Each PR it sent stays on Your turn with one
+  state chip that opens the thread: Sending, Working, Needs you, Done, Blocked,
+  Ended without a report, or Not sent, until GitHub shows its feedback cleared.
+  A PR it left out says why on its row. The deck's selection offers the same.
+  On a PR that has a thread, f lists what that thread gets for you to confirm.
   **Other open PRs** follows, by effort; each row shows the PR's state
   and next step. **Nudge** appears only where a reviewer has waited long
   enough, and the server checks again before it sends. A Your turn row offers

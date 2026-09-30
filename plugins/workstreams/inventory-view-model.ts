@@ -6,6 +6,7 @@
 // roster's time formatting only, so no server module reaches the browser.
 import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
 import type { AttentionReason } from "./pr-attention";
+import type { Sent } from "./your-turn";
 import { age, clock } from "./roster-view-model";
 
 /** Realtime: the server publishes it after each inventory read, single-PR read, hold change, and recorded inventory action. */
@@ -22,9 +23,10 @@ export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: 
 export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
-    ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments. Open thread goes to its thread."],
-    ["Ask its thread", "Lists what the PR's thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo. Only on a PR with a thread."],
-    ["Address selected", "Select Your turn rows with x, a click, or Shift for a range. It lists each PR's feedback for one batch thread, or each PR's own, for you to confirm. It starts 8 s later unless you Undo, and never merges."],
+    ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments."],
+    ["Address selected", "Select Your turn rows with x, a click, or Shift for a range, then Address selected or b. One thread starts for all of them 8 s later unless you Undo, and never merges. Anything it leaves out says why on its row."],
+    ["State", "Each PR Address sent stays on Your turn with one chip that opens its thread: Sending, Working, Needs you, Done, Blocked, Ended without a report, or Not sent. It leaves once GitHub shows the feedback cleared."],
+    ["Ask its thread", "f on a row lists what the PR's own thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],
     ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
@@ -81,6 +83,8 @@ export type InventoryLine = {
   yourTurn: { text: string; age: string | null } | null;
   /** The batch thread addressing that feedback now, which holds the PR's claim until it finishes; its id is null while it starts. */
   addressing: { threadId: string | null } | null;
+  /** Where the last Address batch sent it, and how that stands, with the thread's link however it ended. */
+  sent: Sent | null;
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
 };
@@ -299,8 +303,9 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   const threads = [...working ? [{ ...working, role: "working" as const }] : [], ...started ? [{ ...started, role: "started" as const }] : []];
   const yourTurn = row.yourTurn && { text: row.yourTurn.text, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) };
   const addressing = row.addressing && { threadId: row.addressing.threadId };
+  const sent = row.sent ?? null;
   // Whether Your turn lists the row decides its actions: a Nudge there would leave the feedback waiting on you.
-  const turn = onYourTurn({ yourTurn, primary, threads, effortPile, addressing });
+  const turn = onYourTurn({ yourTurn, primary, threads, effortPile, sent });
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
@@ -313,7 +318,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
       label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
-    yourTurn, addressing,
+    yourTurn, addressing, sent,
     depth: 0, branch: null,
   };
 }
@@ -323,18 +328,23 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
  * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Only a PR with a thread already, which
  * the ask reuses: All PRs never starts one. Null where the deck would refuse it.
  */
-export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing">): "ask" | "fix" | null {
-  if (!onYourTurn(line) || line.effortPile || !line.threads.length) return null;
+export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing" | "sent">): "ask" | "fix" | null {
+  if (!onYourTurn(line) || line.addressing || line.effortPile || !line.threads.length) return null;
   if (line.primary === "confirm-handled") return "ask";
   return line.primary === "thread" ? "fix" : null;
 }
 
 /**
- * On Your turn: the server found feedback waiting on you, and neither a thread working on it now, nor the batch thread addressing it, which
- * the deck files In flight, nor a held effort, which asks nothing until you resume it, has it instead.
+ * On Your turn: the server found feedback waiting on you, and neither a thread working on it now nor a held effort, which asks nothing
+ * until you resume it, has it instead. A PR an Address batch sent stays, with its state, until GitHub shows its feedback cleared.
  */
-export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing">): boolean => line.yourTurn !== null &&
-  line.effortPile !== "held" && !line.addressing && !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active));
+export const onYourTurn = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "sent">): boolean => line.yourTurn !== null &&
+  line.effortPile !== "held" && (line.sent !== null || !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active)));
+/** Sent states a batch or its thread still owns: Address takes the PR again only once they end. */
+const OWNED = new Set<Sent["state"]>(["sending", "working", "needs-you"]);
+/** A Your turn row Address can take now: nothing it sent is still under way. */
+export const sendable = (line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "sent">): boolean =>
+  onYourTurn(line) && !(line.sent && OWNED.has(line.sent.state));
 
 /**
  * The selection after a click on one of `order`'s rows: Shift adds every row from the last one you clicked through this one, in the order

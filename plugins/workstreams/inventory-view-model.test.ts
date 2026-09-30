@@ -7,7 +7,8 @@ import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW
 import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
-import { actionCall, askKind, onYourTurn, pickRows, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+import type { Sent } from "./your-turn.js";
+import { actionCall, askKind, onYourTurn, pickRows, sendable, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
   type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
@@ -149,7 +150,7 @@ describe("the PR inventory screen view model", () => {
   it("imports only types and the roster's time words, so it can't compute attention or reach a server module", () => {
     const source = readFileSync(new URL("./inventory-view-model.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import (type )?.* from "(.+)";$/gmu)].map((match) => [match[2], match[1] === "type " ? "type" : "value"]);
-    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./roster-view-model", "value"]]);
+    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "type"], ["./roster-view-model", "value"]]);
     // The server publishes this channel (inventory-get-server.test.ts pins its side), and the picker checks logins as gh would.
     expect(INVENTORY_CHANGED).toBe("inventory-changed");
     expect(LOGIN.source).toBe(REVIEWER.source);
@@ -454,10 +455,17 @@ describe("the PR inventory screen view model", () => {
   });
 
   // A batch thread holding the PR is working on its feedback: the row isn't your turn, and offers no ask of its own.
-  it("takes a row a batch thread holds off Your turn, and offers no ask on it", () => {
-    const held = find("quill #211", withRow("quill #211", { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } }));
-    expect([held.addressing, onYourTurn(held), askKind(held)]).toEqual([{ threadId: "thr-batch" }, false, null]);
-    expect(onYourTurn(find("quill #211"))).toBe(true);
+  // Sent PRs are tracked in one place: each stays on Your turn with its state until GitHub shows the feedback cleared, and Address takes
+  // one again only once nothing it sent is under way, which the server's claim enforces too.
+  it("keeps a PR a batch sent on Your turn with its state until its feedback clears, and Address takes it again only once its thread ends", () => {
+    const sent = (state: Sent["state"], patch: Partial<InventoryRow> = {}) => find("quill #211", withRow("quill #211", { sent: { state, threadId: "thr-batch",
+      title: "Address feedback on 2 PRs", detail: null, batchId: null }, ...patch }));
+    const held = sent("working", { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } });
+    expect([held.addressing, onYourTurn(held), sendable(held), askKind(held)]).toEqual([{ threadId: "thr-batch" }, true, false, null]);
+    for (const state of ["sending", "needs-you"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, false]);
+    for (const state of ["done", "blocked", "no-report", "refused"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, true]);
+    expect(onYourTurn(sent("no-report", { yourTurn: null }))).toBe(false);
+    expect([onYourTurn(find("quill #211")), sendable(find("quill #211"))]).toEqual([true, true]);
   });
 
   it("explains the two lists and why Nudge is conditional", () => {
@@ -469,7 +477,10 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Your turn")).toContain("Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
     expect(words.has("Back to me")).toBe(false);
     expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
-    expect(words.get("Address selected")).toContain("one batch thread, or each PR's own");
+    // Address has no listing and no choice of thread: one thread starts, with Undo, and each sent PR keeps its state on Your turn.
+    expect(words.get("Address selected")).toContain("One thread starts for all of them 8 s later unless you Undo");
+    expect(words.get("Address selected")).not.toMatch(/confirm|each PR's own/u);
+    expect(words.get("State")).toContain("It leaves once GitHub shows the feedback cleared");
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

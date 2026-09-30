@@ -78,3 +78,56 @@ export function turnSummary(turn: Pick<YourTurn, "text">, reviewed: readonly { l
   const approvers = reviewed.filter((review) => review.state.toUpperCase() === "APPROVED").map((review) => review.login);
   return turn.text.split(" · ").map((part) => approvers.length && (part === APPROVAL_NOTE || part === APPROVAL_COMMENTS) ? `Approval comment from ${mentions(approvers)}` : part).join(" · ");
 }
+
+/**
+ * Where the last Address batch sent a PR, and how that stands now: waiting out its Undo window, its thread working or waiting on you, what
+ * the thread reported once it ended (done, blocked, or no report at all), or why dispatch refused it. It keeps the thread's link however
+ * the thread ends, until a newer batch takes the PR, or feedback newer than the thread's end replaces what it answered.
+ */
+export const SENT_STATES = ["sending", "working", "needs-you", "done", "blocked", "no-report", "refused"] as const;
+export type SentState = (typeof SENT_STATES)[number];
+export const sentSchema = z.object({
+  state: z.enum(SENT_STATES), threadId: z.string().nullable(), title: z.string().nullable(),
+  /** The report in a word ("pushed", "replied"), a blocker's summary, or why dispatch refused it. */
+  detail: z.string().nullable(),
+  /** The batch still in its Undo window, which Undo takes back. */
+  batchId: z.string().nullable(),
+}).strict();
+export type Sent = z.infer<typeof sentSchema>;
+/** The PR's newest Address item: its state, the batch's, and when the batch was confirmed. */
+export type SentItem = { state: "queued" | "sending" | "sent" | "refused" | "unknown"; detail: string | null; batchId: string; confirmedAt: number };
+/** The PR's newest batch-thread claim in the board's run record. */
+export type SentRun = { threadId: string | null; status: "running" | "needs-you" | "done" | "failed" | "succeeded"; startedAt: number; finishedAt: number | null;
+  result: string | null; error: string | null };
+/** How a claim settles when the thread gave no report: none in its output, or it went before its output was read. */
+const NO_REPORT = /^No result line for this PR\.|report was never read/u;
+
+/** A PR's Sent from its newest Address item and newest claim; `since` is when the feedback now waiting on you arrived, if dated. */
+export function sentState(item: SentItem | null, run: SentRun | null, title: string | null, since: number | null): Sent | null {
+  const none = { threadId: null, title: null, detail: null, batchId: null };
+  if (item?.state === "queued" || item?.state === "sending") return { ...none, state: "sending", batchId: item.state === "queued" ? item.batchId : null };
+  // A claim started after the batch was confirmed is this batch's; without one, dispatch refused it or was cut off before claiming.
+  const claimed = run !== null && (!item || run.startedAt >= item.confirmedAt);
+  if (item && !claimed && (item.state === "refused" || item.state === "unknown")) return { ...none, state: "refused", detail: item.detail };
+  if (!run) return null;
+  const thread = { threadId: run.threadId, title, batchId: null };
+  if (run.status === "running" || run.status === "needs-you") return { ...thread, state: run.status === "running" ? "working" : "needs-you", detail: null };
+  if (since !== null && run.finishedAt !== null && since > run.finishedAt) return null;
+  const text = run.result ?? run.error ?? "";
+  if (run.status === "done") return { ...thread, state: "done", detail: /no-change/u.test(text) ? "replied" : "pushed" };
+  if (NO_REPORT.test(text)) return { ...thread, state: "no-report", detail: null };
+  return { ...thread, state: "blocked", detail: text.replace(/^Blocked: /u, "").replace(/^Reported (\S+) at \S+$/u, "reported $1") || null };
+}
+
+/** A Sent's chip: its words, and how it reads. Sending's Undo is the row's own button. */
+export function sentChip(sent: Sent): { text: string; tone: "blue" | "amber" | "green" | "red" | "gray" } {
+  switch (sent.state) {
+    case "sending": return { text: "Sending", tone: "gray" };
+    case "working": return { text: sent.threadId ? "Working" : "Starting", tone: "blue" };
+    case "needs-you": return { text: "Needs you", tone: "amber" };
+    case "done": return { text: `Done · ${sent.detail ?? "pushed"}`, tone: "green" };
+    case "blocked": return { text: `Blocked: ${sent.detail ?? "see its thread"}`, tone: "red" };
+    case "no-report": return { text: "Ended without a report", tone: "red" };
+    case "refused": return { text: `Not sent: ${sent.detail ?? "refused"}`, tone: "red" };
+  }
+}

@@ -19,10 +19,10 @@
 export const KEY_GROUPS = ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"] as const;
 export type KeyGroup = (typeof KEY_GROUPS)[number];
 /**
- * What pressing the key does: move around, change only what the view shows, open a dialog, open a listing confirm for a batch write, or
- * open the fresh merge preview.
+ * What pressing the key does: move around, change only what the view shows, open a dialog, open a listing confirm for a batch write,
+ * start a batch at once into its Undo window (Address selected's one thread), or open the fresh merge preview.
  */
-export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
+export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "start" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
   | "held" | "tiles" | "notes" | "only-needs" | "only-blocked" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "fix" | "address" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
@@ -53,7 +53,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "ready", group: "Act", title: "Mark ready…", keys: ["y"], effect: "confirm" },
   { id: "release", group: "Act", title: "Release the hold…", keys: ["l"], effect: "confirm" },
   { id: "fix", group: "Act", title: "Ask threads to fix…", keys: ["f"], effect: "confirm" },
-  { id: "address", group: "Act", title: "Address selected…", keys: ["b"], effect: "confirm" },
+  { id: "address", group: "Act", title: "Address selected", keys: ["b"], effect: "start" },
   { id: "undo", group: "Act", title: "Undo the last action", keys: ["z"], effect: "local" },
   { id: "hold-pr", group: "Act", title: "Hold or release the PR…", keys: [], effect: "dialog" },
   { id: "refresh", group: "Act", title: "Refresh the PR from GitHub", keys: [], effect: "local" },
@@ -96,10 +96,14 @@ export function actionForKey(event: { key: string; shiftKey?: boolean; metaKey?:
   return action && (!event.repeat || REPEATS.has(action.id)) ? { id: action.id } : null;
 }
 
-/** Typing in a field is never an action, except Escape, which leaves it, and ⌘K. */
+/**
+ * Typing in a field is never an action, except Escape, which leaves it, and ⌘K. A checkbox or radio takes no text: a click focuses a row's
+ * selection box, and b, x, and esc still act from it.
+ */
 export function typingTarget(target: unknown): boolean {
   const element = target as { isContentEditable?: boolean; closest?: (selector: string) => unknown } | null;
-  return !!element && (element.isContentEditable === true || !!element.closest?.("input, textarea, select, [contenteditable]"));
+  return !!element && (element.isContentEditable === true
+    || !!element.closest?.("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable]"));
 }
 
 /**

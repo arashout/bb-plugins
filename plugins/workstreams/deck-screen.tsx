@@ -7,7 +7,7 @@
 // render it. Color appears only where the move is yours, and muted.
 import { Fragment, type ReactNode, type RefObject } from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
-import type { AddressMode, BatchItem, Skipped } from "./deck-batch";
+import type { BatchItem, Skipped } from "./deck-batch";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
 import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, OverviewScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
@@ -38,7 +38,7 @@ export type Run = (command: DeckCommand) => void;
 
 /** The 2px accent ring every control shows on keyboard focus. */
 export const RING = "outline-none focus-visible:ring-2 focus-visible:ring-sky-500";
-const TONE: Record<Tone, { text: string; chip: string; edge: string; button: string; bar: string }> = {
+export const TONE: Record<Tone, { text: string; chip: string; edge: string; button: string; bar: string }> = {
   green: { text: "text-emerald-700 dark:text-emerald-300", chip: "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200", edge: "bg-emerald-500/70",
     button: "border-emerald-500/35 bg-emerald-500/[0.07] text-emerald-800 hover:bg-emerald-500/[0.14] dark:text-emerald-200", bar: "bg-emerald-500/55" },
   violet: { text: "text-violet-700 dark:text-violet-300", chip: "bg-violet-500/10 text-violet-800 dark:text-violet-200", edge: "bg-violet-500/70",
@@ -713,8 +713,10 @@ export function viewPaletteItems(view: HeaderProps["view"]): PaletteItem[] {
  * The selection's moves, docked under the rows so it never covers one; on a service card, the moves into efforts too, and on an effort's
  * card (`leaves`), the move to One-offs. `address` counts the selected Your turn rows, which Address selected takes.
  */
-export function BatchBar({ selected, kinds, sorting, leaves, address = 0, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; sorting: boolean;
-  leaves?: boolean; address?: number; run: Run }) {
+export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusal, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[];
+  sorting: boolean; leaves?: boolean; address?: number;
+  /** Why the last Address started nothing. */
+  refusal?: string | null; run: Run }) {
   if (!selected) return null;
   // Advance runs the safe writes only: never a merge, and never a thread's work.
   const safe = kinds.filter((kind) => kind.id !== "merge" && kind.id !== "fix").reduce((sum, kind) => sum + kind.count, 0);
@@ -723,8 +725,9 @@ export function BatchBar({ selected, kinds, sorting, leaves, address = 0, run }:
       <b className="mr-1 font-semibold">{selected} selected</b>
       {safe ? <button type="button" onClick={() => run({ kind: "action", id: "advance" })} className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background")}>
         Advance · {safe}<Kbd inverted>a</Kbd></button> : null}
-      {address ? <button type="button" data-deck-address onClick={() => run({ kind: "action", id: "address" })} title="Lists each PR first, then sends after 8 s with Undo. Nothing merges."
+      {address ? <button type="button" data-deck-address onClick={() => run({ kind: "action", id: "address" })} title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
         className={cn(BUTTON, TONE.amber.button)}>Address selected ({address})<Kbd>{ACTION.address.keys[0]}</Kbd></button> : null}
+      {refusal ? <span role="alert" data-deck-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
       {kinds.map((kind) => <button key={kind.id} type="button" onClick={() => run({ kind: "action", id: kind.id })} className={cn(BUTTON, TONE[kind.tone].button)}>
         {ACTION[kind.id].title.replace("…", "")} {kind.count}<Kbd>{ACTION[kind.id].keys[0]}</Kbd></button>)}
       {sorting ? <>
@@ -764,11 +767,7 @@ export type ConfirmPlan = { title: string; sub: string; verb: string;
   items: readonly (Pick<BatchItem, "prUrl" | "ref" | "title" | "kind" | "what" | "notes"> & Partial<Pick<BatchItem, "feedback" | "where">>)[];
   skipped: readonly Pick<Skipped, "prUrl" | "ref" | "reason">[]; excluded: string | null; request: boolean;
   /** What happens after the window, as its footer says it: "Sends", or "Releases" for a release. */
-  when?: string;
-  /** Address: where its PRs go, one batch thread or each PR's own, which you can switch before confirming. */
-  mode?: AddressMode };
-/** Address's two choices, as its listing names them. */
-const MODE_WORDS: Record<AddressMode, string> = { batch: "One batch thread", each: "Each PR in its own thread" };
+  when?: string };
 const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "blue", request: "blue", ready: "blue", release: "gray", ask: "violet", fix: "amber",
   address: "amber" };
 
@@ -776,18 +775,11 @@ const KIND_TONE: Record<BatchItem["kind"], Tone> = { confirm: "violet", nudge: "
  * The listing confirm: nothing is written until you press its button (or ⌘↵), and then only after SEND_DELAY_MS, which Undo cancels.
  * A request can ask someone else instead of each PR's suggestion; that plans again.
  */
-export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, onReplan, onConfirm, onCancel, onMode }: { plan: ConfirmPlan; busy: boolean; error: string | null;
+export function ConfirmBody({ plan, busy, error, reviewer, dirty, onReviewer, onReplan, onConfirm, onCancel }: { plan: ConfirmPlan; busy: boolean; error: string | null;
   /** The reviewer you typed differs from the one this listing asks: nothing sends until it plans again. */
-  reviewer: string; dirty: boolean; onReviewer(value: string): void; onReplan(): void; onConfirm(): void; onCancel(): void;
-  /** Address: list it again for the other choice. */
-  onMode?(mode: AddressMode): void }) {
+  reviewer: string; dirty: boolean; onReviewer(value: string): void; onReplan(): void; onConfirm(): void; onCancel(): void }) {
   const seconds = Math.round(SEND_DELAY_MS / 1_000);
   return <div className="grid gap-3 text-[12.5px]">
-    {plan.mode ? <div role="radiogroup" aria-label="Where it runs" className="flex flex-wrap gap-1.5">
-      {(["batch", "each"] as const).map((mode) => <button key={mode} type="button" role="radio" aria-checked={plan.mode === mode} data-deck-mode={mode} disabled={busy}
-        onClick={() => onMode?.(mode)} className={cn(BUTTON, "h-7", plan.mode === mode ? "border-foreground font-medium" : "border-border text-muted-foreground hover:bg-foreground/[0.06]")}>
-        {MODE_WORDS[mode]}</button>)}
-    </div> : null}
     <ul data-deck-plan className="grid max-h-[50vh] gap-2 overflow-y-auto">
       {plan.items.map((item) => <li key={`${item.kind}-${item.prUrl}`} className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2.5">
         <span className={cn("mt-px rounded px-1.5 text-[11px] leading-[18px]", TONE[KIND_TONE[item.kind]].chip)}>{item.what}</span>
@@ -1105,7 +1097,7 @@ export type DeckPaneProps = {
   /** The card a flip landed on, said once to screen readers; empty otherwise. */
   announce?: string;
   on: Availability; hints: readonly [string, string][]; flash: { text: string; undo: boolean } | null;
-  batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; address?: number };
+  batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; address?: number; refusal?: string | null };
   run: Run; onPalette(): void; onHelp(): void; onUndo(): void;
   rootRef?: RefObject<HTMLDivElement | null>; scrollerRef?: RefObject<HTMLDivElement | null>; slackRef?: RefObject<HTMLDivElement | null>;
   chipsRef?: RefObject<HTMLDivElement | null>; viewRef?: RefObject<HTMLDivElement | null>;
@@ -1139,7 +1131,7 @@ export function DeckPane(props: DeckPaneProps) {
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>
-    <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} address={props.batch.address} sorting={card?.card.kind === "service"}
+    <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} address={props.batch.address} refusal={props.batch.refusal} sorting={card?.card.kind === "service"}
       leaves={card?.card.kind === "effort" && !card.card.oneOff} run={props.run} />
     <HintBar hints={props.hints} flash={props.flash} onPalette={props.onPalette} onHelp={props.onHelp} onUndo={props.onUndo} />
     <p role="status" data-deck-announce className="sr-only">{props.announce}</p>

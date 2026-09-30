@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { turnSummary, yourTurn } from "./your-turn.js";
+import { sentChip, sentState, turnSummary, yourTurn, type Sent, type SentItem, type SentRun } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -121,5 +121,43 @@ describe("Your turn", () => {
     // The re-request's part holds a " · " of its own, which must not shift the approval's part out of place.
     const asked = { text: "Answered @otto-v · re-request review · Approval comment to address · 2 open threads" };
     expect(turnSummary(asked, approval.latestReviews)).toBe("Answered @otto-v · re-request review · Approval comment from @mira-l · 2 open threads");
+  });
+});
+
+// A sent PR's one chip reads its batch item while the batch waits or was refused, else its newest claim: the thread working, waiting on
+// you, or how it ended. The thread's link outlives the thread however it ends, until a newer batch or newer feedback replaces it.
+describe("a sent PR's state", () => {
+  const T = 1_000_000;
+  const item = (state: SentItem["state"], detail: string | null = null): SentItem => ({ state, detail, batchId: "b-2", confirmedAt: T });
+  const run = (status: SentRun["status"], text: string | null = null, startedAt = T + 8_000): SentRun => ({ threadId: "thr-1", status, startedAt,
+    finishedAt: status === "running" || status === "needs-you" ? null : startedAt + 60_000, result: status === "done" ? text : null, error: status === "failed" ? text : null });
+  const chip = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentChip(sent).text];
+
+  it("follows the thread through its run, and keeps its link after it ends with a report, a blocker, or none", () => {
+    expect(chip(sentState(item("queued"), null, null, null))).toEqual(["sending", null, "Sending"]);
+    expect(sentState(item("queued"), null, null, null)?.batchId).toBe("b-2");
+    expect(chip(sentState(item("sent"), run("running"), "Address feedback on 2 PRs", null))).toEqual(["working", "thr-1", "Working"]);
+    expect(chip(sentState(item("sent"), run("needs-you"), null, null))).toEqual(["needs-you", "thr-1", "Needs you"]);
+    expect(chip(sentState(item("sent"), run("done", "Reported changed at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · pushed"]);
+    expect(chip(sentState(item("sent"), run("done", "Reported no-change at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · replied"]);
+    expect(chip(sentState(item("sent"), run("failed", "Blocked: mira-l asks for a new order"), null, null))).toEqual(["blocked", "thr-1", "Blocked: mira-l asks for a new order"]);
+    // Stopped or failed with nothing in its output, or archived or deleted before its output was read: no report, and the link stays.
+    for (const text of ["No result line for this PR.", "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read."]) {
+      expect(chip(sentState(item("sent"), run("failed", text), null, null))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+    }
+    // Past the day a batch item is kept, the claim alone still speaks.
+    expect(chip(sentState(null, run("failed", "No result line for this PR."), null, null))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+  });
+
+  it("says why dispatch refused it, lets a newer batch replace an old thread's link, and drops the link for feedback newer than the thread", () => {
+    const old = run("failed", "No result line for this PR.", T - 3_600_000);
+    // A newer batch refused at dispatch never claimed the PR: its reason replaces the old thread's link.
+    expect(chip(sentState(item("refused", "On hold. Release it first."), old, null, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
+    // A newer batch waiting out its window, then its own claim, replace it too.
+    expect(chip(sentState(item("queued"), old, null, null))).toEqual(["sending", null, "Sending"]);
+    expect(chip(sentState(item("unknown", "The plugin restarted"), { ...run("running"), threadId: "thr-2" }, null, null))).toEqual(["working", "thr-2", "Working"]);
+    // Feedback that arrived after the thread ended isn't what it answered; feedback from before keeps the link.
+    expect(sentState(null, old, null, old.finishedAt! + 1)).toBeNull();
+    expect(chip(sentState(null, old, null, old.startedAt - 1))).toEqual(["no-report", "thr-1", "Ended without a report"]);
   });
 });
