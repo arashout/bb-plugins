@@ -21,6 +21,7 @@ import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
+import { yourTurnSchema } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
 const WEEK_MS = 7 * 86_400_000;
@@ -46,6 +47,8 @@ export const deckRowSchema = z.object({
   suggested: z.array(z.string()), nudge: z.array(z.string()),
   /** Approval comments waiting for your confirmation. */
   notes: z.number(),
+  /** Reviewer feedback that waits on your move, as All PRs' Your turn lists it. */
+  yourTurn: yourTurnSchema.nullable(),
   tickets: z.array(z.string()),
   stackedOn: z.number().nullable(),
   thread: z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict().nullable(),
@@ -219,7 +222,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     prUrl: row.prUrl, repo: row.repo, number: row.number, title: row.title, draft: row.draft, section, status: line.status,
     step: first ? { text: first.text, owner: first.owner.label, since: row.attention.length ? row.attention[0]!.since : null } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
-    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, tickets: [...row.tickets], stackedOn: row.stackedOn,
+    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
     managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };

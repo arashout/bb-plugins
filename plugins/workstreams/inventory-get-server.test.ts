@@ -8,6 +8,7 @@ import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
+import type { DeckView } from "./deck.js";
 import { createPrHoldStore } from "./pr-hold-store.js";
 import plugin from "./server.js";
 
@@ -18,13 +19,15 @@ const pr = (number: number, title: string, extra: Record<string, unknown> = {}):
   headRefOid: "a".repeat(40), latestReviews: [], reviewRequests: [], statusCheckRollup: [{ conclusion: "SUCCESS" }], createdAt: "2026-09-21T15:00:00Z", ...extra }]))!.pr;
 const unit = (path: string, value: Pr | null): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: "folio", githubRepo: "inkwell/folio", branch: value?.headRefName ?? "main",
   dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: value, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
+const CHANGES = { reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ author: { login: "otto-v" }, state: "CHANGES_REQUESTED", submittedAt: "2026-09-22T15:00:00Z" }] };
 const BATCH = "00000000-0000-4000-8000-000000000081", JOB = "00000000-0000-4000-8000-000000000082", MERGED_JOB = "00000000-0000-4000-8000-000000000084";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
 /**
- * You author #313 (a green draft), #314 (ABC-341, no reviewer yet, with a legacy Advance worker), and #315 (held). A teammate's #400 is
- * checked out; #401 was never read; #402 belongs to an archived effort; #403 merged; a legacy Advance job saw #404 merge, and nothing else read it.
+ * You author #313 (a green draft), #314 (ABC-341, no reviewer yet, with a legacy Advance worker), #315 (held, with changes requested), and
+ * #316 (changes requested). A teammate's #400 is checked out; #401 was never read; #402 belongs to an archived effort; #403 merged; a legacy
+ * Advance job saw #404 merge, and nothing else read it.
  */
 async function setup() {
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
@@ -41,7 +44,8 @@ async function setup() {
     if (method === "scan" || method === "inspectPaths") return { units: [unit("/p/folio", null), unit("/p/folio-400", pr(400, "Shelve box sets together")),
       unit("/p/folio-403", pr(403, "Shelve atlases flat", { state: "MERGED" }))], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [
-      pr(313, "Keep shelf order on reload", { isDraft: true }), pr(314, "ABC-341 Group shelves by genre"), pr(315, "Sort shelves by author"),
+      pr(313, "Keep shelf order on reload", { isDraft: true }), pr(314, "ABC-341 Group shelves by genre"), pr(315, "Sort shelves by author", CHANGES),
+      pr(316, "Shelve series in order", CHANGES),
     ].map((entry) => ({ repo: "inkwell/folio", pr: entry })), discoveryComplete: true, repositories: [{ repo: "inkwell/folio", complete: true }], complete: true, warnings: [] };
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host method ${method}`);
@@ -80,7 +84,7 @@ describe("the PR inventory read model", () => {
     const view = await env.get();
     expect(view.groups.map((group) => [group.effort?.name ?? null, group.rows.map((row) => row.number)])).toEqual([
       // #402's effort is archived, and #403 and #404 merged, so none is open work here.
-      ["Shelf order", [314, 400, 401]], [null, [313, 315]]]);
+      ["Shelf order", [314, 400, 401]], [null, [313, 315, 316]]]);
     const rows = new Map(view.groups.flatMap((group) => group.rows).map((row) => [row.number, row]));
     expect(rows.get(313)).toMatchObject({ authored: true, draft: true, status: "Draft", attention: [{ question: "forgotten-draft", action: "mark-ready", owner: "you" }],
       checkedAt: expect.any(String), failure: null });
@@ -93,6 +97,21 @@ describe("the PR inventory read model", () => {
     expect(rows.get(401)).toMatchObject({ authored: false, title: "", status: "Not read yet", checkedAt: null });
     expect(view.counts).toEqual({ "forgotten-draft": 1, "missing-reviewer": 1, "needs-nudge": 0 });
     expect(view).toMatchObject({ checkedAt: expect.any(String), refreshing: false, rateLimitedUntil: null });
+  });
+
+  // Your turn is the server's word in both read models, so the badge, All PRs, and the deck agree; a held PR waits in Held on its card.
+  it("marks Your turn in inventory_get and deck_get, never on a held PR, and signals when a release makes it yours again", async () => {
+    const env = await setup();
+    const turns = async () => (await env.get()).groups.flatMap((group) => group.rows).filter((row) => row.yourTurn).map((row) => [row.number, row.yourTurn!.text]);
+    expect(await turns()).toEqual([[316, "Changes requested by @otto-v"]]);
+    const deck = await env.harness.callRpc("deck_get", {}) as DeckView;
+    const rows = [...deck.active, ...deck.held].flatMap((card) => card.sections.flatMap((section) => section.rows));
+    expect(rows.find((row) => row.number === 316)?.yourTurn?.kinds).toEqual(["changes"]);
+    expect(rows.find((row) => row.number === 315)).toMatchObject({ section: "held", yourTurn: null });
+    const before = env.harness.inspection.realtimeSignals.length;
+    await env.harness.callRpc("pr_hold_set", { prUrl: url(315), held: false });
+    expect(env.harness.inspection.realtimeSignals.slice(before).map((signal) => signal.channel)).toContain("inventory-changed");
+    expect(await turns()).toEqual([[315, "Changes requested by @otto-v"], [316, "Changes requested by @otto-v"]]);
   });
 
   it("settles an effort's PR the board holds no facts for as its roster does, so the two agree on whether it is open", async () => {

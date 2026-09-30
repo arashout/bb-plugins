@@ -7,6 +7,7 @@ import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceS
 import { approvalFeedbackSchema } from "./approval-feedback.js";
 import { approvalHandlingSchema } from "./approval-evidence.js";
 import { prAttentionSchema } from "./pr-attention.js";
+import { reviewFeedbackSchema } from "./your-turn.js";
 
 /**
  * GitHub's authoritative "can this merge right now" signal
@@ -103,6 +104,8 @@ export const prSchema = z
     unresolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
     /** Complete-page count of resolved review threads; null when unread or incomplete. */
     resolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
+    /** Feedback only the PR's own review read proves, which Your turn reads (your-turn.ts); absent until that read. */
+    reviewFeedback: reviewFeedbackSchema.optional(),
     /**
      * Ticket IDs the PR description states, extracted on the host from its
      * first 8 KB. The description itself is client content and is never kept,

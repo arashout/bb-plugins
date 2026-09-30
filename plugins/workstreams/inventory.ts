@@ -55,15 +55,23 @@ async function bounded<T>(items: readonly T[], worker: (item: T) => Promise<void
 
 /** A PR whose review threads are read: one a reviewer approved or asked to change, and not a draft. */
 const readsReviewThreads = (pr: Pr) => !pr.isDraft && (pr.reviewDecision === "APPROVED" || pr.reviewDecision === "CHANGES_REQUESTED");
+/**
+ * A PR whose review read says what feedback waits on you (your-turn.ts): those, and any other a reviewer has reviewed. Only those keep its
+ * thread counts and approval evidence, so a PR with only comments keeps its state word.
+ */
+const readsReviewFeedback = (pr: Pr) => readsReviewThreads(pr) || (!pr.isDraft && pr.latestReviews.some((review) => review.state !== "PENDING"));
 
 async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message: string) => void): Promise<void> {
   const { repo, pr } = entry;
-  if (!readsReviewThreads(pr)) return;
-  const threads = await readReviewThreads(run, prTarget(pr.url)!, pr.reviewDecision === "CHANGES_REQUESTED" || pr.approvalHasBody === true);
+  if (!readsReviewFeedback(pr)) return;
+  // Always with the follow-up read: your replies and reviewers' comments in the conversation date the feedback.
+  const threads = await readReviewThreads(run, prTarget(pr.url)!, true);
   if (!threads.ok) {
     warn(`${repo} #${pr.number}: review threads could not be checked: ${threads.error}`);
     return;
   }
+  if (threads.reviewFeedback) pr.reviewFeedback = threads.reviewFeedback;
+  if (!readsReviewThreads(pr)) return;
   pr.unresolvedReviewThreads = threads.count;
   pr.resolvedReviewThreads = threads.resolvedCount;
   pr.approvalFeedback = threads.approvalFeedback;
@@ -250,14 +258,18 @@ export async function readOpenAuthoredPrs(run: GhRunner, scopeOwners: readonly s
 
 /**
  * A polled PR with the review evidence only its own read proves, carried from the stored read while nothing on the PR moved since: its
- * head, review decision, latest reviews, and GitHub's update time. Null when the PR needs that read again. A PR whose threads aren't read
- * needs nothing.
+ * head, review decision, latest reviews, and GitHub's update time. Null when the PR needs that read again. A PR whose reviews aren't read
+ * needs nothing. Open threads never outnumber the ones this poll counted.
  */
 export function carryReviewFacts(pr: Pr, stored: Pr | undefined): Pr | null {
-  if (!readsReviewThreads(pr)) return pr;
-  if (stored?.approvalFeedback === undefined || stored.headRefOid !== pr.headRefOid || stored.reviewDecision !== pr.reviewDecision ||
+  if (!readsReviewFeedback(pr)) return pr;
+  const threads = readsReviewThreads(pr);
+  if (stored === undefined || (threads && stored.approvalFeedback === undefined) || stored.reviewFeedback === undefined ||
+      stored.headRefOid !== pr.headRefOid || stored.reviewDecision !== pr.reviewDecision ||
       stored.updatedAt !== pr.updatedAt || JSON.stringify(stored.latestReviews) !== JSON.stringify(pr.latestReviews)) return null;
-  return { ...pr, approvalFeedback: stored.approvalFeedback, ...(stored.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: stored.reviewFollowupPosted }) };
+  const feedback = { ...stored.reviewFeedback, openThreads: Math.min(stored.reviewFeedback.openThreads, pr.unresolvedReviewThreads ?? Number.POSITIVE_INFINITY) };
+  return { ...pr, reviewFeedback: feedback, ...threads ? { approvalFeedback: stored.approvalFeedback,
+    ...(stored.reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted: stored.reviewFollowupPosted }) } : {} };
 }
 
 /** Empty or invalid scope never expands discovery to unrelated organizations. */

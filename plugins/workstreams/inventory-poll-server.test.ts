@@ -158,14 +158,15 @@ describe("the inventory poll", () => {
     const approved = (extra: Record<string, unknown> = {}): Pr => ({ ...pr(43, { reviewDecision: "APPROVED",
       latestReviews: [{ author: { login: "mira" }, state: "APPROVED", submittedAt: "2026-09-24T09:00:00Z" }], ...extra }), unresolvedReviewThreads: 0, resolvedReviewThreads: 1 });
     const evidence = { status: "none" as const, fingerprint: null, sourceIds: [] };
-    env.state.inspection = (urls) => ({ entries: urls.map((prUrl) => ({ repo: "inkwell/folio", pr: { ...approved(), url: prUrl, approvalFeedback: evidence } })),
+    const reviewFeedback = { openThreads: 0, comment: { login: "mira", at: "2026-09-24T09:00:00Z" }, repliedAt: null };
+    env.state.inspection = (urls) => ({ entries: urls.map((prUrl) => ({ repo: "inkwell/folio", pr: { ...approved(), url: prUrl, approvalFeedback: evidence, reviewFeedback } })),
       closed: [], failed: [], warnings: [] });
     env.state.polled = listing([pr(42), approved()]);
     expect(await env.poll()).toEqual(["pollAuthoredPrs", "inspectPrs"]);
-    expect((await env.board()).prInventory.entries[1]?.pr).toMatchObject({ approvalFeedback: evidence, approvalFeedbackVerified: true });
-    // Nothing moved: no read, and the evidence stays.
+    expect((await env.board()).prInventory.entries[1]?.pr).toMatchObject({ approvalFeedback: evidence, approvalFeedbackVerified: true, reviewFeedback });
+    // Nothing moved: no read, and the evidence stays, Your turn's with it.
     expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
-    expect((await env.board()).prInventory.entries[1]?.pr).toMatchObject({ approvalFeedback: evidence, approvalFeedbackVerified: true });
+    expect((await env.board()).prInventory.entries[1]?.pr).toMatchObject({ approvalFeedback: evidence, approvalFeedbackVerified: true, reviewFeedback });
     // A new comment moved GitHub's update time: the evidence may no longer hold, so it is read again.
     env.state.polled = listing([pr(42), approved({ updatedAt: "2026-09-26T09:00:00Z" })]);
     expect(await env.poll()).toEqual(["pollAuthoredPrs", "inspectPrs"]);

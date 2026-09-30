@@ -14,6 +14,7 @@ import {
   readRateLimitReset,
   readReviewThreads,
   readyArgv,
+  reviewFeedbackOf,
   rerequestArgv,
   rerunFailedArgv,
   runMerge,
@@ -254,6 +255,39 @@ describe("readReviewThreads", () => {
     expect((await readReviewThreads(partial.run, TARGET)).ok).toBe(false);
     const malformed = fakeGh(() => ({ ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{}] } } } } }) }));
     expect((await readReviewThreads(malformed.run, TARGET)).ok).toBe(false);
+  });
+});
+
+// Your turn reads who said what last from the review read it already makes: a reviewer's newest word against yours, and threads others opened.
+describe("review feedback for Your turn", () => {
+  const review = (login: string, state: string, hour: number) => ({ state, submittedAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`, author: { login } });
+  const said = (login: string, hour: number) => ({ createdAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`, author: { login } });
+  const thread = (isResolved: boolean, ...comments: unknown[]) => ({ isResolved, comments: { nodes: comments } });
+  const read = (reviews: unknown[], threads: unknown[] = [], comments: unknown[] = []) =>
+    reviewFeedbackOf({ author: { login: "ana-w" }, reviews: { nodes: reviews }, comments: { nodes: comments } }, threads);
+
+  it("dates a reviewer's newest review, thread comment, or conversation comment, and your newest reply", () => {
+    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("otto-v", 10), said("ana-w", 11))], [said("otto-v", 12)]))
+      .toEqual({ openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T12:00:00Z" }, repliedAt: "2026-09-29T11:00:00Z" });
+  });
+
+  it("counts only open threads someone else started", () => {
+    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("ana-w", 8)), thread(true, said("otto-v", 9)), thread(false, said("otto-v", 9))])?.openThreads)
+      .toBe(1);
+  });
+
+  // An approver's notes are the approval's feedback, which Confirm handled covers; a conversation comment from someone who never reviewed
+  // is a bot's or a bystander's, not a reviewer's.
+  it("leaves out an approver's comments and conversation comments from anyone who never reviewed", () => {
+    expect(read([review("mira-l", "COMMENTED", 9), review("mira-l", "APPROVED", 10)], [thread(false, said("mira-l", 11))], [said("ci-bot", 12)]))
+      .toEqual({ openThreads: 1, comment: null, repliedAt: null });
+    // A reviewer who approved and then asked for changes is no longer an approver.
+    expect(read([review("mira-l", "APPROVED", 9), review("mira-l", "CHANGES_REQUESTED", 10)])?.comment).toEqual({ login: "mira-l", at: "2026-09-29T10:00:00Z" });
+  });
+
+  it("says nothing without the PR's author or its reviews", () => {
+    expect(reviewFeedbackOf({ reviews: { nodes: [] } }, [])).toBeUndefined();
+    expect(reviewFeedbackOf({ author: { login: "ana-w" } }, [])).toBeUndefined();
   });
 });
 

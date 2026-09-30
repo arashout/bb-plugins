@@ -99,6 +99,25 @@ describe("authored PR inventory", () => {
     expect(reads.every((args) => args.includes("includeFollowup=true"))).toBe(true);
   });
 
+  // Your turn needs a commented PR's feedback too, but its state word stays what the approve-or-change-request read says it is.
+  it("reads a PR with only comments for Your turn, keeping its thread counts unread", async () => {
+    const reviews = [{ author: { login: "otto-v" }, state: "COMMENTED", submittedAt: "2026-09-29T10:00:00Z" }];
+    const gh = fake((args) => args[0] === "search" ? ok([{ url: url(1) }]) : args[0] === "pr" ? ok([
+      pr(1, { reviewDecision: "REVIEW_REQUIRED", latestReviews: reviews }), pr(2, { reviewDecision: "REVIEW_REQUIRED" }),
+    ]) : ok({ data: { repository: { pullRequest: { author: { login: "ana-w" }, reviews: { pageInfo: { hasPreviousPage: false }, nodes: reviews },
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ isResolved: false, comments: { nodes: [{ author: { login: "otto-v" }, createdAt: "2026-09-29T10:00:00Z" }] } }] },
+      comments: { nodes: [] } } } } }));
+    const result = await readAuthoredPrs(gh.run, ["inkwell"]);
+    const reads = threadReads(gh.calls);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain("includeFollowup=true");
+    expect(result.entries[0]?.pr).toMatchObject({ unresolvedReviewThreads: null,
+      reviewFeedback: { openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T10:00:00Z" }, repliedAt: null } });
+    expect(result.entries[0]?.pr.approvalFeedback).toBeUndefined();
+    // No one reviewed #2: nothing to read.
+    expect(result.entries[1]?.pr.reviewFeedback).toBeUndefined();
+  });
+
   it("rejects malformed and out-of-scope discovery data without using it as a gh target", async () => {
     const gh = fake(() => ok([{ url: "https://github.com/another/folio/pull/1" }, { url: "--admin" }, null]));
     expect(await readAuthoredPrs(gh.run, ["inkwell"])).toMatchObject({ complete: false, discoveryComplete: false, entries: [] });
@@ -280,8 +299,9 @@ describe("the inventory poll's batched read", () => {
 describe("review evidence across polls", () => {
   const read: Pr = { ...parsePrList(JSON.stringify([pr(1, { headRefOid: "a".repeat(40), updatedAt: "2026-09-25T11:00:00Z",
     latestReviews: [{ author: { login: "otto" }, state: "APPROVED", submittedAt: "2026-09-23T09:00:00Z" }] })]))!.pr,
-    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFollowupPosted: false };
-  const { approvalFeedback: _feedback, reviewFollowupPosted: _followup, ...polled } = read;
+    approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFollowupPosted: false,
+    reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } };
+  const { approvalFeedback: _feedback, reviewFollowupPosted: _followup, reviewFeedback: _turn, ...polled } = read;
 
   it("carries a PR's approval evidence while nothing on it moved, and asks for its own read once anything did", () => {
     expect(carryReviewFacts(polled, read)).toEqual(read);
@@ -289,8 +309,26 @@ describe("review evidence across polls", () => {
       expect(carryReviewFacts({ ...polled, ...moved }, read)).toBeNull();
     }
     expect(carryReviewFacts(polled, undefined)).toBeNull();
+    // A read from before Your turn proves no feedback facts, so it is read again once.
+    expect(carryReviewFacts(polled, { ...read, reviewFeedback: undefined })).toBeNull();
     // A draft proves nothing by its threads, so it needs no read.
     expect(carryReviewFacts({ ...polled, isDraft: true }, undefined)).toEqual({ ...polled, isDraft: true });
+  });
+
+  // Threads this poll saw resolved are no longer open, even while GitHub's update time stands still.
+  it("never carries more open threads than the poll counted", () => {
+    expect(carryReviewFacts({ ...polled, unresolvedReviewThreads: 0 }, read)?.reviewFeedback).toEqual({ openThreads: 0, comment: null, repliedAt: null });
+  });
+
+  // A PR with only comments has its reviews read for Your turn, but keeps its thread counts and approval evidence as they were.
+  it("carries a commented PR's feedback facts, and nothing its state word reads", () => {
+    const commented: Pr = { ...polled, reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ login: "otto", state: "COMMENTED", submittedAt: "2026-09-23T09:00:00Z" }] };
+    const stored: Pr = { ...commented, reviewFeedback: { openThreads: 1, comment: { login: "otto", at: "2026-09-23T09:00:00Z" }, repliedAt: null } };
+    expect(carryReviewFacts(commented, undefined)).toBeNull();
+    expect(carryReviewFacts(commented, stored)).toEqual(stored);
+    expect(carryReviewFacts(commented, stored)).not.toHaveProperty("approvalFeedback");
+    // No one has reviewed it: nothing to read.
+    expect(carryReviewFacts({ ...commented, latestReviews: [] }, undefined)).toEqual({ ...commented, latestReviews: [] });
   });
 });
 

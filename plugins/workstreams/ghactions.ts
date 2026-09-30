@@ -9,6 +9,7 @@ import { SHA, type LiveMergeFacts, type MergeMethod } from "./actions.js";
 import { createHash } from "node:crypto";
 import { approvalFeedbackSchema, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { NOTE_MAX, type ApprovalHandling, type ApprovalSource } from "./approval-evidence.js";
+import type { ReviewFeedback } from "./your-turn.js";
 
 export type Run = { ok: true; stdout: string } | { ok: false; error: string };
 /** Runs `gh` with these arguments, optionally writing `stdin` to it. */
@@ -342,8 +343,61 @@ async function approvalFeedbackOf(run: GhRunner, target: PrTarget, pr: Record<st
     detail: { approvals, followups, linked, reviews: allReviews as Review[], author: typeof prAuthor === "string" ? prAuthor : null } };
 }
 
+const loginOf = (value: unknown): string | null => {
+  const login = value !== null && typeof value === "object" ? (value as { login?: unknown }).login : undefined;
+  return typeof login === "string" ? login : null;
+};
+const dateOf = (value: unknown): string | null => typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value.slice(0, 40) : null;
+const nodesOf = (value: unknown): unknown[] => {
+  const nodes = value !== null && typeof value === "object" ? (value as { nodes?: unknown }).nodes : undefined;
+  return Array.isArray(nodes) ? nodes : [];
+};
+
+/**
+ * What one review read shows of feedback waiting on the PR's author: unresolved threads someone else started, the newest review, thread
+ * comment, or conversation comment from a reviewer whose latest review isn't an approval, and the author's newest review or comment. An
+ * approver's notes are its approval feedback, which Confirm handled covers, so they never count as comments. A conversation comment counts
+ * only from someone who reviewed, which leaves out bots that only post. Undefined without the PR's author or its reviews: without them, it
+ * can't tell your reply from a reviewer's comment.
+ */
+export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comments?: unknown }, threads: readonly unknown[]): ReviewFeedback | undefined {
+  const me = loginOf(pr.author);
+  const reviews = pr.reviews !== null && typeof pr.reviews === "object" ? (pr.reviews as { nodes?: unknown }).nodes : undefined;
+  if (me === null || !Array.isArray(reviews)) return undefined;
+  const said: { who: string; at: string }[] = [];
+  const latest = new Map<string, { state: string; at: string }>();
+  for (const review of reviews) {
+    const node = review !== null && typeof review === "object" ? review as { state?: unknown; submittedAt?: unknown; author?: unknown } : {};
+    const who = loginOf(node.author), at = dateOf(node.submittedAt);
+    if (who === null || at === null || node.state === "PENDING") continue;
+    const seen = latest.get(who);
+    if (who !== me && (!seen || Date.parse(seen.at) <= Date.parse(at))) latest.set(who, { state: String(node.state), at });
+    said.push({ who, at });
+  }
+  for (const thread of threads) for (const comment of nodesOf((thread as { comments?: unknown } | null)?.comments)) {
+    const node = comment !== null && typeof comment === "object" ? comment as { createdAt?: unknown; author?: unknown } : {};
+    const who = loginOf(node.author), at = dateOf(node.createdAt);
+    if (who !== null && at !== null) said.push({ who, at });
+  }
+  for (const comment of nodesOf(pr.comments)) {
+    const node = comment !== null && typeof comment === "object" ? comment as { createdAt?: unknown; author?: unknown } : {};
+    const who = loginOf(node.author), at = dateOf(node.createdAt);
+    if (who !== null && at !== null && (who === me || latest.has(who))) said.push({ who, at });
+  }
+  const newest = (list: { who: string; at: string }[]) => list.reduce<{ who: string; at: string } | null>((best, item) =>
+    best === null || Date.parse(item.at) > Date.parse(best.at) ? item : best, null);
+  const comment = newest(said.filter((item) => item.who !== me && latest.get(item.who)?.state !== "APPROVED"));
+  const openThreads = threads.filter((thread) => {
+    const node = thread !== null && typeof thread === "object" ? thread as { isResolved?: unknown; comments?: unknown } : {};
+    const first = nodesOf(node.comments)[0];
+    return node.isResolved === false && loginOf(first !== null && typeof first === "object" ? (first as { author?: unknown }).author : null) !== me;
+  }).length;
+  return { openThreads: Math.min(openThreads, 2_000), comment: comment && { login: comment.who.slice(0, 140), at: comment.at },
+    repliedAt: newest(said.filter((item) => item.who === me))?.at ?? null };
+}
+
 /** Read all available review, thread, and linked comment pages before claiming feedback is clear. */
-export async function readReviewThreads(run: GhRunner, target: PrTarget, includeFollowup = false, includeApprovalNotes = false): Promise<{ ok: true; count: number; resolvedCount: number | null; hasNextPage: boolean; headOid: string | null; approvalFeedback: ApprovalFeedbackSnapshot; reviewFollowupPosted?: boolean; approvalNotes?: ApprovalNote[]; approvalNotesMore?: number; approvalNotesComplete?: boolean } | { ok: false; error: string }> {
+export async function readReviewThreads(run: GhRunner, target: PrTarget, includeFollowup = false, includeApprovalNotes = false): Promise<{ ok: true; count: number; resolvedCount: number | null; hasNextPage: boolean; headOid: string | null; approvalFeedback: ApprovalFeedbackSnapshot; reviewFollowupPosted?: boolean; approvalNotes?: ApprovalNote[]; approvalNotesMore?: number; approvalNotesComplete?: boolean; reviewFeedback?: ReviewFeedback } | { ok: false; error: string }> {
   const result = await run(threadsArgv(target, includeFollowup));
   if (!result.ok) return { ok: false, error: result.error };
   const body = json(result) as { errors?: unknown; data?: { repository?: { pullRequest?: { reviewThreads?: unknown; reviews?: unknown; headRefOid?: unknown; author?: unknown; comments?: unknown; commits?: unknown } } } } | undefined;
@@ -402,6 +456,8 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
       }
     }
   }
+  // Conversation comments come only with the follow-up read: without it, a reply there goes unseen.
+  const reviewFeedback = reviewFeedbackOf(pr ?? {}, countedNodes);
   return {
     ok: true,
     count,
@@ -411,6 +467,7 @@ export async function readReviewThreads(run: GhRunner, target: PrTarget, include
     approvalFeedback,
     ...(reviewFollowupPosted === undefined ? {} : { reviewFollowupPosted }),
     ...(approvalHistory === undefined ? {} : { approvalNotes: approvalHistory.notes, approvalNotesMore: approvalHistory.more, approvalNotesComplete: approvalHistory.complete }),
+    ...(reviewFeedback === undefined ? {} : { reviewFeedback }),
   };
 }
 

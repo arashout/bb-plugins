@@ -15,6 +15,7 @@ import type { ResolvedThreadLink } from "./work-context.js";
 import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
 import { prTarget } from "./ghactions.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
+import { yourTurn, yourTurnSchema } from "./your-turn.js";
 
 export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
 /** Every action a row records, as inventory-actions.ts takes them. */
@@ -35,6 +36,8 @@ export const inventoryRowSchema = z.object({
   /** The approval comments' fingerprint, when approving reviews left any: Confirm handled sends it back with `head`. */
   feedbackFingerprint: z.string().nullable(),
   attention: z.array(attentionReasonSchema),
+  /** Reviewer feedback on your PR that waits on your move (your-turn.ts); null on a teammate's PR, a draft, or one you hold. */
+  yourTurn: yourTurnSchema.nullable(),
   /** The last read GitHub answered, and the last it didn't, with why, while no read since has succeeded. */
   checkedAt: z.string().nullable(), failure: z.object({ at: z.string(), error: z.string().nullable() }).strict().nullable(),
   /** The last full inventory read no longer listed it, or couldn't read it. */
@@ -116,6 +119,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
     feedbackFingerprint: pr?.approvalFeedback?.fingerprint ?? null,
     attention: [...input.reasons],
+    yourTurn: input.authored && pr ? yourTurn(pr, input.hold !== null) : null,
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
