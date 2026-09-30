@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
-import { inkwellDeck, inkwellSuggestions, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import type { SeedProposal } from "./linear-seed.js";
@@ -193,6 +193,21 @@ describe("the effort deck's markup", () => {
       error: null, onDraft: noop, onAdd: noop, onRemove: noop, onCancel: noop }));
     expect(html).toContain('aria-label="Remove the rule Branch shelf/* → Shelf order · 2 this week"');
     expect(html.indexOf("data-deck-rules")).toBeLessThan(html.indexOf("Always put"));
+  });
+
+  it("draws a card with only threads as its header and its threads, with no action to take and a hint where each thread's effort is set", () => {
+    const view = inkwellDeck(inkwellThreads());
+    const loose = pane(view, "loose");
+    expect([...loose.matchAll(/data-deck-tile="([a-z]+)"/gu)].map((match) => match[1])).toEqual(["threads"]);
+    expect(loose).not.toContain("act-advance");
+    expect(text(loose)).toContain("Loose threads No open PRs Threads with no effort or repository yet.");
+    expect(text(loose)).toContain("Threads 4 Look at a flaky test");
+    expect(text(loose)).toContain("Set each thread's effort from the chip above its composer.");
+    const quill = pane(view, "service:inkwell/quill");
+    expect(quill).not.toContain("act-promote");
+    expect(quill).not.toContain("data-deck-suggest");
+    expect(text(quill)).toContain("Try a quieter quill layout");
+    expect(text(quill)).toContain("No open PRs here.");
   });
 
   it("collapses a group to one line with Undo once you accepted all of it here, and keeps drawing the rest", () => {

@@ -1,14 +1,17 @@
 // The effort deck's read model (plan amendments A15 and A17.1): the active pile
-// of effort cards, the On hold and Done piles, and a service card per
-// repository for its open PRs that no effort owns, so nothing open is outside
-// a card. Pure: the server gathers the inventory's rows and what the board
-// keeps about each effort. This places every row in one section by the move
-// it needs, words it as the inventory does, counts Needs you with
-// deck-shared.ts's one rule, and sums each card from its rows, merges, Linear
-// details, and threads. Service cards live only here: nothing stores them.
+// of effort cards, the On hold and Done piles, a service card per repository
+// for its open PRs and threads that no effort has, and Loose threads, so
+// nothing open is outside a card. Pure: the server gathers the inventory's
+// rows, each thread's evidence, and what the board keeps about each effort.
+// This places every row in one section by the move it needs, words it as the
+// inventory does, counts Needs you with deck-shared.ts's one rule, places each
+// thread with deck-homes.ts's, and sums each card from its rows, merges,
+// Linear details, and threads. Service cards and Loose threads live only
+// here: nothing stores them.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
-import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, needsYou, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
+import { ACTED_MS, BATCH_KINDS, DECK_SECTIONS, LOOSE_ID, needsYou, serviceId, serviceName, type DeckPile, type DeckSection, type RowActed } from "./deck-shared.js";
+import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { suggestionGroupSchema, type SuggestionGroup } from "./effort-classify.js";
 import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
 import type { InventoryRow } from "./inventory-view.js";
@@ -58,8 +61,11 @@ const tally = z.array(z.object({ name: z.string(), count: z.number() }).strict()
 const personSchema = z.object({ login: z.string(), prs: z.array(z.object({ prUrl: z.string(), ref: z.string(), since: z.number().nullable() }).strict()) }).strict();
 export const deckCardSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(), goal: z.string(),
-  /** A stored effort's card, or a repository's service card, which only this read model draws; `repo` names a service card's repository. */
-  kind: z.enum(["effort", "service"]), repo: z.string().nullable(),
+  /**
+   * A stored effort's card, or one only this read model draws: a repository's service card, named by `repo`, or Loose threads, for the
+   * threads no effort, PR, or repository places.
+   */
+  kind: z.enum(["effort", "service", "loose"]), repo: z.string().nullable(),
   /** The one effort for standalone PRs. */
   oneOff: z.boolean(),
   pile: z.enum(EFFORT_PILES), reason: z.string(), since: z.number(),
@@ -83,8 +89,11 @@ export const deckCardSchema = z.object({
     assignees: tally }).strict(),
   /** Reviewers you wait on, and reviewers whose requested changes wait on you. */
   people: z.object({ youWaitOn: z.array(personSchema), waitOnYou: z.array(personSchema) }).strict(),
-  /** Its parent thread, then each PR's threads, most recent first. Read-only. */
-  threads: z.array(z.object({ id: z.string(), title: z.string(), role: z.enum(["parent", "pr"]), prUrl: z.string().nullable(), status: z.string(),
+  /**
+   * Its parent thread, then the threads on its open PRs, then the rest of the threads it holds, each most recent first. Read-only. A `linked`
+   * thread is here by its own evidence (deck-homes.ts), with the open PR on this card it links, if any.
+   */
+  threads: z.array(z.object({ id: z.string(), title: z.string(), role: z.enum(["parent", "pr", "linked"]), prUrl: z.string().nullable(), status: z.string(),
     lastActivityAt: z.number().nullable() }).strict()),
   /** Merges, reviews, and pushes in the last 7 days, newest first. */
   activity: z.array(z.object({ kind: z.enum(["merged", "approved", "changes", "pushed"]), prUrl: z.string(), ref: z.string(), who: z.string().nullable(),
@@ -95,7 +104,7 @@ export const deckCardSchema = z.object({
 }).strict();
 export type DeckCard = z.infer<typeof deckCardSchema>;
 export const deckViewSchema = z.object({
-  /** Active efforts, most Needs you first and One-offs after them, then the service cards, most Needs you first. */
+  /** Active efforts, most Needs you first and One-offs after them, then the service cards, most Needs you first, then Loose threads. */
   active: z.array(deckCardSchema),
   /** Held efforts, in the order they were held. */
   held: z.array(deckCardSchema),
@@ -141,6 +150,8 @@ export type DeckInput = {
   merges: readonly { url: string; at: number; effortId: string }[];
   linear: ReadonlyMap<string, LinearDetail>;
   threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
+  /** Every visible thread, with the evidence that places it on one card. */
+  homes: readonly ThreadEvidence[];
   /** The classifier's suggestions for the open PRs no effort owns, and One-offs. */
   classify: { groups: SuggestionGroup[]; oneOffsId: string | null };
   read: { checkedAt: string | null; refreshing: boolean; limitedUntil: number | null };
@@ -216,7 +227,8 @@ function people(rows: readonly Placed[]): DeckCard["people"] {
   return { youWaitOn: sorted(youWaitOn), waitOnYou: sorted(waitOnYou) };
 }
 
-function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput, repo: string | null = null): DeckCard {
+function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput, homed: readonly ThreadEvidence[], kind: DeckCard["kind"] = "effort",
+  repo: string | null = null): DeckCard {
   const { now } = input;
   const pile = effort.pile.pile;
   const all = rows.map(({ row }) => row);
@@ -250,6 +262,12 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     threads.set(thread.id, { id: thread.id, title: thread.title, role: "pr", prUrl: row.prUrl, status: facts?.status ?? (thread.active ? "active" : "idle"),
       lastActivityAt: facts?.updatedAt ?? null });
   }
+  for (const thread of homed) {
+    const facts = input.threads.get(thread.id);
+    if (!facts || threads.has(thread.id)) continue;
+    const prUrl = thread.prs.find((pr) => rows.some(({ row }) => row.prUrl === pr.url))?.url ?? null;
+    threads.set(thread.id, { id: thread.id, title: facts.title, role: "linked", prUrl, status: facts.status, lastActivityAt: facts.updatedAt });
+  }
   const recent = (at: number | null) => at !== null && now - at <= WEEK_MS;
   const activity: DeckCard["activity"] = [
     ...merges.filter((merge) => recent(merge.at)).map((merge) => ({ kind: "merged" as const, prUrl: merge.url, ref: urlRef(merge.url), who: null, at: merge.at })),
@@ -263,7 +281,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   ].sort((a, b) => b.at - a.at).slice(0, 12);
   const parts = [needs && `${needs} need you`, blocked.length && `${blocked.length} blocked`, flight && `${flight} in flight`].filter(Boolean);
   return {
-    id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, kind: repo === null ? "effort" : "service", repo, oneOff: effort.oneOff, pile,
+    id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, kind, repo, oneOff: effort.oneOff, pile,
     reason: effort.pile.reason, since: effort.pile.since,
     status: pile === "held" ? { tone: "held", text: effort.pile.reason ? `On hold: ${effort.pile.reason}` : "On hold" }
       : { tone: needs ? "you" : blocked.length ? "waiting" : rows.length ? "moving" : "quiet", text: parts.join(" · ") || "No open PRs" },
@@ -287,23 +305,25 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
       }),
       assignees: tallies(details.flatMap((detail) => detail.assignee ? [detail.assignee] : [])) },
     people: people(rows),
-    threads: [...threads.values()].sort((a, b) => Number(b.role === "parent") - Number(a.role === "parent") || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)),
+    // Threads on open work come first; the rest, on merged work or none, wait behind More.
+    threads: [...threads.values()].sort((a, b) => Number(b.role === "parent") - Number(a.role === "parent") || Number(b.prUrl !== null) - Number(a.prUrl !== null)
+      || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)),
     activity,
     sections: DECK_SECTIONS.flatMap((key) => {
       const list = inSection(key);
       return list.length ? [{ key, needsYou: list.filter(counts).length, rows: list }] : [];
     }),
-    suggestions: repo === null ? [] : input.classify.groups.flatMap((group) => {
+    suggestions: kind !== "service" ? [] : input.classify.groups.flatMap((group) => {
       const prs = group.prs.filter((pr) => all.some((row) => row.prUrl === pr.prUrl));
       return prs.length ? [{ ...group, prs }] : [];
     }),
   };
 }
 
-/** A repository's service card, as the effort it stands in for: always active, and never held, completed, or given a goal to meet. */
-const serviceEffort = (repo: string): DeckEffortInput => ({ id: serviceId(repo), key: serviceId(repo), name: serviceName(repo),
-  goal: `Work in ${repo.split("/").at(-1)} that no effort has yet.`, oneOff: false, archived: false, pile: { effortId: serviceId(repo), pile: "active", reason: "", since: 0 },
-  parentThreadId: null, tickets: [], criteria: null });
+/** A card no stored effort backs, as the effort it stands in for: always active, and never held, completed, or given a goal to meet. */
+const standIn = (id: string, name: string, goal: string): DeckEffortInput => ({ id, key: id, name, goal, oneOff: false, archived: false,
+  pile: { effortId: id, pile: "active", reason: "", since: 0 }, parentThreadId: null, tickets: [], criteria: null });
+const serviceEffort = (repo: string) => standIn(serviceId(repo), serviceName(repo), `Work in ${repo.split("/").at(-1)} that no effort has yet.`);
 
 /** Every row as the deck draws it, with the facts it came from, its card, and its card's pile: a PR no effort owns is on its repository's service card. */
 export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (Placed & { pile: DeckPile; cardId: string })[] {
@@ -319,10 +339,21 @@ export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (P
 export function deckView(input: DeckInput): DeckView {
   const placed = deckRows(input);
   const of = (cardId: string) => placed.filter((item) => item.cardId === cardId);
-  const cards = input.efforts.filter((effort) => effort.pile.pile !== "done").map((effort) => card(effort, of(effort.id), input));
-  const repos = [...new Set(placed.flatMap(({ input: row }) => row.effort ? [] : [row.repo.toLowerCase()]))];
-  const services = repos.map((repo) => card(serviceEffort(repo), of(serviceId(repo)), input, repo))
+  // Each thread on the one card its evidence names: an effort's, a repository's service card, or Loose threads.
+  const homes = new Map<string, ThreadEvidence[]>();
+  for (const thread of input.homes) {
+    const home = threadHome(thread);
+    const id = home.kind === "effort" ? home.id : home.kind === "service" ? serviceId(home.repo) : LOOSE_ID;
+    homes.set(id, [...homes.get(id) ?? [], thread]);
+  }
+  const homed = (cardId: string) => homes.get(cardId) ?? [];
+  const cards = input.efforts.filter((effort) => effort.pile.pile !== "done").map((effort) => card(effort, of(effort.id), input, homed(effort.id)));
+  const repos = [...new Set([...placed.flatMap(({ input: row }) => row.effort ? [] : [row.repo.toLowerCase()]),
+    ...input.homes.flatMap((thread) => { const home = threadHome(thread); return home.kind === "service" && input.threads.has(thread.id) ? [home.repo] : []; })])];
+  const services = repos.map((repo) => card(serviceEffort(repo), of(serviceId(repo)), input, homed(serviceId(repo)), "service", repo))
     .sort((a, b) => b.needsYou - a.needsYou || b.stats.open - a.stats.open || a.name.localeCompare(b.name));
+  const loose = homed(LOOSE_ID).filter((thread) => input.threads.has(thread.id));
+  if (loose.length) services.push(card(standIn(LOOSE_ID, "Loose threads", "Threads with no effort or repository yet."), [], input, loose, "loose"));
   const active = [...cards.filter((item) => item.pile === "active")
     .sort((a, b) => Number(a.oneOff) - Number(b.oneOff) || b.needsYou - a.needsYou || a.since - b.since || a.name.localeCompare(b.name)), ...services];
   const held = cards.filter((item) => item.pile === "held").sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));

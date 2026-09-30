@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
-import { inkwellDeck, inkwellSuggestions, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { acceptPlan, availability, cardScreen, cardSnapshot, hintKeys, paletteItems, readText, stripChips, targets, type Accepted, type CardScreen,
   type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
@@ -26,6 +26,13 @@ describe("the effort deck's strip", () => {
     // A card keeps its number after you flip away and a read reorders the server's pile: the session order wins.
     expect(stripChips([PICKUP, ONE_OFFS, SHELF, CATALOG], cards, SHELF).map((chip) => chip.name))
       .toEqual(["Store pickup", "One-offs", "Shelf order", "catalog · service"]);
+  });
+
+  it("ends with a service card for a repository with only threads, and Loose threads, gray, neither counting in Needs you", () => {
+    const view = inkwellDeck(inkwellThreads());
+    const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
+    expect(stripChips(view.active.map((item) => item.id), cards, SHELF).slice(-2).map((chip) => [chip.n, chip.name, chip.count, chip.service, chip.color]))
+      .toEqual([[7, "quill · service", 0, true, "#d3a35a"], [8, "Loose threads", 0, true, "#8f8e8a"]]);
   });
 });
 
@@ -228,8 +235,12 @@ describe("what the keys act on", () => {
     const focused = folio.sections[0]!.lines[0]!;
     const sorting = availability(context(folio, { focused }));
     expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting.request.on, sorting.advance.on, sorting.promote.on, sorting.hold.on, sorting.hold.why,
-      sorting["new-effort"].on]).toEqual([true, true, true, true, true, true, false, "a service card stays active", false]);
+      sorting["new-effort"].on]).toEqual([true, true, true, true, true, true, false, "this card stays active", false]);
     expect(availability(context(folio, { focused, selected: [focused] }))["new-effort"].on).toBe(true);
+    // Loose threads holds only threads: nothing on it sorts, advances, promotes, or leaves the active pile.
+    const loose = availability(context(card(inkwellDeck(inkwellThreads()), "loose")));
+    expect([loose.advance.on, loose.promote.on, loose.promote.why, loose.hold.on, loose.hold.why, loose.accept.on]).toEqual([false, false,
+      "only a service card promotes", false, "this card stays active", false]);
     // u goes to the first service card, while one exists.
     expect([sorting.services.on, availability(context(folio, { service: null })).services.why]).toEqual([true, "every PR is in an effort"]);
     // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.

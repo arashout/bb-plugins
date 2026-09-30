@@ -7,7 +7,7 @@
 // imports types, zero-import modules, and the roster's time format only, so
 // no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { cardTier, counted, DECK_SECTIONS, needsYou, type BatchKind, type DeckPile, type DeckSection } from "./deck-shared";
+import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, type BatchKind, type DeckPile, type DeckSection } from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
@@ -40,7 +40,7 @@ export const ONE_OFF_COLOR = "#8f8e8a";
 /** A service card's color, drawn as a hollow dot: it stands in for an effort no one made yet. */
 export const SERVICE_COLOR = "#d3a35a";
 export function effortColor(id: string, oneOff = false): string {
-  if (oneOff) return ONE_OFF_COLOR;
+  if (oneOff || id === LOOSE_ID) return ONE_OFF_COLOR;
   if (cardTier(id) > 0) return SERVICE_COLOR;
   let hash = 0;
   for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
@@ -391,9 +391,10 @@ export function availability(context: KeyContext): Availability {
   set("hold-pile", deck && context.held > 0, deck ? "no effort is on hold" : "Efforts only");
   set("done-pile", deck && context.done > 0, deck ? "no effort is done" : "Efforts only");
   set("advance", live && card!.advance.length > 0, card ? "nothing safe to run" : deck ? NO_CARD : "Efforts only");
-  const stays = card?.card.oneOff ? "One-offs stays active" : service ? "a service card stays active" : "it's on hold";
-  set("hold", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
-  set("complete", live && !card!.card.oneOff && !service, card ? stays : deck ? NO_CARD : "Efforts only");
+  const effort = card?.card.kind === "effort";
+  const stays = card?.card.oneOff ? "One-offs stays active" : !effort ? "this card stays active" : "it's on hold";
+  set("hold", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
+  set("complete", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
   set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
   set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready"] as const) {

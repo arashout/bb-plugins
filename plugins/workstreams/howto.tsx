@@ -143,9 +143,14 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
 
       <Section title="Sorting PRs into efforts">
         <p>
-          Every open PR is on a card. One that no effort owns is on its repository&apos;s service card, such as
-          folio · service, after the efforts in the strip. It works like an effort&apos;s card, and its PRs count in
-          Needs you. Suggestions above its rows show where each group of its PRs could go, with its strength (strong,
+          Every open PR and thread is on a card, or with its done effort on the Done pile. A PR that no effort owns is on
+          its repository&apos;s service card, such as folio · service, after the efforts in the strip. A service card works
+          like an effort&apos;s card, and its PRs count in Needs you. A thread goes with the PRs it works on, or with its
+          own checkout. Threads with no effort or single repository, such as ones that only ran in a shared clone, are on
+          Loose threads, the last card.
+        </p>
+        <p>
+          Suggestions above a service card&apos;s rows show where each group of its PRs could go, with its strength (strong,
           moderate, or weak) and the signals behind it: a shared ticket, Linear project, stack, linked thread, board group,
           or code area. A ticket prefix only adds weight to a stronger signal. A lone PR whose ticket nothing else carries
           is offered as a weak one-off.

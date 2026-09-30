@@ -14,7 +14,10 @@ export const threadEffortSourceSchema = z.object({
  */
 export const threadEffortPickerSchema = z.object({
   chip: z.object({
-    /** An effort: the thread's own, the one it coordinates, or the one its linked PRs are in. A service: no effort, so its linked PRs' repository. */
+    /**
+     * An effort: the thread's own, the one it coordinates, or the one its own PRs are in. A service: no effort, so its repository's service
+     * card, as the deck places it (deck-homes.ts). None: a loose thread.
+     */
     kind: z.enum(["effort", "service", "none"]),
     effortId: z.string().nullable(), name: z.string(), oneOff: z.boolean(),
     /** Needs you on its card: an effort's, or a service's, whose PRs count as any effort's do. */
@@ -112,32 +115,26 @@ export function threadEffortSignals(input: {
 export { serviceName };
 
 /**
- * The effort a thread's chip names. Explicit efforts win: the thread's own, then the one whose parent thread it is, then the one most of
- * its linked PRs are in. Without one, the repository most of its linked PRs are in, as that repository's service effort; ties go by name.
+ * The effort a thread's chip names. Explicit efforts win: the thread's own, then the one whose parent thread it is. Without either, the
+ * card the deck places the thread on (deck-homes.ts): the effort its own PRs are in, or its repository's service card.
  */
 export function threadEffortChip(input: {
   own: { id: string; name: string; oneOff: boolean } | null;
   coordinates: { id: string; name: string; oneOff: boolean } | null;
-  /** Its linked PRs, each with its repository and the effort it's in. */
-  linked: readonly { repo: string; effort: { id: string; name: string; oneOff: boolean } | null }[];
+  /** Where the deck places the thread; null for a loose thread, or an effort the deck no longer has. */
+  home: { kind: "effort"; effort: { id: string; name: string; oneOff: boolean } } | { kind: "service"; repo: string } | null;
   /** Needs you on the effort's or service's card; null when the deck draws no card for it. */
-  needsYou: (effortId: string) => number | null;
+  needsYou: (cardId: string) => number | null;
 }): ThreadEffortPicker["chip"] {
-  const most = <T>(items: readonly T[], key: (item: T) => string, name: (item: T) => string): T | null => {
-    const counts = new Map<string, { item: T; n: number }>();
-    for (const item of items) counts.set(key(item), { item, n: (counts.get(key(item))?.n ?? 0) + 1 });
-    return [...counts.values()].sort((a, b) => b.n - a.n || name(a.item).localeCompare(name(b.item)))[0]?.item ?? null;
-  };
-  const efforts = input.linked.flatMap((pr) => pr.effort ? [pr.effort] : []);
-  const effort = input.own ?? input.coordinates ?? most(efforts, (item) => item.id, (item) => item.name);
+  const effort = input.own ?? input.coordinates ?? (input.home?.kind === "effort" ? input.home.effort : null);
   if (effort) {
     const needs = input.needsYou(effort.id);
     return { kind: "effort", effortId: effort.id, name: effort.name, oneOff: effort.oneOff, needsYou: needs ?? 0, card: needs === null ? null : effort.id };
   }
-  const repo = most(input.linked.map((pr) => pr.repo.toLowerCase()), (item) => item, (item) => item);
-  if (repo) {
-    const needs = input.needsYou(serviceId(repo));
-    return { kind: "service", effortId: null, name: serviceName(repo), oneOff: false, needsYou: needs ?? 0, card: needs === null ? null : serviceId(repo) };
+  if (input.home?.kind === "service") {
+    const needs = input.needsYou(serviceId(input.home.repo));
+    return { kind: "service", effortId: null, name: serviceName(input.home.repo), oneOff: false, needsYou: needs ?? 0,
+      card: needs === null ? null : serviceId(input.home.repo) };
   }
   return { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null };
 }

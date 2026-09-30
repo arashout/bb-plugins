@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { counted, needsYou } from "./deck-shared.js";
 import { deckRows, deckView, type DeckEffortInput, type DeckInput, type DeckRowInput } from "./deck.js";
 import type { SuggestionGroup } from "./effort-classify.js";
-import { inkwellInventory, inkwellInventoryPrs, INVENTORY_EFFORTS, INVENTORY_NOW } from "./inkwell-fixtures.js";
+import { inkwellDeck, inkwellInventory, inkwellInventoryPrs, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW } from "./inkwell-fixtures.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
 
@@ -24,7 +24,7 @@ function input(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Parti
       acted: null };
     return { ...base, ...row(base) };
   }));
-  return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), threads: new Map(),
+  return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), threads: new Map(), homes: [],
     classify: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false, limitedUntil: null }, seen: new Map(), ...patch };
 }
 const sections = (card: ReturnType<typeof deckView>["active"][number]) =>
@@ -219,5 +219,56 @@ describe("the effort deck", () => {
     expect(Object.keys(serviceRows(view))).toHaveLength(7);
     // Once they close, it leaves the deck.
     expect(deckView(input({ efforts: [archived], rows: [] })).done).toEqual([]);
+  });
+});
+
+describe("threads on the effort deck", () => {
+  const threadsOf = (view: ReturnType<typeof deckView>, id: string) => view.active.find((card) => card.id === id)?.threads.map((thread) =>
+    `${thread.id} ${thread.role}${thread.prUrl ? ` ${thread.prUrl.split("/").at(-3)} #${thread.prUrl.split("/").at(-1)}` : ""}`);
+  const everyThread = (view: ReturnType<typeof deckView>) => view.active.flatMap((card) => card.threads.map((thread) => thread.id));
+
+  it("puts every thread on a card: its effort's, its repository's service card, or Loose threads last", () => {
+    const view = inkwellDeck(inkwellThreads());
+    expect(view.active.map((card) => [card.name, card.kind])).toEqual([["Shelf order", "effort"], ["Store pickup", "effort"], ["One-offs", "effort"],
+      ["folio · service", "service"], ["atlas · service", "service"], ["catalog · service", "service"], ["quill · service", "service"], ["Loose threads", "loose"]]);
+    // Nothing is outside a card: every thread the deck was handed is on one, and on only one of the cards it places by evidence.
+    const placed = everyThread(view);
+    for (const id of inkwellThreads().homes.map((thread) => thread.id)) expect(placed.filter((item) => item === id)).toHaveLength(1);
+    expect(view.counts.needsYou).toBe(inkwellDeck().counts.needsYou);
+  });
+
+  it("lets an explicit effort win: the thread's own effort, then the effort of the PRs it links, merged ones too", () => {
+    const view = inkwellDeck(inkwellThreads());
+    expect(threadsOf(view, INVENTORY_EFFORTS.shelf.id)).toEqual(["thr_folio_330 pr folio #330", "thr_shelf_notes linked", "thr_shelf_ship linked"]);
+  });
+
+  // The review's real case: threads that ran in a clone many threads share link to whatever branch it has checked out, which says nothing.
+  it("never places a thread by a checkout it shares, so the folio clone's threads don't crowd folio's service card", () => {
+    const view = inkwellDeck(inkwellThreads());
+    expect(threadsOf(view, "service:inkwell/folio")).toEqual(["thr_folio_recall linked folio #325", "thr_folio_305 pr folio #305", "thr_folio_325 pr folio #325"]);
+    expect(threadsOf(view, "loose")).toEqual(["thr_clone_flaky linked", "thr_audit_logs linked", "thr_clone_footer linked", "thr_clone_question linked"]);
+  });
+
+  it("puts a thread spanning repositories on the one most of its PRs are in, its environment's on a tie, else Loose threads", () => {
+    const view = inkwellDeck(inkwellThreads());
+    expect(threadsOf(view, "service:inkwell/catalog")).toEqual(["thr_author_rename linked catalog #97"]);
+    expect(threadsOf(view, "service:inkwell/atlas")).toEqual(["thr_atlas_410 pr atlas #410"]);
+    expect(threadsOf(view, "loose")).toContain("thr_audit_logs linked");
+  });
+
+  it("draws a service card for a repository whose only open work is a thread in a checkout of its own, after the ones with PRs", () => {
+    const quill = inkwellDeck(inkwellThreads()).active.find((card) => card.id === "service:inkwell/quill")!;
+    expect(quill).toMatchObject({ name: "quill · service", kind: "service", repo: "inkwell/quill", needsYou: 0, stats: { open: 0 }, sections: [], suggestions: [],
+      status: { text: "No open PRs" }, threads: [{ id: "thr_quill_try", role: "linked", prUrl: null }] });
+  });
+
+  it("draws Loose threads only while a thread has nowhere else to go, and never counts it in Needs you", () => {
+    const { threads, homes } = inkwellThreads();
+    expect(inkwellDeck({ threads, homes: homes.filter((thread) => !["thr_clone_footer", "thr_clone_flaky", "thr_clone_question", "thr_audit_logs"].includes(thread.id)) })
+      .active.map((card) => card.id)).not.toContain("loose");
+    const loose = inkwellDeck({ threads, homes }).active.at(-1)!;
+    expect(loose).toMatchObject({ id: "loose", name: "Loose threads", kind: "loose", repo: null, needsYou: 0, pile: "active", sections: [] });
+    // A thread the deck has no facts for, such as one archived since, lands nowhere.
+    expect(inkwellDeck({ threads: new Map(), homes }).active.map((card) => card.id)).not.toContain("loose");
   });
 });

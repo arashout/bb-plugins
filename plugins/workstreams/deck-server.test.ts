@@ -1,7 +1,8 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr, RawUnit } from "./contract.js";
 import type { DeckView } from "./deck.js";
+import type { ThreadEffortReady } from "./thread-effort.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import plugin from "./server.js";
@@ -18,8 +19,17 @@ const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githu
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-/** Shelf order owns ABC-500 and folio #401, a green draft; #402 carries ABC-500; #402 and #403 have no reviewer, and #403 has no effort. */
-async function setup() {
+/** A visible thread of this plugin's, running in `path` when it has one. */
+const thread = (id: string, title: string, path: string | null = null) => ({ ...makeThreadResponse({ id, title, projectId: "project-folio", originPluginId: "workstreams" }),
+  environmentPath: path, environmentBranchName: null, queuedWork: "none", hasPendingInteraction: false, ...path ? { environment: { path } } : {},
+  activity: { activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 } });
+
+/**
+ * Shelf order owns ABC-500 and folio #401, a green draft; #402 carries ABC-500; #402 and #403 have no reviewer, and #403 has no effort.
+ * `threads`, `units`, and `metadata` stand in for BB's threads, the scanned checkouts, and each thread's plugin metadata.
+ */
+async function setup(world: { threads?: ReturnType<typeof thread>[]; units?: RawUnit[]; metadata?: Record<string, Record<string, unknown>> } = {}) {
+  const metadata = world.metadata ?? {};
   const current = new Map<number, Pr>([
     [401, pr(401, "ABC-501 Store shelf order", { isDraft: true })],
     [402, pr(402, "ABC-500 Read shelf order back")],
@@ -28,10 +38,11 @@ async function setup() {
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
     system: { config: async () => ({ primaryHostId: HOST }) as never },
     projects: { list: async () => [{ id: "project-folio", name: "Folio", sources: [{ hostId: HOST, path: "/p" }] }] as never },
-    threads: { list: async () => [] as never, getPluginMetadata: async () => ({}) as never, events: { list: async () => [] },
-      spawn: async () => { throw new Error("The deck starts no thread."); } },
+    threads: { list: async () => (world.threads ?? []) as never, getPluginMetadata: async ({ threadId }: { threadId: string }) => (metadata[threadId] ?? {}) as never,
+      get: async ({ threadId }: { threadId: string }) => (world.threads ?? []).find((item) => item.id === threadId) ?? Promise.reject(new Error("missing thread")),
+      events: { list: async () => [] }, spawn: async () => { throw new Error("The deck starts no thread."); } },
   }, experimental_callHostRpc: async ({ method, input }) => {
-    if (method === "scan" || method === "inspectPaths") return { units: [UNIT], warnings: [] };
+    if (method === "scan" || method === "inspectPaths") return { units: world.units ?? [UNIT], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [...current.values()].filter((entry) => entry.state === "OPEN")
       .map((entry) => ({ repo: "inkwell/folio", pr: entry })), discoveryComplete: true, repositories: [{ repo: "inkwell/folio", complete: true }], complete: true, warnings: [] };
     if (method === "inspectPrs") {
@@ -50,7 +61,7 @@ async function setup() {
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
   const deck = async () => await harness.callRpc("deck_get", {}) as DeckView;
   const signals = () => harness.inspection.realtimeSignals.filter((signal) => signal.channel === "deck-changed").length;
-  return { harness, current, effort, deck, signals, rpc: (method: string, value: unknown) => harness.callRpc(method as never, value as never) };
+  return { harness, current, effort, deck, signals, metadata, db: bb.storage.database(), rpc: (method: string, value: unknown) => harness.callRpc(method as never, value as never) };
 }
 
 describe("the effort deck on the server", () => {
@@ -121,5 +132,38 @@ describe("the effort deck on the server", () => {
     // #401 and #402 pause, as a done effort's PRs do, and #403 is still on the service card.
     expect(await env.deck()).toMatchObject({ active: [{ name: "folio · service" }], done: [{ name: "Shelf order", archived: true, open: 2 }],
       counts: { needsYou: 1, held: 0, done: 1 } });
+  });
+
+  // The real case behind A17.1: many threads ran in one shared clone, and its checkout now has #403's branch. Each of them links to #403
+  // through that checkout, which says nothing about #403, so none of them may land on its service card.
+  it("puts every thread on a card by its own evidence: never a checkout it shares, a checkout of its own, a linked PR, or its effort", async () => {
+    const clone: RawUnit = { ...UNIT, branch: "branch-403", pr: pr(403, "ABC-610 Fix the footer year") };
+    const scratch: RawUnit = { ...UNIT, path: "/p/folio-scratch", dirName: "folio-scratch", branch: "scratch", pr: null };
+    const env = await setup({ units: [clone, scratch], threads: [thread("thr-clone-a", "Check the footer", "/p/folio"),
+      thread("thr-clone-b", "Look at a flaky test", "/p/folio"), thread("thr-scratch", "Try a quieter layout", "/p/folio-scratch"),
+      thread("thr-linked", "Footer follow-up"), thread("thr-notes", "Shelf notes")],
+      metadata: { "thr-linked": { linkedPrUrl: url(403) } } });
+    // You put "Shelf notes" in Shelf order yourself.
+    env.metadata["thr-notes"] = { workEffortId: env.effort.id };
+    env.db.prepare(`INSERT INTO thread_work_intent_ids (thread_id) VALUES (?)`).run("thr-notes");
+    const view = await env.deck();
+    const threads = (id: string) => view.active.find((card) => card.id === id)?.threads.map((item) => `${item.id}${item.prUrl ? ` #${item.prUrl.split("/").pop()}` : ""}`).sort();
+    expect(view.active.map((card) => card.name)).toEqual(["Shelf order", "folio · service", "Loose threads"]);
+    expect(threads(env.effort.id)).toEqual(["thr-notes"]);
+    expect(threads("service:inkwell/folio")).toEqual(["thr-linked #403", "thr-scratch"]);
+    expect(threads("loose")).toEqual(["thr-clone-a", "thr-clone-b"]);
+    // The thread's chip agrees with the deck: the popover still lists #403, which assigning the thread takes in, but the chip doesn't
+    // file the thread under it.
+    const shared = (await env.rpc("thread_effort_context", { threadId: "thr-clone-a", seen: {} }) as ThreadEffortReady).picker!;
+    expect([shared.chip.name, shared.chip.card, shared.linked.map((item) => item.ref)]).toEqual(["No effort", null, ["folio #403"]]);
+    const own = (await env.rpc("thread_effort_context", { threadId: "thr-scratch", seen: {} }) as ThreadEffortReady).picker!;
+    expect([own.chip.name, own.chip.card, own.chip.needsYou]).toEqual(["folio · service", "service:inkwell/folio", 1]);
+    // Archiving Shelf order drops it from "Shelf notes", whose chip then says No effort, so the thread is on Loose threads, not lost.
+    const { scopes } = await env.rpc("effort_admin_list", null) as { scopes: Record<string, string> };
+    expect(await env.rpc("effort_admin_archive", { effortKey: env.effort.key, archived: true, expectedScope: scopes[env.effort.key] })).toMatchObject({ ok: true });
+    const archived = await env.deck();
+    expect(archived.active.find((card) => card.id === "loose")?.threads.map((item) => item.id).sort()).toEqual(["thr-clone-a", "thr-clone-b", "thr-notes"]);
+    const notes = (await env.rpc("thread_effort_context", { threadId: "thr-notes", seen: {} }) as ThreadEffortReady).picker!;
+    expect([notes.chip.kind, notes.chip.name]).toEqual(["none", "No effort"]);
   });
 });

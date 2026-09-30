@@ -28,6 +28,7 @@ import {
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
+import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch } from "./deck-batch.js";
 import { DECK_CHANGED, SERVICE_PREFIX, type DeckPile, type RowActed } from "./deck-shared.js";
 import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
@@ -3551,7 +3552,8 @@ export default async function plugin(bb: BbPluginApi) {
     efforts: ThreadEffortReady["efforts"]; intended: EstablishedEffort | null; direct: { url: string; title: string }[]; seen: Readonly<Record<string, number>> }):
     Promise<ThreadEffortPicker> {
     const { threadId, work, sources } = input;
-    const deck = deckView(await deckInput(input.seen));
+    const read = await deckInput(input.seen);
+    const deck = deckView(read);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE)?.id ?? null;
     const brief = (effort: EstablishedEffort) => ({ id: effort.id, name: effort.name, oneOff: effort.id === oneOffs });
     const needs = (effortId: string) => deck.active.find((card) => card.id === effortId)?.needsYou ?? (deck.held.some((card) => card.id === effortId) ? 0 : null);
@@ -3576,9 +3578,12 @@ export default async function plugin(bb: BbPluginApi) {
       return { url, ref: ref(url), title, effortId: effort?.id ?? null, effortName: effort?.name ?? null, sourceIds: [...taken].sort(), also };
     });
     const coordinates = effortStore.list().find((effort) => !effort.archivedAt && effort.coordinatorThreadId === threadId) ?? null;
+    // Where the deck places the thread, by the same evidence and rule.
+    const evidence = read.homes.find((thread) => thread.id === threadId);
+    const placed = evidence ? threadHome(evidence) : null;
+    const homeEffort = placed?.kind === "effort" ? effortStore.get(placed.id) : null;
     const chip = threadEffortChip({ own: input.intended && !input.intended.archivedAt ? brief(input.intended) : null, coordinates: coordinates && brief(coordinates),
-      linked: linked.map((pr) => { const effort = pr.effortId ? effortStore.get(pr.effortId) : null; return { repo: prTarget(pr.url)?.slug ?? "", effort: effort && brief(effort) }; })
-        .filter((pr) => pr.repo), needsYou: needs });
+      home: homeEffort && !homeEffort.archivedAt ? { kind: "effort", effort: brief(homeEffort) } : placed?.kind === "service" ? placed : null, needsYou: needs });
     // Efforts the deck draws a card for: not archived or done.
     const open = effortStore.list().filter((effort) => !effort.archivedAt && piles.get(effort).pile !== "done");
     const ticketOwner = (ticket: string) => {
@@ -5564,6 +5569,40 @@ export default async function plugin(bb: BbPluginApi) {
       warnings: current.prInventory.warnings }, only);
   }
 
+  /**
+   * What places each visible thread on the deck (deck-homes.ts), from one board read: its own effort or the one it coordinates, the PRs it
+   * links through its own work with the effort that owns each, the checkout only it runs in, and its environment's repository. A link only
+   * through a checkout other threads share never counts, as the classifier never counts one. An archived effort places nothing, as the
+   * thread's chip names none, so its threads go where the rest of their evidence says.
+   */
+  async function threadHomes(efforts: readonly EstablishedEffort[], work: ReturnType<typeof readWorkContext>): Promise<ThreadEvidence[]> {
+    const kept = efforts.filter((effort) => !effort.archivedAt);
+    const live = new Set(kept.map((effort) => effort.id));
+    const coordinates = new Map(kept.flatMap((effort) => effort.coordinatorThreadId ? [[effort.coordinatorThreadId, effort.id] as const] : []));
+    // A thread's intent lives in its metadata; only the few threads with one are read.
+    const intents = new Map(await Promise.all(intentIds().filter((id) => threadFacts.has(id)).map(async (id) => {
+      try { const effortId = await intentOf(id); return [id, effortId && live.has(effortId) ? effortId : null] as const; } catch { return [id, null] as const; }
+    })));
+    const own = new Map<string, Set<string>>();
+    for (const url of work.items.keys()) for (const link of work.linksForPr(url, false))
+      if (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket") own.set(link.threadId, (own.get(link.threadId) ?? new Set()).add(url));
+    const trim = (path: string) => path.replace(/\/+$/u, "");
+    const runners = new Map<string, number>();
+    for (const facts of threadFacts.values()) if (facts.environmentPath) runners.set(trim(facts.environmentPath), (runners.get(trim(facts.environmentPath)) ?? 0) + 1);
+    const scanned = readUnits();
+    const repoOf = (unit: RawUnit | undefined) => unit?.githubRepo?.toLowerCase() ?? null;
+    return [...threadFacts.values()].map((facts) => {
+      const path = facts.environmentPath ? trim(facts.environmentPath) : null;
+      const alone = path && runners.get(path) === 1 ? scanned.find((unit) => trim(unit.path) === path) : undefined;
+      const urls = new Set(own.get(facts.id));
+      if (alone?.pr) urls.add(prWorkItemKey(alone.pr.url));
+      const owner = (url: string) => { const effortId = work.ownerForPr(url)?.id ?? null; return effortId && live.has(effortId) ? effortId : null; };
+      return { id: facts.id, effortId: intents.get(facts.id) ?? coordinates.get(facts.id) ?? null,
+        prs: [...urls].flatMap((url) => { const target = prTarget(url); return target ? [{ url, repo: target.slug.toLowerCase(), effortId: owner(url) }] : []; }),
+        checkout: repoOf(alone), environment: path ? repoOf(scanned.filter((unit) => withinPath(path, trim(unit.path))).sort((a, b) => b.path.length - a.path.length)[0]) : null };
+    });
+  }
+
   /** An inventory action as the deck batch kind that runs it. */
   const DECK_KIND = { "mark-ready": "ready", "request-review": "request", nudge: "nudge", "confirm-handled": "confirm" } as const;
   /** Everything the effort deck reads, from one board read. See deck.ts. */
@@ -5604,6 +5643,7 @@ export default async function plugin(bb: BbPluginApi) {
       linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
         updatedAt: facts.updatedAt }])),
+      homes: await threadHomes(efforts, work),
       read: { checkedAt: view.checkedAt, refreshing: view.refreshing, limitedUntil: view.rateLimitedUntil }, seen: new Map(Object.entries(seen)) };
   }
   const deckGet = async (seen?: Readonly<Record<string, number>>): Promise<DeckView> => deckView(await deckInput(seen));

@@ -39,32 +39,29 @@ describe("a thread's effort signals", () => {
 
 describe("a thread's effort chip", () => {
   const shelf = { id: "shelf", name: "Shelf order", oneOff: false }, pickup = { id: "pickup", name: "Store pickup", oneOff: false };
-  const counts = (effortId: string) => effortId === "done" ? null : 4;
+  const counts = (cardId: string) => cardId === "done" ? null : 4;
 
-  it("names the thread's own effort over the one it coordinates and the one its PRs are in", () => {
-    expect(threadEffortChip({ own: pickup, coordinates: shelf, linked: [{ repo: "inkwell/folio", effort: shelf }], needsYou: counts }))
+  it("names the thread's own effort over the one it coordinates and the one the deck places it in", () => {
+    expect(threadEffortChip({ own: pickup, coordinates: shelf, home: { kind: "effort", effort: shelf }, needsYou: counts }))
       .toEqual({ kind: "effort", effortId: "pickup", name: "Store pickup", oneOff: false, needsYou: 4, card: "pickup" });
-    expect(threadEffortChip({ own: null, coordinates: shelf, linked: [{ repo: "inkwell/folio", effort: pickup }], needsYou: counts }).effortId).toBe("shelf");
+    expect(threadEffortChip({ own: null, coordinates: shelf, home: { kind: "effort", effort: pickup }, needsYou: counts }).effortId).toBe("shelf");
   });
 
-  it("falls back to the effort most of its linked PRs are in", () => {
-    expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts,
-      linked: [{ repo: "inkwell/folio", effort: pickup }, { repo: "inkwell/folio", effort: shelf }, { repo: "inkwell/atlas", effort: shelf }] }).name).toBe("Shelf order");
+  // The chip and the deck agree: without an effort of its own, the chip names the card the deck puts the thread on (deck-homes.ts).
+  it("falls back to where the deck places the thread: the effort its own PRs are in", () => {
+    expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts, home: { kind: "effort", effort: shelf } }).name).toBe("Shelf order");
   });
 
-  it("falls back to the service card of its PRs' repository when no effort has them, whose PRs count as Needs you as an effort's do", () => {
-    expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts,
-      linked: [{ repo: "inkwell/Atlas", effort: null }, { repo: "inkwell/folio", effort: null }, { repo: "inkwell/atlas", effort: null }] }))
+  it("falls back to its repository's service card, whose PRs count as Needs you as an effort's do", () => {
+    expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts, home: { kind: "service", repo: "inkwell/atlas" } }))
       .toEqual({ kind: "service", effortId: null, name: "atlas · service", oneOff: false, needsYou: 4, card: "service:inkwell/atlas" });
-    // A tie goes by name, so the chip doesn't change between reads.
-    expect(threadEffortChip({ own: null, coordinates: null, needsYou: counts,
-      linked: [{ repo: "inkwell/folio", effort: null }, { repo: "inkwell/atlas", effort: null }] }).name).toBe(serviceName("inkwell/atlas"));
+    expect(serviceName("inkwell/atlas")).toBe("atlas · service");
   });
 
-  it("says No effort for a thread with no effort and no linked PR, and opens no card for an effort the deck doesn't draw", () => {
-    expect(threadEffortChip({ own: null, coordinates: null, linked: [], needsYou: counts }))
+  it("says No effort for a loose thread, and opens no card for an effort the deck doesn't draw", () => {
+    expect(threadEffortChip({ own: null, coordinates: null, home: null, needsYou: counts }))
       .toEqual({ kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null });
-    expect(threadEffortChip({ own: { id: "done", name: "Store hours", oneOff: false }, coordinates: null, linked: [], needsYou: counts }))
+    expect(threadEffortChip({ own: { id: "done", name: "Store hours", oneOff: false }, coordinates: null, home: null, needsYou: counts }))
       .toMatchObject({ kind: "effort", name: "Store hours", needsYou: 0, card: null });
   });
 });

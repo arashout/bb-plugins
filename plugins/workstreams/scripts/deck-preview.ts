@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { inkwellDeck, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
+import { inkwellDeck, inkwellThreads, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, stripChips, type KeyContext } from "../deck-view-model.js";
 import { DeckPane } from "../deck-screen.js";
 
@@ -24,7 +24,7 @@ const css = new URL("../dist/app.css", import.meta.url);
 if (!existsSync(css)) throw new Error("Run bb plugin build first: the preview reads dist/app.css.");
 const noop = () => {};
 const none = { rows: {}, at: {} };
-const view = inkwellDeck();
+const view = inkwellDeck(inkwellThreads());
 const order = view.active.map((item) => item.id);
 const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
 const ring = order;

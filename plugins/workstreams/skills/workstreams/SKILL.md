@@ -455,12 +455,12 @@ instruction; their thread and scope remain unchanged.
 
 The effort chip above a thread's composer names the thread's effort with its
 color and Needs you count, and opens that effort's card on the deck. Without an
-explicit effort (the thread's own, the one it coordinates, or the one its
-linked PRs are in), it names the `<repo> · service` card of the repository
-most of its linked PRs are in, with that card's Needs you count.
-Linked PRs are the ones the thread records and the PR in its exact checkout,
-which assigning the thread takes in; a link only by branch name or worked path
-doesn't count.
+effort of its own or one it coordinates, it names the card the deck places the
+thread on (see the effort deck's threads): an effort, a `<repo> · service`
+card with that card's Needs you count, or No effort for a loose thread. The
+popover's linked PRs are the ones the thread records and the PR in its exact
+checkout, which assigning the thread takes in; a link only by branch name or
+worked path doesn't count.
 
 The chip's popover lists efforts with suggested ones first, each with its
 signal: an effort has a PR the thread links, the title names one of its
@@ -820,7 +820,22 @@ is history. `deck-shared.ts` holds this one rule for every view.
   always wins. Its `suggestions` are `classify_get`'s groups cut to its PRs.
   `deck_batch_plan` takes its id as the `effortId`, and it is always active.
   Promoting one is `classify_new_effort` with all its PRs.
+- Last, **Loose threads** (`kind` `loose`, id `loose`), while any thread has
+  nowhere else to go. It has no PRs.
 - `oneOffsId`: One-offs, once it exists.
+
+Every visible thread is on exactly one card by its own evidence
+(`deck-homes.ts`). An explicit effort wins: the thread's intent, the effort it
+coordinates, then the effort most of its own PRs are in (merged ones too). Its
+own PRs are recorded or started links, a ticket in its title, actions it ran,
+and the PR in a checkout only it runs in, never a link through a checkout
+other threads share. Without an effort, it goes to the service card of the
+repository most of its own PRs are in; a tie goes to its environment's
+repository when that is one of the tied, else it is loose. With no PRs, the
+checkout only it runs in names the repository, which can draw a service card
+with threads and no PRs. An archived effort places no thread, and a thread in
+a done effort stays with it on the Done pile. Each card lists its threads on
+open PRs first.
 - `held`: held efforts' cards, which ask nothing. `done`: each done effort's
   name, merges, and still-open PRs, and each archived effort (`archived`)
   while it still owns open PRs, which pause as a done effort's do.

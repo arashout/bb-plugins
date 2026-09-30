@@ -308,34 +308,47 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
   const { card } = screen;
   const held = card.pile === "held";
   const service = card.kind === "service";
+  // A service card with only threads, and Loose threads, have nothing but their threads to show.
+  const bare = card.kind !== "effort" && card.stats.open === 0;
   const open = (id: string) => tiles.has(id);
   // Three waits, or two on a card under 700 px wide.
   const blocked = open("blocked") ? screen.blocked : screen.blocked.slice(0, 3);
-  const threads = open("threads") ? screen.threads : screen.threads.slice(0, 3);
+  const shown = bare ? 6 : 3;
+  const threads = open("threads") ? screen.threads : screen.threads.slice(0, shown);
   const total = screen.stats.bar.reduce((sum, item) => sum + item.count, 0) || 1;
   const { linear } = screen;
   const linearLine = linear.chips.length > 0 || linear.bar.length > 0;
   const ticketStates = `Tickets: ${linear.bar.map((state) => `${state.count} ${state.name}`).join(" · ")}`;
+  const threadsTile = <Tile id="threads" title="Threads" note={screen.threads.length || undefined} open={open("threads")} more={screen.threads.length > shown} run={run}
+    className={bare ? "col-span-6 @min-[900px]:col-span-12" : "col-span-6 @min-[900px]:row-span-3"}>
+    {threads.length ? <div className="-mx-1 grid">{threads.map((thread) => <button key={thread.id} type="button" onClick={() => run({ kind: "thread", id: thread.id })}
+      title={`Open "${thread.title}"`} className={cn("grid min-h-6 grid-cols-[10px_minmax(0,1fr)_auto_28px] items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
+      <span aria-hidden className={cn("size-2 rounded-full", thread.status === "active" ? "bg-sky-500/70 motion-safe:animate-pulse" : "bg-muted-foreground/40")} />
+      <span className="truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}<small className="ml-1.5 text-[11px] text-muted-foreground">{thread.ref}</small></span>
+      <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
+    </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>}
+  </Tile>;
   return <section data-deck-card={card.id} aria-label={card.name} className="@container relative rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
     style={{ backgroundImage: `linear-gradient(180deg, color-mix(in srgb, ${screen.color} 6%, transparent) 0, transparent 110px)` }}>
     <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-0.5">
       <div className="min-w-0 flex-[1_1_300px]">
         <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
-          <Dot color={screen.color} hollow={service} /><span className="truncate">{card.name}</span>
+          <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
           <span className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", TONE[screen.status.tone].text)}>{screen.status.text}</span>
         </h1>
         <p className="truncate text-[12px] text-muted-foreground" title={card.goal}>{card.goal || "No goal written yet."}{held && card.reason ? ` · held: ${card.reason}` : ""}</p>
       </div>
       <div className="flex flex-wrap gap-1.5">
-        {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, "border-foreground bg-foreground text-background")}>Resume</button> : <>
+        {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, "border-foreground bg-foreground text-background")}>Resume</button>
+          : bare ? null : <>
           <ActionButton id="advance" on={on} run={run} primary label={`Advance${screen.advance.length ? ` · ${screen.advance.length}` : ""}`} />
           {service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
             : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
         </>}
       </div>
     </div>
-    <div className="mt-2.5 grid grid-cols-6 gap-2 @min-[900px]:grid-cols-12">
+    {bare ? <div className="mt-2.5 grid grid-cols-6 gap-2 @min-[900px]:grid-cols-12">{threadsTile}</div> : <div className="mt-2.5 grid grid-cols-6 gap-2 @min-[900px]:grid-cols-12">
       <Tile id="next" title="Next steps" open={open("next")} more={false} run={run} className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-5"
         note={screen.next.criteria ? <span className="inline-flex items-center gap-1.5"><span aria-hidden className="inline-flex gap-0.5">{Array.from({ length: screen.next.criteria.needed },
           (_, index) => <i key={index} className={cn("inline-block size-2 rounded-full border", index < screen.next.criteria!.validated ? "border-transparent bg-emerald-500/60" : "border-border")} />)}</span>
@@ -369,15 +382,7 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
           {screen.stats.bar.map((item) => <i key={item.key} className={cn("block h-full", TONE[item.tone].bar)} style={{ flex: item.count / total }} />)}</div>
         {open("stats") ? <p className="mt-1 text-[11px] text-muted-foreground">{screen.stats.bar.map((item) => `${item.count} ${item.label}`).join(" · ")}</p> : null}
       </Tile>
-      <Tile id="threads" title="Threads" note={screen.threads.length || undefined} open={open("threads")} more={screen.threads.length > 3} run={run}
-        className="col-span-6 @min-[900px]:row-span-3">
-        {threads.length ? <div className="-mx-1 grid">{threads.map((thread) => <button key={thread.id} type="button" onClick={() => run({ kind: "thread", id: thread.id })}
-          title={`Open "${thread.title}"`} className={cn("grid min-h-6 grid-cols-[10px_minmax(0,1fr)_auto_28px] items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
-          <span aria-hidden className={cn("size-2 rounded-full", thread.status === "active" ? "bg-sky-500/70 motion-safe:animate-pulse" : "bg-muted-foreground/40")} />
-          <span className="truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}<small className="ml-1.5 text-[11px] text-muted-foreground">{thread.ref}</small></span>
-          <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
-        </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>}
-      </Tile>
+      {threadsTile}
       {/* On a card 700 px or wider, the chips, state bar, and target sit on one line in place of the summary; opened, the fields follow. */}
       <Tile id="linear" title="Linear" note={open("linear") ? undefined : <span className={cn(linearLine && "@min-[700px]:hidden")}>{linear.summary}</span>}
         open={open("linear")} more={linear.lines.length > 0} run={run} className="col-span-2 @min-[700px]:col-span-6">
@@ -401,7 +406,7 @@ export function Card({ screen, tiles, run, on }: { screen: CardScreen; tiles: Re
           className="col-span-2 @min-[700px]:col-span-3 @min-[900px]:col-span-6">
           {open(id) ? <ul className="grid gap-0.5 text-[12px]">{lines.map((line) => <li key={line} className="break-words">{line}</li>)}</ul> : null}
         </Tile>)}
-    </div>
+    </div>}
   </section>;
 }
 
@@ -419,7 +424,8 @@ export function CardBar({ name, color, status, advance, hollow }: { name: string
 export function CardSections({ screen, state, run, open, stuck }: { screen: CardScreen; state: RowState; run: Run; open: ReadonlySet<string>; stuck: boolean }) {
   return screen.sections.length ? <>{screen.sections.map((section) => <Section key={section.key} section={section} state={state} run={run} open={open.has(section.key)}
     stuck={stuck} held={screen.card.pile !== "active"} />)}</> : <p className="py-8 text-center text-[12px] text-muted-foreground">
-    {screen.card.kind === "service" ? "No open PRs here." : "No open PRs in this effort."}</p>;
+    {screen.card.kind === "loose" ? "Set each thread's effort from the chip above its composer." : screen.card.kind === "service" ? "No open PRs here."
+      : "No open PRs in this effort."}</p>;
 }
 
 // ---------------------------------------------------------------------------

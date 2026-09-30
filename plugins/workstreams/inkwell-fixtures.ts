@@ -5,6 +5,7 @@ import { feedbackVerificationState, type ApprovalFeedbackRecord } from "./approv
 import { advanceBatchSchema, type AdvanceBatch, type AdvanceJob } from "./bulk-advance.js";
 import { prSchema, type Pr, type RawUnit } from "./contract.js";
 import { deckView, type DeckInput, type DeckRowInput, type DeckView } from "./deck.js";
+import type { ThreadEvidence } from "./deck-homes.js";
 import type { SuggestionGroup } from "./effort-classify.js";
 import type { EffortRoster, RosterRow } from "./effort-roster.js";
 import { suggestReviewers } from "./inventory-actions.js";
@@ -442,6 +443,33 @@ function inventoryCase(feedback: ApprovalFeedbackRecords) {
 }
 
 /**
+ * Threads for the deck case, with the evidence the server gathers for each (deck-homes.ts), one per A17.1 case. Three run in the shared
+ * folio clone, whose checkout has folio #325's branch now, and link nothing of their own. One runs alone in a quill worktree with no PR.
+ * One works folio #325. One spans atlas and catalog evenly from a catalog checkout, and one spans atlas and folio from nowhere. One has
+ * Shelf order as its effort, and one links a merged Shelf order PR. Its threads include Store pickup's parent thread, which the deck case has.
+ */
+export function inkwellThreads(): Pick<DeckInput, "threads" | "homes"> {
+  const pr = (repo: string, number: number, effortId: string | null = null) => ({ url: url(repo, number), repo: `inkwell/${repo}`, effortId });
+  const shelf = INVENTORY_EFFORTS.shelf.id;
+  const specs: [id: string, title: string, hoursAgo: number, evidence: Omit<ThreadEvidence, "id">][] = [
+    ["thr_clone_footer", "Check the footer year", 30, { effortId: null, prs: [], checkout: null, environment: "inkwell/folio" }],
+    ["thr_clone_flaky", "Look at a flaky test", 5, { effortId: null, prs: [], checkout: null, environment: "inkwell/folio" }],
+    ["thr_clone_question", "How do shelves sort?", 50, { effortId: null, prs: [], checkout: null, environment: "inkwell/folio" }],
+    ["thr_quill_try", "Try a quieter quill layout", 8, { effortId: null, prs: [], checkout: "inkwell/quill", environment: "inkwell/quill" }],
+    ["thr_folio_recall", "Recall the last shelf", 3, { effortId: null, prs: [pr("folio", 325)], checkout: null, environment: null }],
+    ["thr_author_rename", "Rename the author field", 4, { effortId: null, prs: [pr("atlas", 410), pr("catalog", 97)], checkout: null, environment: "inkwell/catalog" }],
+    ["thr_audit_logs", "Audit request logs", 6, { effortId: null, prs: [pr("atlas", 410), pr("folio", 305)], checkout: null, environment: null }],
+    ["thr_shelf_notes", "Shelf order notes", 7, { effortId: shelf, prs: [], checkout: null, environment: null }],
+    ["thr_shelf_ship", "Ship the shelf fix", 9, { effortId: null, prs: [pr("folio", 290, shelf)], checkout: null, environment: null }],
+  ];
+  return {
+    threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }],
+      ...specs.map(([id, title, hoursAgo]) => [id, { title, status: "idle", updatedAt: INVENTORY_NOW - hoursAgo * HOUR }] as const)]),
+    homes: specs.map(([id, , , evidence]) => ({ id, ...evidence })),
+  };
+}
+
+/**
  * The classifier's suggestions for the deck case's four PRs no effort owns: folio #325 for Shelf order, atlas #410 and catalog #97, in two
  * repositories, as a new effort, and folio #305 with no clear signal.
  */
@@ -486,7 +514,7 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
     merges: [{ url: url("folio", 290), at: INVENTORY_NOW - day, effortId: shelf }],
     linear: new Map([["ABC-360", { identifier: "ABC-360", title: "Store shelf order", description: null, state: { name: "In Review", type: "started" },
       project: { id: "p1", name: "Shelf redesign" }, parent: null, labels: ["shelves"], url: null, updatedAt: null, source: "agent" }]]),
-    threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }]]),
+    threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }]]), homes: [],
     classify: { oneOffsId: oneOffs.id, groups: inkwellSuggestions() },
     read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false, limitedUntil: null }, seen: new Map(), ...patch });
 }
