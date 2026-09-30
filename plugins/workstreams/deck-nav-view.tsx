@@ -15,9 +15,9 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor, type FocusKey,
   type Place, type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch,
-  readText, refreshNote, rowFacts, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type RowFacts }
-  from "./deck-view-model";
+import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, paletteItems,
+  paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
+  type PaletteItem, type RowFacts } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
@@ -222,9 +222,11 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   // The order this render reads is the one you last saw until the effect below saves the new one, so the card landed on is kept now.
   const cur = landAfter(place.order, place.cur, ring);
   if (cur) place.cur = cur;
-  const card = cur ? cards.get(cur) ?? null : null;
+  const full = cur ? cards.get(cur) ?? null : null;
   const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
   const here = viewPlace(cur);
+  // A header count shows its rows alone until you show all again; everything else on the card counts them all.
+  const card = full && here.filter ? { ...full, sections: filterSections(full, here.filter) } : full;
   // Focus and scroll events can fire between a flip's render and its effects; they read the card shown now.
   const curRef = useRef(cur);
   curRef.current = cur;
@@ -235,7 +237,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const settleable = card?.settleable ?? false;
   const chips = useMemo(() => stripChips(order, cards, cur), [order, cards, cur]);
   const context: KeyContext = { view: "deck", cur: card, service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused, selected,
-    seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0 };
+    seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0, filter: here.filter?.kind ?? null };
   const on = availability(context);
   const persist = useCallback(() => writeStore("sessionStorage", PLACE_KEY, placeRef.current), []);
 
@@ -641,6 +643,15 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     next.scrollIntoView({ block: "nearest" });
   }
   const toggleIn = (list: string[], item: string) => list.includes(item) ? list.filter((value) => value !== item) : [...list, item];
+  /** Show only the rows a header count names, from the first of them; the same count, or esc, shows all again, holding the row you're on. */
+  function toggleFilter(kind: "needs" | "blocked") {
+    if (!full) return;
+    if (here.filter?.kind === kind) { here.filter = null; pendingAnchor.current = captureAnchor(); persist(); bump(); return; }
+    here.filter = rowFilter(full, kind);
+    persist(); bump();
+    const first = filterSections(full, here.filter)[0]?.key;
+    if (first) window.requestAnimationFrame(() => jumpSection(first));
+  }
   /** A section's header at the top, under the card's bar, with focus on its first row you can act on, which flashes so the eye finds it. */
   function jumpSection(key: string) {
     const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-sec="${CSS.escape(key)}"]`);
@@ -721,7 +732,12 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         persist(); bump(); say(`Selected ${same.length} in this section.`); return;
       }
       case "expand": if (row) { here.expanded = toggleIn(here.expanded, row.prUrl); pendingAnchor.current = captureAnchor(); persist(); bump(); } return;
-      case "clear": if (here.selected.length) { here.selected = []; persist(); bump(); } else if (row && here.expanded.includes(row.prUrl)) runAction("expand", row); return;
+      case "clear":
+        if (here.selected.length) { here.selected = []; persist(); bump(); }
+        else if (row && here.expanded.includes(row.prUrl)) runAction("expand", row);
+        else if (here.filter) toggleFilter(here.filter.kind);
+        return;
+      case "only-needs": case "only-blocked": toggleFilter(id === "only-needs" ? "needs" : "blocked"); return;
       case "open-thread": if (row?.row?.thread) navigate.toThread(row.row.thread.id); return;
       case "open-pr": if (row) navigate.openUrl(row.prUrl); return;
       case "accept": {
@@ -821,6 +837,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       case "pile": setPile(command.pile); return;
       case "revoke": void rpc.call("inventory_confirm_revoke", { prUrl: command.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); },
         (cause: unknown) => say(message(cause))); return;
+      case "filter": toggleFilter(command.filter); return;
       case "notes-draft": setNotesEdit((current) => current && { ...current, draft: command.text }); return;
       case "notes-cancel": setNotesEdit(null); pendingFocus.current = { id: "notes-edit" }; return;
       case "notes-save": saveNotes(); return;
@@ -897,7 +914,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
       open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
-      notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} />
+      notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} filter={here.filter?.kind ?? null} />
     {batch.element}
     {notes.element}
     <DeckDialog open={dialog?.kind === "hold" || dialog?.kind === "hold-pr"} title={dialog?.kind === "hold" ? `Hold ${dialog.name}` : dialog?.kind === "hold-pr" ? `Hold ${dialog.ref}` : ""}

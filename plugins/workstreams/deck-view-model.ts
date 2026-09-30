@@ -10,7 +10,7 @@
 import type { DeckCard, DeckRow, DeckView } from "./deck";
 import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type ActedKind, type BatchKind,
   type DeckPile, type DeckSection, type DeckWrite } from "./deck-shared";
-import { settleRows, type SettledRow, type Shown } from "./deck-place";
+import { settleRows, type RowFilter, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
@@ -245,6 +245,8 @@ export type Accepted = ReadonlyMap<string, { actionId: string; text: string; prU
 export type CardScreen = {
   card: DeckCard; color: string;
   status: { text: string; tone: Tone };
+  /** The status line's parts on an active card, "3 need you · 2 blocked · 1 in flight": the first two show those rows alone. */
+  counts: { key: "needs" | "blocked" | "flight" | "held"; n: number; text: string }[];
   /** Needs you now, the PRs Advance plans (the safe moves drawn as needing you), and what Mark seen would settle. */
   needsYou: number; advance: string[]; changed: number; settleable: boolean;
   /** Its PRs on hold now, which its header's Held chip counts and jumps to. */
@@ -277,6 +279,9 @@ const ACTIVITY: Record<DeckCard["activity"][number]["kind"], string> = { merged:
 /** Where a suggestion points, as a row's chip says it. */
 const pointer = (target: SuggestionGroup["target"]) => target?.kind === "effort" ? `→ ${target.name}` : target?.kind === "new" ? `→ new ${target.name}`
   : target?.kind === "one-off" ? "→ One-offs" : null;
+
+/** Whether a drawn row is one a header count counts and shows alone: it needs you, or it's in Blocked where you saw it. */
+const inCount = (kind: RowFilter["kind"], line: DeckLine) => kind === "needs" ? line.needs : line.section === "blocked" && !line.ghost;
 
 /**
  * A card as the deck draws it, with its rows settled against what you last marked seen. On a service card, each row names where its
@@ -329,13 +334,14 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   const needsYou = shown.filter((line) => line.needs).length;
   const suggest = suggestGroups(card, shown, context.accepted ?? new Map());
   // Worded from the rows as drawn, so the header, the strip, and the sections agree while rows wait for Mark seen.
-  const held = counts(["held"]);
-  const parts = [needsYou && `${needsYou} need you`, card.blocked.length && `${card.blocked.length} blocked`,
-    counts(["flight"]) && `${counts(["flight"])} in flight`, held && `${held} held`].filter(Boolean);
+  const held = counts(["held"]), blocked = shown.filter((line) => inCount("blocked", line)).length;
+  const parts = ([["needs", needsYou, "need you"], ["blocked", blocked, "blocked"], ["flight", counts(["flight"]), "in flight"], ["held", held, "held"]] as const)
+    .flatMap(([key, n, word]) => n ? [{ key, n, text: `${n} ${word}` }] : []);
   return {
     card, color: effortColor(card.id, card.oneOff),
     status: card.pile === "held" ? { text: card.status.text, tone: "gray" }
-      : { text: parts.join(" · ") || "No open PRs", tone: needsYou ? "amber" : card.blocked.length || held ? "blue" : current.length ? "green" : "gray" },
+      : { text: parts.map((part) => part.text).join(" · ") || "No open PRs", tone: needsYou ? "amber" : blocked || held ? "blue" : current.length ? "green" : "gray" },
+    counts: card.pile === "held" ? [] : parts,
     needsYou,
     advance: shown.filter((line) => line.needs && (BATCH_KINDS as readonly string[]).includes(line.section)).map((line) => line.prUrl),
     held,
@@ -440,6 +446,22 @@ export function refreshNote(ref: string, before: { status: string; section: Deck
   return `${ref}: ${[before.status !== after.status && `${before.status} → ${after.status}`, moved].filter(Boolean).join(" · ")}`;
 }
 
+/** What a header count shows alone now: the rows that match, which the filter keeps until you show all. */
+export function rowFilter(screen: CardScreen, kind: RowFilter["kind"]): RowFilter {
+  return { kind, prUrls: screen.sections.flatMap((section) => section.lines).filter((line) => inCount(kind, line))
+    .map((line) => line.prUrl) };
+}
+/** A card's sections cut to what its filter shows: the rows it named, and any that match it now. */
+export function filterSections(screen: CardScreen, filter: RowFilter | null): SectionScreen[] {
+  if (!filter) return screen.sections;
+  const now = new Set(rowFilter(screen, filter.kind).prUrls);
+  const keep = (prUrl: string) => now.has(prUrl) || filter.prUrls.includes(prUrl);
+  return screen.sections.flatMap((section) => {
+    const lines = section.lines.filter((line) => keep(line.prUrl));
+    return lines.length ? [{ ...section, lines, arriving: section.arriving.filter((item) => keep(item.prUrl)) }] : [];
+  });
+}
+
 /** The top bar's read status: when the deck last read GitHub, and GitHub's rate limit while it holds reads. */
 export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limitedUntil">, now: number): string {
   const limited = view.limitedUntil !== null && view.limitedUntil > now ? `Rate-limited until ${clock(view.limitedUntil, now)} · ` : "";
@@ -466,6 +488,8 @@ export type KeyContext = {
   focused: DeckLine | null;
   selected: readonly DeckLine[];
   seenAvailable: boolean; undo: boolean; held: number; done: number;
+  /** The header count whose rows show alone. */
+  filter?: RowFilter["kind"] | null;
   /** In All PRs: whether a row is focused, whether it has a thread, and the moves its inventory row offers. */
   prs?: { row: boolean; thread: boolean; moves: ReadonlySet<DeckActionId> };
 };
@@ -544,7 +568,10 @@ export function availability(context: KeyContext): Availability {
   set("select", deck && !!focused && !focused.dim, deck ? "focus a live row first" : "Efforts only");
   set("select-section", deck && !!focused, deck ? "focus a row first" : "Efforts only");
   set("expand", deck && !!focused, deck ? "focus a row first" : "Efforts only");
-  set("clear", selected.length > 0, "nothing selected");
+  set("clear", selected.length > 0 || !!context.filter, "nothing selected");
+  const count = (kind: RowFilter["kind"]) => !!card && (context.filter === kind || card.counts.some((part) => part.key === kind));
+  set("only-needs", count("needs"), card ? "nothing here needs you" : deck ? NO_CARD : "Efforts only");
+  set("only-blocked", count("blocked"), card ? "nothing here is blocked" : deck ? NO_CARD : "Efforts only");
   set("open-thread", deck ? !!focused?.row?.thread : !!prs?.thread, row ? "the row has no thread" : "focus a row first");
   set("open-pr", row, "focus a row first");
   set("accept", sorting, service ? "focus a row first" : "only a service card's rows move from here");
@@ -577,7 +604,7 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && context.cur?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
   if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
-  return pick(["next", "flip"], ["row-next", "rows"], advance, ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
+  return pick(["next", "flip"], ["row-next", "rows"], advance, context.filter ? ["clear", "show all"] : ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
 }
 
 /** One palette entry: a registry action, or a go-to, resume, or reopen for one effort. */

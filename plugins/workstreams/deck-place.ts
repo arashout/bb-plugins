@@ -121,10 +121,16 @@ export function focusFallback<E>(key: FocusKey, dom: FocusDom<E>): E | null {
   return (key.row ? dom.row(key.row) : null) ?? (key.section ? dom.nextLiveRow(key.section) : null) ?? dom.firstLiveRow() ?? dom.heading();
 }
 
+/**
+ * The rows a card's header count shows alone: what needs you, or what's blocked, and every row that matched when you chose it, so a row
+ * you act on, which then needs you no more, stays where it was until you show all again.
+ */
+export type RowFilter = { kind: "needs" | "blocked"; prUrls: string[] };
 /** Each view's place, which the session keeps: the deck's current card and the view you were in, and per view what you had open. */
-export type ViewPlace = { anchor: Anchor | null; scrollTop: number; focus: string | null; selected: string[]; expanded: string[]; tiles: string[]; open: string[] };
+export type ViewPlace = { anchor: Anchor | null; scrollTop: number; focus: string | null; selected: string[]; expanded: string[]; tiles: string[]; open: string[];
+  filter: RowFilter | null };
 export type Place = { view: "deck" | "prs"; cur: string | null; order: string[]; views: Record<string, ViewPlace> };
-export const EMPTY_VIEW: ViewPlace = { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [] };
+export const EMPTY_VIEW: ViewPlace = { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [], filter: null };
 export const PLACE_KEY = "bb-workstreams:deck-place";
 /** What each view last marked seen, and when you last marked each PR's row seen, which outlast the session like the roster's. */
 export const SEEN_KEY = "bb-workstreams:deck-seen";
@@ -136,6 +142,10 @@ const anchorOf = (value: unknown): Anchor | null => {
   if (!item || typeof item.at !== "number") return null;
   return typeof item.row === "string" ? { row: item.row, at: item.at } : item.card === true ? { card: true, at: item.at } : null;
 };
+const filterOf = (value: unknown): RowFilter | null => {
+  const item = value as { kind?: unknown; prUrls?: unknown } | null;
+  return item && (item.kind === "needs" || item.kind === "blocked") ? { kind: item.kind, prUrls: strings(item.prUrls) } : null;
+};
 
 /** A stored place, with anything missing or malformed dropped rather than trusted. */
 export function readPlace(raw: string | null): Place {
@@ -145,7 +155,7 @@ export function readPlace(raw: string | null): Place {
   for (const [key, item] of Object.entries(typeof value.views === "object" && value.views ? value.views as Record<string, Record<string, unknown>> : {})) {
     if (!item || typeof item !== "object") continue;
     views[key] = { anchor: anchorOf(item.anchor), scrollTop: typeof item.scrollTop === "number" ? item.scrollTop : 0, focus: typeof item.focus === "string" ? item.focus : null,
-      selected: strings(item.selected), expanded: strings(item.expanded), tiles: strings(item.tiles), open: strings(item.open) };
+      selected: strings(item.selected), expanded: strings(item.expanded), tiles: strings(item.tiles), open: strings(item.open), filter: filterOf(item.filter) };
   }
   return { view: value.view === "prs" ? "prs" : "deck", cur: typeof value.cur === "string" ? value.cur : null, order: strings(value.order), views };
 }

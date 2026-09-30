@@ -21,7 +21,7 @@ export type KeyGroup = (typeof KEY_GROUPS)[number];
  */
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
-  | "held" | "tiles" | "notes" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
+  | "held" | "tiles" | "notes" | "only-needs" | "only-blocked" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
 /** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine, and "⇧H" is Shift with h. */
 export type DeckAction = { id: DeckActionId; group: KeyGroup; title: string; keys: readonly string[]; effect: KeyEffect };
@@ -41,6 +41,8 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "held", group: "Card", title: "Go to held PRs", keys: ["⇧H"], effect: "nav" },
   { id: "tiles", group: "Card", title: "Show or hide every tile's details", keys: ["i"], effect: "local" },
   { id: "notes", group: "Card", title: "Edit the effort's notes", keys: ["⇧N"], effect: "local" },
+  { id: "only-needs", group: "Card", title: "Show only what needs you, or all", keys: [], effect: "local" },
+  { id: "only-blocked", group: "Card", title: "Show only what's blocked, or all", keys: [], effect: "local" },
   { id: "merge", group: "Act", title: "Preview merge…", keys: ["m"], effect: "preview" },
   { id: "confirm", group: "Act", title: "Confirm review notes…", keys: ["c"], effect: "dialog" },
   { id: "nudge", group: "Act", title: "Nudge reviewers…", keys: ["n"], effect: "confirm" },

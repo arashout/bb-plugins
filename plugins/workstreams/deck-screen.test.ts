@@ -213,6 +213,20 @@ describe("the effort deck's markup", () => {
   });
 
   // Notes are a stopgap for what the card doesn't track yet: one line until you open them, bb's Markdown once you do, and edited in place.
+  it("makes the header's need-you and blocked counts buttons that show those rows alone, with a line that shows all again", () => {
+    const html = pane(inkwellDeck(), "effort-store-pickup");
+    expect(html).toMatch(/<button type="button" data-deck-focus="count-needs" aria-pressed="false" title="Show only these 3"[^>]*>3 need you<\/button>/u);
+    expect(html).toMatch(/<button type="button" data-deck-focus="count-blocked" aria-pressed="false" title="Show only these 2"[^>]*>2 blocked<\/button>/u);
+    expect(html).not.toContain("data-deck-filter");
+    const view = inkwellDeck();
+    const full = cardScreen(view.active.find((item) => item.id === "effort-store-pickup")!, none, { now: NOW });
+    const cut = { ...full, sections: full.sections.filter((section) => section.key === "blocked") };
+    const filtered = pane(view, "effort-store-pickup", { card: cut, filter: "blocked" });
+    expect(filtered).toMatch(/data-deck-focus="count-blocked" aria-pressed="true" title="Show all rows \(esc\)"/u);
+    expect(text(filtered)).toContain("Only what's blocked · 2 Show all esc Blocked 2");
+    expect(filtered).not.toContain('data-deck-sec="work"');
+  });
+
   it("shows an effort's notes as their first line, renders them with the Markdown it's given when opened, and edits them in place", () => {
     const body = "## Flags\n- shelf_v2 on for staff\n\nExperiment: sort by genre.";
     const view = inkwellDeck();

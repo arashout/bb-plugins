@@ -5,7 +5,7 @@
 // data comes in as props, every click goes out through one `run` command, no
 // SDK hook is called, and imports stay relative, so static-markup tests can
 // render it. Color appears only where the move is yours, and muted.
-import type { ReactNode, RefObject } from "react";
+import { Fragment, type ReactNode, type RefObject } from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
 import type { SeedProposal } from "./linear-seed";
@@ -29,6 +29,8 @@ export type DeckCommand =
   | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null }
   /** Take back your confirmation of a PR's review notes. */
   | { kind: "revoke"; prUrl: string }
+  /** Show only the rows a header count names, or all again. */
+  | { kind: "filter"; filter: "needs" | "blocked" }
   /** The Notes tile's editor: what you typed, save (⌘↵), or cancel (esc). */
   | { kind: "notes-draft"; text: string } | { kind: "notes-save" } | { kind: "notes-cancel" };
 export type Run = (command: DeckCommand) => void;
@@ -352,6 +354,22 @@ function Tile({ id, title, note, open, more, run, className, action, children }:
   </div>;
 }
 
+/**
+ * The status line. "N need you" and "N blocked" show only those rows, and again show all; `filter` is the one showing alone. `bar`: the
+ * card's sticky one-line bar, whose copies take no focus id of their own.
+ */
+function Counts({ screen, filter, run, bar }: { screen: CardScreen; filter?: "needs" | "blocked" | null; run: Run; bar?: boolean }) {
+  const tone = TONE[screen.status.tone].text;
+  if (!screen.counts.length) return <span className={cn("shrink-0 text-[11.5px] font-medium", tone)}>{screen.status.text}</span>;
+  return <span data-deck-counts className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", tone)}>
+    {screen.counts.map((part, index) => <Fragment key={part.key}>{index ? <span aria-hidden>·</span> : null}
+      {part.key === "needs" || part.key === "blocked" ? <button type="button" data-deck-focus={bar ? undefined : `count-${part.key}`} aria-pressed={filter === part.key}
+        title={filter === part.key ? "Show all rows (esc)" : `Show only these ${part.n}`} onClick={() => run({ kind: "filter", filter: part.key as "needs" | "blocked" })}
+        className={cn("rounded px-0.5 underline decoration-dotted underline-offset-2 hover:decoration-solid", RING, filter === part.key && "bg-foreground/[0.08] decoration-solid")}>
+        {part.text}</button> : <span>{part.text}</span>}</Fragment>)}
+  </span>;
+}
+
 /** The Notes tile's editor while it's open: what you typed, the revision it edits, and a save that's running or was refused. */
 export type NotesEdit = { draft: string; busy: boolean; error: string | null };
 
@@ -398,8 +416,8 @@ function NotesTile({ notes, edit, open, run, markdown }: { notes: NonNullable<Ca
  * `keyless` drops its Advance's badge while a acts on a focused row or a selection. `notes` is the Notes editor while it's open on this
  * card, and `markdown` renders notes; without it they show as plain text.
  */
-export function Card({ screen, tiles, run, on, keyless, notes, markdown }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability; keyless?: boolean;
-  notes?: NotesEdit | null; markdown?: (body: string) => ReactNode }) {
+export function Card({ screen, tiles, run, on, keyless, notes, markdown, filter }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability;
+  keyless?: boolean; notes?: NotesEdit | null; markdown?: (body: string) => ReactNode; filter?: "needs" | "blocked" | null }) {
   const { card } = screen;
   const held = card.pile === "held";
   const service = card.kind === "service";
@@ -431,8 +449,8 @@ export function Card({ screen, tiles, run, on, keyless, notes, markdown }: { scr
         <div className="flex min-w-0 items-center gap-2">
           <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
             <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
-            <span className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", TONE[screen.status.tone].text)}>{screen.status.text}</span>
           </h1>
+          <Counts screen={screen} filter={filter} run={run} />
           {/* Held PRs are one press away on every card: the chip jumps to its Held section. */}
           {screen.held ? <button type="button" data-deck-focus="held" onClick={() => run({ kind: "action", id: "held" })} title={`Go to the held PRs (${ACTION.held.keys[0]})`}
             className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] text-muted-foreground hover:text-foreground")}>Held · {screen.held}<Kbd>{ACTION.held.keys[0]}</Kbd></button>
@@ -512,12 +530,21 @@ export function Card({ screen, tiles, run, on, keyless, notes, markdown }: { scr
   </section>;
 }
 
-/** The one-line card header that stays once the card's own header scrolls away. */
-export function CardBar({ name, color, status, advance, hollow }: { name: string; color: string; status?: { text: string; tone: Tone }; advance?: ReactNode; hollow?: boolean }) {
+/** Above the rows while a header count shows them alone: what shows, how many, and Show all. */
+function FilterLine({ kind, n, run }: { kind: "needs" | "blocked"; n: number; run: Run }) {
+  return <div data-deck-filter={kind} className="flex min-h-8 items-center gap-2 pl-2 pr-1 text-[12px] text-muted-foreground">
+    <span>Only {kind === "needs" ? "what needs you" : "what's blocked"} · {n}</span><span className="flex-1" />
+    <button type="button" data-deck-focus="show-all" onClick={() => run({ kind: "filter", filter: kind })} className={GHOST}>Show all<Kbd>esc</Kbd></button>
+  </div>;
+}
+
+/** The one-line card header that stays once the card's own header scrolls away; `counts` stands in for its status line. */
+export function CardBar({ name, color, status, counts, advance, hollow }: { name: string; color: string; status?: { text: string; tone: Tone }; counts?: ReactNode;
+  advance?: ReactNode; hollow?: boolean }) {
   return <div className="sticky top-0 z-[6] -mb-[34px] h-[34px] border-b border-border/70 bg-background">
     <div className="mx-auto flex h-full max-w-3xl items-center gap-2 px-4">
       <Dot color={color} hollow={hollow} /><b className="truncate text-[13px] font-semibold">{name}</b>
-      {status ? <span className={cn("shrink-0 text-[11.5px]", TONE[status.tone].text)}>{status.text}</span> : null}
+      {counts ?? (status ? <span className={cn("shrink-0 text-[11.5px]", TONE[status.tone].text)}>{status.text}</span> : null)}
       <span className="flex-1" />{advance}
     </div>
   </div>;
@@ -974,6 +1001,8 @@ export type DeckPaneProps = {
   chipsRef?: RefObject<HTMLDivElement | null>; viewRef?: RefObject<HTMLDivElement | null>;
   /** The Notes editor while it's open on the card shown, and what renders notes as Markdown. */
   notes?: NotesEdit | null; markdown?: (body: string) => ReactNode;
+  /** The header count whose rows show alone; `card`'s sections are already cut to them. */
+  filter?: "needs" | "blocked" | null;
 };
 
 export function DeckPane(props: DeckPaneProps) {
@@ -985,14 +1014,16 @@ export function DeckPane(props: DeckPaneProps) {
     <Strip chips={props.chips} cur={props.cur} deck held={props.held} done={props.done} pile={props.pile} run={props.run} chipsRef={props.chipsRef} />
     <div ref={props.scrollerRef} data-deck-scroller className="@container relative min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]">
       {stuck && card ? <CardBar name={card.card.name} color={card.color} hollow={card.card.kind !== "effort"} status={card.status}
+        counts={<Counts screen={card} filter={props.filter} run={props.run} bar />}
         advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`}
           keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className="mx-auto max-w-3xl px-2 pb-10 pt-3 @min-[720px]:px-4">
         {card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
-          markdown={props.markdown} /></Stack>
+          markdown={props.markdown} filter={props.filter} /></Stack>
           <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
-            <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} /></div></>
+            {props.filter ? <FilterLine kind={props.filter} n={card.sections.reduce((sum, section) => sum + section.lines.length, 0)} run={props.run} /> : null}
+            {props.filter && !card.sections.length ? null : <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} />}</div></>
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck."
             : props.empty ? "Nothing is open." : "Reading your efforts…"}</p>}
       </div>

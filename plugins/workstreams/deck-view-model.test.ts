@@ -3,8 +3,8 @@ import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { withArrivals } from "./deck-place.js";
-import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, paletteItems, readText, refreshNote, rowFacts,
-  stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, paletteItems, readText,
+  refreshNote, rowFacts, rowFilter, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -381,6 +381,39 @@ describe("what the keys act on", () => {
     // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.
     const prs = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["nudge"]) } });
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
+  });
+
+  // "3 need you" and "2 blocked" in a card's header each show those rows alone. Acting on one there must not pull it out from under you.
+  it("cuts a card to the rows a header count names, and keeps one that stops matching until you show all", () => {
+    const pickup = card(inkwellDeck(), PICKUP);
+    expect(pickup.counts.map((part) => [part.key, part.n, part.text])).toEqual([["needs", 3, "3 need you"], ["blocked", 2, "2 blocked"]]);
+    const refs = (screen: CardScreen, filter: ReturnType<typeof rowFilter> | null) => filterSections(screen, filter).map((section) => [section.key,
+      section.lines.map((line) => line.ref)]);
+    const needs = rowFilter(pickup, "needs");
+    expect(refs(pickup, needs)).toEqual([["work", ["quill #210", "quill #211", "spine #155"]]]);
+    expect(refs(pickup, rowFilter(pickup, "blocked"))).toEqual([["blocked", ["quill #212", "spine #156"]]]);
+    expect(filterSections(pickup, null)).toBe(pickup.sections);
+    // Asked to fix, quill #210 dims and needs you no more; the filter you chose keeps it where it was, and a new one leaves it out.
+    const acted = card(inkwellDeck({}, (row) => row.number === 210 ? { acted: { kind: "nudge", state: "sent", at: NOW, batchId: "b1" } } : {}), PICKUP);
+    expect(refs(acted, needs)).toEqual([["work", ["quill #210", "quill #211", "spine #155"]]]);
+    expect(refs(acted, rowFilter(acted, "needs"))).toEqual([["work", ["quill #211", "spine #155"]]]);
+    // Esc shows all again, which the hint bar says; a count with nothing behind it offers nothing.
+    const on = availability(context(pickup, { filter: "needs" }));
+    expect([on.clear.on, on["only-needs"].on, on["only-blocked"].on]).toEqual([true, true, true]);
+    expect(hintKeys(context(pickup, { filter: "needs" }), on)).toContainEqual(["esc", "show all"]);
+    expect(availability(context(card(inkwellDeck(), SHELF)))["only-blocked"]).toEqual({ on: false, why: "nothing here is blocked" });
+  });
+
+  // The number on "N blocked" is a promise about what clicking it shows, so both count the rows as drawn until Mark seen.
+  it("counts Blocked as drawn, so a row a read moved in or out doesn't make the header's number and its rows disagree", () => {
+    const decided = (number: number) => inkwellDeck({}, (row) => row.number === number ? { decision: { n: 1, question: "Which counter?", since: null } } : {});
+    const seenAs = (view: DeckView) => ({ rows: { [PICKUP]: cardSnapshot(view.active.find((item) => item.id === PICKUP)!) }, at: {} });
+    const header = (screen: CardScreen) => [screen.counts.find((part) => part.key === "blocked")?.text,
+      filterSections(screen, rowFilter(screen, "blocked")).flatMap((section) => section.lines.map((line) => line.ref))];
+    // quill #211 is blocked on a decision now; it waits in Work in threads until you mark the card seen.
+    expect(header(card(decided(211), PICKUP, seenAs(inkwellDeck())))).toEqual(["2 blocked", ["quill #212", "spine #156"]]);
+    // quill #210 isn't blocked now; it waits in Blocked until you mark the card seen.
+    expect(header(card(inkwellDeck(), PICKUP, seenAs(decided(210))))).toEqual(["3 blocked", ["quill #210", "quill #212", "spine #156"]]);
   });
 
   it("offers an effort's notes to edit, with ⇧N, and none on a service card", () => {

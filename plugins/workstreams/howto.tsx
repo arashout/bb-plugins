@@ -119,7 +119,9 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
           open PRs sit below it in sections by the move each needs, with one button per section.
         </p>
         <p>
-          Color marks a move that&apos;s yours, and Needs you counts those moves; gray waits on others. A blue dot marks a
+          Color marks a move that&apos;s yours, and Needs you counts those moves; gray waits on others. In a card&apos;s
+          header, &ldquo;N need you&rdquo; and &ldquo;N blocked&rdquo; show only those rows; press it again, or esc, to show
+          all. A blue dot marks a
           change since you looked, and rows stay in place until you mark the view seen: a row a read moved says what
           changed and links to where it goes, and one that merged or closed stays as a one-line ghost. ↻ on a row reads
           it from GitHub again and spins until the row updates, and what changed flashes.

@@ -121,9 +121,11 @@ describe("focus after an action or a dialog", () => {
 describe("stored place", () => {
   it("reads back what the session kept, and drops what it can't trust instead of failing", () => {
     const place = { view: "prs", cur: "effort-shelf", order: ["effort-shelf", 3], views: { "effort-shelf": { anchor: { row: "u", at: 12 }, scrollTop: 300,
-      focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"] }, broken: 7 } };
+      focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"], filter: { kind: "needs", prUrls: ["u", 4] } },
+      "effort-pickup": { filter: { kind: "everything" } }, broken: 7 } };
     expect(readPlace(JSON.stringify(place))).toEqual({ view: "prs", cur: "effort-shelf", order: ["effort-shelf"], views: { "effort-shelf": {
-      anchor: { row: "u", at: 12 }, scrollTop: 300, focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"] } } });
+      anchor: { row: "u", at: 12 }, scrollTop: 300, focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"], filter: { kind: "needs", prUrls: ["u"] } },
+      "effort-pickup": { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [], filter: null } } });
     expect(readPlace("{not json")).toEqual({ view: "deck", cur: null, order: [], views: {} });
     expect(readPlace(null).view).toBe("deck");
   });
