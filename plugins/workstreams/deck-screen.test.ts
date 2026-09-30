@@ -129,6 +129,23 @@ describe("the effort deck's markup", () => {
     expect(html.match(new RegExp(`data-deck-row="${url("folio", 343)}"`, "gu"))).toHaveLength(1);
   });
 
+  it("puts Refresh on each row, shown on the row you point at, and spins it in sight while GitHub reads the PR", () => {
+    const pr340 = url("folio", 340);
+    const idle = section(pane(inkwellDeck(), SHELF), "merge").split("data-deck-row=").find((part) => part.startsWith(`"${pr340}"`))!;
+    expect(idle).toMatch(/<button type="button" tabindex="-1" data-deck-refresh="idle" aria-label="Refresh folio #340 from GitHub" title="Refresh from GitHub" class="[^"]*opacity-0 group-hover:opacity-100[^"]*"><span aria-hidden="true" class="inline-block leading-none">↻<\/span><\/button>/u);
+    const html = pane(inkwellDeck(), SHELF, { state: { selected: new Set(), expanded: new Set([pr340]), focus: null, refreshing: new Set([pr340]) } });
+    const busy = section(html, "merge").split("data-deck-row=").find((part) => part.startsWith(`"${pr340}"`))!;
+    expect(busy).toMatch(/data-deck-refresh="busy" aria-busy="true" aria-label="Reading folio #340 from GitHub" title="Reading GitHub now…" class="(?![^"]*opacity-0)[^"]*"><span aria-hidden="true" class="inline-block leading-none motion-safe:animate-spin">↻/u);
+    // Its details say so too, and won't start a second read.
+    expect(busy).toMatch(/<button type="button" aria-busy="true" disabled=""[^>]*><span[^>]*motion-safe:animate-spin">↻<\/span>Refreshing…<\/button>/u);
+    // A ghost has nothing left to read.
+    const seen = { rows: { [SHELF]: cardSnapshot(inkwellDeck().active.find((item) => item.id === SHELF)!) }, at: {} };
+    const after = inkwellDeck({}, (row) => row.number === 341 ? { effort: null } : {});
+    const ghost = section(pane(after, SHELF, { card: cardScreen(after.active.find((item) => item.id === SHELF)!, seen, { now: NOW }) }), "merge")
+      .split("data-deck-row=").find((part) => part.startsWith(`"${url("folio", 341)}"`))!;
+    expect(ghost).not.toContain("data-deck-refresh");
+  });
+
   it("says on the row when its last read failed", () => {
     const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } } : {});
     const row = section(pane(view, SHELF), "merge").split("data-deck-row=").find((part) => part.includes("folio/pull/340"))!;

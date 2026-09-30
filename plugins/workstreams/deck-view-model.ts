@@ -409,6 +409,28 @@ function suggestGroups(card: DeckCard, shown: readonly DeckLine[], accepted: Acc
   return groups.filter((group) => group.lines.length || group.accepted);
 }
 
+/** Each open row's state and section in one read, by PR, to tell what a later read changed. */
+export type RowFacts = ReadonlyMap<string, { ref: string; status: string; section: DeckSection }>;
+export function rowFacts(view: Pick<DeckView, "active" | "held">): RowFacts {
+  return new Map([...view.active, ...view.held].flatMap((card) => card.sections.flatMap((section) => section.rows.map((row) =>
+    [row.prUrl, { ref: refOf(row), status: row.status, section: row.section }] as const))));
+}
+/** The rows a read changed since the one before it: its state or section moved, or it left. The deck flashes what changed on each. */
+export function changedRows(before: RowFacts, after: RowFacts): string[] {
+  return [...before].flatMap(([prUrl, was]) => {
+    const now = after.get(prUrl);
+    return !now || now.status !== was.status || now.section !== was.section ? [prUrl] : [];
+  });
+}
+/** What a row's Refresh found, in the hint bar: what changed and where the row goes, or that nothing did. */
+export function refreshNote(ref: string, before: { status: string; section: DeckSection } | null, after: { status: string; section: DeckSection } | null,
+  gone: { how: "merged" | "closed" } | null): string {
+  if (!after) return `${ref}: ${gone ? (gone.how === "merged" ? "merged" : "closed") : "left this card"}`;
+  if (!before || (before.status === after.status && before.section === after.section)) return `Read ${ref} just now · no change`;
+  const moved = before.section !== after.section ? `moves to ${SECTIONS[after.section].title} on Mark seen` : null;
+  return `${ref}: ${[before.status !== after.status && `${before.status} → ${after.status}`, moved].filter(Boolean).join(" · ")}`;
+}
+
 /** The top bar's read status: when the deck last read GitHub, and GitHub's rate limit while it holds reads. */
 export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limitedUntil">, now: number): string {
   const limited = view.limitedUntil !== null && view.limitedUntil > now ? `Rate-limited until ${clock(view.limitedUntil, now)} · ` : "";

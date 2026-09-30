@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { withArrivals } from "./deck-place.js";
-import { acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, paletteItems, readText, stripChips, targets, type Accepted,
-  type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, paletteItems, readText, refreshNote, rowFacts,
+  stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
@@ -106,6 +106,20 @@ describe("an effort card", () => {
     const lines343 = card(refreshed, SHELF, { rows: { [SHELF]: snapshot }, at: {} }, undefined, { gone: merged }).sections[0]!.lines;
     expect(lines343.map((line) => [line.ref, line.ghost, line.trail?.text ?? null, line.to?.key ?? null])).toEqual([["folio #340", false, null, "flight"],
       ["folio #341", false, null, "blocked"], ["folio #342", false, null, "blocked"], ["folio #343", true, "Merged · just now", null]]);
+  });
+
+  it("tells which rows a read changed, to flash, and what a row's Refresh found, for the hint bar", () => {
+    const before = rowFacts(inkwellDeck());
+    // folio #330's conflict cleared, so it's in flight, and folio #343 merged.
+    const after = rowFacts(inkwellDeck({}, (row) => row.number === 330 ? { attention: [], status: "Ready to merge", stage: "ready", mergeable: true } as never
+      : row.number === 343 ? { effort: null, status: "Merged" } as never : {}));
+    expect(changedRows(before, after)).toEqual([url("folio", 343), url("folio", 330)]);
+    expect(changedRows(after, after)).toEqual([]);
+    const pr330 = url("folio", 330);
+    expect(refreshNote("folio #330", before.get(pr330)!, after.get(pr330)!, null)).toBe("folio #330: Conflicts → Ready to merge · moves to In flight on Mark seen");
+    expect(refreshNote("folio #340", before.get(url("folio", 340))!, before.get(url("folio", 340))!, null)).toBe("Read folio #340 just now · no change");
+    expect(refreshNote("folio #343", before.get(url("folio", 343))!, null, { how: "merged" })).toBe("folio #343: merged");
+    expect(refreshNote("folio #343", before.get(url("folio", 343))!, null, null)).toBe("folio #343: left this card");
   });
 
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {

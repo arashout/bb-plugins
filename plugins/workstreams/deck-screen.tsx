@@ -182,13 +182,26 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
 // Rows: one line each.
 // ---------------------------------------------------------------------------
 
-export type RowState = { selected: ReadonlySet<string>; expanded: ReadonlySet<string>; focus: string | null };
+export type RowState = { selected: ReadonlySet<string>; expanded: ReadonlySet<string>; focus: string | null;
+  /** Rows whose Refresh is reading GitHub now, until the read that carries it lands. */
+  refreshing?: ReadonlySet<string> };
 /** What a narrow pane drops from a row, as the mock does below 720 px: who approved a merge, the suggested reviewer, and "draft". */
 const OPTIONAL_INFO = new Set(["merge", "request", "ready"]);
+
+/** Refresh on a row: ↻ on the row you point at or focus, which spins while GitHub reads it, and stays in sight until the row updates. */
+function RefreshControl({ line, busy, run }: { line: DeckLine; busy: boolean; run: Run }) {
+  return <button type="button" tabIndex={-1} data-deck-refresh={busy ? "busy" : "idle"} aria-busy={busy || undefined}
+    aria-label={busy ? `Reading ${line.ref} from GitHub` : `Refresh ${line.ref} from GitHub`} title={busy ? "Reading GitHub now…" : "Refresh from GitHub"}
+    onClick={() => { if (!busy) run({ kind: "action", id: "refresh", line }); }}
+    className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING,
+      busy ? "text-sky-700 dark:text-sky-300" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
+    <span aria-hidden className={cn("inline-block leading-none", busy && "motion-safe:animate-spin")}>↻</span></button>;
+}
 
 function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run: Run; first: boolean }) {
   const open = state.expanded.has(line.prUrl);
   const selected = state.selected.has(line.prUrl);
+  const busy = state.refreshing?.has(line.prUrl) ?? false;
   const trail = line.trail;
   return <>
     <div data-deck-row={line.prUrl} data-deck-section={line.section} data-deck-dim={line.dim || undefined} data-deck-dot={line.dot ? true : undefined} tabIndex={state.focus === line.prUrl || (state.focus === null && first) ? 0 : -1}
@@ -208,9 +221,11 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
       {line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
         line.checked.failed ? "text-destructive" : "hidden text-muted-foreground @min-[720px]:inline")}>{line.checked.text}</span> : null}
       {line.signals.map((signal) => <span key={signal} className={cn("hidden shrink-0 rounded px-1.5 text-[11px] @min-[720px]:inline", TONE.gray.chip)}>{signal}</span>)}
-      {line.info ? <span className={cn("shrink-0 whitespace-nowrap text-[11.5px]", OPTIONAL_INFO.has(line.section) && "hidden @min-[720px]:inline",
+      {line.info ? <span data-deck-change={line.change ? true : undefined} className={cn("shrink-0 whitespace-nowrap text-[11.5px]",
+        OPTIONAL_INFO.has(line.section) && !line.change && "hidden @min-[720px]:inline",
         line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)
-        : "text-muted-foreground", line.dim && "opacity-50")}>{line.info.text}</span> : null}
+        // What a read changed is the one thing on a settling row that stays at full strength.
+        : line.change ? "rounded px-1 leading-[19px] text-foreground/80" : "text-muted-foreground", line.dim && !line.change && "opacity-50")}>{line.info.text}</span> : null}
       <span className={cn("w-7 shrink-0 text-right text-[11px] tabular-nums", line.hot ? TONE.amber.text : "text-muted-foreground")}>{line.age ?? ""}</span>
       {/* Release stays in sight on Held's few rows; Advance shows on the row you point at or focus. Only the focused row's badge shows, and
           none while a selection takes the key: then its key acts on that row alone, which the hint bar names. */}
@@ -224,6 +239,7 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
         title={`It moves to ${line.to.title} on Mark seen. Show where.`}
         className={cn("shrink-0 whitespace-nowrap rounded px-1 text-[11.5px] text-sky-700 hover:underline dark:text-sky-300", RING)}>
         → moved to {line.to.title} {line.to.up ? "↑" : "↓"}</button> : null}
+      {line.row ? <RefreshControl line={line} busy={busy} run={run} /> : null}
       <span className="flex min-w-12 shrink-0 items-center justify-end gap-1 text-[11.5px]">
         {trail?.kind === "acted" ? <>
           <span className={cn("max-w-44 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")} title={trail.title ?? trail.text}>{trail.text}</span>
@@ -233,17 +249,17 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
           aria-label={`Open ${trail.text}`} className={cn("max-w-40 truncate rounded px-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
           {/* A narrow pane keeps the title's room: the thread shows as ↗, named in its tooltip. */}
           <span className="hidden @min-[720px]:inline">{trail.text} </span>↗</button>
-        : trail ? <span className="max-w-44 truncate text-muted-foreground" title={line.dot ?? undefined}>{trail.text}</span>
+        : trail ? <span data-deck-fate className="max-w-44 truncate rounded text-muted-foreground" title={line.dot ?? undefined}>{trail.text}</span>
         : <button type="button" tabIndex={-1} aria-expanded={open} onClick={() => run({ kind: "expand", prUrl: line.prUrl })}
           className={cn("rounded px-1 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}>{open ? "Less" : "More"}</button>}
       </span>
     </div>
-    {open ? <Details line={line} run={run} /> : null}
+    {open ? <Details line={line} run={run} busy={busy} /> : null}
   </>;
 }
 
 /** A row's details: what it waits on, its reviewers and tickets, and every action it can take, each with its key. */
-function Details({ line, run }: { line: DeckLine; run: Run }) {
+function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean }) {
   const row = line.row;
   if (!row) return <p className="mb-1.5 ml-9 text-[12px] text-muted-foreground">Left this view since you looked. Mark seen clears it.</p>;
   const move = SECTION_ACTION[line.section];
@@ -265,7 +281,8 @@ function Details({ line, run }: { line: DeckLine; run: Run }) {
       {row.thread ? <button type="button" onClick={() => run({ kind: "thread", id: row.thread!.id })} className={cn(BUTTON, "border-border")}>Open “{row.thread.title}”<Kbd>o</Kbd></button> : null}
       <button type="button" onClick={() => run({ kind: "action", id: "open-pr", line })} className={GHOST}>Open on GitHub ↗</button>
       <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release…" : "Hold PR…"}</button>
-      <button type="button" onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>Refresh</button>
+      <button type="button" aria-busy={busy || undefined} disabled={busy} onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>
+        {busy ? <><span aria-hidden className="inline-block leading-none motion-safe:animate-spin">↻</span>Refreshing…</> : "Refresh"}</button>
     </div>
   </div>;
 }

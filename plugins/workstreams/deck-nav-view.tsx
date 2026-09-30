@@ -15,8 +15,9 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor, type FocusKey,
   type Place, type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch, readText, SECTIONS, stripChips,
-  targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem } from "./deck-view-model";
+import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, hintKeys, keptServiceCards, KIND_OF, paletteItems, paletteMatch,
+  readText, refreshNote, rowFacts, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext, type PaletteItem, type RowFacts }
+  from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand,
   type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
@@ -76,7 +77,9 @@ function useDeck(seenAt: () => Record<string, number>, drawn: () => string[], be
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [load]);
-  return { rpc, view, reads, error, load };
+  /** A read is running now, so the next one to land may predate a change made during it. */
+  const busy = useCallback(() => reading.current, []);
+  return { rpc, view, reads, error, load, busy };
 }
 
 type Dialogs =
@@ -134,6 +137,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const [seenNote, setSeenNote] = useState<string | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
   const [rules, setRules] = useState<RuleItem[]>([]);
+  /** Rows whose Refresh is running, until the read after it lands; with what each was, and the reads so far when GitHub answered. */
+  const [refreshing, setRefreshing] = useState<ReadonlyMap<string, { ref: string; was: { status: string; section: keyof typeof SECTIONS } | null; after: number | null }>>(new Map());
+  /** Where each row a Mark seen moves sat on screen, so it slides from there to its new place. */
+  const pendingMoves = useRef<Map<string, number> | null>(null);
   const now = useNow(30_000);
 
   const scrollBox = () => scrollerRef.current?.getBoundingClientRect() ?? null;
@@ -172,8 +179,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     scroller.scrollTop = next.scrollTop;
   }, []);
 
-  const { rpc, view, reads, error, load } = useDeck(() => seenRef.current.at, () => [...new Set(Object.entries(seenRef.current.rows)
+  const { rpc, view, reads, error, load, busy: readingNow } = useDeck(() => seenRef.current.at, () => [...new Set(Object.entries(seenRef.current.rows)
     .flatMap(([key, rows]) => key.startsWith("threads:") ? [] : rows.map((row) => row.prUrl)))].slice(0, 1_000), () => { pendingAnchor.current = captureAnchor(); });
+  const readsRef = useRef(reads);
+  readsRef.current = reads;
   const flashTimer = useRef<number | null>(null);
   const say = useCallback((text: string, withUndo = false, ms?: number) => {
     setFlash({ text, undo: withUndo });
@@ -245,6 +254,15 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   const shown = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (pendingAnchor.current) { restoreAnchor(pendingAnchor.current); pendingAnchor.current = null; }
+    // Mark seen: each row it moved slides from where you saw it to its new place, once the anchor holds your place.
+    if (pendingMoves.current) {
+      for (const [prUrl, top] of pendingMoves.current) {
+        const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(prUrl)}"]`);
+        const delta = element ? top - element.getBoundingClientRect().top : 0;
+        if (element && Math.abs(delta) > 1 && !reduced()) element.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 320, easing: EASE });
+      }
+      pendingMoves.current = null;
+    }
     if (pendingFocus.current) { focusBack(pendingFocus.current, scrollFocus.current); pendingFocus.current = null; scrollFocus.current = false; return; }
     // The one safety net: a control that unmounted or hid under focus hands it to its replacement, never to the page.
     const active = document.activeElement;
@@ -283,6 +301,31 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     announceTimer.current = said ? null : window.setTimeout(() => setAnnounce(name), FLIP_MS);
   });
   useEffect(() => () => { if (announceTimer.current !== null) window.clearTimeout(announceTimer.current); }, []);
+  // Each read flashes what it changed on the rows in view: the change, the link to where a row moves, or what became of one that left.
+  const lastFacts = useRef<RowFacts | null>(null);
+  useLayoutEffect(() => {
+    if (!view) return;
+    const facts = rowFacts(view);
+    const changed = lastFacts.current ? changedRows(lastFacts.current, facts) : [];
+    lastFacts.current = facts;
+    if (reduced()) return;
+    for (const prUrl of changed) {
+      const row = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(prUrl)}"]`);
+      for (const part of row ? Array.from(row.querySelectorAll<HTMLElement>("[data-deck-change], [data-deck-to], [data-deck-fate]")) : [])
+        part.animate([{ backgroundColor: "rgba(56,189,248,.3)" }, { backgroundColor: "rgba(56,189,248,.3)", offset: 0.35 }, { backgroundColor: "transparent" }],
+          { duration: 1_800, easing: "ease-out" });
+    }
+  }, [view]);
+  // A Refresh's spinner stays until the read after GitHub answered lands; then the hint bar says what it found.
+  useEffect(() => {
+    if (!view) return;
+    const landed = [...refreshing].filter(([, item]) => item.after !== null && reads > item.after);
+    if (!landed.length) return;
+    const facts = rowFacts(view);
+    const gone = new Map(view.gone.map((item) => [item.prUrl, item]));
+    say(landed.map(([prUrl, item]) => refreshNote(item.ref, item.was, facts.get(prUrl) ?? null, gone.get(prUrl) ?? null)).join(" · "));
+    setRefreshing((current) => new Map([...current].filter(([prUrl]) => !landed.some(([url]) => url === prUrl))));
+  }, [view, reads, refreshing, say]);
   // The pane resizing holds the row you were on in place, and keeps the current chip in view.
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -513,6 +556,23 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     load();
   }
 
+  // ---- Refresh -------------------------------------------------------------
+  /** One row read from GitHub now: its spinner runs until the read that carries the answer lands, and the row changes in place. */
+  function refreshRow(line: DeckLine) {
+    if (refreshing.has(line.prUrl) || !line.row) return;
+    const prUrl = line.prUrl;
+    const was = { status: line.row.status, section: line.row.section };
+    setRefreshing((current) => new Map([...current, [prUrl, { ref: line.ref, was, after: null }]]));
+    const stop = (text: string) => { say(text); setRefreshing((current) => new Map([...current].filter(([url]) => url !== prUrl))); };
+    void rpc.call("pr_refresh", { prUrl }).then((read) => {
+      if (read.status !== "checked") { stop(read.error); load(); return; }
+      // A read already running may have started before GitHub answered, so the one after it carries the answer.
+      const after = readsRef.current + (readingNow() ? 1 : 0);
+      setRefreshing((current) => current.has(prUrl) ? new Map([...current, [prUrl, { ref: line.ref, was, after }]]) : current);
+      load();
+    }, (cause: unknown) => stop(message(cause)));
+  }
+
   // ---- Mark seen -----------------------------------------------------------
   function markSeen() {
     if (!view || !card || !context.seenAvailable) return;
@@ -522,6 +582,13 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     const anchor = captureAnchor(focusedRow && inView(focusedRow) ? focusedRow : firstChanged);
     const before = Array.from(root?.querySelectorAll<HTMLElement>("[data-deck-row]") ?? []).map((element) => element.dataset.deckRow!);
     const moved = lines.filter((line) => !line.ghost && (line.change || line.to)).length;
+    // Where each row that moves sits now, for its slide to its new place, which a folded In flight opens to show.
+    pendingMoves.current = new Map(lines.flatMap((line) => {
+      const element = line.to ? root?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(line.prUrl)}"]`) : null;
+      return element ? [[line.prUrl, element.getBoundingClientRect().top] as const] : [];
+    }));
+    const folded = lines.flatMap((line) => line.to && SECTIONS[line.to.key].fold && !here.open.includes(line.to.key) ? [line.to.key] : []);
+    if (folded.length) { here.open = [...new Set([...here.open, ...folded])]; persist(); }
     const left = lines.filter((line) => line.ghost).length;
     const stamp = Date.now();
     const settled = { [card.card.id]: cardSnapshot(card.card), [threadsKey(card.card.id)]: threadSnapshot(card.card) };
@@ -624,8 +691,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         else openDialog({ kind: "hold-pr", prUrl: row.prUrl, ref: row.ref, reason: "" });
         return;
       }
-      case "refresh": if (row) void rpc.call("pr_refresh", { prUrl: row.prUrl }).then((read) => say(read.status === "checked" ? `Read ${row.ref} just now.` : read.error),
-        (cause: unknown) => say(message(cause))); return;
+      case "refresh": if (row) refreshRow(row); return;
       case "row-next": moveRow(1); return;
       case "row-prev": moveRow(-1); return;
       case "select": if (row && !row.dim) toggleSelect(row.prUrl, false); return;
@@ -795,7 +861,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
     <DeckPane chips={chips} cur={cur} card={card} empty={!!view && !card} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
-      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus }} tiles={new Set(here.tiles)} open={new Set(here.open)} stuck={stuck}
+      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
+      open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash} batch={{ kinds }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef} />
     {batch.element}
