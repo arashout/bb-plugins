@@ -403,7 +403,7 @@ export function PipelineView({
     else toast.info("No linked thread for this item");
   };
   const repairAction = (card: PipelineCard): AgentAction | null => {
-    if (card.local && card.blocker.label === "CI failing")
+    if (card.local && card.blocker.label.startsWith("CI failing"))
       return "investigate-ci";
     if (card.local?.action?.kind === "agent") return card.local.action.action;
     const attempt = dispatch.attempts.find(

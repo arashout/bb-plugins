@@ -17,6 +17,9 @@ const waiting = (reviewers: string[]): AttentionReason => ({ question: "needs-nu
 const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-1"] };
 const commented = (extra: Partial<Pr> = {}): Pr => ({ ...pr({ reviewDecision: "APPROVED" }), checkConclusions: ["SUCCESS"], mergeable: "MERGEABLE",
   mergeStateStatus: "CLEAN", unresolvedReviewThreads: 0, resolvedReviewThreads: 1, approvalFeedback: FEEDBACK, approvalFeedbackVerified: false, ...extra });
+/** The same comments after your reply: answered, so only an otherwise ready PR asks you to confirm them. */
+const answered = (extra: Partial<Pr> = {}): Pr => commented({ reviewFeedback: { openThreads: 0, comment: null, repliedAt: "2026-09-28T13:00:00Z",
+  noteAt: "2026-09-28T12:00:00Z", followUpAt: null }, ...extra });
 /** The inventory's own rule, so a confirmation is re-checked on the facts that earned its row's reason. */
 const earned: InventoryActionDeps["attention"] = async (facts) => attentionReasons(facts, {}, { now: 1_000, thresholds: DEFAULT_ATTENTION_THRESHOLDS,
   utcOffsetMinutes: 0 });
@@ -215,11 +218,11 @@ describe("inventory actions", () => {
         "The approval has no comments to confirm now; nothing was written."],
       [commented({ approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } }),
         "GitHub didn't return the approval's comments in full. Refresh and try again; nothing was written."],
-      // A worker's evidence for this head already clears it; your confirmation would overwrite that evidence.
-      [commented({ approvalFeedbackVerified: true }), "These comments are already verified on this head; nothing was written."],
-      // The same comments, but the approver reopened a thread or asked for changes, or the PR went red or conflicting: they aren't handled.
+      // Comments you answered that a worker's evidence verified on this head: your confirmation would overwrite that evidence.
+      [answered({ approvalFeedbackVerified: true }), "These comments are already verified on this head; nothing was written."],
+      // Answered comments, but the approver reopened a thread or asked for changes, or the PR went red or conflicting: they aren't handled.
       ...[{ unresolvedReviewThreads: 1 }, { reviewDecision: "CHANGES_REQUESTED" }, { checkConclusions: ["FAILURE"] }, { mergeStateStatus: "DIRTY" as const }]
-        .map((extra): [Pr, string] => [commented(extra),
+        .map((extra): [Pr, string] => [answered(extra),
           "Its approval, checks, merge state, or review threads changed since the row was shown. Review it and try again; nothing was written."]),
     ];
     for (const [fresh, error] of moved) {
@@ -228,6 +231,20 @@ describe("inventory actions", () => {
       expect(env.log).toEqual(["read"]);
       expect(env.records).toMatchObject([{ action: "confirm-handled", ok: false, detail: error }]);
     }
+  });
+
+  // An approval comment no one answered is yours to confirm whatever CI or the merge state say, and a worker's evidence is no answer: the
+  // confirm still reads the notes and their evidence first.
+  it("confirms an approval comment to address on red checks, a conflict, or a worker's evidence, after reading its evidence", async () => {
+    for (const extra of [{ checkConclusions: ["FAILURE"] }, { mergeStateStatus: "DIRTY" as const }, { approvalFeedbackVerified: true }]) {
+      const env = setup({ fresh: commented(extra), evidence: { ...NONE, commits: 1 }, deps: { attention: earned } });
+      expect(await env.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: true });
+      expect(env.log).toEqual(["read", "notes", "confirm"]);
+    }
+    // Your own confirmation on this head already answers it.
+    const mine = setup({ fresh: commented({ approvalFeedbackVerified: true, approvalFeedbackConfirmed: true }), deps: { attention: earned } });
+    expect(await mine.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: false,
+      error: "These comments are already verified on this head; nothing was written." });
   });
 
   // Asking is the confirm's answer to notes nobody answered: the thread does the work, and nothing is confirmed.
@@ -247,12 +264,16 @@ describe("inventory actions", () => {
     expect(await held.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("On hold") });
     for (const [fresh, error] of [[commented({ headRefOid: "b".repeat(40) }), "New commits landed"],
       [commented({ approvalFeedback: { ...FEEDBACK, fingerprint: "e".repeat(64) } }), "notes changed"],
-      [commented({ approvalFeedbackVerified: true }), "already verified"]] as const) {
+      [answered({ approvalFeedbackVerified: true }), "already verified"],
+      [commented({ approvalFeedbackVerified: true, approvalFeedbackConfirmed: true }), "already verified"]] as const) {
       const env = setup({ fresh });
       expect(await env.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining(error) });
       expect(env.asked).toEqual([]);
     }
     expect(held.asked).toEqual([]);
+    // A worker's evidence doesn't answer the reviewer, so the thread can still be asked.
+    const worker = setup({ fresh: commented({ approvalFeedbackVerified: true }) });
+    expect(await worker.actions.askThread(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: true });
   });
 
   // Asking threads to fix sends code work, so it acts only on the head the listing showed and only for fixes GitHub still calls for.

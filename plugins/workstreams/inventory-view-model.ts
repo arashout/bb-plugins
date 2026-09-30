@@ -60,7 +60,8 @@ export type InventoryLine = {
   suggested: string[];
   /**
    * The server's state word; "Clear" on an approved PR reads "Ready to merge", or "Ready · your word" while your confirmation
-   * of its review notes is what clears it, and approval comments to confirm read "Approved with comments".
+   * of its review notes is what clears it, and approval comments to confirm read "Approved with comments". Feedback to address follows
+   * whatever else holds the PR: "CI failing · approval comment to address".
    */
   status: string;
   hold: { reason: string | null; age: string } | null;
@@ -112,8 +113,10 @@ const CODE_WORK: Record<string, string> = { "CI failing": "Fix the failing check
 /** An approval whose written notes no one has confirmed handled doesn't merge yet: you read them on GitHub. */
 const APPROVAL_NOTES: Record<string, string> = { "Feedback verification needed": "Read the approval's notes and confirm they're handled",
   "New review feedback": "Read the new review feedback", "Verification needs recheck": "Recheck the approval's notes against the new head" };
-/** Ready only on your word: a later head, or a worker's evidence, replaces it. */
+/** Ready only on your word: a later head, or a worker's evidence, replaces it and asks for the notes again. */
 export const CONFIRMED = "Ready · your word";
+/** Feedback to address, as a row's state adds it after whatever else holds the PR. */
+const FEEDBACK_WORDS: Partial<Record<AttentionReason["kind"], string>> = { "approval-note": "approval comment to address", "review-comments": "comment to address" };
 /** Why Confirm handled can't bind to what the row shows. */
 const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 /** A read that left the PR's state open: Refresh reads it again. */
@@ -131,10 +134,22 @@ const keyOf = (row: Pick<InventoryRow, "repo" | "number">) => `${row.repo.toLowe
 export const nudgees = (row: Pick<InventoryRow, "attention">) =>
   [...new Set(row.attention.filter((reason) => reason.action === "nudge" || reason.action === "rerequest").flatMap((reason) => reason.reviewers))];
 
-/** The server calls it mergeable now: a merge reason, or "Clear" on an approved PR stacked on nothing. */
+/** The server calls it mergeable now: a merge reason, or "Clear" on an approved PR stacked on nothing; never with feedback to address. */
 function mergeable(row: InventoryRow): boolean {
-  return row.hold === null && row.authored && (row.attention.some((reason) => reason.action === "merge") ||
-    (row.stage === "ready" && row.status === "Clear" && row.stackedOn === null));
+  return row.hold === null && row.authored && !row.attention.some((reason) => FEEDBACK_WORDS[reason.kind]) &&
+    (row.attention.some((reason) => reason.action === "merge") || (row.stage === "ready" && row.status === "Clear" && row.stackedOn === null));
+}
+
+/**
+ * The row's state and every piece of feedback to address it doesn't already name: "CI failing · approval comment to address". Feedback to
+ * address never reads beside ready: it holds the merge.
+ */
+function statusOf(row: InventoryRow): string {
+  const feedback = row.attention.flatMap((reason) => FEEDBACK_WORDS[reason.kind] ?? []);
+  const word = row.attention.some((reason) => reason.kind === "approval-comments") ? "Approved with comments"
+    : row.status !== "Clear" || row.stage !== "ready" ? row.status : feedback.length ? "" : row.confirmation?.current ? CONFIRMED : "Ready to merge";
+  const text = [word, ...feedback.filter((item) => item !== word.toLowerCase())].filter(Boolean).join(" · ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** Approved and waiting only on the PR it's stacked on, which is itself mergeable or next in line: it merges in stack order. */
@@ -276,8 +291,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
-    status: row.attention.some((reason) => reason.kind === "approval-comments") ? "Approved with comments"
-      : row.status === "Clear" && row.stage === "ready" ? row.confirmation?.current ? CONFIRMED : "Ready to merge" : row.status,
+    status: statusOf(row),
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) }, effortPile,
     steps, primary,
     actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile }),

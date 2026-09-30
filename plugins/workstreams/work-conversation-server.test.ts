@@ -78,7 +78,7 @@ async function setup(saved?: SavedRows) {
     if (method === "prLive") return { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED",
       mergeStateStatus: "DIRTY", headRefOid: "a".repeat(40), stackedAbove: [], unresolvedThreads: 0,
       unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
-      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } };
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
     throw new Error(`Unexpected host method ${method}`);
   } });
   if (saved) {

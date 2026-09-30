@@ -12,6 +12,7 @@ import type { WireRun } from "./server.js";
 import { advancePrKey, selectVisibleOpen, type AdvanceSelection } from "./bulk-advance-selection.js";
 import { displayTitle, isTicketlessClone, prLifecycle, type Lifecycle } from "./workstreams.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
+import { FEEDBACK_LABEL, feedbackToAddress } from "./feedback-to-address.js";
 import { prWorkItemKey } from "./work-item-index.js";
 
 export const PIPELINE_STAGES = ["build", "review", "feedback", "ready", "merged", "released"] as const;
@@ -81,6 +82,9 @@ export function blockerFor(pr: Pr | null, stage: PipelineStage, hold: PrHold | n
   if (pr.mergeStateStatus === "DIRTY") return { label: "Conflicts", tone: "bad" };
   if (pr.reviewDecision === "CHANGES_REQUESTED" && !pr.reviewFollowupPosted) return { label: "Changes requested", tone: "warn" };
   if (pr.unresolvedReviewThreads !== null && pr.unresolvedReviewThreads > 0) return { label: `${pr.unresolvedReviewThreads} open threads`, tone: "warn" };
+  // Feedback to address outranks every wait below and never reads Clear, whatever CI or the merge state say.
+  const open = feedbackToAddress(pr, pr.approvalFeedbackConfirmed === true)[0];
+  if (open) return { label: FEEDBACK_LABEL[open.kind], tone: "warn" };
   if (pr.reviewDecision === "APPROVED" && pr.approvalFeedback?.status === "present" && !pr.approvalFeedbackVerified) {
     return { label: pr.approvalFeedbackVerification === "head-changed" ? "Verification needs recheck" :
       pr.approvalFeedbackVerification === "feedback-changed" ? "New review feedback" : "Feedback verification needed", tone: "warn" };
@@ -150,6 +154,8 @@ export function nextStepFor(pr: Pr | null, stage: PipelineStage, blocker: Pipeli
   if (blocker.label === "Conflicts" || blocker.label === "Branch behind") return "Advance to update the branch.";
   if (blocker.label === "Draft") return "Finish draft work; Advance checks for repairable blockers.";
   if (blocker.label === "Changes requested" || blocker.label === "New review feedback" || blocker.label === "Feedback verification needed" || blocker.label.endsWith("open threads")) return "Advance to address review feedback.";
+  if (blocker.label === FEEDBACK_LABEL.approval) return "Answer the approval's comment: reply, link a follow-up, or confirm it.";
+  if (blocker.label === FEEDBACK_LABEL.comment) return "Answer the review comment on GitHub.";
   if (blocker.label === "Review history unknown") return "Advance to verify review history.";
   if (behind !== null) return `Parent PR #${behind} must merge before this PR can merge.`;
   if (blocker.label === "Awaiting re-review") return "Wait for the reviewer to respond to the follow-up.";
@@ -194,6 +200,10 @@ export function pipelineCards(entries: readonly BacklogEntry[], locals: readonly
     let action = primaryPipelineAction(stage, blocker, activity, hold, behind);
     if (pr?.state !== "OPEN" && action?.kind === "advance") action = null;
     let nextStep = nextStepFor(pr, stage, blocker, activity, hold, behind);
+    // Every reason shows: feedback to address follows whatever gate outranks it, as "CI failing · approval comment to address".
+    const feedback = pr === null || hold !== null || stale ? [] : feedbackToAddress(pr, pr.approvalFeedbackConfirmed === true)
+      .map((item) => FEEDBACK_LABEL[item.kind]).filter((label) => label !== blocker.label);
+    if (feedback.length) blocker = { ...blocker, label: [blocker.label, ...feedback.map((label) => label.toLowerCase())].join(" · ") };
     // The roster is the one state authority: its state replaces the board's gate, a legacy attempt is history there, and every action goes
     // through the roster, so the card offers none of its own.
     if (managed) {

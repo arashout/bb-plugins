@@ -351,7 +351,7 @@ export const INKWELL_SHELVING_ROSTER: EffortRoster = {
  * The PR inventory's acceptance shape (plan amendment A13): the 17 open PRs behind a live board's 14 "needs you" items, with Inkwell
  * names, as inventory_get returns them. The rows come through the functions the server composes (attention, stack parents, suggested
  * reviewers, rows, and the view), not written by hand, so a change to any of them that reclassifies a row fails the acceptance test.
- * - Approved with comments to confirm: folio #301 and #318, ready to merge once `feedback` holds your confirmation for each.
+ * - Approval comments to address, with no reply: folio #301 and #318, ready to merge once `feedback` holds your confirmation for each.
  * - Ready to merge: the approved stack folio #340 → #341 → #342 → #343.
  * - Needs a nudge: catalog #96, asked of two reviewers on Monday.
  * - Waiting on parents: quill #212 on #210 (changes requested and conflicting), and spine #156 on #155 (changes requested).
@@ -380,9 +380,9 @@ function inventoryCase(feedback: ApprovalFeedbackRecords) {
   const asked = (hoursAgo: number, ...logins: string[]): Partial<Pr> => ({ reviewRequests: logins,
     reviewRequestedAt: logins.map((reviewer) => ({ reviewer, at: iso(INVENTORY_NOW - hoursAgo * HOUR) })) });
   const conflicting: Partial<Pr> = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" };
-  // The approval left comments.
+  // The approval left comments, and nothing since answered them.
   const commented = (number: number): Partial<Pr> => ({ approvalFeedback: { status: "present", fingerprint: number.toString(16).padStart(64, "f"),
-    sourceIds: [`review-${number}`] } });
+    sourceIds: [`review-${number}`] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: iso(INVENTORY_NOW - 2 * day), followUpAt: null } });
   const since = (state: keyof StateSince): StateSince => ({ [state]: INVENTORY_NOW - 2 * day });
   type Spec = { repo: string; number: number; title: string; base?: number; effort?: keyof typeof INVENTORY_EFFORTS; facts?: Partial<Pr>; since?: StateSince;
     thread?: boolean; started?: boolean };
@@ -419,7 +419,8 @@ function inventoryCase(feedback: ApprovalFeedbackRecords) {
     // As the server checks it: verified when the approval left no comments, or the store holds a verification for this head and these comments.
     const verification = feedbackVerificationState(pr.approvalFeedback, pr.headRefOid ?? null, feedback(pr.url));
     return { repo: `inkwell/${spec.repo}`, pr: { ...pr, approvalFeedbackVerification: verification,
-      approvalFeedbackVerified: verification === "none" || verification === "verified" } };
+      approvalFeedbackVerified: verification === "none" || verification === "verified",
+      approvalFeedbackConfirmed: userConfirmation(feedback(pr.url), pr.approvalFeedback, pr.headRefOid ?? null)?.current === true } };
   });
   const threads = new Map<string, ThreadRef>(specs.flatMap((spec): [string, ThreadRef][] => [
     ...spec.thread ? [[`thr_${spec.repo}_${spec.number}`, { title: `Work on ${spec.repo} #${spec.number}`, titleFallback: null, status: "idle", updatedAt: 2 }] as [string, ThreadRef]] : [],

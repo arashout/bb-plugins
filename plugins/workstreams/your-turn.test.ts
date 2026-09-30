@@ -19,7 +19,8 @@ const turn = (facts: Pr, held = false) => yourTurn(facts, attentionReasons(facts
 
 const changes = pr({ reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(10) }] });
 const approval = pr({ reviewDecision: "APPROVED", latestReviews: [{ login: "mira-l", state: "APPROVED", submittedAt: at(11) }],
-  approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: false });
+  approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: false,
+  reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: at(11), followUpAt: null } });
 const threads = pr({ reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } });
 const comments = pr({ latestReviews: [{ login: "theo-k", state: "COMMENTED", submittedAt: at(12) }],
   reviewFeedback: { openThreads: 0, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
@@ -27,7 +28,7 @@ const comments = pr({ latestReviews: [{ login: "theo-k", state: "COMMENTED", sub
 describe("Your turn", () => {
   it("lists each kind of feedback that waits on you, with who and since when", () => {
     expect(turn(changes)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
-    expect(turn(approval)).toEqual({ kinds: ["approval"], text: "Approved with comments", since: Date.parse(at(11)) });
+    expect(turn(approval)).toEqual({ kinds: ["approval"], text: "Approval comment to address", since: Date.parse(at(11)) });
     expect(turn(threads)).toEqual({ kinds: ["threads"], text: "2 open threads", since: null });
     expect(turn(comments)).toEqual({ kinds: ["comments"], text: "New comments from @theo-k", since: Date.parse(at(12)) });
   });
@@ -52,18 +53,23 @@ describe("Your turn", () => {
     }
   });
 
-  // Red or running checks are the thread's work or CI's, not a reviewer's feedback: they never make it your turn on their own, and an
-  // approval's notes wait with them, as attention's approval-comments reason does.
+  // Red or running checks are the thread's work or CI's, not a reviewer's feedback: they never make it your turn on their own.
   it("leaves out a PR waiting only on CI, or on reviewers you asked", () => {
     expect(turn(pr({ checkConclusions: ["FAILURE"], mergeStateStatus: "UNSTABLE" }))).toBeNull();
-    expect(turn({ ...approval, checkConclusions: ["PENDING"], mergeStateStatus: "UNSTABLE" })).toBeNull();
-    expect(turn({ ...approval, checkConclusions: ["FAILURE"], mergeStateStatus: "UNSTABLE" })).toBeNull();
     expect(turn(pr({ reviewRequests: ["mira-l"] }))).toBeNull();
     // Asked again after their change request, the next move is theirs.
     expect(turn({ ...changes, reviewRequests: ["otto-v"] })).toBeNull();
-    // An approval whose comments you confirmed handled, or that left none.
-    expect(turn({ ...approval, approvalFeedbackVerified: true })).toBeNull();
+    // An approval whose comments you confirmed on this head, or that left none.
+    expect(turn({ ...approval, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true })).toBeNull();
     expect(turn({ ...approval, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true })).toBeNull();
+  });
+
+  // An approval that said something waits on your answer whatever CI says, and a worker's evidence is no answer the reviewer sees.
+  it("keeps an approval comment to address on Your turn while checks run or fail, and over a worker's evidence", () => {
+    for (const checks of [["PENDING"], ["FAILURE"]]) {
+      expect(turn({ ...approval, checkConclusions: checks, mergeStateStatus: "UNSTABLE" })?.kinds).toEqual(["approval"]);
+    }
+    expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approval comment to address");
   });
 
   it("clears reviewer comments once you push or reply after them, and only then", () => {

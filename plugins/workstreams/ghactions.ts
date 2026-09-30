@@ -589,7 +589,8 @@ export async function readLiveMerge(run: GhRunner, target: PrTarget): Promise<Li
   const head = typeof view.headRefName === "string" && !view.headRefName.startsWith("-") ? view.headRefName : null;
   const [stacked, threads] = await Promise.all([
     head === null ? Promise.resolve<Run>({ ok: true, stdout: "[]" }) : run(stackedArgv(target, head)),
-    readReviewThreads(run, target, false, true),
+    // With the conversation and the links, which say whether anyone's feedback still waits on an answer.
+    readReviewThreads(run, target, true, true),
   ]);
   if (!stacked.ok) return { ok: false, error: `Could not check for stacked PRs: ${stacked.error}` };
   if (!threads.ok) return { ok: false, error: `Could not count unresolved review threads: ${threads.error}` };
@@ -612,6 +613,7 @@ export async function readLiveMerge(run: GhRunner, target: PrTarget): Promise<Li
       approvalNotesMore: threads.approvalNotesMore ?? 0,
       approvalNotesComplete: threads.approvalNotesComplete ?? false,
       approvalFeedback: threads.approvalFeedback,
+      ...(threads.reviewFeedback === undefined ? {} : { reviewFeedback: threads.reviewFeedback }),
     },
   };
 }

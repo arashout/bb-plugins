@@ -24,8 +24,8 @@ const calendarDay = (value: string) => new Date(Date.parse(value)).toLocaleDateS
 export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
 export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
 export const SECTIONS: Record<DeckSection, SectionMeta> = {
-  merge: { title: "Merge", tone: "green", action: "merge", button: "Preview merge", help: "Approved, checks green, no conflicts. The preview reads each PR again, and nothing merges until you press Merge or ⌘↵." },
-  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "Approved with written notes. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
+  merge: { title: "Merge", tone: "green", action: "merge", button: "Preview merge", help: "Approved, checks green, no conflicts, no feedback to address. The preview reads each PR again, and nothing merges until you press Merge or ⌘↵." },
+  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "An approval that said something, waiting on your reply, a follow-up, or your Confirm, whatever CI says. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
   nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
   request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
@@ -106,7 +106,8 @@ function info(row: DeckRow, section: string): DeckLine["info"] {
     // Ready on your word alone says so, so it never reads as checked.
     case "merge": { const approved = row.reviewers.filter((review) => review.state === "approved").map((review) => review.login);
       return row.confirmation?.current ? { text: row.status, tone: "amber" } : approved.length ? { text: `✓ ${mentions(approved)}`, tone: null } : null; }
-    case "confirm": return { text: plural(Math.max(1, row.notes), "note"), tone: "violet" };
+    // Anything else holding the PR shows beside its notes: "CI failing · approval comment to address".
+    case "confirm": return { text: row.status.includes(" · ") ? row.status : plural(Math.max(1, row.notes), "note"), tone: "violet" };
     case "nudge": return row.nudge.length ? { text: mentions(row.nudge), tone: null } : null;
     case "request": return row.suggested.length ? { text: `suggest @${row.suggested[0]}`, tone: null } : null;
     case "ready": return { text: "draft", tone: null };

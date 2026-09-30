@@ -14,6 +14,7 @@
 import type { ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { evidenceText, handled, type ApprovalEvidence, type ApprovalHandling } from "./approval-evidence.js";
 import type { Pr, PrWrite } from "./contract.js";
+import { feedbackToAddress } from "./feedback-to-address.js";
 import { REVIEWER } from "./ghactions.js";
 import type { AttentionReason } from "./pr-attention.js";
 import type { PrHold } from "./pr-holds.js";
@@ -168,11 +169,11 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (feedback?.status !== "present") return { refuse: feedback?.status === "none" ? "The approval has no comments to confirm now; nothing was written."
         : "GitHub didn't return the approval's comments in full. Refresh and try again; nothing was written." };
       if (feedback.fingerprint !== fingerprint) return { refuse: "The approval's comments changed since the row was shown. Read them and try again; nothing was written." };
-      if (fresh.approvalFeedbackVerified === true) return { refuse: "These comments are already verified on this head; nothing was written." };
-      // The rest of what earned the row's reason: approved, green, merge-clean, and every review thread resolved. An approver who reopened a
-      // thread leaves the fingerprint as it was, but not this.
-      if (!(await deps.attention(fresh)).some((reason) => reason.kind === "approval-comments")) {
-        return { refuse: "Its approval, checks, merge state, or review threads changed since the row was shown. Review it and try again; nothing was written." };
+      // What earned the row's reason: an approval comment still to address, whatever a worker's evidence says, or notes you answered on an
+      // approved, green, merge-clean PR with every review thread resolved. An approver who reopened a thread leaves the fingerprint as it was.
+      if (!(await deps.attention(fresh)).some((reason) => reason.kind === "approval-note" || reason.kind === "approval-comments")) {
+        return { refuse: fresh.approvalFeedbackVerified === true ? "These comments are already verified on this head; nothing was written."
+          : "Its approval, checks, merge state, or review threads changed since the row was shown. Review it and try again; nothing was written." };
       }
       const notes = await deps.handling(prUrl);
       if (!notes.ok) return { refuse: `GitHub couldn't be read for the approval's notes, so nothing was written: ${notes.error}` };
@@ -192,7 +193,10 @@ export function createInventoryActions(deps: InventoryActionDeps) {
       if (fresh.headRefOid !== headOid) return { refuse: "New commits landed since you read the notes. Read them again; nothing was sent." };
       const feedback = fresh.approvalFeedback;
       if (feedback?.status !== "present" || feedback.fingerprint !== fingerprint) return { refuse: "The approval's notes changed since you read them. Read them again; nothing was sent." };
-      if (fresh.approvalFeedbackVerified === true) return { refuse: "These notes are already verified on this head; nothing was sent." };
+      // A worker's evidence doesn't answer the reviewer; only your Confirm, a reply, or a follow-up does.
+      if (fresh.approvalFeedbackVerified === true && !feedbackToAddress(fresh, fresh.approvalFeedbackConfirmed === true).some((item) => item.kind === "approval")) {
+        return { refuse: "These notes are already verified on this head; nothing was sent." };
+      }
       return { ask: { headOid, feedback } };
     }),
   };

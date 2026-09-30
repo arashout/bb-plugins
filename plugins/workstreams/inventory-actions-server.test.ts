@@ -27,6 +27,8 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 
 // mira's approval of #319 left comments; every review thread on it is resolved.
 const FEEDBACK = { status: "present" as const, fingerprint: "f".repeat(64), sourceIds: ["review-319"] };
+/** The merge preview's refusal while an approval's comment waits on your answer. */
+const NOTE_WAITS = "An approval comment waits on your answer: reply, link a follow-up, or confirm it.";
 
 /**
  * You author a green draft (#313), a PR no one was asked to review (#314), a PR mira was asked to review ten days ago (#315), a PR
@@ -45,7 +47,8 @@ async function setup() {
     [318, { ...pr(318, { reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ author: { login: "otto" }, state: "CHANGES_REQUESTED", submittedAt: daysAgo(3) }] }),
       reviewFollowupPosted: true, unresolvedReviewThreads: 0, resolvedReviewThreads: 1, headCommittedAt: daysAgo(1) }],
     [319, { ...pr(319, { reviewDecision: "APPROVED", latestReviews: [{ author: { login: "mira" }, state: "APPROVED", submittedAt: daysAgo(2) }] }),
-      approvalFeedback: FEEDBACK, unresolvedReviewThreads: 0, resolvedReviewThreads: 2, headCommittedAt: daysAgo(3) }],
+      approvalFeedback: FEEDBACK, unresolvedReviewThreads: 0, resolvedReviewThreads: 2, headCommittedAt: daysAgo(3),
+      reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: daysAgo(2), followUpAt: null } }],
   ]);
   const spawn = vi.fn(async () => { throw new Error("An inventory action starts no thread."); });
   const { bb, harness } = createFakePluginHost({ pluginId: "workstreams", settings: { scanRoots: "/p" }, sdk: {
@@ -74,7 +77,8 @@ async function setup() {
       const live = current.get(Number((input as { prUrl: string }).prUrl.split("/").pop()))!;
       return { ok: true, live: { state: live.state, isDraft: live.isDraft, reviewDecision: live.reviewDecision, mergeStateStatus: live.mergeStateStatus,
         headRefOid: live.headRefOid, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0,
-        approvalNotesComplete: true, approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] } } };
+        approvalNotesComplete: true, approvalFeedback: live.approvalFeedback ?? { status: "none", fingerprint: null, sourceIds: [] },
+        reviewFeedback: live.reviewFeedback ?? { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
     }
     throw new Error(`Unexpected host method ${method}`);
   } });
@@ -236,10 +240,10 @@ describe("inventory actions on the server", () => {
   it("confirms an approval's comments from its row, as yours and on its head, after which the row and the fresh preview offer the merge", async () => {
     const env = await setup();
     const shown = await env.row(319);
-    expect(shown).toMatchObject({ head: HEAD, feedbackFingerprint: FEEDBACK.fingerprint, attention: [{ kind: "approval-comments", action: "confirm-handled",
-      nextStep: "Confirm the approval's comments are handled", owner: "you" }] });
+    expect(shown).toMatchObject({ head: HEAD, feedbackFingerprint: FEEDBACK.fingerprint, attention: [{ kind: "approval-note", action: "confirm-handled",
+      nextStep: "Answer the approval's comment", owner: "you" }] });
     const preview = () => env.rpc("action_merge_preview", { prUrl: url(319) }) as Promise<{ ok: true; refusals: string[] }>;
-    expect((await preview()).refusals).toEqual(["Approval feedback needs verified follow-up on the current head."]);
+    expect((await preview()).refusals).toEqual(["Approval feedback needs verified follow-up on the current head.", NOTE_WAITS]);
     const confirm = () => env.rpc("inventory_confirm_handled", { prUrl: url(319), headOid: shown.head, fingerprint: shown.feedbackFingerprint });
     const stored = () => env.db.prepare("SELECT body FROM approval_feedback_verifications").all();
 
@@ -284,7 +288,7 @@ describe("inventory actions on the server", () => {
   });
 
   // Ready on your word must never read as checked, and must not outlive the head you confirmed on.
-  it("says a PR you confirmed is confirmed by you with no check, until a new head asks for its notes again or a worker's evidence replaces yours", async () => {
+  it("says a PR you confirmed is confirmed by you with no check, until a new head asks for its notes again, and a worker's evidence never answers them", async () => {
     const env = await setup();
     const status = async () => inventoryLine(await env.row(319), new Map(), { now: Date.now(), limitedUntil: null }).status;
     env.notes.evidence = { ...env.notes.evidence, commits: 1 };
@@ -295,16 +299,17 @@ describe("inventory actions on the server", () => {
     env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
     await env.rpc("pr_refresh", { prUrl: url(319) });
     expect([await status(), (await env.row(319)).attention.map((reason) => reason.kind), (await env.row(319)).confirmation?.current])
-      .toEqual(["Approved with comments", ["approval-comments"], false]);
+      .toEqual(["Approval comment to address", ["approval-note"], false]);
     expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals)
-      .toEqual(["Approval feedback needs verified follow-up on the current head."]);
-    // A worker's evidence for the new head replaces your word: ready, and checked.
+      .toEqual(["Approval feedback needs verified follow-up on the current head.", NOTE_WAITS]);
+    // A worker's evidence for the new head replaces your word and verifies the head, but mira saw no answer: her comment still waits.
     const feedback = createApprovalFeedbackStore(env.db);
     feedback.save(url(319), "thr-worker", { attemptId: "A-9", headOid: "b".repeat(40), fingerprint: FEEDBACK.fingerprint, blockers: [],
       findings: [{ sourceId: "review-319", resolution: "fixed", evidence: "Labels wrap at 40 characters in src/spine.ts.",
         validation: { outcome: "passed", detail: "Spine label tests passed." } }] }, Date.now());
     await env.rpc("pr_refresh", { prUrl: url(319) });
-    expect([await status(), (await env.row(319)).confirmation]).toEqual(["Ready to merge", null]);
+    expect([await status(), (await env.row(319)).confirmation]).toEqual(["Approval comment to address", null]);
+    expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals).toEqual([NOTE_WAITS]);
   });
 
   // Your word can be taken back whenever you doubt it: the notes need you again, and the merge preview refuses until they're handled.
@@ -329,9 +334,9 @@ describe("inventory actions on the server", () => {
       body: JSON.parse((row as { body: string }).body) }))).toEqual([{ action: "confirm", body: expect.objectContaining({ headOid: HEAD }) },
       { action: "revoke", body: { headOid: HEAD, fingerprint: FEEDBACK.fingerprint, confirmedAt: expect.any(Number), evidence: env.notes.evidence } }]);
     await env.rpc("pr_hold_set", { prUrl: url(319), held: false });
-    expect(await env.row(319)).toMatchObject({ confirmation: null, attention: [{ kind: "approval-comments" }], lastAction: { action: "revoke-confirmation", ok: true } });
+    expect(await env.row(319)).toMatchObject({ confirmation: null, attention: [{ kind: "approval-note" }], lastAction: { action: "revoke-confirmation", ok: true } });
     expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals)
-      .toEqual(["Approval feedback needs verified follow-up on the current head."]);
+      .toEqual(["Approval feedback needs verified follow-up on the current head.", NOTE_WAITS]);
     expect(await env.rpc("inventory_confirm_revoke", { prUrl: url(319) })).toEqual({ ok: false, error: "There's no confirmation of yours on this PR; nothing changed." });
   });
 });

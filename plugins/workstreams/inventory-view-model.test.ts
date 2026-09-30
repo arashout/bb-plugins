@@ -51,16 +51,16 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
       // The one code-work row with no thread can't open one.
       ["No effort", "catalog #97", "Conflicts", "Resolve the conflicts", "you", "thread", false],
       // Approved, green, and clean, but the approvals left comments that only you can confirm handled before either merges.
-      ["No effort", "folio #301", "Approved with comments", "Confirm the approval's comments are handled", "you", "confirm-handled", true],
+      ["No effort", "folio #301", "Approval comment to address", "Answer the approval's comment", "you", "confirm-handled", true],
       ["No effort", "folio #305", "CI failing", "Request a review + Fix the failing checks", "you", "request-review", true],
-      ["No effort", "folio #318", "Approved with comments", "Confirm the approval's comments are handled", "you", "confirm-handled", true],
+      ["No effort", "folio #318", "Approval comment to address", "Answer the approval's comment", "you", "confirm-handled", true],
       ["No effort", "folio #325", "Conflicts", "Request a review + Resolve the conflicts", "you", "request-review", true],
     ]);
   });
 
   // Confirm handled is the one step between these two approvals and a merge. Through the action, store, and attention the server
   // composes, your confirmation of each moves it to Ready to merge with Merge…, and moves nothing else.
-  it("moves folio #301 and #318 from Approved with comments to mergeable, confirmed by you with no check, once you confirm each handled", async () => {
+  it("moves folio #301 and #318 from an approval comment to address to mergeable, confirmed by you with no check, once you confirm each handled", async () => {
     const approvedWithComments = ["folio #301", "folio #318"];
     for (const pr of approvedWithComments) expect(action(find(pr), "merge")).toBeUndefined();
     const db = new Database(":memory:"); db.exec(APPROVAL_FEEDBACK_MIGRATION);
@@ -89,11 +89,16 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
         .toEqual(["Ready · your word", ["Merge"], "you", "merge"]);
       expect(line.actions.map((item) => [item.id, item.enabled])).toEqual([["revoke", true], ["merge", true], ["refresh", true], ["thread", false]]);
     }
-    // A new head on #301 leaves your confirmation behind: it asks for its notes again. A worker's evidence for #318 replaces yours, and reads as ready.
+    // A new head on #301 leaves your confirmation behind: it asks for its notes again. A worker's evidence for #318 replaces yours, and the
+    // approval's comment waits on your answer again: the reviewer saw no reply.
     const pushed = withRow("folio #301", { head: "d".repeat(40), attention: rowOf("folio #301").attention,
       confirmation: { ...rowOf("folio #301", confirmed).confirmation!, current: false } }, confirmed);
-    expect(find("folio #301", pushed)).toMatchObject({ status: "Approved with comments", primary: "confirm-handled" });
-    expect(find("folio #318", withRow("folio #318", { confirmation: null }, confirmed)).status).toBe("Ready to merge");
+    expect(find("folio #301", pushed)).toMatchObject({ status: "Approval comment to address", primary: "confirm-handled" });
+    const mine = store.get("https://github.com/inkwell/folio/pull/318")!;
+    store.save(mine.prUrl, "thr_worker", { attemptId: "worker-1", headOid: mine.headOid, fingerprint: mine.fingerprint, blockers: [],
+      findings: mine.findings.map((finding) => ({ ...finding, resolution: "no-change-needed" as const, validation: { outcome: "passed" as const, detail: "Tests pass." } })) }, NOW);
+    expect(find("folio #318", inkwellInventory(store.get))).toMatchObject({ status: "Approval comment to address", primary: "confirm-handled" });
+    expect(action(find("folio #318", inkwellInventory(store.get)), "merge")).toBeUndefined();
     const others = (view: InventoryView) => lines(view).filter(({ line }) => !approvedWithComments.includes(`${line.repo} #${line.number}`))
       .map(({ group, line }) => [group, line.number, line.status, line.primary]);
     expect(others(confirmed)).toEqual(others(VIEW));
@@ -243,7 +248,7 @@ describe("the PR inventory screen view model", () => {
   // One click never records a confirmation: it opens the notes, which read GitHub first and show what came after the approval.
   it("offers Confirm handled… on an approval with comments, opening its notes, and says why when it can't", () => {
     const line = find("folio #301");
-    expect(line).toMatchObject({ status: "Approved with comments", steps: [{ text: "Confirm the approval's comments are handled", owner: { kind: "you" }, age: "2d" }] });
+    expect(line).toMatchObject({ status: "Approval comment to address", steps: [{ text: "Answer the approval's comment", owner: { kind: "you" }, age: "2d" }] });
     expect(action(line, "confirm-handled")).toMatchObject({ enabled: true, label: "Confirm handled…" });
     expect(actionCall(rowOf("folio #301"), action(line, "confirm-handled")!)).toEqual({ kind: "notes", prUrl: "https://github.com/inkwell/folio/pull/301" });
     for (const patch of [{ head: null }, { feedbackFingerprint: null }]) {
@@ -382,7 +387,7 @@ describe("the PR inventory screen view model", () => {
     // An approval's notes are yours to confirm, even behind an overdue review; with no feedback waiting, attention keeps its own order.
     const overdue = [reason({}), ...rowOf("folio #301").attention];
     expect(find("folio #301", withRow("folio #301", { attention: overdue }))).toMatchObject({ primary: "confirm-handled",
-      steps: [{ text: "Confirm the approval's comments are handled" }, { text: "Nudge @mira-l" }] });
+      steps: [{ text: "Answer the approval's comment" }, { text: "Nudge @mira-l" }] });
     expect(find("folio #301", withRow("folio #301", { attention: overdue, yourTurn: null })).primary).toBe("nudge");
   });
 

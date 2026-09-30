@@ -23,9 +23,12 @@ const quiet: AttentionFacts = {
 const approved: Partial<AttentionFacts> = { reviewDecision: "APPROVED", reviewRequests: [], reviewRequestedAt: [],
   headCommittedAt: iso(now - 3 * DAY), latestReviews: [{ login: "mira", state: "APPROVED", submittedAt: iso(now - DAY) }],
   unresolvedReviewThreads: 0, resolvedReviewThreads: 0, approvalFeedbackVerified: true };
-// Approved as above, but the approval left comments no one has verified on this head.
-const commented: Partial<AttentionFacts> = { ...approved, approvalFeedbackVerified: false,
-  approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] } };
+// Approved as above, but the approval said something a day ago that nothing since has answered or verified.
+const noted: Partial<AttentionFacts> = { ...approved, approvalFeedbackVerified: false,
+  approvalFeedback: { status: "present", fingerprint: "f".repeat(64), sourceIds: ["review-1"] },
+  reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: iso(now - DAY), followUpAt: null } };
+// The same comments, answered by your reply since, but not yet verified on this head.
+const commented: Partial<AttentionFacts> = { ...noted, reviewFeedback: { ...noted.reviewFeedback!, repliedAt: iso(now - HOUR) } };
 const changes = (submittedAt: number, state = "CHANGES_REQUESTED"): Partial<AttentionFacts> => ({
   reviewDecision: state === "DISMISSED" ? "REVIEW_REQUIRED" : "CHANGES_REQUESTED",
   reviewRequests: [], reviewRequestedAt: [], latestReviews: [{ login: "otto", state, submittedAt: iso(submittedAt) }] });
@@ -88,7 +91,28 @@ describe("PR attention", () => {
     ["approved with its approval feedback unverified", { ...approved, approvalFeedbackVerified: false }, {}, []],
     ["approved with feedback GitHub couldn't fully read", { ...approved, approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] },
       approvalFeedbackVerified: false }, {}, []],
-    // Comments on an approval nobody has verified on this head: you confirm them, at once, whatever else merging still waits on.
+    // An approval that said something no one answered is feedback to address, first and whatever CI, a draft, a conflict, a push, or a
+    // worker's evidence says; only your reply, a follow-up that links it, or your Confirm clears it, and until then nothing asks to merge.
+    ["approved with a comment no one answered", noted, {}, ["approval-note"]],
+    ["approved with a comment no one answered, and red checks", { ...noted, checkConclusions: ["FAILURE"] }, { "ci-red": now - 2 * DAY }, ["approval-note", "ci-red"]],
+    ["approved with a comment no one answered, and checks running", { ...noted, checkConclusions: ["PENDING"] }, {}, ["approval-note"]],
+    ["approved with a comment no one answered, conflicting", { ...noted, mergeable: "CONFLICTING" }, {}, ["approval-note"]],
+    ["approved with a comment no one answered, blocked by branch protection", { ...noted, mergeStateStatus: "BLOCKED" }, {}, ["approval-note"]],
+    ["approved with a comment no one answered, a review thread still open", { ...noted, unresolvedReviewThreads: 1 }, {}, ["approval-note"]],
+    ["approved with a comment no one answered, stacked on an open PR", { ...noted, stackedOn: 41 }, {}, ["approval-note"]],
+    ["a green draft approved with a comment no one answered", { ...noted, isDraft: true }, {}, ["approval-note", "draft-ready"]],
+    ["approved with a comment no one answered, pushed since", { ...noted, headCommittedAt: iso(now - HOUR) }, {}, ["approval-note"]],
+    ["approved with a comment no one answered, and a worker's evidence on this head", { ...noted, approvalFeedbackVerified: true }, {}, ["approval-note"]],
+    ["approved with a comment you confirmed on this head", { ...noted, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true }, {}, ["merge-waiting"]],
+    ["approved with a comment a follow-up PR linked since, verified on this head", { ...noted, approvalFeedbackVerified: true,
+      reviewFeedback: { ...noted.reviewFeedback!, followUpAt: iso(now - HOUR) } }, {}, ["merge-waiting"]],
+    ["approved, green, and mergeable, with a reviewer's comment no one answered", { ...approved,
+      reviewFeedback: { openThreads: 0, comment: { login: "theo", at: iso(now - 2 * HOUR) }, repliedAt: iso(now - DAY), noteAt: null, followUpAt: null } }, {},
+      ["review-comments"]],
+    ["approved, green, and mergeable, with a reviewer's comment you replied to", { ...approved,
+      reviewFeedback: { openThreads: 0, comment: { login: "theo", at: iso(now - 2 * HOUR) }, repliedAt: iso(now - HOUR), noteAt: null, followUpAt: null } }, {},
+      ["merge-waiting"]],
+    // Comments you answered that nobody has verified on this head: you confirm them, at once, once nothing else holds the merge.
     ["approved with comments not yet confirmed", commented, {}, ["approval-comments"]],
     ["approved with comments a minute ago", { ...commented, latestReviews: [{ login: "mira", state: "APPROVED", submittedAt: iso(now - MINUTE) }] }, {}, ["approval-comments"]],
     ["approved with comments, stacked on an open PR", { ...commented, stackedOn: 41 }, {}, ["approval-comments"]],
@@ -100,7 +124,7 @@ describe("PR attention", () => {
     ["approved with comments, conflicting", { ...commented, mergeable: "CONFLICTING" }, {}, []],
     // Green, so only its being a draft keeps it from asking for the confirmation: marking it ready comes first.
     ["a green draft approved with comments", { ...commented, isDraft: true }, {}, ["draft-ready"]],
-    ["approved with comments you confirmed on this head", { ...commented, approvalFeedbackVerified: true }, {}, ["merge-waiting"]],
+    ["approved with comments verified on this head", { ...commented, approvalFeedbackVerified: true }, {}, ["merge-waiting"]],
     ["approved but stacked on an open PR", { ...approved, stackedOn: 41 }, {}, []],
     ["approved over an older change request", { ...approved, latestReviews: [...approved.latestReviews!, { login: "otto", state: "CHANGES_REQUESTED", submittedAt: iso(now - 4 * DAY) }] }, {}, ["merge-waiting"]],
     ["red for exactly a day", { checkConclusions: ["FAILURE"] }, { "ci-red": now - DAY }, ["ci-red"]],
@@ -135,6 +159,12 @@ describe("PR attention", () => {
       { login: "otto", state: "APPROVED", submittedAt: iso(now - 4 * HOUR) }] })).toEqual([{ question: "needs-nudge", kind: "approval-comments",
       action: "confirm-handled", nextStep: "Confirm the approval's comments are handled", owner: "you", reviewers: [], since: now - 4 * HOUR, ageMs: 4 * HOUR,
       basis: "github" }]);
+    // Feedback to address leads, aged from the note or the comment.
+    expect(reasons({ ...noted, reviewFeedback: { ...noted.reviewFeedback!, comment: { login: "theo", at: iso(now - 2 * HOUR) } } }).slice(0, 2)).toEqual([
+      { question: "needs-nudge", kind: "approval-note", action: "confirm-handled", nextStep: "Answer the approval's comment", owner: "you", reviewers: [],
+        since: now - DAY, ageMs: DAY, basis: "github" },
+      { question: "needs-nudge", kind: "review-comments", action: "open-thread", nextStep: "Answer @theo's comment", owner: "you", reviewers: [],
+        since: now - 2 * HOUR, ageMs: 2 * HOUR, basis: "github" }]);
     expect(reasons({ checkConclusions: ["FAILURE"], mergeable: "CONFLICTING" }, { "ci-red": now - 2 * DAY, conflicting: now - 3 * DAY })).toEqual([
       { question: "needs-nudge", kind: "ci-red", action: "open-thread", nextStep: "Fix the failing checks", owner: "you", reviewers: [],
         since: now - 2 * DAY, ageMs: 2 * DAY, basis: "observed" },

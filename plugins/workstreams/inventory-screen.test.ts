@@ -64,7 +64,7 @@ describe("simple All PRs list", () => {
   it("says why it's your turn and since when, with Open thread where the PR has a thread", () => {
     const html = pane();
     expect(text(rowOf(html, "inkwell/quill#210"))).toContain("ABC-370 Hold books at the counter Changes requested by @otto-v · 1d Open thread");
-    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approved with comments · 2d");
+    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approval comment to address · 2d");
     expect(rowOf(html, "inkwell/folio#301")).not.toContain("Open thread");
     // Other open PRs lead with their state and next step, and never with Open thread.
     expect(rowOf(html, "inkwell/folio#330")).not.toContain("Open thread");
@@ -140,7 +140,7 @@ describe("simple All PRs list", () => {
   it("lists an approval with comments as your turn, with no Confirm handled or Merge… here", () => {
     for (const ref of ["inkwell/folio#301", "inkwell/folio#318"]) {
       const row = rowOf(pane(), ref);
-      expect(text(row)).toContain("Approved with comments · 2d");
+      expect(text(row)).toContain("Approval comment to address · 2d");
       expect(row).not.toContain('data-inventory-action="confirm-handled"');
       expect(row).not.toContain('data-inventory-action="merge"');
     }

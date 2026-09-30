@@ -205,12 +205,20 @@ describe("unitLifecycle", () => {
     expect(unitLifecycle(unit({ pr: pr({ reviewDecision: "APPROVED", approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, unresolvedReviewThreads: 0 }) }))).toBe("approved-with-note");
   });
 
-  it("keeps approved feedback visible until current-head evidence is verified", () => {
+  // A worker's evidence verifies the head, but only your reply, a follow-up, or your Confirm answers the reviewer.
+  it("keeps approved feedback visible until current-head evidence is verified and the note is answered", () => {
     const reviewed = pr({ reviewDecision: "APPROVED", approvalHasBody: true,
       approvalFeedback: { status: "present", fingerprint: "a".repeat(64), sourceIds: ["review-1"] }, approvalFeedbackVerified: true,
-      unresolvedReviewThreads: 0, resolvedReviewThreads: 6 });
+      unresolvedReviewThreads: 0, resolvedReviewThreads: 6,
+      reviewFeedback: { openThreads: 0, comment: null, repliedAt: "2026-09-24T12:00:00Z", noteAt: "2026-09-24T11:00:00Z", followUpAt: null } });
     expect(unitLifecycle(unit({ pr: reviewed }))).toBe("awaiting-merge");
     expect(reviewed.approvalHasBody).toBe(true);
+    expect(unitLifecycle(unit({ pr: { ...reviewed, reviewFeedback: { ...reviewed.reviewFeedback!, repliedAt: null } } }))).toBe("approved-with-note");
+    expect(unitLifecycle(unit({ pr: { ...reviewed, approvalFeedbackConfirmed: true, reviewFeedback: { ...reviewed.reviewFeedback!, repliedAt: null } } })))
+      .toBe("awaiting-merge");
+    // Another person's comment no one answered holds it too.
+    expect(unitLifecycle(unit({ pr: { ...reviewed, reviewFeedback: { ...reviewed.reviewFeedback!, comment: { login: "pia-r", at: "2026-09-24T13:00:00Z" } } } })))
+      .toBe("approved-with-comments");
   });
 
   it("calls an approved PR with green checks and no open comments awaiting-merge, because it is waiting on nothing but a button", () => {

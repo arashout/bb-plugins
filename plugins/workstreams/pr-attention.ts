@@ -1,11 +1,14 @@
 // The PR inventory's three questions for each open PR: is it forgotten in
 // draft, is it missing a reviewer, and does it need a nudge. Pure: PR facts,
 // holds, effort ownership, the clock, and thresholds in; each reason's next
-// step, owner, and age out. Ages come from GitHub's timestamps where GitHub
-// keeps one. Red checks and conflicts have none, so their age starts at the
-// read that first saw the state: a lower bound, and labeled as one.
+// step, owner, and age out. Feedback to address comes first, whatever CI,
+// a draft, conflicts, or the merge state say, and holds the merge while it
+// waits. Ages come from GitHub's timestamps where GitHub keeps one. Red
+// checks and conflicts have none, so their age starts at the read that first
+// saw the state: a lower bound, and labeled as one.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
+import { feedbackToAddress } from "./feedback-to-address.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
 import { awaitingRerequest, changesAddressed, conflicted, mergeClean, reviewEngaged } from "./pr-gates.js";
 import { prHoldFor, type PrHolds } from "./pr-holds.js";
@@ -52,8 +55,9 @@ export function businessMsBetween(from: number, to: number, utcOffsetMinutes: nu
 
 export const attentionReasonSchema = z.object({
   question: z.enum(["forgotten-draft", "missing-reviewer", "needs-nudge"]),
-  kind: z.enum(["draft-ready", "draft-idle", "missing-reviewer", "review-waiting", "rereview-needed", "approval-comments", "merge-waiting", "ci-red",
-    "conflicting"]),
+  /** `approval-note` and `review-comments` are feedback to address; `approval-comments` is notes you answered that still want your Confirm. */
+  kind: z.enum(["approval-note", "review-comments", "draft-ready", "draft-idle", "missing-reviewer", "review-waiting", "rereview-needed", "approval-comments",
+    "merge-waiting", "ci-red", "conflicting"]),
   action: z.enum(["mark-ready", "request-review", "nudge", "rerequest", "confirm-handled", "merge", "open-thread"]),
   nextStep: z.string(),
   /** Who acts: you, the PR's author, or the reviewers it names. */
@@ -76,7 +80,8 @@ export type PrAttention = z.infer<typeof prAttentionSchema>;
 
 /** The PR facts attention reads. A missing timestamp never ages a reason. */
 export type AttentionFacts = Pick<Pr, "url" | "state" | "isDraft" | "reviewDecision" | "checkConclusions" | "mergeable" | "mergeStateStatus" |
-  "reviewRequests" | "unresolvedReviewThreads" | "resolvedReviewThreads" | "createdAt" | "reviewFollowupPosted" | "approvalFeedback" | "approvalFeedbackVerified"> & {
+  "reviewRequests" | "unresolvedReviewThreads" | "resolvedReviewThreads" | "createdAt" | "reviewFollowupPosted" | "approvalFeedback" | "approvalFeedbackVerified" |
+  "approvalFeedbackConfirmed" | "reviewFeedback"> & {
   latestReviews: readonly { login: string; state: string; submittedAt?: string }[];
   /** The head commit's date: the last push, as near as GitHub dates it. */
   headCommittedAt?: string;
@@ -111,6 +116,14 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
   const drafted = pushed === null ? null : Math.max(pushed, time(pr.createdAt) ?? pushed);
   const submitted = pr.latestReviews.filter((review) => review.state !== "PENDING");
   const green = checksGreen(pr.checkConclusions);
+
+  // Feedback to address first, on any PR: an approval's note, else another person's comment, that you haven't answered.
+  const open = feedbackToAddress(pr, pr.approvalFeedbackConfirmed === true);
+  for (const item of open) {
+    add(item.kind === "approval"
+      ? { question: "needs-nudge", kind: "approval-note", action: "confirm-handled", nextStep: "Answer the approval's comment", owner: "you", since: item.since }
+      : { question: "needs-nudge", kind: "review-comments", action: "open-thread", nextStep: `Answer @${item.login}'s comment`, owner: "you", since: item.since });
+  }
 
   if (pr.isDraft) {
     if (green && !conflicted(pr)) add({ question: "forgotten-draft", kind: "draft-ready", action: "mark-ready", nextStep: "Mark ready for review", owner: "you", since: drafted });
@@ -149,13 +162,13 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
   const approvals = submitted.filter((review) => review.state === "APPROVED").map((review) => time(review.submittedAt));
   // The newest approval; an undated one leaves the wait undated.
   const approved = approvals.length > 0 && approvals.every((at) => at !== null) ? Math.max(...(approvals as number[])) : null;
-  // Approval comments not yet verified on this head hold the merge, and you can confirm them yourself, so this asks at once, not after a day.
-  if (approvedClean && pr.approvalFeedback?.status === "present" && pr.approvalFeedbackVerified !== true) {
+  // Notes you answered but haven't confirmed on this head still hold the merge, and you can confirm them yourself, so this asks at once.
+  if (approvedClean && pr.approvalFeedback?.status === "present" && pr.approvalFeedbackVerified !== true && !open.some((item) => item.kind === "approval")) {
     add({ question: "needs-nudge", kind: "approval-comments", action: "confirm-handled", nextStep: "Confirm the approval's comments are handled", owner: "you",
       since: approved });
   }
-  // Only what the merge gates pass: the above, approval feedback verified, and no open parent to merge first.
-  if (approvedClean && pr.approvalFeedbackVerified === true && pr.stackedOn == null) {
+  // Only what the merge gates pass: the above, approval feedback verified, no feedback to address, and no open parent to merge first.
+  if (approvedClean && pr.approvalFeedbackVerified === true && open.length === 0 && pr.stackedOn == null) {
     // Mergeable since the newest approval, or the push after it.
     const from = approved === null ? null : Math.max(approved, pushed ?? approved);
     if (aged(from, thresholds.stuckAfterDays)) add({ question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", since: from });

@@ -48,8 +48,10 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   const changes = awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
   if (changes.length) parts.push({ kind: "changes", text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
     since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
-  const approval = reasons.find((reason) => reason.kind === "approval-comments");
-  if (approval) parts.push({ kind: "approval", text: "Approved with comments", since: approval.since });
+  // An approval comment still to address, whatever CI says; else notes you answered that attention asks you to confirm.
+  const note = reasons.find((reason) => reason.kind === "approval-note");
+  const approval = note ?? reasons.find((reason) => reason.kind === "approval-comments");
+  if (approval) parts.push({ kind: "approval", text: note ? "Approval comment to address" : "Approved with comments", since: approval.since });
   const open = pr.reviewFeedback?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
   const comment = commentsSince(pr);

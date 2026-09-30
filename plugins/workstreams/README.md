@@ -274,7 +274,9 @@ implemented.
   groups your open PRs by next action in organizations represented by scanned
   projects, including PRs without a checkout. Approved
   is a review decision; **Ready to merge** also requires clear checks, review
-  threads, branch state, and stack dependencies. Direct
+  threads, branch state, stack dependencies, and no feedback to address: a
+  reviewer's comment or an approval's note that no reply, follow-up, or
+  confirmation answers. Direct
   merge, branch update, and reviewer nudge actions ask for confirmation. CI,
   conflict, and review work shows the planned steps before you start a
   dedicated agent thread. You can expand and edit its instructions.

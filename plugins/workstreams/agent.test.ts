@@ -137,6 +137,7 @@ function liveFacts(overrides: Partial<LiveMergeFacts> = {}): LiveMergeFacts {
     approvalNotesMore: 0,
     approvalNotesComplete: true,
     approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
+    reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null },
     ...overrides,
   };
 }

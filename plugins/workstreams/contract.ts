@@ -252,6 +252,7 @@ export const liveMergeSchema = z
     approvalNotesMore: z.number().int().min(0),
     approvalNotesComplete: z.boolean(),
     approvalFeedback: approvalFeedbackSchema,
+    reviewFeedback: reviewFeedbackSchema.optional(),
   })
   .strict();
 

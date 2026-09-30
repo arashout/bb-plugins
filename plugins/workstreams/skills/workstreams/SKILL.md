@@ -705,6 +705,21 @@ question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
 action.
 
+Feedback to address holds a PR from ready and from merge in every view. It is
+an approval with a non-empty body (a comment, question, condition, or request),
+or another person's comment in a review body, an inline thread, or the PR's
+conversation, that nothing after it answers. Bots, such as deploy previews,
+trackers, CI, and code-review apps, never count. An answer is a reply from the
+PR's author after it, an issue or a PR on the same base that the author links
+the PR from after it (a teammate's mention, or a PR stacked on it or under it,
+doesn't count), or, for an approval's notes, your evidence-checked
+confirmation on the current head. A push never answers it, and
+a worker's evidence doesn't either. It doesn't depend on CI, a draft,
+conflicts, or merge state. Its attention reasons, `approval-note` and
+`review-comments`, come first, and the row's state names it after whatever
+else holds the PR, as in "CI failing · approval comment to address". The merge
+preview refuses the PR until the feedback is answered.
+
 Four RPCs act on one of your PRs, one write per click, and each sends back
 what its row showed: `inventory_mark_ready` the row's `head`,
 `inventory_request_review` the row's `reviewers` and the logins to ask
@@ -713,8 +728,10 @@ repository's most recent ones), `inventory_nudge` the reviewers its attention
 reason names, whom it re-requests, and `inventory_confirm_handled` the row's
 `head` and `feedbackFingerprint`. The first three each write to GitHub.
 `inventory_confirm_handled` writes nothing to GitHub. It answers an
-`approval-comments` reason (approved, green, merge-clean, every review thread
-resolved, and the approval's comments unverified on this head) by recording
+`approval-note` reason (an approval comment to address, whatever else holds the
+PR) or an `approval-comments` reason (approved, green, merge-clean, every
+review thread resolved, and the approval's comments answered but unverified on
+this head) by recording
 your verification of those comments on that head, which the merge gate accepts
 as it accepts a worker's evidence. It reads the approval's notes from GitHub
 first and needs evidence of handling since the newest: a commit, a reply from

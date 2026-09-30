@@ -146,6 +146,23 @@ describe("readLiveMerge", () => {
     for (const call of calls) expect(["view", "list", "graphql"]).toContain(call.args[1]);
   });
 
+  // A reviewer's word in the conversation holds the merge until you answer it, so the last read before a merge has to ask for the
+  // conversation and links; a read without them sees no comment and no answer.
+  it("reads the conversation and links, where a reviewer's comment holds the merge", async () => {
+    const said = { body: "Please hold this until the migration runs.", createdAt: "2026-09-29T10:00:00Z", author: { __typename: "User", login: "pia-r" } };
+    const { run } = fakeGh((args) => {
+      if (args[1] === "view") return { ok: true, stdout: JSON.stringify(view) };
+      if (args[1] === "list") return { ok: true, stdout: "[]" };
+      const conversation = args.includes("includeFollowup=true")
+        ? { comments: { pageInfo: { hasPreviousPage: false }, nodes: [said] }, commits: { nodes: [] }, timelineItems: { nodes: [] } } : {};
+      return { ok: true, stdout: JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, baseRefName: "main", author: { login: "ana-w" },
+        reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] }, reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] }, ...conversation } } } }) };
+    });
+    const result = await readLiveMerge(run, TARGET);
+    expect(result.ok && result.live.reviewFeedback).toEqual({ openThreads: 0, comment: { login: "pia-r", at: said.createdAt }, repliedAt: null,
+      noteAt: null, followUpAt: null });
+  });
+
   it("marks the unresolved count as a lower bound past one page", async () => {
     const { run } = fakeGh(answers([], [{ isResolved: false }], true));
     const result = await readLiveMerge(run, TARGET);

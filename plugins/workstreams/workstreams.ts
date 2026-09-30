@@ -1,6 +1,7 @@
 // Pure board logic: no I/O, no SDK. Everything here is unit-tested in
 // workstreams.test.ts, because these rules are the whole point of the plugin.
 import type { MergeStateStatus, Pr, RawUnit } from "./contract.js";
+import { feedbackToAddress } from "./feedback-to-address.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
 import { ticketFinder, type TicketSource } from "./tickets.js";
 
@@ -314,7 +315,10 @@ export function prLifecycle(pr: Pr): Lifecycle {
     if (!pr.approvalFeedback || pr.approvalFeedback.status === "unknown") return "unverified";
     if (pr.unresolvedReviewThreads === null) return "unverified";
     if (pr.unresolvedReviewThreads > 0) return "approved-with-comments";
-    if (pr.approvalFeedback.status === "present" && !pr.approvalFeedbackVerified) return "approved-with-note";
+    // Feedback to address holds an approval short of awaiting-merge, whatever a worker's evidence says.
+    const open = feedbackToAddress(pr, pr.approvalFeedbackConfirmed === true);
+    if (open.some((item) => item.kind === "approval") || (pr.approvalFeedback.status === "present" && !pr.approvalFeedbackVerified)) return "approved-with-note";
+    if (open.length) return "approved-with-comments";
     if (checksGreen(pr.checkConclusions)) return "awaiting-merge";
   }
   return "awaiting-review";

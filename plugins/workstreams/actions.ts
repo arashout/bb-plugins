@@ -6,7 +6,8 @@ import type { MergeStateStatus } from "./contract.js";
 import { threadPrompt, waitingBehind, type InboxSection, type InboxUnitFacts, type PromptFacts } from "./workstreams.js";
 import type { ThreadTier } from "./threads.js";
 import { RESULT_INSTRUCTION } from "./runs.js";
-import { feedbackVerified } from "./approval-feedback.js";
+import { feedbackVerified, userConfirmation } from "./approval-feedback.js";
+import { feedbackToAddress, type ReviewFeedback } from "./feedback-to-address.js";
 
 /** Actions that need judgement, so they go to an agent thread. */
 export const AGENT_ACTIONS = ["investigate-ci", "resolve-conflicts", "address-review", "address-comments", "review-approval-note"] as const;
@@ -293,6 +294,8 @@ export type LiveMergeFacts = {
   approvalNotesComplete: boolean;
   /** Complete current approving-review feedback, independently of thread resolution. */
   approvalFeedback: import("./approval-feedback.js").ApprovalFeedbackSnapshot;
+  /** Who said what last, and what answered it (feedback-to-address.ts); absent when GitHub didn't return enough to tell. */
+  reviewFeedback?: ReviewFeedback;
 };
 
 export type MergeVerdict = { refusals: string[]; warnings: string[] };
@@ -324,6 +327,13 @@ export function mergeVerdict(live: LiveMergeFacts, verification: import("./appro
   if (!feedbackVerified(live.approvalFeedback, live.headRefOid, verification)) refusals.push("Approval feedback needs verified follow-up on the current head.");
   else if (live.approvalFeedback.status === "present" && verification?.provenance?.kind === "user") {
     warnings.push("Its review notes are confirmed by you; no check ran.");
+  }
+  // Feedback to address holds the merge until you answer it on GitHub or confirm the approval's notes; a worker's evidence doesn't.
+  if (live.reviewFeedback === undefined) refusals.push("GitHub didn't return who commented last. Refresh and try again.");
+  const confirmed = userConfirmation(verification, live.approvalFeedback, live.headRefOid)?.current === true;
+  for (const item of feedbackToAddress(live, confirmed)) {
+    refusals.push(item.kind === "approval" ? "An approval comment waits on your answer: reply, link a follow-up, or confirm it."
+      : `A comment from @${item.login} waits on your answer.`);
   }
   return { refusals, warnings };
 }

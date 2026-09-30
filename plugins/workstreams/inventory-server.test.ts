@@ -36,7 +36,7 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
     if (method === "checkoutState") return { ok: true, branch: "main", rebasing: options.rebasing ?? false };
     if (method === "prLive") { await beforeLive(); return { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN",
       headRefOid: SHA, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
-      approvalFeedback: primary.approvalFeedback } }; }
+      approvalFeedback: primary.approvalFeedback, reviewFeedback: primary.reviewFeedback ?? { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } }; }
     if (method === "prReviewers") return options.closed ? { ok: false, error: "PR is no longer open." } : { ok: true, reviewers: options.reviewers ?? ["ada"] };
     if (method === "prWrite") return { ok: true, detail: "Done." };
     if (method === "inspectPrs") return options.inspection === "open"
@@ -106,7 +106,7 @@ describe("authored backlog server actions", () => {
     expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(false);
     expect((await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).not.toBe("awaiting-merge");
     expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({
-      ok: true, refusals: [expect.stringContaining("Approval feedback")],
+      ok: true, refusals: [expect.stringContaining("Approval feedback"), expect.stringContaining("approval comment waits")],
     });
     expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: true })).toMatchObject({
       ok: false, error: expect.stringContaining("Approval feedback"),
@@ -119,15 +119,30 @@ describe("authored backlog server actions", () => {
         validation: { outcome: "not-needed", detail: "No code change is needed." } }],
     }, Date.now());
     expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(true);
-    expect((await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle).toBe("awaiting-merge");
+    // A worker's evidence verifies the head, but the reviewer saw no answer: the approval's comment still holds the merge (the live case
+    // that once read Ready to merge).
+    const lifecycle = async () => (await env.board()).groups.flatMap((group) => group.clusters).find((cluster) => cluster.units.some((unit) => unit.path === UNIT.path))?.lifecycle;
+    expect(await lifecycle()).toBe("approved-with-note");
+    expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({ ok: true,
+      refusals: ["An approval comment waits on your answer: reply, link a follow-up, or confirm it."] });
+    expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: false,
+      error: expect.stringContaining("approval comment waits") });
+    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
+
+    // Your reply after the note answers it.
+    env.entries[0]!.pr.reviewFeedback = { openThreads: 0, comment: null, repliedAt: "2026-09-25T10:00:00Z", noteAt: "2026-09-25T09:00:00Z", followUpAt: null };
+    await env.harness.runCli(["refresh"]);
+    expect(await lifecycle()).toBe("awaiting-merge");
     expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({ ok: true, refusals: [] });
     expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: true });
 
+    // mira adds to her note: a new fingerprint, and a note newer than your reply.
     env.entries[0]!.pr.approvalFeedback = { status: "present", fingerprint: "e".repeat(64), sourceIds: ["review-42"] };
+    env.entries[0]!.pr.reviewFeedback = { ...env.entries[0]!.pr.reviewFeedback!, noteAt: "2026-09-25T11:00:00Z" };
     await env.harness.runCli(["refresh"]);
     expect((await env.board()).prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(false);
     expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({
-      ok: true, refusals: [expect.stringContaining("Approval feedback")],
+      ok: true, refusals: [expect.stringContaining("Approval feedback"), expect.stringContaining("approval comment waits")],
     });
   });
   it("projects a repeated remote ticket into one effort without inventing checkouts", async () => {

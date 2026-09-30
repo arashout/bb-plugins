@@ -99,7 +99,7 @@ async function setup(options: { remoteOnly?: boolean; mixedCase?: boolean; ready
     if (method === "prLive") return { ok: true, live: { state: pr.state, isDraft: false, reviewDecision: pr.reviewDecision,
       mergeStateStatus: pr.mergeStateStatus, headRefOid: pr.headRefOid, stackedAbove: [], unresolvedThreads: 0,
       unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
-      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } } };
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
     if (method === "inspectPrs") return facts.state === "OPEN"
       ? { entries: [{ repo, pr }], closed: [], failed: [], warnings: [] }
       : { entries: [], closed: [url], failed: [], warnings: [] };
