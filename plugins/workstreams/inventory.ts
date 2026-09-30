@@ -264,7 +264,8 @@ export async function readOpenAuthoredPrs(run: GhRunner, scopeOwners: readonly s
 export function carryReviewFacts(pr: Pr, stored: Pr | undefined): Pr | null {
   if (!readsReviewFeedback(pr)) return pr;
   const threads = readsReviewThreads(pr);
-  if (stored === undefined || (threads && stored.approvalFeedback === undefined) || stored.reviewFeedback === undefined ||
+  // A stored read from before feedback to address dated notes and follow-ups can't say whether anything answered them.
+  if (stored === undefined || (threads && stored.approvalFeedback === undefined) || stored.reviewFeedback?.followUpAt === undefined ||
       stored.headRefOid !== pr.headRefOid || stored.reviewDecision !== pr.reviewDecision ||
       stored.updatedAt !== pr.updatedAt || JSON.stringify(stored.latestReviews) !== JSON.stringify(pr.latestReviews)) return null;
   const feedback = { ...stored.reviewFeedback, openThreads: Math.min(stored.reviewFeedback.openThreads, pr.unresolvedReviewThreads ?? Number.POSITIVE_INFINITY) };

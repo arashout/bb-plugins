@@ -158,7 +158,7 @@ describe("the inventory poll", () => {
     const approved = (extra: Record<string, unknown> = {}): Pr => ({ ...pr(43, { reviewDecision: "APPROVED",
       latestReviews: [{ author: { login: "mira" }, state: "APPROVED", submittedAt: "2026-09-24T09:00:00Z" }], ...extra }), unresolvedReviewThreads: 0, resolvedReviewThreads: 1 });
     const evidence = { status: "none" as const, fingerprint: null, sourceIds: [] };
-    const reviewFeedback = { openThreads: 0, comment: { login: "mira", at: "2026-09-24T09:00:00Z" }, repliedAt: null };
+    const reviewFeedback = { openThreads: 0, comment: { login: "mira", at: "2026-09-24T09:00:00Z" }, repliedAt: null, noteAt: null, followUpAt: null };
     env.state.inspection = (urls) => ({ entries: urls.map((prUrl) => ({ repo: "inkwell/folio", pr: { ...approved(), url: prUrl, approvalFeedback: evidence, reviewFeedback } })),
       closed: [], failed: [], warnings: [] });
     env.state.polled = listing([pr(42), approved()]);

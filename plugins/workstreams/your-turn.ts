@@ -10,17 +10,6 @@ import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
 import { awaitingRerequest } from "./pr-gates.js";
 
-/**
- * What a PR's own review read shows of feedback on it (inventory.ts): open threads someone else started, the newest comment from a
- * reviewer who hasn't approved it, and its author's newest reply. An approver's notes are its approval feedback, so they never count here.
- */
-export const reviewFeedbackSchema = z.object({
-  openThreads: z.number().int().min(0).max(2_000),
-  comment: z.object({ login: z.string().max(140), at: z.string().max(40) }).strict().nullable(),
-  repliedAt: z.string().max(40).nullable(),
-}).strict();
-export type ReviewFeedback = z.infer<typeof reviewFeedbackSchema>;
-
 export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments"] as const;
 export type YourTurnKind = (typeof YOUR_TURN_KINDS)[number];
 export const yourTurnSchema = z.object({

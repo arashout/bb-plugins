@@ -258,17 +258,25 @@ describe("readReviewThreads", () => {
   });
 });
 
-// Your turn reads who said what last from the review read it already makes: a reviewer's newest word against yours, and threads others opened.
-describe("review feedback for Your turn", () => {
-  const review = (login: string, state: string, hour: number) => ({ state, submittedAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`, author: { login } });
-  const said = (login: string, hour: number) => ({ createdAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`, author: { login } });
-  const thread = (isResolved: boolean, ...comments: unknown[]) => ({ isResolved, comments: { nodes: comments } });
-  const read = (reviews: unknown[], threads: unknown[] = [], comments: unknown[] = []) =>
-    reviewFeedbackOf({ author: { login: "ana-w" }, reviews: { nodes: reviews }, comments: { nodes: comments } }, threads);
+// Feedback to address reads who said what last from the review read it already makes: another person's newest word against yours, the
+// approval's newest note, follow-ups that link the PR, and threads others opened.
+describe("review feedback to address", () => {
+  const review = (login: string, state: string, hour: number, body = "", id = `${login}-${hour}`) => ({ id, state, body,
+    submittedAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`, author: { __typename: "User", login } });
+  const said = (login: string, hour: number, typename = "User") => ({ createdAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`,
+    author: { __typename: typename, login } });
+  const thread = (isResolved: boolean, ...comments: unknown[]) => ({ id: `thread-${comments.length}`, isResolved, comments: { nodes: comments } });
+  const link = (hour: number, source: Record<string, unknown>, actor = "ana-w") => ({ createdAt: `2026-09-29T${String(hour).padStart(2, "0")}:00:00Z`,
+    isCrossRepository: false, actor: { __typename: "User", login: actor }, source });
+  const read = (reviews: unknown[], threads: unknown[] = [], comments: unknown[] = [], timeline: unknown[] = [], notes: Parameters<typeof reviewFeedbackOf>[2] = null) =>
+    reviewFeedbackOf({ author: { login: "ana-w" }, baseRefName: "main", reviews: { nodes: reviews },
+      comments: { nodes: comments }, timelineItems: { nodes: timeline } }, threads, notes);
 
-  it("dates a reviewer's newest review, thread comment, or conversation comment, and your newest reply", () => {
-    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("otto-v", 10), said("ana-w", 11))], [said("otto-v", 12)]))
-      .toEqual({ openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T12:00:00Z" }, repliedAt: "2026-09-29T11:00:00Z" });
+  it("dates another person's newest review body, thread comment, or conversation comment, and your newest reply", () => {
+    expect(read([review("otto-v", "COMMENTED", 9, "Why a map here?")], [thread(false, said("otto-v", 10), said("ana-w", 11))], [said("otto-v", 12)]))
+      .toEqual({ openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T12:00:00Z" }, repliedAt: "2026-09-29T11:00:00Z", noteAt: null, followUpAt: null });
+    // A review with no body says nothing of its own; its inline comments speak for it.
+    expect(read([review("otto-v", "COMMENTED", 9)])?.comment).toBeNull();
   });
 
   it("counts only open threads someone else started", () => {
@@ -276,13 +284,54 @@ describe("review feedback for Your turn", () => {
       .toBe(1);
   });
 
-  // An approver's notes are the approval's feedback, which Confirm handled covers; a conversation comment from someone who never reviewed
-  // is a bot's or a bystander's, not a reviewer's.
-  it("leaves out an approver's comments and conversation comments from anyone who never reviewed", () => {
-    expect(read([review("mira-l", "COMMENTED", 9), review("mira-l", "APPROVED", 10)], [thread(false, said("mira-l", 11))], [said("ci-bot", 12)]))
-      .toEqual({ openThreads: 1, comment: null, repliedAt: null });
-    // A reviewer who approved and then asked for changes is no longer an approver.
-    expect(read([review("mira-l", "APPROVED", 9), review("mira-l", "CHANGES_REQUESTED", 10)])?.comment).toEqual({ login: "mira-l", at: "2026-09-29T10:00:00Z" });
+  // A bot's word is a deploy preview, a tracker link, a CI report, or a code-review app's pass: none waits on your answer.
+  it("never counts a bot, by GitHub's type or its login", () => {
+    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9, "Possible issue")], [thread(false, said("press-helper", 10, "Bot"))],
+      [said("vercel", 11), said("linear", 12), said("inkwell-ci-bot", 13)])?.comment).toBeNull();
+  });
+
+  // Anyone other than you speaks for review here, reviewer or not; a later approval of their own covers what they said before it.
+  it("counts anyone's conversation comment, and lets a person's own later approval cover what they said before it", () => {
+    expect(read([], [], [said("pia-r", 10)])?.comment).toEqual({ login: "pia-r", at: "2026-09-29T10:00:00Z" });
+    expect(read([review("mira-l", "COMMENTED", 9, "Rename this?"), review("mira-l", "APPROVED", 10)])?.comment).toBeNull();
+    expect(read([review("mira-l", "APPROVED", 10)], [], [said("mira-l", 11)])?.comment).toEqual({ login: "mira-l", at: "2026-09-29T11:00:00Z" });
+    // A reviewer who approved and then asked for changes no longer stands behind the approval.
+    expect(read([review("mira-l", "APPROVED", 9), review("mira-l", "CHANGES_REQUESTED", 10, "Not yet")])?.comment)
+      .toEqual({ login: "mira-l", at: "2026-09-29T10:00:00Z" });
+  });
+
+  // The approval's own notes wait as the approval's feedback, which Confirm covers; counting them as comments too would outlive a Confirm.
+  it("dates the approval's newest note and leaves its sources out of comments", () => {
+    const approval = review("mira-l", "APPROVED", 10, "listSeriesNames still returns every name.", "approval-1");
+    const notes = { reviewIds: new Set(["approval-1"]), threads: new Map([["thread-1", "mira-l"]]), at: "2026-09-29T10:00:00Z" };
+    expect(read([approval], [thread(false, said("mira-l", 10))], [], [], notes))
+      .toEqual({ openThreads: 1, comment: null, repliedAt: null, noteAt: "2026-09-29T10:00:00Z", followUpAt: null });
+  });
+
+  it("dates the newest PR or issue that links this one, but not a PR stacked on it or under it", () => {
+    const followUp = link(12, { __typename: "PullRequest", baseRefName: "main", headRefName: "ana/series-aware-order" });
+    const issue = link(13, { __typename: "Issue" });
+    const child = link(14, { __typename: "PullRequest", baseRefName: "ana/series-order", headRefName: "ana/series-page" });
+    const parent = link(15, { __typename: "PullRequest", baseRefName: "release", headRefName: "main" });
+    const bot = link(16, { __typename: "Issue" }, "linear");
+    // A stack tool lists every PR in the stack, so a PR two above this one links it too.
+    const stackListing = link(17, { __typename: "PullRequest", baseRefName: "ana/series-page", headRefName: "ana/series-index" });
+    expect(read([], [], [], [followUp])?.followUpAt).toBe("2026-09-29T12:00:00Z");
+    expect(read([], [], [], [followUp, issue, child, parent, bot, stackListing])?.followUpAt).toBe("2026-09-29T13:00:00Z");
+    expect(read([], [], [], [child, parent, bot, stackListing])?.followUpAt).toBeNull();
+  });
+
+  // Only you answer feedback on your PR: a teammate's issue or PR that mentions it says nothing to the reviewer who is waiting.
+  it("counts only a link you made as a follow-up", () => {
+    const teammate = [link(11, { __typename: "Issue" }, "otto-v"), link(12, { __typename: "PullRequest", baseRefName: "main", headRefName: "otto/cleanup" }, "otto-v")];
+    const held = read([review("mira-l", "APPROVED", 9)], [], [said("pia-r", 10)], teammate);
+    expect(held).toMatchObject({ comment: { login: "pia-r", at: "2026-09-29T10:00:00Z" }, followUpAt: null });
+  });
+
+  // Without the follow-up read, a reply or link in the conversation goes unseen, so no date claims an answer.
+  it("leaves the note and link dates out of a read without the conversation", () => {
+    const partial = reviewFeedbackOf({ author: { login: "ana-w" }, reviews: { nodes: [] } }, []);
+    expect(partial).toEqual({ openThreads: 0, comment: null, repliedAt: null });
   });
 
   it("says nothing without the PR's author or its reviews", () => {
@@ -305,6 +354,21 @@ describe("current approval feedback snapshot", () => {
     reviewThreads: { pageInfo: { hasNextPage: false }, nodes: threads } });
   const read = (value: unknown) => readReviewThreads(fakeGh(() => ({ ok: true,
     stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET);
+
+  // The two shapes that once read ready: an approval whose body asks for more, with no reply; and a conditional approval. Each one's note
+  // is dated for feedback to address and left out of the comments, and a follow-up PR that links it dates the answer.
+  it("dates an approval's note and a follow-up that links it on the follow-up read", async () => {
+    const conditional = review("Approving, on the understanding that series-aware ordering comes in a separate PR.");
+    const followUp = { createdAt: "2026-09-24T15:00:00Z", isCrossRepository: false, actor: { __typename: "User", login: "author" },
+      source: { __typename: "PullRequest", baseRefName: "main", headRefName: "author/series-aware-order" } };
+    const withConversation = (timeline: unknown[]) => ({ ...pr([conditional], [thread([comment("c-1", "listSeriesNames still returns every name.")], false)]),
+      headRefName: "author/series-order", baseRefName: "main", comments: { pageInfo: { hasPreviousPage: false }, nodes: [] }, timelineItems: { nodes: timeline } });
+    const readFollowup = (value: unknown) => readReviewThreads(fakeGh(() => ({ ok: true,
+      stdout: JSON.stringify({ data: { repository: { pullRequest: value } } }) })).run, TARGET, true);
+    expect(await readFollowup(withConversation([]))).toMatchObject({ ok: true, approvalFeedback: { status: "present" },
+      reviewFeedback: { comment: null, repliedAt: null, noteAt: "2026-09-24T12:01:00Z", followUpAt: null } });
+    expect(await readFollowup(withConversation([followUp]))).toMatchObject({ reviewFeedback: { noteAt: "2026-09-24T12:01:00Z", followUpAt: "2026-09-24T15:00:00Z" } });
+  });
 
   it("proves none only with complete approval and thread history", async () => {
     expect(await read(pr([review("")]))).toMatchObject({ ok: true, approvalFeedback: {

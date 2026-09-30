@@ -300,7 +300,7 @@ describe("review evidence across polls", () => {
   const read: Pr = { ...parsePrList(JSON.stringify([pr(1, { headRefOid: "a".repeat(40), updatedAt: "2026-09-25T11:00:00Z",
     latestReviews: [{ author: { login: "otto" }, state: "APPROVED", submittedAt: "2026-09-23T09:00:00Z" }] })]))!.pr,
     approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFollowupPosted: false,
-    reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } };
+    reviewFeedback: { openThreads: 2, comment: null, repliedAt: null, noteAt: null, followUpAt: null } };
   const { approvalFeedback: _feedback, reviewFollowupPosted: _followup, reviewFeedback: _turn, ...polled } = read;
 
   it("carries a PR's approval evidence while nothing on it moved, and asks for its own read once anything did", () => {
@@ -309,21 +309,24 @@ describe("review evidence across polls", () => {
       expect(carryReviewFacts({ ...polled, ...moved }, read)).toBeNull();
     }
     expect(carryReviewFacts(polled, undefined)).toBeNull();
-    // A read from before Your turn proves no feedback facts, so it is read again once.
+    // A read from before Your turn proves no feedback facts, and one from before feedback to address dated no answer: each is read again once.
     expect(carryReviewFacts(polled, { ...read, reviewFeedback: undefined })).toBeNull();
+    expect(carryReviewFacts(polled, { ...read, reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } })).toBeNull();
     // A draft proves nothing by its threads, so it needs no read.
     expect(carryReviewFacts({ ...polled, isDraft: true }, undefined)).toEqual({ ...polled, isDraft: true });
   });
 
   // Threads this poll saw resolved are no longer open, even while GitHub's update time stands still.
   it("never carries more open threads than the poll counted", () => {
-    expect(carryReviewFacts({ ...polled, unresolvedReviewThreads: 0 }, read)?.reviewFeedback).toEqual({ openThreads: 0, comment: null, repliedAt: null });
+    expect(carryReviewFacts({ ...polled, unresolvedReviewThreads: 0 }, read)?.reviewFeedback).toEqual({ openThreads: 0, comment: null, repliedAt: null,
+      noteAt: null, followUpAt: null });
   });
 
   // A PR with only comments has its reviews read for Your turn, but keeps its thread counts and approval evidence as they were.
   it("carries a commented PR's feedback facts, and nothing its state word reads", () => {
     const commented: Pr = { ...polled, reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ login: "otto", state: "COMMENTED", submittedAt: "2026-09-23T09:00:00Z" }] };
-    const stored: Pr = { ...commented, reviewFeedback: { openThreads: 1, comment: { login: "otto", at: "2026-09-23T09:00:00Z" }, repliedAt: null } };
+    const stored: Pr = { ...commented, reviewFeedback: { openThreads: 1, comment: { login: "otto", at: "2026-09-23T09:00:00Z" }, repliedAt: null,
+      noteAt: null, followUpAt: null } };
     expect(carryReviewFacts(commented, undefined)).toBeNull();
     expect(carryReviewFacts(commented, stored)).toEqual(stored);
     expect(carryReviewFacts(commented, stored)).not.toHaveProperty("approvalFeedback");

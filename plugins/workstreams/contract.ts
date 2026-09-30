@@ -7,7 +7,7 @@ import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceS
 import { approvalFeedbackSchema } from "./approval-feedback.js";
 import { approvalHandlingSchema } from "./approval-evidence.js";
 import { prAttentionSchema } from "./pr-attention.js";
-import { reviewFeedbackSchema } from "./your-turn.js";
+import { reviewFeedbackSchema } from "./feedback-to-address.js";
 
 /**
  * GitHub's authoritative "can this merge right now" signal
@@ -96,6 +96,8 @@ export const prSchema = z
     approvalFeedback: approvalFeedbackSchema.optional(),
     /** Server comparison with the current head-bound verification record. */
     approvalFeedbackVerified: z.boolean().optional(),
+    /** Your own evidence-checked confirmation covers the current head and notes (feedback-to-address.ts); a worker's evidence never sets it. */
+    approvalFeedbackConfirmed: z.boolean().optional(),
     /** Why approval feedback is not yet verified against the current PR. */
     approvalFeedbackVerification: z.enum(["none", "verified", "missing", "head-changed", "feedback-changed", "unknown"]).optional(),
     /** Changes requested remains GitHub's decision, but the author posted a verified PTAL after a newer head. */
@@ -104,7 +106,7 @@ export const prSchema = z
     unresolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
     /** Complete-page count of resolved review threads; null when unread or incomplete. */
     resolvedReviewThreads: z.number().int().min(0).max(2_000).nullable().default(null),
-    /** Feedback only the PR's own review read proves, which Your turn reads (your-turn.ts); absent until that read. */
+    /** Feedback only the PR's own review read proves (feedback-to-address.ts); absent until that read. */
     reviewFeedback: reviewFeedbackSchema.optional(),
     /**
      * Ticket IDs the PR description states, extracted on the host from its

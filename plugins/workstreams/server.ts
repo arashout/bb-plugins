@@ -964,9 +964,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function withApprovalFeedback(pr: Pr): Pr {
-    const verification = feedbackVerificationState(pr.approvalFeedback, pr.headRefOid ?? null, approvalFeedback.get(pr.url));
+    const record = approvalFeedback.get(pr.url);
+    const verification = feedbackVerificationState(pr.approvalFeedback, pr.headRefOid ?? null, record);
     return { ...pr, approvalFeedbackVerification: verification,
-      approvalFeedbackVerified: verification === "none" || verification === "verified" };
+      approvalFeedbackVerified: verification === "none" || verification === "verified",
+      approvalFeedbackConfirmed: userConfirmation(record, pr.approvalFeedback, pr.headRefOid ?? null)?.current === true };
   }
 
   function writeUnits(units: RawUnit[]): void {
