@@ -4,6 +4,7 @@
   "name": "bb-plugins",
   "plugins": [
     { "name": "workstreams", "source": "./plugins/workstreams" },
-    { "name": "kubernetes-provider", "source": "./plugins/kubernetes-provider" }
+    { "name": "kubernetes-provider", "source": "./plugins/kubernetes-provider" },
+    { "name": "review-watch", "source": "./plugins/review-watch" }
   ]
 }
