@@ -203,9 +203,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
   // What became of a row that left: merged or closed, as the read found it, or on another card now.
   const fates = useMemo(() => {
     const open = new Map((view ? [...view.active, ...view.held] : []).flatMap((item) => item.sections.flatMap((section) => section.rows.map((row) => [row.prUrl, item.name] as const))));
-    for (const [key, rows] of Object.entries(seen.rows)) if (!key.startsWith("threads:")) for (const row of rows)
-      if (!open.has(row.prUrl) && !leftAt.current.has(row.prUrl)) leftAt.current.set(row.prUrl, Date.now());
-    for (const url of leftAt.current.keys()) if (open.has(url)) leftAt.current.delete(url);
+    const drawn = new Set(Object.entries(seen.rows).flatMap(([key, rows]) => key.startsWith("threads:") ? [] : rows.map((row) => row.prUrl)));
+    for (const url of drawn) if (!open.has(url) && !leftAt.current.has(url)) leftAt.current.set(url, Date.now());
+    // One open again, or settled by Mark seen, is no ghost.
+    for (const url of leftAt.current.keys()) if (open.has(url) || !drawn.has(url)) leftAt.current.delete(url);
     return { gone: new Map((view?.gone ?? []).map((item) => [item.prUrl, { how: item.how, at: item.at }])), elsewhere: open, left: new Map(leftAt.current) };
   }, [view, seen.rows]);
   const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved, ...fates })])),
