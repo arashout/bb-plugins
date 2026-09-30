@@ -79,7 +79,7 @@ describe("poll with date-limited searches", () => {
     const result = await host.harness.behavior.callRpc("poll_now", null) as { ok: boolean; removed: number };
 
     expect(result).toMatchObject({ ok: true, removed: 1 });
-    expect(searches).toHaveLength(3);
+    expect(searches).toHaveLength(2);
     expect(searches.every((search) => search.includes("updated:>=2026-09-15"))).toBe(true);
     expect(lookups).toHaveLength(1);
     expect(lookups[0]).toContain('nodes(ids: ["node-10","node-11"])');
@@ -152,11 +152,11 @@ describe("refresh after a review-watch thread becomes idle", () => {
     release();
     expect((await singleIdle).errors).toEqual([]);
     expect((await batchIdle).errors).toEqual([]);
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
     expect((await host.bb.storage.kv.get<{ ok: boolean }>("last-poll"))?.ok).toBe(true);
 
     await idle("thread-2");
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
   });
 
   it("runs one trailing refresh when another watched thread idles during the cooldown", async () => {
@@ -185,15 +185,15 @@ describe("refresh after a review-watch thread becomes idle", () => {
     });
 
     await idle("thread-1");
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
     await idle("thread-2");
     await idle("thread-2");
     await idle("unrelated-thread");
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
     await vi.advanceTimersByTimeAsync(59_999);
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
-    expect(searches).toBe(6);
+    expect(searches).toBe(4);
   });
 
   it("waits for an active poll before refreshing for a second thread that idles during it", async () => {
@@ -209,7 +209,7 @@ describe("refresh after a review-watch thread becomes idle", () => {
       if (query.includes("query Viewer")) return graphqlResponse({ viewer: { login: "reader-ada" } });
       if (query.includes("query WatchedPullRequests")) {
         searches += 1;
-        if (searches <= 3) {
+        if (searches <= 2) {
           entered();
           await firstSearchGate;
         }
@@ -234,10 +234,10 @@ describe("refresh after a review-watch thread becomes idle", () => {
     await idle("thread-2");
     await idle("thread-2");
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(searches).toBe(3);
+    expect(searches).toBe(2);
     release();
     await firstIdle;
-    await vi.waitFor(() => expect(searches).toBe(6));
+    await vi.waitFor(() => expect(searches).toBe(4));
   });
 });
 
@@ -270,51 +270,16 @@ describe("batch review start", () => {
       .toEqual(["thread-1", "thread-1"]);
   });
 
-  it("spawns one project-default thread for feedback across pull requests", async () => {
-    const first = item(3, "feedback-to-address");
-    const second = item(4, "feedback-to-address");
-    const host = await setup([first, second]);
-
-    const result = await host.harness.behavior.callRpc("item_batch_start", {
-      keys: [first.key, second.key],
-    }) as { threadId: string; items: QueueItem[] };
-
-    expect(result).toMatchObject({ threadId: "thread-1" });
-    expect(result.items.map((row) => row.state)).toEqual(["started", "started"]);
-    const calls = host.harness.sdk.callsTo("threads.spawn");
-    expect(calls).toHaveLength(1);
-    const spawn = calls[0]?.[0] as { projectId: string; title: string; prompt: string; environment: unknown };
-    expect(spawn.projectId).toBe("project-test");
-    expect(spawn.environment).toEqual({ type: "project-default" });
-    expect(spawn.title).toBe("Address feedback on 2 pull requests");
-    for (const row of [first, second]) {
-      expect(spawn.prompt).toContain(`${row.repo}#${row.number} (Fix review issue number ${row.number}): ${row.url}`);
-      expect(spawn.prompt).toContain(`Full title: ${row.title}`);
-      expect(spawn.prompt).toContain(`Head: ${row.headSha}; branch: ${row.headBranch}`);
-    }
-    expect(spawn.prompt).toContain("complete review threads and review state");
-    expect(spawn.prompt).toContain("complement to Workstreams");
-    expect(spawn.prompt).toContain("isolated worktree at the pull request's pinned head before editing");
-    expect(spawn.prompt).toContain("If no clone exists, create an isolated clone at that pinned head");
-    expect(spawn.prompt).toContain("Never edit the aggregate project's source checkout, an existing working branch, or another pull request's branch");
-    expect(spawn.prompt).toContain("files changed, and test results");
-    expect(spawn.prompt).toContain("Do not push, post comments or replies, resolve threads, or submit reviews");
-    expect((await host.bb.storage.kv.get<QueueItem[]>("queue"))?.map((row) => row.threadId))
-      .toEqual(["thread-1", "thread-1"]);
-  });
-
-  it("rejects duplicate, partial, dismissed, started, and mixed keys without spawning", async () => {
+  it("rejects duplicate, partial, dismissed, and started keys without spawning", async () => {
     const first = item(1);
     const dismissed = { ...item(2), state: "dismissed" as const };
-    const feedback = item(3, "feedback-to-address");
-    const started = { ...item(4, "feedback-to-address"), state: "started" as const, threadId: "prior-thread" };
-    const host = await setup([first, dismissed, feedback, started]);
+    const started = { ...item(4), state: "started" as const, threadId: "prior-thread" };
+    const host = await setup([first, dismissed, started]);
     for (const keys of [
       [first.key, first.key],
       [first.key.slice(0, 10)],
       [dismissed.key],
       [started.key],
-      [first.key, feedback.key],
     ]) {
       await expect(host.harness.behavior.callRpc("item_batch_start", { keys })).rejects.toThrow();
     }
@@ -369,5 +334,30 @@ describe("batch review start", () => {
     const spawn = host.harness.sdk.callsTo("threads.spawn")[0]?.[0] as { prompt: string };
     expect(spawn.prompt).toContain("`gh pr diff 5 -R owner/repo`");
     expect(spawn.prompt).toContain("If a matching local checkout exists");
+  });
+});
+
+describe("stored rows from the retired feedback-to-address rule", () => {
+  // Earlier versions queued feedback on the viewer's own pull requests. That
+  // now lives in Workstreams, so leftover rows must neither break the page nor
+  // start a thread.
+  function legacy(number: number, state: QueueItem["state"]): QueueItem {
+    const row = { ...item(number), key: `feedback-to-address:node-${number}:sha-${number}`, state };
+    return { ...row, rule: "feedback-to-address" } as unknown as QueueItem;
+  }
+
+  it("leaves them out of the queue and drops them at the next write", async () => {
+    const review = item(40);
+    const host = await setup([review, legacy(41, "queued"), { ...legacy(42, "started"), threadId: "old-thread" }]);
+
+    const listed = await host.harness.behavior.callRpc("queue_list", null) as { items: QueueItem[] };
+    expect(listed.items.map((row) => row.key)).toEqual([review.key]);
+    await expect(host.harness.behavior.callRpc("item_start", { key: "feedback-to-address" }))
+      .rejects.toThrow(/No queue item matches/);
+    expect(host.harness.sdk.callsTo("threads.spawn")).toHaveLength(0);
+
+    await host.harness.behavior.callRpc("item_dismiss", { key: review.key });
+    expect((await host.bb.storage.kv.get<QueueItem[]>("queue"))?.map((row) => row.key))
+      .toEqual([review.key]);
   });
 });

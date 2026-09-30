@@ -11,8 +11,7 @@ background poller asks GitHub every few minutes. The **Reviews** page and
 badges show queued `review-requested` and `review-followup` items in two
 colored chips. Each badge shows both counts, including zeros. Hover over the
 header badge to see labeled counts, preview up to five review requests, and
-open **Reviews**. Workstreams displays the user's own pull requests with
-feedback.
+open **Reviews**.
 
 The queue is notify-only. Review Watch never posts to GitHub or starts a
 thread on its own. A human chooses **Start**, **Review selected**, or
@@ -43,8 +42,9 @@ Each item carries one rule, which says why a human must act:
   submitted a review on the pull request.
 - `review-followup` — the user submitted an earlier review, and a newer head or
   explicit re-request needs the user's attention.
-- `feedback-to-address` — the user's own pull request carries review feedback
-  they have not answered.
+
+The user's own pull requests never enter the queue. For feedback on them, use
+Workstreams, which shows it as **Your turn**.
 
 ## Authentication
 
@@ -78,7 +78,6 @@ matters even when the poller uses a token.
 In **Reviews**, select queued `review-requested` and `review-followup` items,
 then choose **Review selected** to open one aggregate review thread. This action
 does not have a CLI command. Use **Start** to open an individual review thread.
-Workstreams displays `feedback-to-address` items for your own pull requests.
 
 The queued sections show only queued review requests and follow-ups. Started
 review items appear at the bottom under **Opened threads**, with a link to each
@@ -90,8 +89,6 @@ Dismissed items do not appear.
 - Never post to GitHub on the user's behalf. In a thread started from a review
   item, present findings for the user to post: do not submit a review, approve,
   request changes, comment, or resolve a review thread.
-- Never push or force-push from a `feedback-to-address` thread without the
-  user's approval.
 - Never push code from a review thread. Present findings and next actions in
   the thread for the user.
 - Change the queue only through `bb review-watch`. Do not edit bb.db or the

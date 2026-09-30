@@ -3,14 +3,15 @@
 // and the page cannot drift apart.
 import { z } from "zod";
 
-/** Why an item is in the queue. One rule, one reason a human must act. */
+/**
+ * Why an item is in the queue. One rule, one reason a human must act. Feedback
+ * on my own pull requests is not here: Workstreams owns it as "Your turn".
+ */
 export const ruleSchema = z.enum([
   // Someone named me as a reviewer and I have not reviewed this head commit.
   "review-requested",
   // I reviewed an earlier commit; the author has pushed since.
   "review-followup",
-  // My own pull request carries review feedback I have not answered.
-  "feedback-to-address",
 ]);
 export type Rule = z.infer<typeof ruleSchema>;
 
@@ -40,13 +41,6 @@ export const pullRequestSchema = z.object({
   reviewDecision: z
     .enum(["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"])
     .nullable(),
-  /**
-   * When the most recent CHANGES_REQUESTED review was submitted, if the pull
-   * request currently carries one. Rule 3 dates the review decision against my
-   * last push with this; without it a standing CHANGES_REQUESTED re-fires on
-   * every commit.
-   */
-  changesRequestedAt: z.string().nullable(),
   /** Logins GitHub currently lists as requested reviewers (users only). */
   requestedReviewers: z.array(z.string()),
   /** My own most recent submitted review, if any. */
@@ -62,10 +56,6 @@ export const pullRequestSchema = z.object({
       submittedAt: z.string(),
     })
     .nullable(),
-  /** Unresolved review threads, with the timestamp of each one's last comment. */
-  unresolvedThreads: z.array(
-    z.object({ lastCommentAt: z.string(), author: z.string() }),
-  ),
 });
 export type PullRequest = z.infer<typeof pullRequestSchema>;
 

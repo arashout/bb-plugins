@@ -46,7 +46,6 @@ const QUEUE_CHANGED = "queue-changed";
 const RULE_LABELS: Record<Rule, string> = {
   "review-requested": "Needs your review",
   "review-followup": "Needs a follow-up",
-  "feedback-to-address": "Your PRs with feedback",
 };
 
 /** Leaves room for the JSON envelope the host wraps CLI output in. */
@@ -168,30 +167,12 @@ const reviewFollowupPrompt = (item: QueueItem): string =>
     "Do not submit a GitHub review, approve, request changes, or post a comment. The human posts; you draft.",
   ].join("\n");
 
-const feedbackPrompt = (item: QueueItem): string =>
-  [
-    `Address the review feedback on my pull request ${item.repo}#${item.number} (${prSummary(item)}).`,
-    `Full title: ${item.title}`,
-    `URL: ${item.url}`,
-    `Find the matching ${item.repo} checkout, then isolate a branch or worktree at ${item.headSha} before editing.`,
-    `Landing these changes means pushing them onto ${item.headBranch} — which I do, not you.`,
-    "",
-    "1. Read every unresolved review thread on the pull request.",
-    "2. Make the changes the feedback asks for. Where you disagree, say so instead of changing the code.",
-    "3. Run the repo's own checks.",
-    "4. Summarize what you changed per thread and stop for my approval.",
-    "",
-    "Do not push, force-push, reply on GitHub, or resolve a review thread. Wait for my approval before pushing.",
-  ].join("\n");
-
 function promptFor(item: QueueItem): string {
   switch (item.rule) {
     case "review-requested":
       return reviewPrompt(item);
     case "review-followup":
       return reviewFollowupPrompt(item);
-    case "feedback-to-address":
-      return feedbackPrompt(item);
   }
 }
 
@@ -213,24 +194,6 @@ function batchPrompt(items: QueueItem[]): string {
     "- Next: approve, approve with explicit required before-merge changes, request changes, or defer. Approval does not enforce the required changes; name who must verify them before merge.",
     "Call out coverage gaps and dependencies between pull requests.",
     "Do not post GitHub reviews or comments, approve or request changes on GitHub, or push code. Report in this thread for the human to act on.",
-  ].join("\n");
-}
-
-function feedbackBatchPrompt(items: QueueItem[]): string {
-  return [
-    "Address review feedback on these pull requests from the configured project's default environment:",
-    ...items.flatMap((item) => [
-      "",
-      `- ${item.repo}#${item.number} (${prSummary(item)}): ${item.url}`,
-      `  Full title: ${item.title}`,
-      `  Head: ${item.headSha}; branch: ${item.headBranch} onto ${item.baseBranch}.`,
-    ]),
-    "",
-    "Use `gh pr view` and `gh api` with each repository and pull request number to read the complete review threads and review state, including resolved threads and prior reviews. Group related pull requests and identify dependencies as a complement to Workstreams.",
-    "For each pull request, find a matching local repository clone, then create an isolated worktree at the pull request's pinned head before editing. If no clone exists, create an isolated clone at that pinned head. Never edit the aggregate project's source checkout, an existing working branch, or another pull request's branch.",
-    "Make focused fixes for actionable feedback. Explain any feedback that remains unresolved or deferred. Run the relevant checks in each repository that you change.",
-    "Report the overall sequence and, for each pull request, the feedback addressed, unresolved or deferred feedback, files changed, and test results.",
-    "Do not push, post comments or replies, resolve threads, or submit reviews without the user's approval.",
   ].join("\n");
 }
 
@@ -350,8 +313,13 @@ export default async function plugin(bb: BbPluginApi) {
   // inside the 256KB value limit, and a single value keeps merges atomic.
   // -------------------------------------------------------------------------
 
+  /**
+   * Rows of a rule this plugin no longer queues — `feedback-to-address`, which
+   * Workstreams now owns — are skipped here and vanish at the next write.
+   */
   async function readQueue(): Promise<QueueItem[]> {
-    return (await bb.storage.kv.get<QueueItem[]>(QUEUE_KEY)) ?? [];
+    const stored = (await bb.storage.kv.get<QueueItem[]>(QUEUE_KEY)) ?? [];
+    return stored.filter((item) => ruleSchema.safeParse(item.rule).success);
   }
 
   async function writeQueue(items: QueueItem[]): Promise<void> {
@@ -672,18 +640,12 @@ export default async function plugin(bb: BbPluginApi) {
           throw new Error(`${item.repo}#${item.number} is already ${item.state}.`);
         }
       }
-      const feedback = selected[0]!.rule === "feedback-to-address";
-      if (selected.some((item) => (item.rule === "feedback-to-address") !== feedback)) {
-        throw new Error("Select either feedback items or review items in one batch.");
-      }
       const projectId = current.project;
       if (projectId === undefined) throw new Error(`No project is configured. ${CONFIGURE_HINT}`);
       const thread = await bb.sdk.threads.spawn({
         projectId,
-        prompt: feedback ? feedbackBatchPrompt(selected) : batchPrompt(selected),
-        title: feedback
-          ? `Address feedback on ${selected.length} pull requests`
-          : `Review ${selected.length} pull requests`,
+        prompt: batchPrompt(selected),
+        title: `Review ${selected.length} pull requests`,
         environment: { type: "project-default" },
         pluginMetadata: { itemKeys: selected.map((item) => item.key) },
         ...(current.provider === undefined ? {} : { providerId: current.provider }),
@@ -692,7 +654,7 @@ export default async function plugin(bb: BbPluginApi) {
       const started = selected.map((item): QueueItem => ({ ...item, state: "started", threadId: thread.id }));
       const byKey = new Map(started.map((item) => [item.key, item]));
       await writeQueue(queue.map((item) => byKey.get(item.key) ?? item));
-      bb.log.info(`Started ${started.length} ${feedback ? "feedback items" : "reviews"} → thread ${thread.id}`);
+      bb.log.info(`Started ${started.length} reviews → thread ${thread.id}`);
       return { threadId: thread.id, items: started };
     });
   }

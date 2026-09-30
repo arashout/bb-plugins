@@ -27,10 +27,8 @@ function pullRequest(overrides: Partial<PullRequest> = {}): PullRequest {
     headCommittedAt: T.pushed,
     updatedAt: T.commented,
     reviewDecision: "REVIEW_REQUIRED",
-    changesRequestedAt: null,
     requestedReviewers: [],
     myLastReview: null,
-    unresolvedThreads: [],
     ...overrides,
   };
 }
@@ -184,103 +182,17 @@ describe("classify: review-followup", () => {
   });
 });
 
-describe("classify: feedback-to-address", () => {
-  it("queues my own pull request when a reviewer asked for changes, so I answer the block", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.commented,
-        unresolvedThreads: [{ lastCommentAt: T.commented, author: "bob" }],
-      }),
-    ]);
-    expect(items).toHaveLength(1);
-    expect(items[0]?.rule).toBe("feedback-to-address");
-    expect(items[0]?.reason).toBe("changes requested by @bob");
-  });
-
-  it("names the blocking verdict even when no thread survives to attribute it", () => {
-    const items = run([
-      pullRequest({ author: ME, reviewDecision: "CHANGES_REQUESTED", changesRequestedAt: T.commented }),
-    ]);
-    expect(items[0]?.reason).toBe("changes requested on your pull request");
-  });
-
-  it("queues unresolved comments that arrived after my last push, since they await an answer", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        unresolvedThreads: [
-          { lastCommentAt: T.commented, author: "bob" },
-          { lastCommentAt: T.commented, author: "carol" },
-        ],
-      }),
-    ]);
-    expect(items[0]?.rule).toBe("feedback-to-address");
-    expect(items[0]?.reason).toBe("2 unresolved threads since your last push");
-  });
-
-  it("uses the singular for one thread, because the queue line is read by a human", () => {
-    const items = run([
-      pullRequest({ author: ME, unresolvedThreads: [{ lastCommentAt: T.commented, author: "bob" }] }),
-    ]);
-    expect(items[0]?.reason).toBe("1 unresolved thread since your last push");
-  });
-
-  it("goes quiet once I push over the feedback, so a fixed comment stops nagging", () => {
-    const items = run([
-      pullRequest({ author: ME, unresolvedThreads: [{ lastCommentAt: T.reviewed, author: "bob" }] }),
-    ]);
+describe("classify: my own pull requests", () => {
+  // Feedback on my own pull requests belongs to Workstreams ("Your turn"), so
+  // the review queue holds only work I owe other authors as a reviewer.
+  it("never queues my own pull request when a reviewer asks for changes", () => {
+    const items = run([pullRequest({ author: ME, reviewDecision: "CHANGES_REQUESTED" })]);
     expect(items).toEqual([]);
   });
 
-  it("treats a comment at the same instant as my push as already covered by it", () => {
-    const items = run([
-      pullRequest({ author: ME, unresolvedThreads: [{ lastCommentAt: T.pushed, author: "bob" }] }),
-    ]);
+  it("ignores a review request on my own pull request, which is not a review I owe", () => {
+    const items = run([pullRequest({ author: ME, requestedReviewers: [ME] })]);
     expect(items).toEqual([]);
-  });
-
-  it("ignores my own unresolved comments, because I am not waiting on myself", () => {
-    const items = run([
-      pullRequest({ author: ME, unresolvedThreads: [{ lastCommentAt: T.commented, author: ME }] }),
-    ]);
-    expect(items).toEqual([]);
-  });
-
-  it("still reports feedback on my own draft, which can carry comments like any other", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        isDraft: true,
-        unresolvedThreads: [{ lastCommentAt: T.commented, author: "bob" }],
-      }),
-    ]);
-    expect(items[0]?.rule).toBe("feedback-to-address");
-  });
-
-  it("takes precedence over a review request when I am somehow author and reviewer", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        requestedReviewers: [ME],
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.commented,
-      }),
-    ]);
-    expect(items).toHaveLength(1);
-    expect(items[0]?.rule).toBe("feedback-to-address");
-  });
-
-  it("does not fire on someone else's pull request with changes requested", () => {
-    const items = run([
-      pullRequest({ reviewDecision: "CHANGES_REQUESTED", changesRequestedAt: T.commented }),
-    ]);
-    expect(items).toEqual([]);
-  });
-
-  it("stays quiet on my approved pull request with nothing unresolved", () => {
-    expect(run([pullRequest({ author: ME, reviewDecision: "APPROVED" })])).toEqual([]);
   });
 
   it("does not call my own later push a review follow-up", () => {
@@ -291,67 +203,20 @@ describe("classify: feedback-to-address", () => {
     expect(items).toEqual([]);
   });
 
-  it("does not re-queue my pull request after I push a fix the reviewer has not looked at yet", () => {
-    // GitHub leaves reviewDecision at CHANGES_REQUESTED until Bob comes back, so
-    // only the timestamps can tell that the ball is in his court, not mine.
+  it("queues only review requests and follow-ups across every kind of pull request it watches", () => {
     const items = run([
+      pullRequest({ nodeId: "PR_requested", requestedReviewers: [ME] }),
       pullRequest({
-        author: ME,
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.reviewed,
-        unresolvedThreads: [{ lastCommentAt: T.reviewed, author: "bob" }],
+        nodeId: "PR_followup",
+        myLastReview: { state: "CHANGES_REQUESTED", submittedAt: T.reviewed },
       }),
+      pullRequest({ nodeId: "PR_mine", author: ME, reviewDecision: "CHANGES_REQUESTED" }),
+      pullRequest({ nodeId: "PR_mine_draft", author: ME, isDraft: true }),
     ]);
-    expect(items).toEqual([]);
-  });
-
-  it("queues again when the reviewer requests changes on the new commit", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.commented,
-      }),
+    expect(items.map((item) => [item.nodeId, item.rule])).toEqual([
+      ["PR_requested", "review-requested"],
+      ["PR_followup", "review-followup"],
     ]);
-    expect(items).toHaveLength(1);
-    expect(items[0]?.rule).toBe("feedback-to-address");
-    expect(items[0]?.reason).toBe("changes requested on your pull request");
-  });
-
-  it("treats a changes-requested review at the same instant as my push as covered by it", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.pushed,
-      }),
-    ]);
-    expect(items).toEqual([]);
-  });
-
-  it("queues line comments left after my push even when no one has requested changes", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        reviewDecision: "REVIEW_REQUIRED",
-        changesRequestedAt: null,
-        unresolvedThreads: [{ lastCommentAt: T.commented, author: "bob" }],
-      }),
-    ]);
-    expect(items).toHaveLength(1);
-    expect(items[0]?.reason).toBe("1 unresolved thread since your last push");
-  });
-
-  it("prefers the changes-requested wording when the standing review is what fired", () => {
-    const items = run([
-      pullRequest({
-        author: ME,
-        reviewDecision: "CHANGES_REQUESTED",
-        changesRequestedAt: T.commented,
-        unresolvedThreads: [{ lastCommentAt: T.commented, author: "bob" }],
-      }),
-    ]);
-    expect(items[0]?.reason).toBe("changes requested by @bob");
   });
 });
 
@@ -419,16 +284,16 @@ describe("mergeQueue", () => {
   it("expires old queued rows but preserves decisions on open pull requests", () => {
     const old = { noticedAt: "2026-08-01T12:00:00Z" };
     const started = queueItem({ ...old, state: "started", rule: "review-followup" });
-    const dismissed = queueItem({ ...old, state: "dismissed", rule: "feedback-to-address" });
+    const dismissed = queueItem({ ...old, state: "dismissed", headSha: "sha-older" });
     const merged = merge(
       [
         queueItem({ ...old, updatedAt: old.noticedAt, state: "queued" }),
         started,
         dismissed,
       ],
-      [queueItem({ rule: "review-followup" }), queueItem({ rule: "feedback-to-address" })],
+      [queueItem({ rule: "review-followup" }), queueItem({ headSha: "sha-older" })],
     );
-    expect(merged).toEqual([dismissed, started]);
+    expect(merged).toEqual([started, dismissed]);
   });
 
   it("does not re-queue an expired open PR on the next poll", () => {

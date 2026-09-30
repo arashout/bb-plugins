@@ -39,7 +39,9 @@ started thread receives:
 | --- | --- | --- |
 | `review-requested` | Someone requests your review, and you have not submitted a review on the pull request. | Reads the diff and drafts findings for you to post. |
 | `review-followup` | You have submitted an earlier review, and a newer head or explicit re-request needs your attention. | Focuses on what changed since your review. |
-| `feedback-to-address` | Your own pull request carries feedback you have not answered. | Makes the changes and stops for your approval before pushing. |
+
+Your own pull requests never enter the queue. Workstreams shows the feedback on
+them as **Your turn**.
 
 A queue key is `<rule>:<node-id>:<head-sha>`, so a new head commit is a new
 item. Every command that takes a key accepts an unambiguous prefix.
@@ -51,8 +53,7 @@ sidebar and thread-header badges show queued `review-requested` and
 `review-followup` items in two colored chips. Each badge shows both counts,
 including zero counts. Hover over the header badge to see labeled counts,
 preview up to five review requests, and open the full **Reviews** page. The
-realtime signal keeps these surfaces current. Workstreams displays your own
-pull requests with feedback.
+realtime signal keeps these surfaces current.
 
 On the **Reviews** page, select queued `review-requested` and `review-followup`
 items, then choose **Review selected** to open one aggregate review thread.
@@ -62,8 +63,7 @@ threads are still running or have completed. Dismissed items do not appear.
 
 Each thread uses the configured project's default environment. The agent finds
 the matching repository checkout before it inspects code. Review Watch does
-not create checkouts or worktrees when it starts a thread; feedback threads
-instruct the agent to use isolated checkouts or worktrees before editing.
+not create checkouts or worktrees when it starts a thread.
 
 ## UI components
 

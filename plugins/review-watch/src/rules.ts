@@ -16,13 +16,6 @@ function repoAllowed(repo: string, allowlist: string[]): boolean {
   return allowlist.some((allowed) => allowed.toLowerCase() === repo.toLowerCase());
 }
 
-/** Comments on my own pull request that landed after the commit I last pushed. */
-function threadsSinceHead(pr: PullRequest, login: string) {
-  return pr.unresolvedThreads.filter(
-    (thread) => thread.author !== login && isBefore(pr.headCommittedAt, thread.lastCommentAt),
-  );
-}
-
 function toItem(
   pr: PullRequest,
   rule: Rule,
@@ -48,43 +41,11 @@ function toItem(
   };
 }
 
-/**
- * The one item a pull request justifies, or null. Rule order is the precedence
- * order: feedback on my own pull request outranks anything I owe as a reviewer.
- */
+/** The one item a pull request justifies, or null. */
 function itemFor(pr: PullRequest, login: string, now: string): QueueItem | null {
-  const staleThreads = threadsSinceHead(pr, login);
-
-  // Rule 3: my own pull request carries feedback I have not answered. Every
-  // branch dates the feedback against headCommittedAt, because GitHub leaves
-  // reviewDecision at CHANGES_REQUESTED until the reviewer comes back: keying off
-  // the decision alone would re-queue the item on every commit I push to fix it.
-  // Drafts count — my draft can still carry comments.
-  if (pr.author === login) {
-    const changesRequestedSinceHead =
-      pr.changesRequestedAt !== null && isBefore(pr.headCommittedAt, pr.changesRequestedAt);
-    if (changesRequestedSinceHead) {
-      const requester = staleThreads[0]?.author ?? pr.unresolvedThreads[0]?.author;
-      return toItem(
-        pr,
-        "feedback-to-address",
-        requester === undefined
-          ? "changes requested on your pull request"
-          : `changes requested by @${requester}`,
-        now,
-      );
-    }
-    if (staleThreads.length > 0) {
-      return toItem(
-        pr,
-        "feedback-to-address",
-        `${staleThreads.length} unresolved ${staleThreads.length === 1 ? "thread" : "threads"} since your last push`,
-        now,
-      );
-    }
-    // A later push to my own PR does not ask me to review my own changes.
-    return null;
-  }
+  // My own pull request never queues: a later push does not ask me to review
+  // my own changes, and Workstreams owns the feedback on it as "Your turn".
+  if (pr.author === login) return null;
 
   // A draft is not ready for anyone else's eyes, so neither reviewer rule fires.
   if (pr.isDraft) return null;

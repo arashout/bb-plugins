@@ -18,8 +18,6 @@ interface RawNodeOverrides {
   reviewDecision?: string | null;
   reviewRequests?: unknown;
   reviews?: unknown;
-  latestOpinionatedReviews?: unknown;
-  reviewThreads?: unknown;
 }
 
 /** A GraphQL search node shaped the way GitHub sends it. */
@@ -40,8 +38,6 @@ function rawNode(overrides: RawNodeOverrides = {}): Record<string, unknown> {
     commits: { nodes: [{ commit: { committedDate: "2026-09-21T09:00:00Z" } }] },
     reviewRequests: { pageInfo: { hasNextPage: false }, nodes: [] },
     reviews: { nodes: [] },
-    latestOpinionatedReviews: { pageInfo: { hasNextPage: false }, nodes: [] },
-    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
     ...overrides,
   };
 }
@@ -171,7 +167,6 @@ describe("fetchWatchedPullRequests: parsing", () => {
       transport: async (query, variables) => {
         calls.push(variables);
         expect(query).toContain("after: $after");
-        if (variables.search.includes("author:")) return (searchPayload([]) as { data: unknown }).data;
         const firstPage = Array.from({ length: 50 }, (_, index) =>
           rawNode({ id: `PR_${index}`, number: index + 1 }),
         );
@@ -188,19 +183,16 @@ describe("fetchWatchedPullRequests: parsing", () => {
       .toEqual([undefined, "page-2"]);
   });
 
-  it.each(["reviewRequests", "latestOpinionatedReviews", "reviewThreads"] as const)(
-    "rejects truncated %s so incomplete review data cannot update the queue",
-    async (connection) => {
-      const node = rawNode({
-        [connection]: { pageInfo: { hasNextPage: true }, nodes: [] },
-      });
-      const { fetchImpl } = stubFetch((search) =>
-        json(searchPayload(search?.includes("review-requested") ? [node] : [])),
-      );
-      await expect(tokenClient(fetchImpl).fetchWatchedPullRequests("reader-ada", "2026-09-15"))
-        .rejects.toThrow(new RegExp(`${connection} is truncated.*inkwell/folio#7`));
-    },
-  );
+  it("rejects truncated reviewRequests so incomplete review data cannot update the queue", async () => {
+    const node = rawNode({
+      reviewRequests: { pageInfo: { hasNextPage: true }, nodes: [] },
+    });
+    const { fetchImpl } = stubFetch((search) =>
+      json(searchPayload(search?.includes("review-requested") ? [node] : [])),
+    );
+    await expect(tokenClient(fetchImpl).fetchWatchedPullRequests("reader-ada", "2026-09-15"))
+      .rejects.toThrow(/reviewRequests is truncated.*inkwell\/folio#7/);
+  });
 
   it("rejects a repeated search cursor instead of looping or returning a partial poll", async () => {
     const { fetchImpl } = stubFetch(() =>
@@ -252,10 +244,10 @@ describe("fetchWatchedPullRequests: parsing", () => {
     const prs = await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
     expect(prs).toHaveLength(1);
     const searches = calls.map((call) => call.body.variables.search);
+    // No `author:` search: Workstreams owns feedback on the viewer's own pull requests.
     expect(searches).toEqual([
       "is:open is:pr review-requested:reader-ada archived:false updated:>=2026-09-15",
       "is:open is:pr reviewed-by:reader-ada archived:false updated:>=2026-09-15",
-      "is:open is:pr author:reader-ada archived:false updated:>=2026-09-15",
     ]);
   });
 
@@ -269,7 +261,7 @@ describe("fetchWatchedPullRequests: parsing", () => {
 
   it("flattens the fields the rules need, including the head commit's own timestamp", async () => {
     const { fetchImpl } = stubFetch((search) =>
-      search?.includes("author:")
+      search?.includes("reviewed-by:")
         ? json(searchPayload([richNode()]))
         : json(searchPayload([])),
     );
@@ -278,16 +270,13 @@ describe("fetchWatchedPullRequests: parsing", () => {
     expect(pr).toMatchObject({
       repo: "inkwell/folio",
       number: 7,
-      author: "reader-ada",
+      author: "alice",
       headSha: "sha-head",
       headCommittedAt: "2026-09-21T09:00:00Z",
       reviewDecision: "CHANGES_REQUESTED",
+      requestedReviewers: ["reader-ada"],
       myLastReview: { state: "COMMENTED", submittedAt: "2026-09-20T09:00:00Z" },
     });
-    // Resolved threads carry no obligation, so only the open one survives.
-    expect(pr?.unresolvedThreads).toEqual([
-      { lastCommentAt: "2026-09-21T18:00:00Z", author: "bob" },
-    ]);
   });
 
   it("treats an unsubmitted draft review as no review, since it has no timestamp to compare", async () => {
@@ -297,48 +286,6 @@ describe("fetchWatchedPullRequests: parsing", () => {
     const client = tokenClient(fetchImpl);
     const [pr] = await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
     expect(pr?.myLastReview).toBeNull();
-  });
-
-  it("dates a standing changes-requested review, so rule 3 can tell new feedback from old", async () => {
-    const { fetchImpl } = stubFetch(() =>
-      json(
-        searchPayload([
-          rawNode({
-            reviewDecision: "CHANGES_REQUESTED",
-            latestOpinionatedReviews: {
-              pageInfo: { hasNextPage: false },
-              nodes: [
-                { state: "CHANGES_REQUESTED", submittedAt: "2026-09-19T09:00:00Z" },
-                { state: "APPROVED", submittedAt: "2026-09-22T09:00:00Z" },
-                { state: "CHANGES_REQUESTED", submittedAt: "2026-09-21T18:00:00Z" },
-              ],
-            },
-          }),
-        ]),
-      ),
-    );
-    const client = tokenClient(fetchImpl);
-    const [pr] = await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
-    // The newest of the two standing changes-requested reviews wins.
-    expect(pr?.changesRequestedAt).toBe("2026-09-21T18:00:00Z");
-  });
-
-  it("reports no changes-requested timestamp once every reviewer has approved", async () => {
-    const { fetchImpl } = stubFetch(() =>
-      json(
-        searchPayload([
-          rawNode({
-            latestOpinionatedReviews: {
-              pageInfo: { hasNextPage: false },
-              nodes: [{ state: "APPROVED", submittedAt: "2026-09-22T09:00:00Z" }],
-            },
-          }),
-        ]),
-      ),
-    );
-    const client = tokenClient(fetchImpl);
-    const [pr] = await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
-    expect(pr?.changesRequestedAt).toBeNull();
   });
 
   it("skips non-pull-request search rows, which the ISSUE search type can return", async () => {
@@ -372,7 +319,7 @@ describe("fetchOpenNodeIds", () => {
     expect(queries).toHaveLength(1);
     expect(queries[0]).toContain('nodes(ids: ["PR_open","PR_closed","PR_merged"])');
     expect(queries[0]).toContain("... on PullRequest { id state }");
-    expect(queries[0]).not.toContain("reviewThreads");
+    expect(queries[0]).not.toContain("reviewRequests");
   });
 
   it("propagates a failed state lookup so the poller cannot discard retained rows", async () => {
@@ -399,31 +346,13 @@ describe("fetchOpenNodeIds", () => {
 /** A node exercising every field the rules read, for cross-transport comparison. */
 function richNode(): Record<string, unknown> {
   return rawNode({
-    author: { login: "reader-ada" },
     reviewDecision: "CHANGES_REQUESTED",
     reviews: { nodes: [{ state: "COMMENTED", submittedAt: "2026-09-20T09:00:00Z" }] },
-    latestOpinionatedReviews: {
-      pageInfo: { hasNextPage: false },
-      nodes: [{ state: "CHANGES_REQUESTED", submittedAt: "2026-09-21T18:00:00Z" }],
-    },
     reviewRequests: {
       pageInfo: { hasNextPage: false },
       nodes: [
         { requestedReviewer: { __typename: "Team" } },
         { requestedReviewer: { __typename: "User", login: "reader-ada" } },
-      ],
-    },
-    reviewThreads: {
-      pageInfo: { hasNextPage: false },
-      nodes: [
-        {
-          isResolved: true,
-          comments: { nodes: [{ createdAt: "2026-09-19T09:00:00Z", author: { login: "bob" } }] },
-        },
-        {
-          isResolved: false,
-          comments: { nodes: [{ createdAt: "2026-09-21T18:00:00Z", author: { login: "bob" } }] },
-        },
       ],
     },
   });
@@ -498,8 +427,8 @@ describe("createGhTransport: locating gh", () => {
     await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
     await client.fetchWatchedPullRequests("reader-ada", "2026-09-15");
     expect(calls.filter((call) => call.args[0] === "--version")).toHaveLength(1);
-    // Three searches per poll were still made; only the probe was cached.
-    expect(calls.filter((call) => call.args[0] === "api")).toHaveLength(6);
+    // Two searches per poll were still made; only the probe was cached.
+    expect(calls.filter((call) => call.args[0] === "api")).toHaveLength(4);
   });
 
   it("tells the user gh is missing and that a token would do instead, rather than failing anonymously", async () => {
@@ -553,12 +482,12 @@ describe("the two transports are interchangeable", () => {
   it("flattens a gh api graphql payload into exactly the pull request fetch produces, so switching transports cannot change the queue", async () => {
     const payload = JSON.stringify(searchPayload([richNode()]));
     const { fetchImpl } = stubFetch((search) =>
-      search?.includes("author:") ? new Response(payload) : json(searchPayload([])),
+      search?.includes("reviewed-by:") ? new Response(payload) : json(searchPayload([])),
     );
     const { run } = stubRun({
       installed: ["gh"],
       api: (search) =>
-        search?.includes("author:") ? payload : JSON.stringify(searchPayload([])),
+        search?.includes("reviewed-by:") ? payload : JSON.stringify(searchPayload([])),
     });
 
     const viaToken = await tokenClient(fetchImpl).fetchWatchedPullRequests("reader-ada", "2026-09-15");
@@ -569,8 +498,8 @@ describe("the two transports are interchangeable", () => {
     expect(viaGh).toEqual(viaToken);
     // Not vacuously equal: this is the fully populated node, not an empty result.
     expect(viaGh).toHaveLength(1);
-    expect(viaGh[0]?.changesRequestedAt).toBe("2026-09-21T18:00:00Z");
-    expect(viaGh[0]?.unresolvedThreads).toHaveLength(1);
+    expect(viaGh[0]?.requestedReviewers).toEqual(["reader-ada"]);
+    expect(viaGh[0]?.myLastReview).toEqual({ state: "COMMENTED", submittedAt: "2026-09-20T09:00:00Z" });
   });
 
   it("passes the query and its variables to gh as string fields, which is how gh forwards GraphQL variables", async () => {

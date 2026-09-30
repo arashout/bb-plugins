@@ -29,12 +29,8 @@ const SECTIONS: readonly { rule: Rule; title: string }[] = [
   { rule: "review-followup", title: "Needs a follow-up" },
 ];
 
-function isReviewItem(item: QueueItem): boolean {
-  return item.rule === "review-requested" || item.rule === "review-followup";
-}
-
 function canBatchReview(item: QueueItem): boolean {
-  return item.state === "queued" && isReviewItem(item);
+  return item.state === "queued";
 }
 
 function ruleLabel(rule: Rule): string {
@@ -248,10 +244,8 @@ function ReviewsPage() {
   const [polling, setPolling] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const navigate = useBbNavigate();
-  const queuedItems =
-    items?.filter((item) => item.state === "queued" && isReviewItem(item)) ?? [];
-  const startedItems =
-    items?.filter((item) => item.state === "started" && isReviewItem(item)) ?? [];
+  const queuedItems = items?.filter((item) => item.state === "queued") ?? [];
+  const startedItems = items?.filter((item) => item.state === "started") ?? [];
   const eligibleReviewKeys = new Set(
     items?.filter(canBatchReview).map((item) => item.key),
   );
@@ -442,11 +436,7 @@ function useQueuedItems(): { items: QueueItem[]; lastPoll: LastPoll } {
   const refetch = useCallback(() => {
     rpc.call("queue_list").then(
       (result) => {
-        setQueued(
-          result.items.filter(
-            (item) => item.state === "queued" && isReviewItem(item),
-          ),
-        );
+        setQueued(result.items.filter((item) => item.state === "queued"));
         setLastPoll(result.lastPoll);
       },
       // Keep the last queue response visible while a transient fetch fails.

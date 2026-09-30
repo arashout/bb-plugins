@@ -1,4 +1,4 @@
-// The GitHub half of review-watch: three searches over the GraphQL API, flattened
+// The GitHub half of review-watch: two searches over the GraphQL API, flattened
 // into the `PullRequest` shape the rest of the plugin speaks.
 //
 // Only the *transport* — one GraphQL round trip — comes in two flavours: a
@@ -55,9 +55,8 @@ export interface GithubClient {
   /** The authenticated user's login, cached for the client's lifetime. */
   viewerLogin(): Promise<string>;
   /**
-   * Every open pull request that could concern `login`: ones where they are a
-   * requested reviewer, ones they reviewed, and ones they authored.
-   * Deduplicated by nodeId.
+   * Every open pull request that could need a review from `login`: ones where
+   * they are a requested reviewer and ones they reviewed. Deduplicated by nodeId.
    */
   fetchWatchedPullRequests(login: string, updatedSince: string): Promise<PullRequest[]>;
   /** Open pull request node IDs from stored rows absent from the fresh searches. */
@@ -91,17 +90,6 @@ const PR_FIELDS = `
     nodes { requestedReviewer { __typename ... on User { login } } }
   }
   reviews(author: $login, last: 1) { nodes { state submittedAt } }
-  latestOpinionatedReviews(first: 20) {
-    pageInfo { hasNextPage }
-    nodes { state submittedAt }
-  }
-  reviewThreads(first: 50) {
-    pageInfo { hasNextPage }
-    nodes {
-      isResolved
-      comments(last: 1) { nodes { createdAt author { login } } }
-    }
-  }
 `;
 
 const SEARCH_QUERY = `
@@ -148,38 +136,7 @@ const searchNodeSchema = z
     reviews: z.object({
       nodes: z.array(z.object({ state: z.string(), submittedAt: z.string().nullable() })),
     }),
-    latestOpinionatedReviews: z.object({
-      pageInfo: z.object({ hasNextPage: z.boolean() }),
-      nodes: z.array(z.object({ state: z.string(), submittedAt: z.string().nullable() })),
-    }),
-    reviewThreads: z.object({
-      pageInfo: z.object({ hasNextPage: z.boolean() }),
-      nodes: z.array(
-        z.object({
-          isResolved: z.boolean(),
-          comments: z.object({
-            nodes: z.array(
-              z.object({
-                createdAt: z.string(),
-                author: z.object({ login: z.string() }).nullable(),
-              }),
-            ),
-          }),
-        }),
-      ),
-    }),
   });
-
-/** The newest still-standing changes-requested review, or null if there is none. */
-function latestChangesRequestedAt(
-  reviews: { state: string; submittedAt: string | null }[],
-): string | null {
-  const timestamps = reviews
-    .filter((review) => review.state === "CHANGES_REQUESTED")
-    .flatMap((review) => (review.submittedAt === null ? [] : [review.submittedAt]))
-    .sort((a, b) => Date.parse(b) - Date.parse(a));
-  return timestamps[0] ?? null;
-}
 
 /**
  * Flatten a node into the shape `pullRequestSchema` describes. The result is
@@ -201,10 +158,6 @@ function flatten(node: z.infer<typeof searchNodeSchema>): unknown {
     headCommittedAt: node.commits.nodes[0]?.commit.committedDate,
     updatedAt: node.updatedAt,
     reviewDecision: node.reviewDecision,
-    // `latestOpinionatedReviews` is the latest APPROVED or CHANGES_REQUESTED
-    // review per reviewer, so a reviewer who has since approved no longer shows
-    // up here — exactly the "currently carries one" the rules need.
-    changesRequestedAt: latestChangesRequestedAt(node.latestOpinionatedReviews.nodes),
     // Team review requests carry no login; review-watch only nags a person.
     requestedReviewers: node.reviewRequests.nodes
       .map((request) => request.requestedReviewer?.login)
@@ -216,14 +169,6 @@ function flatten(node: z.infer<typeof searchNodeSchema>): unknown {
         ? []
         : [{ state: review.state, submittedAt: review.submittedAt }],
     )[0] ?? null,
-    // A thread whose last comment lost its author (deleted account) can never be
-    // attributed to anyone, so it cannot justify an item either.
-    unresolvedThreads: node.reviewThreads.nodes.flatMap((thread) => {
-      if (thread.isResolved) return [];
-      const last = thread.comments.nodes[0];
-      if (last === undefined || last.author === null) return [];
-      return [{ lastCommentAt: last.createdAt, author: last.author.login }];
-    }),
   };
 }
 
@@ -231,10 +176,8 @@ function flatten(node: z.infer<typeof searchNodeSchema>): unknown {
 function parseSearchNode(node: unknown): { pullRequest: PullRequest } | { error: string } {
   const raw = searchNodeSchema.safeParse(node);
   if (!raw.success) return { error: raw.error.message };
-  for (const connection of ["reviewRequests", "latestOpinionatedReviews", "reviewThreads"] as const) {
-    if (raw.data[connection].pageInfo.hasNextPage) {
-      throw new Error(`GitHub ${connection} is truncated for ${raw.data.repository.nameWithOwner}#${raw.data.number}; the poll cannot safely update the queue.`);
-    }
+  if (raw.data.reviewRequests.pageInfo.hasNextPage) {
+    throw new Error(`GitHub reviewRequests is truncated for ${raw.data.repository.nameWithOwner}#${raw.data.number}; the poll cannot safely update the queue.`);
   }
   const parsed = pullRequestSchema.safeParse(flatten(raw.data));
   if (!parsed.success) return { error: parsed.error.message };
@@ -336,7 +279,7 @@ const GH_CANDIDATES = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
 
 const GH_PROBE_TIMEOUT_MS = 5_000;
 const GH_API_TIMEOUT_MS = 30_000;
-/** A 50-result search with review threads is large; 16 MiB is bb's own ceiling. */
+/** A 50-result search can be large; 16 MiB is bb's own ceiling. */
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
 
 const TOKEN_ALTERNATIVE = "Or set the `githubToken` setting to a personal access token instead.";
@@ -555,13 +498,12 @@ export function createGithubClient(options: {
 
     async fetchWatchedPullRequests(login: string, updatedSince: string): Promise<PullRequest[]> {
       const cutoff = ` updated:>=${updatedSince}`;
-      const [requested, reviewed, authored] = await Promise.all([
+      const [requested, reviewed] = await Promise.all([
         search(`is:open is:pr review-requested:${login} archived:false${cutoff}`, login),
         search(`is:open is:pr reviewed-by:${login} archived:false${cutoff}`, login),
-        search(`is:open is:pr author:${login} archived:false${cutoff}`, login),
       ]);
       const byNodeId = new Map<string, PullRequest>();
-      for (const pullRequest of [...requested, ...reviewed, ...authored]) {
+      for (const pullRequest of [...requested, ...reviewed]) {
         byNodeId.set(pullRequest.nodeId, pullRequest);
       }
       return [...byNodeId.values()];

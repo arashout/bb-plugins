@@ -4,8 +4,8 @@ choose to.
 ## What you get
 
 - A **Reviews** page in the left sidebar, grouped into pull requests that need
-  your first review or a follow-up after a new commit or re-request.
-  Workstreams displays your own pull requests carrying feedback.
+  your first review or a follow-up after a new commit or re-request. Feedback
+  on your own pull requests appears in Workstreams as **Your turn**.
 - A **Start** button on each row that opens an individual BB thread with a
   prompt written for that kind of work.
 - Started items appear under **Opened threads** at the bottom, with a link to
@@ -18,8 +18,7 @@ choose to.
   and `review-followup` items in two colored chips. Each badge shows both
   counts, including zeros. Hover over the header badge to see labeled counts,
   preview up to five review requests, or open the full **Reviews** page. Live
-  updates keep the list current without a reload. Workstreams displays your
-  own pull requests with feedback.
+  updates keep the list current without a reload.
 
 ## How it works
 
@@ -33,15 +32,12 @@ data is truncated, the poll reports an error and does not update the queue from
 partial data.
 
 Started review threads use the configured project's default environment. The
-agent finds the matching repository checkout before inspecting code. Feedback
-threads prepare focused fixes in isolated checkouts or worktrees and stop before
-pushing changes, replying on GitHub, or resolving review threads.
+agent finds the matching repository checkout before inspecting code.
 
 Review Watch reads GitHub and never writes to it. It also never starts a thread
 on its own: the queue notifies, and you decide what to work. A thread started
 from a review item presents its findings to you for posting rather than
-submitting a review itself. Feedback threads stop for your approval before any
-push, reply, or resolved review thread.
+submitting a review itself.
 
 ## What you need
 
