@@ -59,7 +59,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "open-pr", group: "Rows", title: "Open the PR on GitHub", keys: [], effect: "nav" },
   { id: "accept", group: "Sort", title: "Accept the suggestion", keys: ["p"], effect: "local" },
   { id: "move", group: "Sort", title: "Move to an effort…", keys: ["e"], effect: "dialog" },
-  { id: "one-off", group: "Sort", title: "Mark as one-offs", keys: [], effect: "local" },
+  { id: "one-off", group: "Sort", title: "Move to One-offs", keys: [], effect: "local" },
   { id: "new-effort", group: "Sort", title: "New effort from the selection…", keys: [], effect: "dialog" },
   { id: "promote", group: "Sort", title: "Promote to an effort…", keys: [], effect: "dialog" },
   { id: "rule", group: "Sort", title: "Standing rules…", keys: [], effect: "dialog" },

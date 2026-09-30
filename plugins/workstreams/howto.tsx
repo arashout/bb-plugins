@@ -142,7 +142,8 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
           To pause one PR, choose Hold PR in its details. A held PR is listed in its card&apos;s Held section, with its reason
           and how long it&apos;s been held; the Held chip in the card&apos;s header, or ⇧H, goes there. No batch or Advance
           touches it until you release it. Release, on its row or for the whole section, lists each PR first and waits
-          with Undo like any write. One-offs collects PRs that merge on their own, and it stays on the active pile.
+          with Undo like any write. One-offs collects PRs that merge on their own, and it stays on the active pile. To move a
+          PR there from an effort, choose Move to One-offs in its details or the selection bar; Undo puts it back.
         </p>
       </Section>
 

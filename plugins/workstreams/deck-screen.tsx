@@ -200,7 +200,8 @@ function RefreshControl({ line, busy, run }: { line: DeckLine; busy: boolean; ru
     <span aria-hidden className={cn("inline-block leading-none", busy && "motion-safe:animate-spin")}>↻</span></button>;
 }
 
-function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run: Run; first: boolean }) {
+/** `leaves`: the row is in an effort, other than One-offs, so it can move to One-offs from its details. */
+function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowState; run: Run; first: boolean; leaves?: boolean }) {
   const open = state.expanded.has(line.prUrl);
   const selected = state.selected.has(line.prUrl);
   const busy = state.refreshing?.has(line.prUrl) ?? false;
@@ -257,12 +258,12 @@ function Row({ line, state, run, first }: { line: DeckLine; state: RowState; run
           className={cn("rounded px-1 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}>{open ? "Less" : "More"}</button>}
       </span>
     </div>
-    {open ? <Details line={line} run={run} busy={busy} /> : null}
+    {open ? <Details line={line} run={run} busy={busy} leaves={leaves} /> : null}
   </>;
 }
 
 /** A row's details: what it waits on, its reviewers and tickets, and every action it can take, each with its key. */
-function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean }) {
+function Details({ line, run, busy, leaves }: { line: DeckLine; run: Run; busy: boolean; leaves?: boolean }) {
   const row = line.row;
   if (!row) return <p className="mb-1.5 ml-9 text-[12px] text-muted-foreground">Left this view since you looked. Mark seen clears it.</p>;
   const move = SECTION_ACTION[line.section];
@@ -284,6 +285,8 @@ function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean 
       {row.thread ? <button type="button" onClick={() => run({ kind: "thread", id: row.thread!.id })} className={cn(BUTTON, "border-border")}>Open “{row.thread.title}”<Kbd>o</Kbd></button> : null}
       <button type="button" onClick={() => run({ kind: "action", id: "open-pr", line })} className={GHOST}>Open on GitHub ↗</button>
       <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release…" : "Hold PR…"}</button>
+      {leaves && !line.dim ? <button type="button" data-deck-one-off onClick={() => run({ kind: "action", id: "one-off", line })} className={GHOST}
+        title="Moves it out of this effort; Undo puts it back">Move to One-offs</button> : null}
       {row.confirmation ? <button type="button" data-deck-revoke onClick={() => run({ kind: "revoke", prUrl: line.prUrl })} className={GHOST}
         title="Its review notes need you again before it merges">Revoke confirmation</button> : null}
       <button type="button" aria-busy={busy || undefined} disabled={busy} onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>
@@ -293,7 +296,8 @@ function Details({ line, run, busy }: { line: DeckLine; run: Run; busy: boolean 
 }
 const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready" };
 
-function Section({ section, state, run, open, stuck, held }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean }) {
+function Section({ section, state, run, open, stuck, held, leaves }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean;
+  leaves: boolean }) {
   const { meta } = section;
   const folded = meta.fold && !open;
   const header = <>
@@ -316,7 +320,8 @@ function Section({ section, state, run, open, stuck, held }: { section: SectionS
         onClick={() => { if (section.action!.enabled) run({ kind: "action", id: section.action!.id }); }}
         className={cn(BUTTON, TONE[meta.tone].button)}>{section.action.label}<Kbd>{section.action.key}</Kbd></button> : null}
     </div>
-    {folded ? null : <div className="pb-1.5 pt-0.5">{section.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0} />)}
+    {folded ? null : <div className="pb-1.5 pt-0.5">{section.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0}
+      leaves={leaves} />)}
       {section.arriving.map((item) => <button key={item.prUrl} type="button" tabIndex={-1} data-deck-arrive={item.prUrl} onClick={() => run({ kind: "jump", prUrl: item.prUrl })}
         title={`Show ${item.ref} where it is now`} className={cn("flex h-[26px] w-full items-center gap-2 rounded-md border border-dashed border-border/70 pl-[62px] pr-2 text-left text-[11.5px] text-muted-foreground hover:text-foreground", RING)}>
         <b className="font-medium">{item.ref}</b> lands here on Mark seen</button>)}</div>}
@@ -468,8 +473,9 @@ export function CardBar({ name, color, status, advance, hollow }: { name: string
 }
 
 export function CardSections({ screen, state, run, open, stuck }: { screen: CardScreen; state: RowState; run: Run; open: ReadonlySet<string>; stuck: boolean }) {
+  const leaves = screen.card.kind === "effort" && !screen.card.oneOff;
   return screen.sections.length ? <>{screen.sections.map((section) => <Section key={section.key} section={section} state={state} run={run} open={open.has(section.key)}
-    stuck={stuck} held={screen.card.pile !== "active"} />)}</> : <p className="py-8 text-center text-[12px] text-muted-foreground">
+    stuck={stuck} held={screen.card.pile !== "active"} leaves={leaves} />)}</> : <p className="py-8 text-center text-[12px] text-muted-foreground">
     {screen.card.kind === "loose" ? "Set each thread's effort from the chip above its composer." : screen.card.kind === "service" ? "No open PRs here."
       : "No open PRs in this effort."}</p>;
 }
@@ -578,9 +584,12 @@ export function TopBar({ view, read, seen, run, onPalette, onHelp }: { view: "de
   </header>;
 }
 
-/** The selection's moves, docked under the rows so it never covers one; on a service card, the moves into efforts too. */
-export function BatchBar({ selected, kinds, sorting, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; sorting: boolean;
-  run: Run }) {
+/**
+ * The selection's moves, docked under the rows so it never covers one; on a service card, the moves into efforts too, and on an effort's
+ * card (`leaves`), the move to One-offs.
+ */
+export function BatchBar({ selected, kinds, sorting, leaves, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; sorting: boolean;
+  leaves?: boolean; run: Run }) {
   if (!selected) return null;
   const safe = kinds.filter((kind) => kind.id !== "merge").reduce((sum, kind) => sum + kind.count, 0);
   return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
@@ -595,7 +604,7 @@ export function BatchBar({ selected, kinds, sorting, run }: { selected: number; 
         <button type="button" onClick={() => run({ kind: "action", id: "move" })} className={cn(BUTTON, "border-border")}>Move…<Kbd>e</Kbd></button>
         <button type="button" onClick={() => run({ kind: "action", id: "new-effort" })} className={cn(BUTTON, "border-border")}>New effort from these…</button>
         <button type="button" onClick={() => run({ kind: "action", id: "one-off" })} className={cn(BUTTON, "border-border")}>Mark one-offs</button>
-      </> : null}
+      </> : leaves ? <button type="button" onClick={() => run({ kind: "action", id: "one-off" })} className={cn(BUTTON, "border-border")}>Move to One-offs</button> : null}
       <span className="flex-1" />
       <button type="button" onClick={() => run({ kind: "action", id: "clear" })} className={GHOST}>Clear<Kbd>esc</Kbd></button>
     </div>
@@ -934,7 +943,8 @@ export function DeckPane(props: DeckPaneProps) {
             : props.empty ? "Nothing is open." : "Reading your efforts…"}</p>}
       </div>
     </div>
-    <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} sorting={card?.card.kind === "service"} run={props.run} />
+    <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} sorting={card?.card.kind === "service"}
+      leaves={card?.card.kind === "effort" && !card.card.oneOff} run={props.run} />
     <HintBar hints={props.hints} flash={props.flash} onPalette={props.onPalette} onHelp={props.onHelp} onUndo={props.onUndo} />
     <p role="status" data-deck-announce className="sr-only">{props.announce}</p>
   </div>;

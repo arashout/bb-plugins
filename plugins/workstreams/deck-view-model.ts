@@ -506,7 +506,10 @@ export function availability(context: KeyContext): Availability {
   const card = deck ? context.cur : null;
   const live = !!card && card.card.pile === "active";
   const service = !!card && card.card.kind === "service";
-  const sorting = service && (selected.length ? selected.some((line) => !line.dim) : !!focused?.row && !focused.dim);
+  const scoped = selected.length ? selected.some((line) => !line.dim) : !!focused?.row && !focused.dim;
+  const sorting = service && scoped;
+  // An effort's rows move to One-offs too, as an explicit move out of it; One-offs' own rows are there already.
+  const leaves = !!card && card.card.kind === "effort" && !card.card.oneOff;
   const prs = context.prs;
   const out = {} as Availability;
   const set = (id: DeckActionId, on: boolean, why = "") => { out[id] = { on, why: on ? "" : why }; };
@@ -541,7 +544,8 @@ export function availability(context: KeyContext): Availability {
   set("open-pr", row, "focus a row first");
   set("accept", sorting, service ? "focus a row first" : "only a service card's rows move from here");
   set("move", sorting, service ? "focus or select a row" : "only a service card's rows move from here");
-  set("one-off", sorting, service ? "focus or select a row" : "only a service card's rows move from here");
+  set("one-off", (service || leaves) && scoped, !card ? (deck ? NO_CARD : "Efforts only") : card.card.oneOff ? "they're in One-offs"
+    : service || leaves ? "focus or select a row" : "only an effort's or a service card's rows move from here");
   set("new-effort", service && selected.length > 0, service ? "select rows first" : "only a service card's rows move from here");
   set("rule", deck, "Efforts only");
   set("seed", deck, "Efforts only");

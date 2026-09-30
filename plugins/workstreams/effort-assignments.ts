@@ -2,6 +2,8 @@
 // rule you added. Each change is one action: a row per PR or ticket it gave an
 // effort, which is both the audit trail and what Undo reverses. Undo releases
 // exactly what the action added, and only while that effort still owns all of it.
+// A move out of another effort (into One-offs) names that effort on its row, so
+// Undo puts the PR back there.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { RULE_KINDS, ruleSchema, suggestionGroupSchema, type Rule } from "./effort-classify.js";
@@ -18,6 +20,11 @@ export const EFFORT_ASSIGNMENT_MIGRATIONS = [
 ];
 /** Append-only: server.ts adds this after the classification audit (id 61). */
 export const EFFORT_RULE_MIGRATION = `CREATE TABLE IF NOT EXISTS effort_rules (id TEXT PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL, effort_id TEXT, created_at INTEGER NOT NULL)`;
+/**
+ * Append-only: server.ts adds this after the confirmation audit (id 66). The effort a moved PR was an exact member of, which Undo puts it
+ * back in; null when the PR had no effort, or was in one only through a ticket, which it rejoins once Undo releases it.
+ */
+export const EFFORT_ASSIGNMENT_FROM_MIGRATION = `ALTER TABLE effort_assignments ADD COLUMN from_effort_id TEXT`;
 export type AssignmentSource = "assign" | "new-effort" | "one-off" | "rule" | "seed";
 
 const failure = z.object({ ok: z.literal(false), error: z.string() });
@@ -50,14 +57,17 @@ export const classifyContract = {
   /** Start an effort from open PRs of yours that no effort owns. Undoing it removes the effort again. */
   classify_new_effort: { input: z.object({ name: z.string().max(500), goal: z.string().max(4_000), prUrls, tickets, requestId: z.string().uuid() }).strict(),
     output: classifyActionResultSchema },
-  /** Put open PRs of yours that no effort owns into One-offs, which the first use creates. */
-  classify_one_off: { input: z.object({ prUrls }).strict(), output: classifyActionResultSchema },
+  /**
+   * Put open PRs of yours into One-offs, which the first use creates: PRs no effort owns, or with `from`, PRs that effort owns now, moved
+   * out of it. Undo puts each back where it was.
+   */
+  classify_one_off: { input: z.object({ prUrls, from: z.string().min(1).max(500).optional() }).strict(), output: classifyActionResultSchema },
   /** Reverse one classification action while its effort still owns everything the action added. */
   classify_undo: { input: z.object({ actionId: z.string().uuid() }).strict(), output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true) }).strict()]) },
 };
 
 type Db = RunDb & { transaction<T>(fn: () => T): () => T };
-type Row = { effortId: string; source: AssignmentSource; kind: "prUrl" | "ticket"; ref: string };
+type Row = { effortId: string; source: AssignmentSource; kind: "prUrl" | "ticket"; ref: string; from: string | null };
 
 export function createAssignmentStore(db: Db, efforts: EffortStore, now = Date.now) {
   return {
@@ -72,6 +82,23 @@ export function createAssignmentStore(db: Db, efforts: EffortStore, now = Date.n
         for (const [kind, refs] of [["prUrl", result.claimed.prUrls], ["ticket", result.claimed.tickets]] as const)
           for (const ref of refs) insert.run(actionId, now(), input.source, result.effort.id, kind, ref, input.ruleId ?? null);
         return { actionId, effort: result.effort, added: result.claimed.prUrls.length };
+      })();
+    },
+    /**
+     * Move PRs into one effort as one action, out of whichever effort has them now; the caller checked they may move. Each row names the
+     * effort the PR was an exact member of, for Undo.
+     */
+    move(input: { effortId: string; source: AssignmentSource; prUrls: readonly string[] }): { actionId: string; effort: EstablishedEffort; added: number } {
+      return db.transaction(() => {
+        const destination = efforts.get(input.effortId);
+        if (!destination || destination.archivedAt) throw new Error("The destination effort changed. Refresh before moving work.");
+        const moving = [...new Set(input.prUrls)].map((ref) => ({ ref, from: efforts.owner("prUrl", ref)?.id ?? null })).filter((item) => item.from !== destination.id);
+        if (!moving.length) throw new Error(`These are in ${destination.name} already.`);
+        const effort = efforts.transfer(destination.id, { tickets: [], prUrls: moving.map((item) => item.ref) });
+        const actionId = randomUUID();
+        const insert = db.prepare(`INSERT INTO effort_assignments (action_id, at, source, effort_id, kind, ref, from_effort_id) VALUES (?, ?, ?, ?, 'prUrl', ?, ?)`);
+        for (const item of moving) insert.run(actionId, now(), input.source, effort.id, item.ref, item.from);
+        return { actionId, effort, added: moving.length };
       })();
     },
     rules: (): Rule[] => (db.prepare(`SELECT id, kind, value, effort_id AS effortId, created_at AS createdAt FROM effort_rules ORDER BY created_at, id`).all())
@@ -96,11 +123,20 @@ export function createAssignmentStore(db: Db, efforts: EffortStore, now = Date.n
     /** Returns the effort the action added to and how, so the caller can finish a new effort's undo. */
     undo(actionId: string): { effortId: string; source: AssignmentSource } {
       return db.transaction(() => {
-        const rows = db.prepare(`SELECT effort_id AS effortId, source, kind, ref FROM effort_assignments WHERE action_id = ? AND undone_at IS NULL`).all(actionId) as Row[];
+        const rows = db.prepare(`SELECT effort_id AS effortId, source, kind, ref, from_effort_id AS "from" FROM effort_assignments
+          WHERE action_id = ? AND undone_at IS NULL`).all(actionId) as Row[];
         if (rows.length === 0) throw new Error("Nothing to undo.");
         const { effortId, source } = rows[0]!;
         if (rows.some((row) => efforts.owner(row.kind, row.ref)?.id !== effortId)) throw new Error("This work moved since, so Undo no longer applies.");
-        efforts.release(effortId, { tickets: rows.flatMap((row) => row.kind === "ticket" ? [row.ref] : []), prUrls: rows.flatMap((row) => row.kind === "prUrl" ? [row.ref] : []) });
+        // A PR moved out of an effort goes back to it; the rest leave, and a PR its ticket placed rejoins that ticket's effort.
+        const back = rows.filter((row) => row.from !== null);
+        for (const from of new Set(back.map((row) => row.from!))) {
+          const home = efforts.get(from);
+          if (!home || home.archivedAt) throw new Error("The effort it came from is gone or archived, so Undo no longer applies.");
+          efforts.transfer(home.id, { tickets: [], prUrls: back.filter((row) => row.from === from).map((row) => row.ref) });
+        }
+        const leave = rows.filter((row) => row.from === null);
+        efforts.release(effortId, { tickets: leave.flatMap((row) => row.kind === "ticket" ? [row.ref] : []), prUrls: leave.flatMap((row) => row.kind === "prUrl" ? [row.ref] : []) });
         db.prepare(`UPDATE effort_assignments SET undone_at = ? WHERE action_id = ?`).run(now(), actionId);
         return { effortId, source };
       })();

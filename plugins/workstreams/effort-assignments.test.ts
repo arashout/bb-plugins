@@ -1,13 +1,13 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS } from "./effort-assignments.js";
+import { createAssignmentStore, EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS } from "./effort-assignments.js";
 import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION } from "./effort-store.js";
 
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 
 function setup() {
   const db = new Database(":memory:");
-  for (const statement of [...EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, ...EFFORT_ASSIGNMENT_MIGRATIONS]) db.prepare(statement).run();
+  for (const statement of [...EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, ...EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_ASSIGNMENT_FROM_MIGRATION]) db.prepare(statement).run();
   const efforts = createEffortStore(db);
   const assignments = createAssignmentStore(db, efforts, () => 5_000);
   const effort = (name: string, members: { tickets: string[]; prUrls: string[]; checkoutPaths?: string[] }) => efforts.establish({ sourceKey: `test:${name}`,
@@ -75,6 +75,48 @@ describe("classification assignments", () => {
     expect(efforts.discard(unused.id)).toBe(true);
     expect(efforts.getRecord(unused.id)).toBeNull();
     expect(efforts.get(pickup.id)).not.toBeNull();
+  });
+
+  // A move is what "Move to One-offs" does to a PR an effort owns: an explicit click, which Undo must reverse exactly, back to where it was.
+  it("moves PRs out of the efforts that have them as one action, naming each one's effort, and Undo puts each back", () => {
+    const { efforts, assignments, pickup, shelf, db } = setup();
+    const oneOffs = efforts.establish({ sourceKey: "one-offs", name: "One-offs", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    efforts.transfer(shelf.key, { tickets: [], prUrls: [url("folio", 314)] });
+    const moved = assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: [url("spine", 150), url("folio", 314)] });
+    expect(moved).toMatchObject({ added: 2, effort: { id: oneOffs.id } });
+    expect(db.prepare(`SELECT source, effort_id AS effortId, kind, ref, from_effort_id AS "from" FROM effort_assignments ORDER BY seq`).all()).toEqual([
+      { source: "one-off", effortId: oneOffs.id, kind: "prUrl", ref: url("spine", 150), from: pickup.id },
+      { source: "one-off", effortId: oneOffs.id, kind: "prUrl", ref: url("folio", 314), from: shelf.id }]);
+    expect([efforts.owner("prUrl", url("spine", 150))?.id, efforts.owner("prUrl", url("folio", 314))?.id]).toEqual([oneOffs.id, oneOffs.id]);
+    // Its tickets and checkouts stay: a one-off leaves its effort alone, and the effort's JSON record agrees with the index.
+    expect(efforts.get(pickup.id)!.members).toEqual({ tickets: ["ABC-330"], prUrls: [], checkoutPaths: ["/Users/reader/spine"] });
+
+    expect(assignments.undo(moved.actionId)).toEqual({ effortId: oneOffs.id, source: "one-off" });
+    expect([efforts.owner("prUrl", url("spine", 150))?.id, efforts.owner("prUrl", url("folio", 314))?.id]).toEqual([pickup.id, shelf.id]);
+    expect([efforts.get(pickup.id)!.members.prUrls, efforts.get(shelf.id)!.members.prUrls, efforts.get(oneOffs.id)!.members.prUrls])
+      .toEqual([[url("spine", 150)], [url("folio", 314)], []]);
+  });
+
+  // A PR its ticket places has no row of its own: moving it gives it one in One-offs, and Undo drops that row, so the ticket places it again.
+  it("leaves a PR its effort had only through a ticket to that ticket again on Undo", () => {
+    const { efforts, assignments, pickup } = setup();
+    const oneOffs = efforts.establish({ sourceKey: "one-offs", name: "One-offs", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    const moved = assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: [url("spine", 160)] });
+    expect(efforts.owner("prUrl", url("spine", 160))?.id).toBe(oneOffs.id);
+    assignments.undo(moved.actionId);
+    expect(efforts.owner("prUrl", url("spine", 160))).toBeNull();
+    expect(efforts.owner("ticket", "ABC-330")?.id).toBe(pickup.id);
+    assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: [url("spine", 150)] });
+    expect(() => assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: [url("spine", 150)] })).toThrow("These are in One-offs already.");
+  });
+
+  it("won't put a moved PR back into an effort archived since", () => {
+    const { efforts, assignments, pickup } = setup();
+    const oneOffs = efforts.establish({ sourceKey: "one-offs", name: "One-offs", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    const moved = assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: [url("spine", 150)] });
+    efforts.setArchived(pickup.id, true);
+    expect(() => assignments.undo(moved.actionId)).toThrow("The effort it came from is gone or archived, so Undo no longer applies.");
+    expect(efforts.owner("prUrl", url("spine", 150))?.id).toBe(oneOffs.id);
   });
 
   it("refuses an undo once any of its work moved to another effort, and releases nothing", () => {

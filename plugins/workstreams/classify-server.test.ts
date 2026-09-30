@@ -162,6 +162,38 @@ describe("One-offs", () => {
     expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316] });
   });
 
+  // Move to One-offs from an effort's card: an explicit move out of the effort that has the PR now, which Undo reverses exactly.
+  it("moves PRs an effort owns into One-offs, creating it on first use, and Undo puts each back", async () => {
+    const env = await setup();
+    // #316 is Shelf order's by its own row; #314 only through ABC-341.
+    env.efforts.transfer(env.shelf.key, { tickets: [], prUrls: [url(316)] });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314, 316], "No effort": [313] });
+    const moved = await env.call("classify_one_off", { prUrls: [url(314), url(316)], from: env.shelf.id });
+    expect(moved).toEqual({ ok: true, actionId: expect.any(String), effort: { id: expect.any(String), key: expect.any(String), name: "One-offs" }, added: 2 });
+    expect(env.efforts.source(ONE_OFFS_SOURCE)?.id).toBe(moved.effort.id);
+    expect(await env.grouped()).toEqual({ "One-offs": [314, 316], "No effort": [313] });
+    // The audit row names where each came from.
+    expect(env.bb.storage.database().prepare(`SELECT ref, source, from_effort_id AS "from" FROM effort_assignments ORDER BY seq`).all()).toEqual([
+      { ref: url(314), source: "one-off", from: null }, { ref: url(316), source: "one-off", from: env.shelf.id }]);
+    // Its ticket stays with Shelf order.
+    expect(env.efforts.owner("ticket", "ABC-341")?.id).toBe(env.shelf.id);
+
+    expect(await env.call("classify_undo", { actionId: moved.actionId })).toEqual({ ok: true });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314, 316], "No effort": [313] });
+    expect(env.efforts.get(env.shelf.id)!.members.prUrls).toEqual([url(316)]);
+  });
+
+  // `from` names the card you moved them from: a PR that left it since, or never had it, moves nowhere, and a refused first use creates nothing.
+  it("moves only PRs the named effort has now, and never out of One-offs", async () => {
+    const env = await setup();
+    expect(await env.call("classify_one_off", { prUrls: [url(314), url(313)], from: env.shelf.id }))
+      .toEqual({ ok: false, error: "inkwell/folio #313 isn't in Shelf order now. Refresh and try again." });
+    expect(env.efforts.source(ONE_OFFS_SOURCE)).toBeNull();
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316] });
+    const { effort } = await env.call("classify_one_off", { prUrls: [url(313)] });
+    expect(await env.call("classify_one_off", { prUrls: [url(313)], from: effort.id })).toEqual({ ok: false, error: "These are in One-offs already." });
+  });
+
   it("keeps One-offs on the active pile", async () => {
     const env = await setup();
     const { effort } = await env.call("classify_one_off", { prUrls: [url(313)] });

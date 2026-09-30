@@ -723,7 +723,15 @@ export function DeckNavView({ onView, openCard = null }: { onView(view: OtherVie
         return;
       }
       case "move": { const list = scopeRows(); if (list.length) openDialog({ kind: "move", prUrls: list.map((item) => item.prUrl), refs: refs(list), group: null }); return; }
-      case "one-off": { const list = scopeRows(); if (list.length) void oneOff(list.map((item) => item.prUrl), null); return; }
+      case "one-off": {
+        // A service card's rows have no effort yet; an effort's move out of it, and Undo puts them back.
+        const list = line ? [line] : scopeRows();
+        const prUrls = list.map((item) => item.prUrl);
+        if (!card || !prUrls.length) return;
+        if (card.card.kind === "service") void oneOff(prUrls, null);
+        else void classify(() => rpc.call("classify_one_off", { prUrls, from: card.card.id }), null, prUrls);
+        return;
+      }
       case "new-effort": { const list = scopeRows(); if (list.length) openDialog({ kind: "new", prUrls: list.map((item) => item.prUrl), refs: refs(list), name: "", goal: "", group: null }); return; }
       case "promote": {
         // Every open PR on the service card, as one new effort named for its repository; its threads follow their PRs.

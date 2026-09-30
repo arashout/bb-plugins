@@ -33,8 +33,8 @@ import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch }
 import { DECK_CHANGED, SERVICE_PREFIX, type DeckPile, type RowActed } from "./deck-shared.js";
 import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
-import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS, ONE_OFFS_SOURCE,
-  type AssignmentSource } from "./effort-assignments.js";
+import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS,
+  ONE_OFFS_SOURCE, type AssignmentSource } from "./effort-assignments.js";
 import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
 import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
 import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
@@ -709,6 +709,7 @@ export const MIGRATIONS = [
   DECK_BATCH_MIGRATION,
   LINEAR_SEED_MIGRATION,
   APPROVAL_CONFIRMATION_AUDIT_MIGRATION,
+  EFFORT_ASSIGNMENT_FROM_MIGRATION,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -4016,6 +4017,40 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
   }
 
+  /** One-offs, which the first one-off creates. */
+  const oneOffsEffort = () => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
+    projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" });
+  /**
+   * Move PRs the effort `fromKey` owns now, exactly or through a ticket, into One-offs as one action, with an audit row per PR naming where
+   * it was, which Undo reverses. Their tickets stay where they are. A refused first use creates nothing.
+   */
+  async function moveToOneOffs(fromKey: string, prUrls: readonly string[]) {
+    const from = effortStore.get(fromKey);
+    if (!from) return { ok: false as const, error: "The effort changed. Refresh the deck." };
+    if (effortStore.sourceKey(from.id) === ONE_OFFS_SOURCE) return { ok: false as const, error: "These are in One-offs already." };
+    const keys = [...new Set(prUrls.map(prWorkItemKey))];
+    const label = (url: string) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; };
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const elsewhere = keys.filter((url) => work.ownerForPr(url)?.id !== from.id).map(label);
+    if (elsewhere.length) return { ok: false as const, error: `${elsewhere.join(", ")} ${elsewhere.length === 1 ? "isn't" : "aren't"} in ${from.name} now. Refresh and try again.` };
+    if (dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === from.id)
+      return { ok: false as const, error: "Turn off automatic dispatch for this effort before moving work." };
+    const writing = keys.map((url) => v2Claimed(url, null)).find(Boolean);
+    if (writing) return { ok: false as const, error: writing };
+    const existed = effortStore.source(ONE_OFFS_SOURCE) !== null;
+    const oneOffs = oneOffsEffort();
+    try {
+      const { actionId, effort, added } = assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: keys });
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
+      await syncV2Targets();
+      return { ok: true as const, actionId, effort: { id: effort.id, key: effort.key, name: effort.name }, added };
+    } catch (error) {
+      if (!existed) effortStore.discard(oneOffs.id);
+      return { ok: false as const, error: (error as Error).message.slice(0, 400) };
+    }
+  }
+
   /** Suggestions for your open PRs no effort owns, from what the board already read: nothing is read again, and nothing moves. */
   async function classifyGet(read?: Board) {
     const current = read ?? await board();
@@ -6103,8 +6138,7 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       return { ok: true as const };
     },
-    classify_one_off: ({ prUrls }) => classifyInto(() => effortStore.source(ONE_OFFS_SOURCE) ?? effortStore.establish({ sourceKey: ONE_OFFS_SOURCE, ...ONE_OFFS,
-      projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }), "one-off", prUrls),
+    classify_one_off: ({ prUrls, from }) => from ? moveToOneOffs(from, prUrls) : classifyInto(oneOffsEffort, "one-off", prUrls),
     classify_undo: async ({ actionId }) => {
       try {
         const { effortId, source } = assignments.undo(actionId);

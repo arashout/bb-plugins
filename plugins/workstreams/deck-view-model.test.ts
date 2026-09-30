@@ -383,6 +383,16 @@ describe("what the keys act on", () => {
     expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
   });
 
+  // A PR filed in an effort by mistake is a one-off: you move it out from the effort's own card, one row or a selection at a time.
+  it("moves a focused or selected row of an effort's card to One-offs, but never One-offs' own rows", () => {
+    const shelf = card(inkwellDeck(), SHELF);
+    const row = shelf.sections[0]!.lines[0]!;
+    expect([availability(context(shelf, { focused: row }))["one-off"].on, availability(context(shelf, { selected: [row] }))["one-off"].on]).toEqual([true, true]);
+    expect(availability(context(shelf))["one-off"]).toEqual({ on: false, why: "focus or select a row" });
+    const oneOffs = card(inkwellDeck(), ONE_OFFS);
+    expect(availability(context(oneOffs, { focused: oneOffs.sections[0]!.lines[0]! }))["one-off"]).toEqual({ on: false, why: "they're in One-offs" });
+  });
+
   it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, review notes, or a dimmed row", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
     expect(oneOffs.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.inline?.label, line.inline?.title])).toEqual([

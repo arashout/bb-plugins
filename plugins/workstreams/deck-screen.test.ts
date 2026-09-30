@@ -163,6 +163,14 @@ describe("the effort deck's markup", () => {
     expect(pane(inkwellDeck(), SHELF, expanded)).not.toContain("data-deck-revoke");
   });
 
+  it("offers Move to One-offs in an effort's row details and selection bar, and nowhere on One-offs or a service card", () => {
+    const open = (id: string, prUrl: string) => pane(inkwellDeck(), id, { state: { selected: new Set([prUrl]), expanded: new Set([prUrl]), focus: null } });
+    const shelf = open(SHELF, url("folio", 340));
+    expect(shelf).toMatch(/<button type="button" data-deck-one-off="true"[^>]*title="Moves it out of this effort; Undo puts it back">Move to One-offs<\/button>/u);
+    expect(shelf.slice(shelf.indexOf('aria-label="Selection"'))).toContain(">Move to One-offs</button>");
+    for (const [id, prUrl] of [[ONE_OFFS, url("folio", 301)], [FOLIO, url("folio", 325)]] as const) expect(open(id, prUrl)).not.toContain("Move to One-offs");
+  });
+
   it("puts Refresh on each row, shown on the row you point at, and spins it in sight while GitHub reads the PR", () => {
     const pr340 = url("folio", 340);
     const idle = section(pane(inkwellDeck(), SHELF), "merge").split("data-deck-row=").find((part) => part.startsWith(`"${pr340}"`))!;

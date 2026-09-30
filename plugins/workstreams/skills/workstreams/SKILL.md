@@ -776,7 +776,9 @@ any of them has an owner now.
   neither.
 - `classify_new_effort` starts an effort from PRs, with a name and goal.
 - `classify_one_off` puts PRs in **One-offs**, the one effort for standalone
-  PRs, which the first use creates. One-offs stays on the active pile.
+  PRs, which the first use creates. One-offs stays on the active pile. With
+  `from` (an effort id or key), it moves PRs that effort owns now out of it;
+  each audit row names the effort, and Undo puts the PR back there.
 
 Each action returns an `actionId` and `added`, the number of PRs it moved, and
 the audit records one row per PR or ticket it added. `classify_undo` reverses the action while its effort still
