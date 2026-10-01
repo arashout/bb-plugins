@@ -2,8 +2,8 @@
 // one quiet panel. It is a fixed tab in BB's own right panel, so it can stay
 // open beside any view. Short sections, in the order a reader asks: the
 // views, the effort deck, its piles and holds, sorting PRs into efforts, Seed
-// from Linear, All PRs, the keys, then the Map and the legacy Board, and
-// whether the board is healthy.
+// from Linear, All PRs, the keys, then the Map, and whether the board is
+// healthy.
 import type { ReactNode } from "react";
 import type { Board, BoardMode } from "./server";
 import { relativeTime } from "./workstreams";
@@ -34,18 +34,6 @@ export const MODE_TEXT: Record<BoardMode, { label: string; detail: string }> = {
   },
 };
 
-const BOARD_KEYS: [string, string][] = [
-  ["j / k", "Next / previous row"],
-  ["Enter", "Open the pull request"],
-  ["a", "Run the row's action (asks first)"],
-  ["t", "Open the most recent thread"],
-  ["n", "Start a thread (asks first)"],
-  ["m", "Show it on the Map"],
-  ["o", "Open the checkout"],
-  ["/", "Search"],
-  ["Esc", "Clear search, then selection"],
-];
-
 const MAP_KEYS: [string, string][] = [
   ["+ / −", "Zoom in / out"],
   ["0 or Esc", "Fit everything"],
@@ -63,24 +51,6 @@ const BOTH_KEYS: [string, string][] = [
   ["v", "Next view; in Efforts and All PRs, switch between the two"],
   ["⌘K", "Go to a view; in Efforts and All PRs, list every action"],
   ["?", "Open this panel; in Efforts and All PRs, list their keys; on a roster, list its keys"],
-];
-
-const STATES: [string, string][] = [
-  ["Fix · CI failing", "A check failed. Investigate CI hands it to an agent."],
-  ["Fix · Resolve conflicts", "GitHub reports a merge conflict with the base."],
-  ["Respond · Changes requested", "A reviewer requested changes. Approval is not in effect."],
-  ["Waiting · Awaiting re-review", "The author pushed a newer head, resolved review threads, and posted PTAL to the reviewer. GitHub still reports changes requested; a branch may also need updating."],
-  ["Respond · Approved · open threads", "Approved, with unresolved review threads on GitHub."],
-  ["Respond · Approved · review note", "The approving review has written notes that may need action. Read them and decide what to do."],
-  [
-    "Merge · Approved · ready",
-    "Approved; no unresolved review threads; every check finished and green; GitHub mergeStateStatus CLEAN (or HAS_HOOKS, or UNSTABLE for non-required checks); not stacked behind an unmerged PR.",
-  ],
-  ["Merge · Update branch", "Ready except the branch is behind its base."],
-  ["Waiting · Waiting for review", "Nobody has decided yet. Nudge reviewers is one click away."],
-  ["Waiting · Behind #N", "Stacked on an unmerged PR, which has to merge first."],
-  ["Waiting · Blocked by branch rules", "Branch protection is unsatisfied; clicking merge would not help."],
-  ["Waiting · Status unavailable", "A local status check or GitHub PR lookup failed. Rescan to verify this checkout; no PR action is offered."],
 ];
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -115,9 +85,8 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
     <div className="text-[12px]">
       <Section title="Views">
         <p>
-          Every view shares one header: Efforts, All PRs, and More, which holds Map, Pipeline, Work, Board, Efforts
-          admin, and How it works. Its right side shows when the view last read its data, Mark seen where the view
-          has it, ⌘K, and ?.
+          Every view shares one header: Efforts, All PRs, and More, which holds Map, Efforts admin, and How it
+          works. Its right side shows when the view last read its data, Mark seen where the view has it, ⌘K, and ?.
         </p>
       </Section>
 
@@ -213,9 +182,6 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <Pairs rows={MAP_KEYS} mono />
         <p className="pt-1 text-foreground">Roster</p>
         <Pairs rows={ROSTER_KEYS} mono />
-        <p className="pt-1 text-foreground">Legacy Board</p>
-        <p className="text-muted-foreground">Search accepts ticket IDs, titles, repos, workstreams, and PR numbers such as 318, #318, or quill #318.</p>
-        <Pairs rows={BOARD_KEYS} mono />
         <p className="pt-1 text-foreground">All views</p>
         <Pairs rows={BOTH_KEYS} mono />
       </Section>
@@ -239,32 +205,6 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         )}
       </Section>
 
-      <Section title="Legacy Board states">
-        <p>
-          Efforts groups all tracked checkouts by effort, with open PRs without a scanned checkout under
-          No effort assigned. PR backlog groups your open PRs by next action in organizations represented
-          by scanned projects: Ready to merge, Approved · next steps, Fix or respond, Waiting for review or
-          another PR, Drafts and work in progress, and Status to verify.
-          Remote PRs can use direct GitHub actions, but agent repairs need a scanned checkout.
-          Merged and release-tagged rows remain under their effort in collapsed sections.
-          &ldquo;In release tag&rdquo; means the merge commit appears in a local release tag;
-          it does not verify a production deployment.
-        </p>
-        <p>
-          Approval records a reviewer decision. Ready to merge also requires clear checks, no unresolved
-          review threads, an acceptable branch and merge state, and no unmerged PR below it in a stack.
-          Choose an effort to preview its next agent action. Preview only does not start an agent;
-          Run automatically starts at most one repair agent at a time.
-        </p>
-        <p>
-          Manual review and conflict repairs inspect the live PR and base, make focused fixes, test,
-          push code changes, reply with the head SHA, and re-read merge gates. They ask for another
-          look only when changes are still requested and never merge.
-        </p>
-        <p>Archive idle leaf threads from their menu. Archived threads shows history and lets you undo an archive.</p>
-        <Pairs rows={STATES} />
-      </Section>
-
       <Section title="Map marks">
         <Pairs
           rows={[
@@ -273,6 +213,7 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
             ["Small dot", "An agent thread works here; it pulses while running. Hover or click it for the list."],
           ]}
         />
+        <p>Archive idle leaf threads from that list. Archived threads shows history and lets you undo an archive.</p>
       </Section>
 
       <Section title="Health">

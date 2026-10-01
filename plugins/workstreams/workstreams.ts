@@ -1960,27 +1960,6 @@ export const INBOX_SECTIONS = [
 ] as const;
 export type InboxSection = (typeof INBOX_SECTIONS)[number];
 
-export const INBOX_SECTION_LABEL: Record<InboxSection, string> = {
-  fix: "Fix",
-  respond: "Respond",
-  merge: "Merge",
-  waiting: "Waiting",
-  "in-flight": "In flight",
-  shipped: "Recently merged",
-  parked: "Parked",
-};
-
-/** The first four are the work; the last three are context, folded away. */
-export const INBOX_COLLAPSED: Record<InboxSection, boolean> = {
-  fix: false,
-  respond: false,
-  merge: false,
-  waiting: false,
-  "in-flight": true,
-  shipped: true,
-  parked: true,
-};
-
 /** How long merged work stays under Recently merged, in whole days, inclusive. */
 export const RECENTLY_SHIPPED_DAYS = 7;
 
@@ -2240,7 +2219,7 @@ export function relativeTime(iso: string | null, now: number): string {
 
 // ---- rows and ordering -----------------------------------------------------
 
-/** What ordering and search read about a row. */
+/** What ordering reads about a row. */
 export type InboxOrderFacts = {
   repo: string;
   prNumber: number | null;
@@ -2262,48 +2241,4 @@ export function byInboxOrder(a: InboxOrderFacts, b: InboxOrderFacts): number {
     (a.prNumber ?? Number.POSITIVE_INFINITY) - (b.prNumber ?? Number.POSITIVE_INFINITY) ||
     a.path.localeCompare(b.path)
   );
-}
-
-/** Case-insensitive text search plus exact PR number, with optional repo prefix. */
-export function matchesInboxQuery(
-  row: { ticket: string | null; title: string; repo: string; effort: string; prNumber?: number | null },
-  query: string,
-): boolean {
-  const needle = query.trim().toLowerCase();
-  if (needle === "") return true;
-  if ([row.ticket ?? "", row.title, row.repo, row.effort].some((field) =>
-    field.toLowerCase().includes(needle),
-  )) return true;
-  if (row.prNumber === null || row.prNumber === undefined) return false;
-  if (/^#?\d+$/.test(needle)) return Number(needle.replace(/^#/, "")) === row.prNumber;
-  const withRepo = /^(.+?)\s*#(\d+)$/.exec(needle);
-  return withRepo !== null && withRepo[1]!.trim() === row.repo.toLowerCase() && Number(withRepo[2]) === row.prNumber;
-}
-
-// ---- starting a thread -----------------------------------------------------
-
-/** The facts a thread prompt is written from. */
-export type PromptFacts = {
-  repo: string;
-  prNumber: number | null;
-  title: string | null;
-  branch: string | null;
-  path: string;
-};
-
-/**
- * The prefilled prompt for "start a thread", by section. The user edits it
- * before anything runs; a missing PR or branch is said plainly rather than
- * leaving a hole in the sentence.
- */
-export function threadPrompt(section: InboxSection, facts: PromptFacts): string {
-  const pr = facts.prNumber === null ? `${facts.repo} (no pull request)` : `${facts.repo} #${facts.prNumber}`;
-  const title = facts.title === null || facts.title.trim() === "" ? "" : ` (${facts.title.trim()})`;
-  const branch = facts.branch === null ? "no branch checked out" : `branch ${facts.branch}`;
-  const where = `${pr}${title}, ${branch}, checkout ${facts.path}`;
-  if (section === "fix") return `CI is failing on ${where}. Investigate the failure and propose a fix.`;
-  if (section === "respond") {
-    return `Review feedback is waiting on ${where}. Read the review comments and address them.`;
-  }
-  return `Pick up ${where}.`;
 }

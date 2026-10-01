@@ -3,8 +3,6 @@
 import { describe, expect, it } from "vitest";
 import {
   DAY_MS,
-  INBOX_COLLAPSED,
-  INBOX_SECTION_LABEL,
   INBOX_SECTIONS,
   LIFECYCLES,
   RECENTLY_SHIPPED_DAYS,
@@ -12,10 +10,8 @@ import {
   byInboxOrder,
   inboxSection,
   inboxVerb,
-  matchesInboxQuery,
   relativeTime,
   stateAge,
-  threadPrompt,
   trackTransitions,
   type InboxSection,
   type InboxUnitFacts,
@@ -92,24 +88,15 @@ describe("inboxSection", () => {
     expect(inboxSection(facts({ ticket: null, pr: null, lifecycle: "active" }), NOW)).toBe("parked");
   });
 
-  it("keeps a ticketless unverified checkout in expanded Waiting with no actionable primary verb", () => {
+  it("keeps a ticketless unverified checkout in Waiting with no actionable primary verb", () => {
     const unit = facts({ ticket: null, pr: null, lifecycle: "unverified", observed: { status: false, pr: false } });
     expect(inboxSection(unit, NOW)).toBe("waiting");
     expect(inboxVerb(unit, "waiting")).toBe("Status unavailable");
     expect(primaryAction(unit, "waiting", "Status unavailable")).toBeNull();
-    expect(INBOX_COLLAPSED.waiting).toBe(false);
   });
 
   it("keeps a ticketless branch that HAS a pull request in its real section, because a PR is work whatever its branch name", () => {
     expect(inboxSection(facts({ ticket: null, lifecycle: "blocked" }), NOW)).toBe("fix");
-  });
-
-  it("labels recent merges by their shared fact, including merges with no release tag", () => {
-    expect(INBOX_SECTION_LABEL.shipped).toBe("Recently merged");
-  });
-
-  it("collapses exactly the three context sections by default", () => {
-    expect(INBOX_SECTIONS.filter((section) => INBOX_COLLAPSED[section])).toEqual(["in-flight", "shipped", "parked"]);
   });
 });
 
@@ -341,57 +328,6 @@ describe("byInboxOrder", () => {
     const once = [...rows].sort(byInboxOrder);
     const reversed = [...rows].reverse().sort(byInboxOrder);
     expect(reversed).toEqual(once);
-  });
-});
-
-describe("matchesInboxQuery", () => {
-  const row = { ticket: "ABC-101", title: "Show gift card balance", repo: "folio", effort: "Gift cards" };
-  it("matches ticket, title, repo and effort, case-insensitively", () => {
-    for (const query of ["abc-101", "GIFT CARD", "folio", "gift cards", "  "]) {
-      expect(matchesInboxQuery(row, query)).toBe(true);
-    }
-    expect(matchesInboxQuery(row, "colophon")).toBe(false);
-  });
-
-  it("finds an exact PR number alone, with #, or prefixed by its repo", () => {
-    const pr = { ...row, repo: "quill", prNumber: 318 };
-    for (const query of ["318", "#318", "QUILL #318", "quill#318"]) {
-      expect(matchesInboxQuery(pr, query)).toBe(true);
-    }
-    for (const query of ["#31", "1318", "another-repo #318"]) {
-      expect(matchesInboxQuery(pr, query)).toBe(false);
-    }
-    expect(matchesInboxQuery({ ...pr, prNumber: null }, "#318")).toBe(false);
-  });
-});
-
-describe("threadPrompt", () => {
-  const facts = { repo: "folio", prNumber: 47, title: "Show gift card balance", branch: "dev/abc-101-gift-cards", path: "/p/folio-abc-101" };
-
-  it("asks for a CI fix under Fix, with every field", () => {
-    expect(threadPrompt("fix", facts)).toBe(
-      "CI is failing on folio #47 (Show gift card balance), branch dev/abc-101-gift-cards, checkout /p/folio-abc-101. Investigate the failure and propose a fix.",
-    );
-  });
-
-  it("asks to address review under Respond", () => {
-    expect(threadPrompt("respond", facts)).toBe(
-      "Review feedback is waiting on folio #47 (Show gift card balance), branch dev/abc-101-gift-cards, checkout /p/folio-abc-101. Read the review comments and address them.",
-    );
-  });
-
-  it("asks to pick the work up everywhere else", () => {
-    for (const section of ["merge", "waiting", "in-flight", "shipped", "parked"] as const) {
-      expect(threadPrompt(section, facts)).toBe(
-        "Pick up folio #47 (Show gift card balance), branch dev/abc-101-gift-cards, checkout /p/folio-abc-101.",
-      );
-    }
-  });
-
-  it("says plainly when there is no PR or no branch, rather than leaving a hole in the sentence", () => {
-    expect(threadPrompt("waiting", { ...facts, prNumber: null, title: null, branch: null })).toBe(
-      "Pick up folio (no pull request), no branch checked out, checkout /p/folio-abc-101.",
-    );
   });
 });
 

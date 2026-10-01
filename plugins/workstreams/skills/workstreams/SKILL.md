@@ -39,8 +39,6 @@ The Map's layout comes from the grouping hierarchy and stable weights alone.
 by memory must not reshuffle when a PR turns red. Status drives colour, halos
 and dimming there, and nothing else.
 
-Pipeline and the legacy Board order work by status (see Views).
-
 The Map's lens control filters and dims **in place**: switching lenses never
 moves a circle or a region. Its three status lenses are exactly the three lifecycle
 groups below, and it composes with independent staleness and surface filters —
@@ -108,7 +106,7 @@ Precedence runs top to bottom in that table. Key distinctions:
 - `awaiting-rereview` requires a complete review-thread check, a head commit
   newer than the changes-requested review, and a PR-author `PTAL @reviewer`
   comment posted after that commit. GitHub still reports `CHANGES_REQUESTED`.
-  The Board offers no automatic reviewer nudge or PTAL for this state. A branch
+  Workstreams offers no automatic reviewer nudge or PTAL for this state. A branch
   behind its base remains visible as a separate signal.
 - Draft pull requests stay in the **Active** group whatever their check state.
   Red CI on unfinished work is expected and must not compete with a PR that is
@@ -225,8 +223,8 @@ separately: `bb plugin logs workstreams`.
   only select, assign, and name. The board and `list` can never disagree.
 - **Writes require an explicit start.** Scans never run a git mutation or touch
   a pull request. `group` / `ungroup` change a local ticket → effort name map;
-  Board row actions run from their dialog's confirm button. Automatic repair
-  starts only after you select **Run automatically** for an effort.
+  Every GitHub write runs from a confirm. Automatic repair starts only after
+  `dispatch_set` selects **Run automatically** for an effort.
   See [Row actions](#row-actions).
 - **A manual name always wins.** `group` beats any model assignment.
 - **No single signal groups anything.** Seeding compares four independent
@@ -288,94 +286,33 @@ Configure with `bb plugin config workstreams set <key> <value>`:
 | `anthropicApiKey` | Secret, optional. With Jev enabled, Claude Sonnet 5 writes group names and cohesion verdicts; it does not assign members. |
 | `surfaceRules` | Multiline. `name: glob, glob, …` per line. A table that fails to parse falls back to the default. |
 | `assignmentConfidenceThreshold` | 0–1, default 0.6. Applies at every grouping level. |
-| `mergeMethod` | `squash` (default), `merge` or `rebase`: how the Board's Merge action merges. |
+| `mergeMethod` | `squash` (default), `merge` or `rebase`: how Merge merges. |
 | `deleteBranchOnMerge` | Default `true`. Always skipped when another open PR is based on the branch. |
 
 ## Row actions
 
-Each Board row offers the action its verb calls for: the row's verb chip is
-its button, and the `a` key runs it. Rows with nothing to do show the verb as
-plain text. The `⋯` menu offers **Go to thread** (`t`), **Open checkout** (`o`)
-and **Start a new thread** (`n`). Opening a dialog never writes; the write runs
-only from the dialog's confirm button.
-
-| Row | Action | Kind |
-| --- | --- | --- |
-| Fix · CI failing | Investigate CI | Agent |
-| Fix · Resolve conflicts | Resolve conflicts | Agent |
-| Respond · Changes requested | Address review and reply | Agent |
-| Waiting · Awaiting re-review | Wait for the reviewer; no repeat PTAL or nudge | None |
-| Respond · Approved, comments open | Address comments and reply (never merges) | Agent |
-| Respond · Review approval note | Review the written approval note (distinct from unresolved inline comments) | Agent |
-| Merge · Ready to merge | Merge | Direct |
-| Merge · Update branch | Update branch | Direct |
-| Waiting · In review | Nudge reviewers | Direct |
-| Waiting · Behind #NN | Jump to the blocking row | Navigation |
-
 ### Direct actions (the host runs `gh`; no agent)
 
-Safeguards common to all three:
+Safeguards common to every direct write:
 
 - Every command is an argv array passed to `execFile`, never a shell string,
   and names the repo with `--repo`, so `gh` never touches the local checkout.
-- The client sends only the row's checkout path. The server resolves the
-  repo, PR number and pending reviewers from its own last scan.
+- The client names only the PR. The server resolves the repo, PR number and
+  pending reviewers from its own last scan.
 - Comment bodies reach `gh` on stdin (`--body-file -`), never as a flag value.
   Reviewer logins are validated before they become `--add-reviewer` values.
 
-**Merge.** Opening the dialog re-reads the PR live: state, draft, review
+**Merge.** Opening the merge preview re-reads the PR live: state, draft, review
 decision, `mergeStateStatus`, head commit, any open PR based on its head
-branch, and the count of unresolved review threads. The dialog refuses, with
+branch, and the count of unresolved review threads. The preview refuses, with
 the reason, unless the PR is open, not a draft, `APPROVED`, and `CLEAN`,
 `HAS_HOOKS` or `UNSTABLE` (`UNSTABLE` shows a warning). Unresolved review
-threads need an explicit **Merge anyway** tick. The server re-reads and
-re-checks all of this again before it writes, then runs
+threads refuse the merge. The server re-reads and re-checks all of this again
+before it writes, then runs
 `gh pr merge <n> --<mergeMethod> --match-head-commit <sha shown>`, so GitHub
-refuses if anything was pushed after the dialog opened. `--delete-branch` is
+refuses if anything was pushed after the preview opened. `--delete-branch` is
 added only when `deleteBranchOnMerge` is on and no open PR is stacked on the
 branch. A successful merge triggers a rescan.
-
-**Update branch.** `gh pr update-branch <n>` after a confirm; the local
-checkout is not touched. A rescan follows.
-
-**Nudge reviewers.** Two independent choices: re-request review from the
-reviewers GitHub still lists as pending (rechecked live before the write),
-and post an editable comment prefilled as
-`PTAL - @reviewer: repo #PR (title) has been waiting 3d.` With no pending
-reviewers, only the comment is offered, and the dialog says so.
-
-### Agent actions (a BB thread does the work)
-
-The dialog reads the row's linked threads live and recommends where to start a
-dedicated thread, with its reason in one line. You can choose a linked parent
-for a subthread or start a new thread. It previews the planned steps and facts
-from the last scan; expand **View or edit instructions** to inspect or change
-the exact prompt before anything runs.
-
-- **Investigate CI and Resolve conflicts** are repairs: a **subthread** of the
-  most relevant linked thread of any tier (strongest tier, then most recently
-  updated, then id), which leaves the parent's context untouched and tells the
-  parent when it finishes. A **new** thread only when nothing is linked.
-- **Address review and Address comments** prefer a **subthread** of the thread
-  that wrote the PR (a `started` or `environment` link). Only weak links
-  (`ticket`, `paths`) or none → a **new** thread, because weak links often point
-  at large, unrelated threads.
-- **Review approval note** handles written feedback on an approving review,
-  separately from unresolved inline comments.
-- **Review, comments, and conflict repairs** inspect the live PR and base,
-  integrate the base when needed, make focused fixes with relevant tests,
-  commit and push code changes, reply to actionable threads and on the PR
-  with the head SHA, then recheck review, checks, threads, and mergeability.
-  Justified nonchanges need an explanation, not an empty commit. Ask for PTAL
-  when changes are still requested; preserve an existing approval. Never merge.
-- If BB will not add a child to a thread, the recommendation falls back to a
-  new thread and says why.
-- **Subthread** only accepts a parent linked to that row. New and subthreads
-  run in the checkout and carry this plugin's thread metadata `{ ticket }`,
-  which links them to the cluster as `started`. Continue is unavailable because
-  BB's thread events cannot reliably identify which queued turn finished.
-- Every agent prompt ends by asking for a final line starting `Result:` in
-  under 12 words. That line is how the Board reports the outcome.
 
 ### Run tracking
 
@@ -401,23 +338,20 @@ and the last day's, newest first. Nothing polls:
   checkout (`inspectPaths` on the host), batched over 3 seconds, so the row
   moves sections on its own.
 
-The Board shows the row's latest run in place of its age (running, needs you,
-or finished in the last 24 hours), and an **Agents** line at the top while
-anything is running, waiting on you, or finished in the last 4 hours. BB's
-sidebar shows a count beside Workstreams: needs-you first, else running.
+BB's sidebar shows a count beside Workstreams: needs-you first, else running.
 
 ### Automatic dispatch
 
-Choose an effort, then use **Off**, **Preview only**, or **Run automatically**
-at the top. Choosing an effort scrolls to
-and expands it. Off is the default. Preview only shows the next candidate on
-its PR row without starting a thread. Run automatically starts at most one
-repair thread at a time for failing CI, merge conflicts, requested changes, or
-unresolved inline comments in that workstream. Written approval notes remain
-a manual row action. It skips dirty or unverified checkouts, stacked PRs blocked
-below, duplicate checkouts for a PR, and items with active work. The agent uses
-the BB project's default harness and is instructed to repair locally, test,
-and ask before a push or GitHub reply. The dispatcher itself
+Automatic dispatch runs for one effort in one of three modes: **Off** (the
+default), **Preview only**, or **Run automatically**. `dispatch_set` sets them;
+no view does. Preview only puts the next candidate in the board's
+`dispatch.candidate` without starting a thread. Run automatically starts at
+most one repair thread at a time for failing CI, merge conflicts, requested
+changes, or unresolved inline comments in that workstream. Written approval
+notes remain a manual step. It skips dirty or unverified checkouts, stacked PRs
+blocked below, duplicate checkouts for a PR, and items with active work. The
+agent uses the BB project's default harness and is instructed to repair
+locally, test, and ask before a push or GitHub reply. The dispatcher itself
 does not write to GitHub, merge, or deploy.
 
 Each launch has a durable attempt record. Before launch, Workstreams inspects
@@ -428,12 +362,7 @@ the attempt reads **Needs you** and blocks further automatic launches until
 a later fresh scan confirms progress. **Off** stops future launches but does
 not cancel an already running thread. Workstreams never retries an unchanged
 attempt automatically. GitHub reporting the PR merged is the workflow's end;
-issue intake, PR creation, review requests, and merging remain manual Board
-steps.
-
-The latest finished Board action appears in the effort heading's outcome
-card. The card records the action and result, links its thread, and flags when
-that thread has newer activity.
+issue intake, PR creation, review requests, and merging remain manual steps.
 
 ## Views
 
@@ -448,20 +377,6 @@ was planned keeps its new title, and the merge still moves its effort and
 parent; the merge notice names it. Keep the thread-briefs plugin's
 `renameThreads` setting off beside Workstreams, which titles coordinator and
 worker threads itself.
-
-**Work** follows saved planning conversations and preparation runs in a
-vertical list, alongside Map and Pipeline. It preserves each conversation's
-original instruction and PR scope, shows current PR facts separately from
-attempt results, and links to the planning and worker threads. Opening the
-view does not start agents. Use its selection to plan work or review an
-existing preparation preview. Preparation still uses the existing scheduler;
-this view does not grant ongoing permission for new repair attempts.
-
-List saved conversations with `conversation_list` using
-`{"offset":0,"limit":50}`. The read-only result contains `items` and `total`;
-increase the offset to read later pages. A page accepts at most 100 records.
-Older conversations without a saved initial instruction return an empty
-instruction; their thread and scope remain unchanged.
 
 The effort chip above a thread's composer names the thread's effort with its
 color and Needs you count, and opens that effort's card on the deck. Without an
@@ -498,120 +413,43 @@ existing thread parents. Automatic dispatch must be off for an affected effort
 before a move; automatic inheritance pauses while the destination effort has
 automatic dispatch enabled.
 
-**Pipeline** shares the Board's scan and is the main action view. It assigns
-checkout work and each open pull request to **Build**, **Review**, **Feedback**,
-**Ready**, **Merged**, or **Released**. Stage and blocker come from GitHub and
-git facts; a draft remains in Build even when CI fails. **Released** means a
-merge commit appears in a local release tag, not that production received a
-deployment. Current scans omit closed pull requests that did not merge.
+The panel opens on the last view you used in this browser, or the effort deck
+on your first visit. Each view has a deep link.
 
-Within each stage, cards show the latest PR updates first, or the latest
-commit for work without a PR. Merged and released cards use their merge date.
-Missing dates sort last.
+To hold one PR, the deck's **Hold PR** in its details calls `pr_hold_set` with
+an optional `reason`. A held PR keeps its readiness and thread access; no
+batch, Advance, or automatic action touches it. `pr_hold_set` with `held: false`
+releases it without changing GitHub.
 
-Switch between stage columns and effort swimlanes. Existing effort keys,
-including ticket cohorts of remote-only PRs, provide swimlane membership;
-items without a key appear in **One-offs**. A held PR stays in its stage with
-**On hold** and **Release** as its only action. Holds do not count toward bulk
-actions, automatic dispatch, or the agents chip. Merged shows the five most
-recent cards, and Released shows three, until you choose **Show all**.
+The Map's **Approved** filter persists across reloads, including approved PRs
+that still need fixes, checks, or branch work. The Map dims nonmatches without
+repacking and counts checkout-backed PRs.
 
-Use a card's **Next** line and primary action to identify the next move. Select
-card checkboxes or **Select visible**, then **Advance selected** across stages;
-search keeps earlier selections. Advance accepts open,
-unheld PRs, including drafts and PRs awaiting approval. Review bulk nudge
-includes PRs that have waited at least seven days. Ready bulk merge opens a
-confirmation for each unblocked PR. The shared agent sheet shows its plan,
-workspace, and **Pushes** or **Read-only** effect. Advance batches use fixed
-service instructions; single-row agent prompts and repair direction remain
-editable. The card shows agent progress, and the Pipeline options menu opens
-**Advance history** and
-the legacy Board.
+Workstreams starts planning and context threads with the Planning model setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the Code-work model setting (`codeModel`, default `codex/gpt-6-sol/high`). A thread created with another provider cannot change providers in place; choose **New agent** to continue through Workstreams while retaining the old thread as history.
 
-The panel opens on the last view you used in this browser, or the **Map** on
-your first visit. **Map**, **Pipeline**, and the legacy **Board** have deep
-links and read the same board data. In the legacy Board, **Efforts** groups
-all tracked checkouts by effort; **PR backlog** groups
-your open PRs by next action. The effort chooser counts scanned rows and associated inventory PRs, even
-when search or filters hide some.
-It counts a PR once by URL and ranks efforts by their first available move:
-ready to merge, update branch, fix, respond, waiting for review, then work in
-progress and other waiting states. Merged and release-tagged rows remain under
-their effort in collapsed sections; a release tag does not prove deployment.
+Authorized PR work routes through the repository controller under the effort
+coordinator. Existing PR workers remain linked as history and repair context;
+repair previews show the available parent before launch. Repairs keep the PR's
+real checkout. A coordinator or repository controller does not satisfy a merge
+gate or replace a PR's latest result. Unarchive an archived controller before
+resuming its repository. An uncertain controller launch never starts a duplicate.
 
-Efforts shows one row per checkout. Efforts with the most urgent work come
-first, and each effort's rows follow action priority, then time in the state.
-PR backlog groups open PRs into **Ready to merge**, **Approved · next steps**,
-**Fix or respond**, **Waiting for review or another PR**, **Drafts and work in
-progress**, and **Status to verify**. The displayed age
-shows when GitHub opened its PR, with the hover reading "PR opened". A checkout
-without a PR shows its last-commit age, labeled "commit". Older scans without
-a PR open date show no age until the next scan. Efforts shortcuts: `j`/`k`,
-`Enter` (PR), `a` (the row's action, which asks first), `t` (newest thread),
-`m` (Map), `o` (open the checkout), `n` (start a thread), `/` (search).
-The Board shows a resolved-thread count beside a PR title when GitHub has
-confirmed review threads were resolved; reviewer marks still show the latest
-review states, including approval.
+Archive an idle leaf thread from its thread menu on the Map. **Archived
+threads** shows archive history and lets you undo it. Threads with children
+must be archived through BB.
 
-The **PR backlog** lists your open PRs in organizations represented by scanned
-projects. A saved PR membership or unambiguous ticket match can place an open
-PR without a checkout under its effort. Other remote PRs appear under **No
-effort assigned** in Efforts. Approved records a review decision; Ready to merge also
-requires checks, threads, branch state, and stack dependencies to clear.
-Direct GitHub actions work on remote PRs; single-PR agent repairs need a scanned checkout.
+The header's ⓘ, or `?` on any view, opens **How this works** in BB's right
+panel. It explains each view, grouping, keys and the Map's marks,
+and it shows health: the last scan, the refresh interval, thread-link coverage
+by tier, warnings in full, and the last enrichment's model calls and tokens.
 
-PR row menus include **Put on hold** with an optional reason; held PRs remain under their effort and in the backlog’s **Held** group with readiness and thread access intact. Hold excludes Advance selection and automatic actions; **Release hold** restores the current readiness group without changing GitHub.
-
-In **Pipeline**, select open, unheld PR cards across stages and choose
-**Advance selected** to preview a finite batch. The legacy **PR backlog** also
-offers this action. The preview distinguishes feedback, branch preparation,
-failed-check work, readiness checks, waiting PRs, and skips. Confirmation
-authorizes the listed work. A PR in an effort uses one persistent repository
-controller under the effort coordinator. The controller handles PR instructions
-in sequence and can delegate bounded PR work to child threads. Confirmed
-Advance can establish the effort and create its coordinator and repository
-controller in isolated non-Git scratch directories; preview and other
-reads do not launch them. An unassigned PR uses a descriptively titled
-repository thread for the batch. Each PR keeps a separate result and isolated
-worktree; remote PRs can use a worktree from an exactly matched scanned
-repository. For feedback, the agent reads reviews and current code,
-verifies fixes already made, addresses remaining changes, and integrates the
-current base as needed. It tests changes, pushes when needed, replies with
-evidence, and resolves only feedback verified as addressed. History rewrites
-use an exact commit lease. Pushed changes receive a PR summary. Agents diagnose
-and fix confirmed failed checks. Draft PRs remain drafts. Readiness-only jobs do
-not spawn an agent; pending review or checks remain waiting. Saved per-PR
-results appear in **Advance progress** across Board lenses. Readiness requires
-fresh approval, review feedback, checks, branch state, and stack dependencies
-on the checked head.
-**Recheck readiness** reads current facts; **Stop queued PRs** stops pending work
-while active workers can finish. Keep worktrees for inspection. Advance never
-merges or deploys. Saved batches retain their original scope; start a new preview
-to authorize feedback work on an earlier result.
-
-Use **Fix…** on a **Needs attention** job to inspect its failure and current PR
-before starting a tracked repair. Choose a child of an existing linked thread
-or a new thread; a stopped worker can continue only when the server confirms
-exclusive ownership. Optional direction is added to the PR and failure handoff.
-The repair does not extend the repository batch queue. Previous attempts and
-worker links remain available. **Threads** on backlog rows combines the local
-thread links with action and batch threads matched by exact PR URL, even when a
-readiness result is stale or the PR has no scanned checkout. The thread menu
-can open a split when the host reports that placement is available. Each progress
-row offers details, repair, threads, and readiness recheck; removing a queued
-item cancels only that item, while removing a finished item hides a record you
-can restore without requeueing it. Running items cannot be removed, and removal
-never deletes the PR, thread, or history.
-One batch runs at a time, with up to two active repositories and 100 selected PRs.
-CI polling runs for up to 30 minutes after a job enters **Waiting for checks**;
-use **Recheck readiness** afterward. If a selected parent update makes a
-verification-only child need branch edits, preview the child again before
-authorizing those edits. Fork writes are skipped; PRs mapped to different BB
-projects in the same repository require separate batches.
+Zoom bands span depth ranges and adapt to the depth the board actually
+collapsed to, so every band boundary reveals something. On a two-level board
+the thresholds are exactly what they were before the hierarchy existed.
 
 ## Scoped PR conversations
 
-**Work on these…** starts one visible BB conversation for an exact selection of
+A scoped PR conversation is one visible BB conversation for an exact selection of
 up to 100 known PR URLs. The immutable scope includes held and remote-only PRs.
 The conversation thread plans and reports; it does not start workers or alter
 the selected PRs. Use the current Pipeline stage, blocker, observation time,
@@ -623,6 +461,12 @@ run `bb plugin rpc call workstreams conversation_get --input-file <path> --json`
 The result includes the full scope, current cached PR facts, the proposal, and
 saved batch results. Read its `revision` before proposing a change.
 
+List saved conversations with `conversation_list` using
+`{"offset":0,"limit":50}`. The read-only result contains `items` and `total`;
+increase the offset to read later pages. A page accepts at most 100 records.
+Older conversations without a saved initial instruction return an empty
+instruction; their thread and scope remain unchanged.
+
 To propose a later preparation batch, write a JSON file with `conversationId`,
 `expectedRevision`, an ordered `selectedPrUrls` subset, an `instruction` of at
 most 4,000 characters, and `exclusions`. Each excluded scope PR needs one
@@ -631,57 +475,8 @@ no preparation is needed. Run
 `bb plugin rpc call workstreams conversation_propose --input-file <path> --json`.
 The server rejects PRs outside the original scope, missing exclusion reasons,
 held PRs in the subset, and stale revisions. Do not invoke `advance_start` or
-`conversation_start` from the conversation thread. The user reviews a fresh
-preview and chooses **Start preparation** in Workstreams. A new proposal applies
-to a later batch; it does not cancel queued or running jobs. Use the existing
-Advance controls to inspect or cancel those jobs.
-
-The shared **Approved** filter persists across Map, Efforts, PR backlog, and
-reloads, including approved PRs that still need fixes, checks, or branch work.
-Map dims nonmatches without repacking and counts checkout-backed PRs; Board
-also includes the PR inventory.
-
-**🧭 Coordinate** previews an effort's linked tickets and PRs, editable name and
-goal, and the matching BB projects. Explicit confirmation creates a planning
-thread in an isolated non-Git scratch directory using the Planning model setting
-(default Codex gpt-6-sol at medium reasoning), or
-associates an eligible idle thread. Coordinator titles prefix the effort name
-with a relevant emoji or a stable, varied fallback, preserving an existing leading
-emoji. An explicitly associated thread receives this title but keeps its parent;
-association does not start a turn. The saved
-effort ID preserves the chosen identity and membership across later grouping.
-The heading then opens the effort thread. Team containers and Unsorted do not
-offer this control.
-
-Workstreams starts planning and context threads with the Planning model setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the Code-work model setting (`codeModel`, default `codex/gpt-6-sol/high`). A thread created with another provider cannot change providers in place; choose **New agent** to continue through Workstreams while retaining the old thread as history.
-
-**Message agent** on a Pipeline PR or checkout card sends to a linked thread or
-starts a context thread only when you send. The context thread receives the
-tracked PR or Linear reference and a cached snapshot; it verifies live facts
-before reporting. A status question does not authorize a repair. A requested
-repair must use a guarded checkout or PR action and its execution workspace, not the
-scratch directory. Held and closed PRs remain diagnostic-only. Starting this
-conversation does not claim effort membership or reserve a PR writer checkout.
-
-Authorized PR work routes through the repository controller under the effort
-coordinator. Existing PR workers remain linked as history and repair context;
-repair previews show the available parent before launch. Repairs keep the PR's
-real checkout. A coordinator or repository controller does not satisfy a merge
-gate or replace a PR's latest result. Unarchive an archived controller before
-resuming its repository. An uncertain controller launch never starts a duplicate.
-
-Archive an idle leaf thread from its thread menu. **Archived threads** shows
-archive history and lets you undo it. Threads with children must be archived
-through BB.
-
-The header's ⓘ, or `?` in either view, opens **How this works** in BB's right
-panel. It explains grouping, the states, view keys and the Map's marks,
-and it shows health: the last scan, the refresh interval, thread-link coverage
-by tier, warnings in full, and the last enrichment's model calls and tokens.
-
-Zoom bands span depth ranges and adapt to the depth the board actually
-collapsed to, so every band boundary reveals something. On a two-level board
-the thresholds are exactly what they were before the hierarchy existed.
+`conversation_start` from the conversation thread; no view starts a proposal's
+batch. A new proposal does not cancel queued or running jobs.
 
 ## PR inventory
 
@@ -693,7 +488,7 @@ checkout's facts or their roster's last read, until the board's latest read
 finds them merged or closed.
 
 The Workstreams panel shows this inventory as **All PRs**, one tab from the
-effort deck it opens on. Map, Pipeline, Work, Board, and Efforts admin sit under
+effort deck it opens on. Map and Efforts admin sit under
 the header's More, and each effort's name opens its roster.
 
 ```

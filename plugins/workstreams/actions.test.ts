@@ -1,14 +1,9 @@
-// Row actions: availability, thread routing, prompts, merge refusals and the
-// nudge comment. Fixtures are the invented Inkwell bookstore: repos quill,
+// Row actions: availability, thread routing, and merge refusals. Fixtures are the invented Inkwell bookstore: repos quill,
 // folio, margin, colophon and spine; tickets ABC-/OPS-/WEB-/SHOP-; PRs 42–99.
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
-  AGENT_ACTIONS,
-  actionPreview,
-  actionPrompt,
   mergeVerdict,
-  nudgeComment,
   primaryAction,
   recommendThread,
   shouldDeleteBranch,
@@ -18,7 +13,6 @@ import {
   type ThreadCapabilities,
 } from "./actions.js";
 import { APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore } from "./approval-feedback.js";
-import { RESULT_INSTRUCTION } from "./runs.js";
 import { inboxSection, inboxVerb, type InboxUnitFacts } from "./workstreams.js";
 import type { MergeStateStatus } from "./contract.js";
 
@@ -161,107 +155,6 @@ describe("recommendThread for repairs (CI, conflicts)", () => {
   });
 });
 
-const FACTS = { repo: "folio", prNumber: 47, title: "Show gift card balance", branch: "dev/abc-101", path: "/p/folio-abc-101" };
-
-describe("actionPrompt", () => {
-  it("substitutes every field into the address-review prompt and requires complete PR follow-through", () => {
-    const text = actionPrompt("address-review", FACTS);
-    expect(text).toMatch(/^Changes were requested on folio #47 \(Show gift card balance\), branch dev\/abc-101, checkout \/p\/folio-abc-101\. /u);
-    expect(text).toMatch(/Read the live PR, its base branch, every review comment and review thread.*Make focused code fixes for actionable feedback.*explain justified nonchanges/us);
-    expect(text).toMatch(/Fetch and integrate the PR base if behind.*resolving conflicts.*rerun relevant tests.*Commit and push code changes; if no change is needed, explain why and use the current head SHA.*exact --force-with-lease/us);
-    expect(text).toContain("Resolve only threads demonstrably addressed by the pushed code.");
-    expect(text).toMatch(/Reply to each actionable review thread.*Post a PR summary comment that mentions the actual reviewers.*includes the head SHA \(the pushed SHA if code changed\)/us);
-    expect(text).toMatch(/If changes are still requested.*ask those reviewers to take another look \(PTAL\) in the PR comment; preserve an existing approval and do not re-request review otherwise/us);
-    expect(text).toMatch(/re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus.*Report any remaining gate and next action. Do not merge/us);
-    expect(text).toContain("Report back with a summary per thread.");
-  });
-
-  it("opens the address-comments prompt with the approval and preserves it while finishing review", () => {
-    const text = actionPrompt("address-comments", FACTS);
-    expect(text.startsWith("folio #47 (Show gift card balance) is approved but has open review comments")).toBe(true);
-    expect(text).toContain("preserve an existing approval and do not re-request review otherwise.");
-    expect(text).toContain("Do not merge. Report back with a summary per thread and whether the PR is ready to merge.");
-  });
-
-  it("finishes approval feedback and branch conflicts before claiming the PR is mergeable", () => {
-    const prompt = actionPrompt("review-approval-note", FACTS);
-    const preview = actionPreview("review-approval-note", { approvalHasBody: true, unresolvedReviewThreads: 0 });
-    expect(prompt).toContain("leave informational points alone and explain why");
-    expect(prompt).toMatch(/Make focused fixes with relevant tests.*Fetch the PR's base branch.*rebase if behind, resolve any conflicts.*run the tests again.*Commit and push code changes only when needed.*exact --force-with-lease/us);
-    expect(prompt).toContain("Advance must verify feedback against the current review and head before the PR is ready to merge.");
-    expect(prompt).toContain("Report the change or justified nonchange, branch state, test result, and remaining gates.");
-    expect(preview.steps.join(" ")).toMatch(/Review each approval note.*rebase if behind and resolve conflicts.*Run relevant tests; commit and push only code changes.*Re-read live approval, threads, checks, and mergeability.*Advance verifies feedback/us);
-    expect(preview.lastScan).toEqual(["Written approval note present"]);
-    expect(preview.steps.join(" ")).toContain("Report remaining gates; do not merge.");
-  });
-
-  it("requires the conflict repair to integrate base, publish the resolution, and recheck live gates", () => {
-    const text = actionPrompt("resolve-conflicts", FACTS);
-    expect(text).toMatch(/^folio #47 \(Show gift card balance\) has merge conflicts with its base. In checkout \/p\/folio-abc-101 on branch dev\/abc-101/u);
-    expect(text).toMatch(/Read the live PR and fetch its base branch.*Integrate the base.*resolving conflicts.*run relevant tests, commit, and push.*exact --force-with-lease/us);
-    expect(text).toMatch(/Post a PR summary comment mentioning the actual reviewers.*pushed head SHA.*ask those reviewers to take another look \(PTAL\).*preserve an existing approval and do not re-request review otherwise/us);
-    expect(text).toMatch(/re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus.*Report any remaining gate and next action. Do not merge/us);
-  });
-
-  it("reuses the existing Fix prompt for CI", () => {
-    expect(actionPrompt("investigate-ci", FACTS)).toMatch(/^CI is failing on folio #47/u);
-  });
-
-  it("ends every template with the Result line the Board reads the outcome from, so no action reports back blind", () => {
-    for (const action of AGENT_ACTIONS) {
-      expect(actionPrompt(action, FACTS).endsWith(` ${RESULT_INSTRUCTION}`)).toBe(true);
-    }
-  });
-
-  it("leaves no placeholder behind in any template", () => {
-    for (const action of ["investigate-ci", "resolve-conflicts", "address-review", "address-comments"] as AgentAction[]) {
-      expect(actionPrompt(action, FACTS)).not.toMatch(/[{}]|undefined|null/u);
-    }
-  });
-});
-
-describe("actionPreview", () => {
-  it("presents CI as investigation and a proposed fix, without promising a code push", () => {
-    const preview = actionPreview("investigate-ci", { checkConclusions: ["SUCCESS", "FAILURE", "ERROR"] });
-    expect(preview.steps).toEqual(["Investigate the CI failure.", "Propose a fix and report what you found."]);
-    expect(preview.steps.join(" ")).not.toMatch(/commit|push|merge/u);
-    expect(actionPrompt("investigate-ci", FACTS)).toContain("Investigate the failure and propose a fix.");
-    expect(preview.lastScan).toEqual(["2 failing checks of 3"]);
-    expect(actionPreview("investigate-ci", { checkConclusions: ["SUCCESS"] }).lastScan).toEqual([]);
-  });
-
-  it("tracks the conflict prompt's base, test, push, reply, and live gate check", () => {
-    const preview = actionPreview("resolve-conflicts", { headRefName: "dev/abc-101", baseRefName: "main" });
-    expect(preview.lastScan).toEqual(["dev/abc-101 → main"]);
-    expect(preview.steps.join(" ")).toMatch(/live PR.*integrate its base.*resolve conflicts.*Run relevant tests, commit, and push.*--force-with-lease if rebased.*PR summary.*pushed head SHA.*PTAL.*Re-read live PR state.*remaining gates; do not merge/us);
-    expect(actionPrompt("resolve-conflicts", FACTS)).toContain("use an exact --force-with-lease");
-  });
-
-  for (const action of ["address-review", "address-comments"] as const) {
-    it(`${action} previews the prompt's base integration, replies, PR summary, and live gates`, () => {
-      const preview = actionPreview(action, { unresolvedReviewThreads: 2 });
-      const steps = preview.steps.join(" ");
-      expect(preview.lastScan).toEqual(["2 open review threads"]);
-      expect(steps).toMatch(/Read the live PR, base, review comments, and threads.*Integrate the base if behind.*resolve conflicts.*commit and push code changes.*Reply to actionable threads.*resolve only those the pushed code demonstrably addresses.*PR summary.*head SHA.*PTAL.*Re-read live PR state.*remaining gates; do not merge/us);
-      expect(actionPrompt(action, FACTS)).toContain("Resolve only threads demonstrably addressed by the pushed code.");
-      expect(steps).toContain("do not merge.");
-    });
-  }
-
-  it("names only reviewers who requested changes and bounds the scan detail", () => {
-    const preview = actionPreview("address-review", {
-      latestReviews: [
-        { login: "ada", state: "CHANGES_REQUESTED" },
-        { login: "bea", state: "APPROVED" },
-        { login: "cam", state: "CHANGES_REQUESTED" },
-        { login: "dee", state: "CHANGES_REQUESTED" },
-        { login: "eli", state: "CHANGES_REQUESTED" },
-      ],
-    });
-    expect(preview.lastScan).toEqual(["Changes requested by ada, cam, dee and 1 more"]);
-  });
-});
-
 function live(overrides: Partial<LiveMergeFacts> = {}): LiveMergeFacts {
   return {
     state: "OPEN",
@@ -360,18 +253,5 @@ describe("shouldDeleteBranch", () => {
     expect(shouldDeleteBranch(true, [])).toBe(true);
     expect(shouldDeleteBranch(false, [])).toBe(false);
     expect(shouldDeleteBranch(true, [58])).toBe(false);
-  });
-});
-
-describe("nudgeComment", () => {
-  it("starts with the literal 'PTAL - ' and mentions every pending reviewer", () => {
-    const text = nudgeComment({ reviewers: ["ada-inkwell", "shop/reviewers"], repo: "margin", prNumber: 61, title: "Paginate the reading list", age: "3d" });
-    expect(text).toBe("PTAL - @ada-inkwell @shop/reviewers: margin #61 (Paginate the reading list) has been waiting 3d.");
-    expect(text.startsWith("PTAL - ")).toBe(true);
-  });
-
-  it("still starts with 'PTAL - ' and leaves no empty mention with no pending reviewers", () => {
-    const text = nudgeComment({ reviewers: [], repo: "margin", prNumber: 61, title: "Paginate the reading list", age: "3d" });
-    expect(text).toBe("PTAL - margin #61 (Paginate the reading list) has been waiting 3d.");
   });
 });

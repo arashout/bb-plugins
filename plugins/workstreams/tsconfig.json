@@ -36,8 +36,6 @@
     "runs.ts",
     "runstore.ts",
     "rescan.ts",
-    "inbox.tsx",
-    "rowactions.tsx",
     "menustate.ts",
     "threadmenu.tsx",
     "howto.tsx",

@@ -8,13 +8,13 @@ describe("Workstreams view preference", () => {
     expect(viewFromSubPath("deck")).toBe("deck");
     expect(viewFromSubPath("inventory")).toBe("inventory");
     expect(viewFromSubPath("map")).toBe("map");
-    expect(viewFromSubPath("pipeline/details")).toBe("pipeline");
-    expect(viewFromSubPath("work/details")).toBe("work");
     expect(viewFromSubPath("efforts/details")).toBe("efforts");
-    expect(viewFromSubPath("board/details")).toBe("board");
-    expect(viewFromSubPath("board-v2/details")).toBe("board");
     expect(viewFromSubPath("")).toBeNull();
     expect(viewFromSubPath("unknown")).toBeNull();
+  });
+
+  it("sends an old link to a removed view to the remembered view, not a blank page", () => {
+    expect(["pipeline/details", "work", "board", "board-v2/details"].map(viewFromSubPath)).toEqual([null, null, null, null]);
   });
 
   it("opens the deck on the card a thread's effort chip links to", () => {
@@ -59,19 +59,14 @@ describe("Workstreams view preference", () => {
     expect(readLastView()).toBe("inventory");
     storeLastView("deck");
     expect(readLastView()).toBe("deck");
-    storeLastView("board");
-    expect(values.get(VIEW_STORAGE_KEY)).toBe("board");
-    expect(readLastView()).toBe("board");
-    storeLastView("pipeline");
-    expect(readLastView()).toBe("pipeline");
-    storeLastView("work");
-    expect(readLastView()).toBe("work");
     storeLastView("efforts");
+    expect(values.get(VIEW_STORAGE_KEY)).toBe("efforts");
     expect(readLastView()).toBe("efforts");
-    values.set(VIEW_STORAGE_KEY, "board-v2");
-    expect(readLastView()).toBe("board");
-    storeLastView("map");
-    expect(readLastView()).toBe("map");
+    // A view remembered before Pipeline, Work, and Board were removed opens the deck.
+    for (const removed of ["pipeline", "work", "board", "board-v2"]) {
+      values.set(VIEW_STORAGE_KEY, removed);
+      expect(readLastView()).toBe("deck");
+    }
     values.set(VIEW_STORAGE_KEY, "unexpected");
     expect(readLastView()).toBe("deck");
   });
@@ -86,9 +81,9 @@ describe("Workstreams view preference", () => {
 
     const values = new Map<string, string>();
     vi.stubGlobal("window", { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } });
-    storeLastView("pipeline");
+    storeLastView("map");
     storeLastView("roster");
-    expect(readLastView()).toBe("pipeline");
+    expect(readLastView()).toBe("map");
     values.set(VIEW_STORAGE_KEY, "roster");
     expect(readLastView()).toBe("deck");
   });
@@ -100,6 +95,6 @@ describe("Workstreams view preference", () => {
       },
     });
     expect(readLastView()).toBe("deck");
-    expect(() => storeLastView("board")).not.toThrow();
+    expect(() => storeLastView("map")).not.toThrow();
   });
 });

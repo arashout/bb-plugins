@@ -2,20 +2,6 @@ import type { ThreadTier } from "./threads.js";
 
 export type MessageLink = { id: string; tier: ThreadTier };
 
-const TIER_ORDER: readonly ThreadTier[] = ["started", "environment", "ticket", "paths"];
-
-/** Strong links first; keep the caller's active/recent order within a tier. */
-export function orderMessageTargets<T extends MessageLink>(links: readonly T[]): T[] {
-  return links.map((link, index) => ({ link, index }))
-    .sort((a, b) => TIER_ORDER.indexOf(a.link.tier) - TIER_ORDER.indexOf(b.link.tier) || a.index - b.index)
-    .map(({ link }) => link);
-}
-
-/** Multiple linked threads need an explicit choice, even when one ranks first. */
-export function defaultMessageTarget(links: readonly MessageLink[]): string {
-  return links.length === 1 ? links[0]!.id : "";
-}
-
 export type MessageSdk = {
   get(args: { threadId: string }): Promise<{ archivedAt: number | null; deletedAt?: number | null; visibility?: string }>;
   send(args: { threadId: string; mode: "auto" | "queue-if-active"; input: { type: "text"; text: string; mentions: [] }[] }): Promise<

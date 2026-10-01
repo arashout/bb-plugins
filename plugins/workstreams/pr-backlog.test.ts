@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { prSchema, type Pr } from "./contract.js";
-import type { Row } from "./inbox.js";
-import { backlogMatches, includeRemoteEfforts, prBacklog, remoteAttentionRows, remotePrsByEffort, type BacklogEntry } from "./pr-backlog.js";
-import { workstreamAttention, hasBoardRows } from "./workstream-attention.js";
+import type { Row } from "./inbox-rows.js";
+import { prBacklog, type BacklogEntry } from "./pr-backlog.js";
 import { prLifecycle, unitLifecycle } from "./workstreams.js";
 
 function pr(patch: Partial<Pr> = {}): Pr {
@@ -56,8 +55,6 @@ describe("authored PR backlog", () => {
     const local = { key: "/real/app", title: "Old title", effort: "Account settings", unit: { path: "/real/app", pr: pr(), rebasing: true, dirty: true, observed: { status: true }, stack: null } } as Row;
     const [row] = prBacklog([entry({ title: "New title" })], [local, { ...local, key: "/aaa-second/app", unit: { ...local.unit, rebasing: undefined } }], now);
     expect(row).toMatchObject({ group: "draft", verb: "Rebase in progress", action: null, local: { key: "/real/app", title: "New title" } });
-    expect(backlogMatches(row!, "app #1 settings")).toBe(true);
-    expect(backlogMatches(row!, "#99")).toBe(false);
   });
   it("preserves checkout lifecycle overrides while sharing remote review logic", () => {
     expect(prLifecycle(pr({ reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true }))).toBe("awaiting-rereview");
@@ -66,43 +63,10 @@ describe("authored PR backlog", () => {
   });
 });
 
-describe("inventory effort associations", () => {
-  it("uses server-confirmed effort membership without creating a checkout row", () => {
-    const rows = prBacklog([{ ...entry(), effortKey: "effort:stable", effortName: "Account experience" }, entry({ number: 2, url: "https://github.com/acme/app/pull/2", title: "Unrelated work" })], [], now);
-    const remote = remotePrsByEffort(rows, "account experience");
-    expect([...remote.keys()]).toEqual(["effort:stable"]);
-    expect(includeRemoteEfforts([], remote)).toEqual([{ key: "effort:stable", label: "Account experience", rows: [], section: null }]);
-    expect(rows.every((row) => row.local === null)).toBe(true);
-    expect(remotePrsByEffort(rows, "unrelated").size).toBe(0);
-  });
-
-  it("does not duplicate a matching checkout or an existing effort heading", () => {
-    const local = { key: "/real/app", effortKey: "effort:stable", effort: "Account experience", unit: { path: "/real/app", pr: pr(), stack: null } } as Row;
-    const entries = [{ ...entry(), effortKey: "effort:stable", effortName: "Account experience" }];
-    expect(remotePrsByEffort(prBacklog(entries, [local], now), "").size).toBe(0);
-    const remote = remotePrsByEffort(prBacklog(entries, [], now), "");
-    const heading = { key: "effort:stable", label: "Account experience", rows: [local], section: null };
-    expect(includeRemoteEfforts([heading], remote)).toEqual([heading]);
-  });
-
-  it("keeps remote work in effort ranking without inventing checkout staleness", () => {
-    const fresh = { ...entry(), effortKey: "effort:stable", effortName: "Account experience" };
-    const [attention] = workstreamAttention(remoteAttentionRows(prBacklog([fresh], [], now)));
-    expect(attention).toMatchObject({ key: "effort:stable", ready: 1, oldCommits: 0 });
-    expect(hasBoardRows(attention!)).toBe(true);
-    const [stale] = workstreamAttention(remoteAttentionRows(prBacklog([{ ...fresh, stale: true }], [], now)));
-    expect(stale).toMatchObject({ ready: 0, unknown: 1, oldCommits: 0 });
-    expect(workstreamAttention(remoteAttentionRows(prBacklog([entry()], [], now)))).toEqual([]);
-  });
-});
-
-it("keeps hold separate from GitHub readiness and effort attention", () => {
+it("keeps hold separate from GitHub readiness", () => {
   const held = { reason: "Awaiting launch approval", heldAt: now };
   const source = { ...entry(), effortKey: "effort:launch", effortName: "Account launch" };
   const rows = prBacklog([source], [], now, { [source.pr.url]: held });
   expect(rows[0]).toMatchObject({ group: "held", hold: held, verb: "Ready to merge", lifecycle: "awaiting-merge" });
-  const attention = workstreamAttention(remoteAttentionRows(rows));
-  expect(attention[0]).toMatchObject({ held: 1, ready: 0, fix: 0, update: 0 });
-  expect(hasBoardRows(attention[0]!)).toBe(true);
   expect(prBacklog([source], [], now)[0]?.group).toBe("ready");
 });

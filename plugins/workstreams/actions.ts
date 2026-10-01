@@ -1,11 +1,9 @@
-// Row actions on the Board inbox. Pure: which action a row offers, which
-// thread an agent action should run in, the prompts it sends, and whether a
-// merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
+// PR row actions. Pure: which action a row offers, which thread an agent
+// action should run in, and whether a merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
 // server.ts do, and they read every decision from here so it can be tested.
 import type { MergeStateStatus } from "./contract.js";
-import { threadPrompt, waitingBehind, type InboxSection, type InboxUnitFacts, type PromptFacts } from "./workstreams.js";
+import { waitingBehind, type InboxSection, type InboxUnitFacts } from "./workstreams.js";
 import type { ThreadTier } from "./threads.js";
-import { RESULT_INSTRUCTION } from "./runs.js";
 import { feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { feedbackToAddress, type ReviewFeedback } from "./feedback-to-address.js";
 
@@ -149,127 +147,6 @@ export function recommendThread(
   return subthreadOr(parent, caps, `Subthread of ${quoted(parent.title)}: it wrote this PR; this action gets its own tracked thread.`);
 }
 
-// ---- prompts ----------------------------------------------------------------
-
-function where(facts: PromptFacts): { pr: string; branch: string } {
-  const title = facts.title === null || facts.title.trim() === "" ? "" : ` (${facts.title.trim()})`;
-  return {
-    pr: `${facts.repo} ${facts.prNumber === null ? "(no pull request)" : `#${facts.prNumber}`}${title}`,
-    branch: facts.branch ?? "(no branch checked out)",
-  };
-}
-
-const REVIEW_STEPS =
-  "Read the live PR, its base branch, every review comment and review thread with gh. Make focused code fixes for actionable feedback with relevant tests; explain justified nonchanges. " +
-  "Fetch and integrate the PR base if behind, resolving conflicts while preserving both sides' intent, then rerun relevant tests. " +
-  "Commit and push code changes; if no change is needed, explain why and use the current head SHA. If you rebased, use an exact --force-with-lease. " +
-  "Reply to each actionable review thread with what changed or why no change was needed. Resolve only threads demonstrably addressed by the pushed code. " +
-  "Post a PR summary comment that mentions the actual reviewers, describes the changes and justified nonchanges, and includes the head SHA (the pushed SHA if code changed). " +
-  "If changes are still requested and reviewer follow-up is needed, ask those reviewers to take another look (PTAL) in the PR comment; preserve an existing approval and do not re-request review otherwise. " +
-  "After the replies and any push, re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus. Report any remaining gate and next action. Do not merge.";
-
-const CONFLICT_STEPS =
-  "Read the live PR and fetch its base branch. Integrate the base in the checkout, resolving conflicts while preserving both sides' intent. " +
-  "Make only fixes needed by the integration, run relevant tests, commit, and push; if you rebased, use an exact --force-with-lease. " +
-  "Post a PR summary comment mentioning the actual reviewers, describing the resolution and including the pushed head SHA. " +
-  "If changes are still requested and reviewer follow-up is needed, ask those reviewers to take another look (PTAL) in the PR comment; preserve an existing approval and do not re-request review otherwise. " +
-  "After the push and reply, re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus. Report any remaining gate and next action. Do not merge.";
-
-/**
- * The editable prompt an agent action starts from. Every field is substituted,
- * and every template ends by asking for a Result line, which is how the Board
- * reports the outcome without a model call (see `extractResult`).
- */
-export function actionPrompt(action: AgentAction, facts: PromptFacts): string {
-  return `${actionBody(action, facts)} ${RESULT_INSTRUCTION}`;
-}
-
-function actionBody(action: AgentAction, facts: PromptFacts): string {
-  const { pr, branch } = where(facts);
-  switch (action) {
-    case "investigate-ci":
-      return threadPrompt("fix", facts);
-    case "address-review":
-      return `Changes were requested on ${pr}, branch ${branch}, checkout ${facts.path}. ${REVIEW_STEPS} Report back with a summary per thread.`;
-    case "address-comments":
-      return `${pr} is approved but has open review comments, branch ${branch}, checkout ${facts.path}. ${REVIEW_STEPS} Report back with a summary per thread and whether the PR is ready to merge.`;
-    case "review-approval-note":
-      return `${pr} is approved with a written review note, branch ${branch}, checkout ${facts.path}. Read the approving review body and decide which points need code changes; leave informational points alone and explain why. Make focused fixes with relevant tests. Fetch the PR's base branch and integrate it before finishing: rebase if behind, resolve any conflicts preserving both sides' intent, and run the tests again. Commit and push code changes only when needed; use an exact --force-with-lease if rebased. Re-read live PR state, review decision, unresolved threads, checks, and mergeStateStatus. Report the change or justified nonchange, branch state, test result, and remaining gates. Advance must verify feedback against the current review and head before the PR is ready to merge. Do not merge.`;
-    case "resolve-conflicts":
-      return `${pr} has merge conflicts with its base. In checkout ${facts.path} on branch ${branch}, ${CONFLICT_STEPS} Report what conflicted and how you resolved it.`;
-  }
-}
-
-/** Short, default-instruction preview. Scan facts are observations, not live checks. */
-export function actionPreview(
-  action: AgentAction,
-  scan: {
-    checkConclusions?: readonly string[];
-    baseRefName?: string | null;
-    headRefName?: string | null;
-    latestReviews?: readonly { login: string; state: string }[];
-    unresolvedReviewThreads?: number | null;
-    approvalHasBody?: boolean;
-  } | null,
-): { steps: string[]; lastScan: string[] } {
-  const lastScan: string[] = [];
-  switch (action) {
-    case "investigate-ci": {
-      const checks = scan?.checkConclusions;
-      if (checks !== undefined) {
-        const failing = checks.filter((value) => value === "FAILURE" || value === "ERROR").length;
-        if (failing > 0) lastScan.push(`${failing} failing ${failing === 1 ? "check" : "checks"} of ${checks.length}`);
-      }
-      return { steps: ["Investigate the CI failure.", "Propose a fix and report what you found."], lastScan };
-    }
-    case "resolve-conflicts":
-      if (scan?.headRefName && scan.baseRefName) lastScan.push(`${scan.headRefName} → ${scan.baseRefName}`);
-      return {
-        steps: [
-          "Read the live PR, fetch and integrate its base, and resolve conflicts preserving both sides' intent.",
-          "Run relevant tests, commit, and push; use an exact --force-with-lease if rebased.",
-          "Post a PR summary with actual reviewer mentions, resolutions, and pushed head SHA; ask for PTAL only if changes are still requested, preserving approval otherwise.",
-          "Re-read live PR state, review, threads, checks, and mergeability. Report remaining gates; do not merge.",
-        ],
-        lastScan,
-      };
-    case "address-review":
-    case "address-comments": {
-      if (scan?.unresolvedReviewThreads !== null && scan?.unresolvedReviewThreads !== undefined) {
-        lastScan.push(`${scan.unresolvedReviewThreads} open review ${scan.unresolvedReviewThreads === 1 ? "thread" : "threads"}`);
-      }
-      if (action === "address-review") {
-        const reviewers = scan?.latestReviews?.filter((review) => review.state === "CHANGES_REQUESTED") ?? [];
-        if (reviewers.length > 0) {
-          const names = reviewers.slice(0, 3).map((review) => review.login).join(", ");
-          lastScan.push(`Changes requested by ${names}${reviewers.length > 3 ? ` and ${reviewers.length - 3} more` : ""}`);
-        }
-      }
-      return {
-        steps: [
-          "Read the live PR, base, review comments, and threads; fix actionable feedback and explain justified nonchanges.",
-          "Integrate the base if behind, resolve conflicts, run relevant tests, and commit and push code changes; explain justified nonchanges and use an exact --force-with-lease if rebased.",
-          "Reply to actionable threads; resolve only those the pushed code demonstrably addresses.",
-          "Post a PR summary with actual reviewer mentions and head SHA (pushed SHA if code changed); request PTAL if changes are still requested, preserving approval otherwise.",
-          "Re-read live PR state, review, threads, checks, and mergeability. Report remaining gates; do not merge.",
-        ],
-        lastScan,
-      };
-    }
-    case "review-approval-note":
-      return {
-        steps: [
-          "Review each approval note; fix actionable points and explain informational ones.",
-          "Fetch and integrate the base; rebase if behind and resolve conflicts preserving intent.",
-          "Run relevant tests; commit and push only code changes, using an exact --force-with-lease after a rebase.",
-          "Re-read live approval, threads, checks, and mergeability. Advance verifies feedback against the current review and head before Merge.",
-          "Report remaining gates; do not merge.",
-        ],
-        lastScan: scan?.approvalHasBody ? ["Written approval note present"] : [],
-      };
-  }
-}
-
 // ---- merge ------------------------------------------------------------------
 
 export const MERGE_METHODS = ["squash", "merge", "rebase"] as const;
@@ -341,22 +218,4 @@ export function mergeVerdict(live: LiveMergeFacts, verification: import("./appro
 /** `--delete-branch` only when allowed AND nothing open is based on this branch. */
 export function shouldDeleteBranch(setting: boolean, stackedAbove: readonly number[]): boolean {
   return setting && stackedAbove.length === 0;
-}
-
-// ---- nudge ------------------------------------------------------------------
-
-/**
- * The prefilled nudge comment. It always opens with the literal "PTAL - ";
- * with no pending reviewers the mention is left out rather than left empty.
- */
-export function nudgeComment(facts: {
-  reviewers: readonly string[];
-  repo: string;
-  prNumber: number;
-  title: string;
-  age: string;
-}): string {
-  const who = facts.reviewers.length === 0 ? "" : `${facts.reviewers.map((login) => `@${login}`).join(" ")}: `;
-  const waiting = facts.age.trim() === "" ? "is waiting on review" : `has been waiting ${facts.age.trim()}`;
-  return `PTAL - ${who}${facts.repo} #${facts.prNumber} (${facts.title.trim()}) ${waiting}.`;
 }

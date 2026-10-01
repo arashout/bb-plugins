@@ -5,16 +5,13 @@ import {
   RESULT_MAX,
   ROW_RUN_MS,
   STRANDED_MS,
-  STRIP_RECENT_MS,
   applySignal,
   badgeValue,
   directOutcome,
   extractResult,
   isStranded,
   rowRun,
-  runDetail,
   runLabel,
-  stripCounts,
   type Run,
   type TrackedRun,
 } from "./runs.js";
@@ -197,36 +194,6 @@ describe("runLabel", () => {
     expect(runLabel(merged, NOON)).toBe("Merged 2m ago");
     expect(runLabel({ ...merged, action: "nudge", finishedAt: NOON - 60 * MIN }, NOON)).toBe("Nudged 1h ago");
     expect(runLabel({ ...merged, status: "failed", result: null, error: "Head moved; refused" }, NOON)).toBe("Failed: Head moved; refused");
-  });
-
-  it("puts the full outcome and both times in the tooltip", () => {
-    const done = run({ status: "done", result: "Pushed", finishedAt: NOON });
-    expect(runDetail(done, (at) => `t${at - NOON}`)).toBe(`Pushed\nStarted t${-4 * MIN}\nFinished t0`);
-    expect(runDetail(run(), (at) => String(at - NOON))).toBe(`Started ${-4 * MIN}\nStill running`);
-  });
-});
-
-describe("stripCounts", () => {
-  it("counts running, needs-you and today's finished runs", () => {
-    const counts = stripCounts(
-      [
-        run({ status: "running" }),
-        run({ status: "running" }),
-        run({ status: "needs-you" }),
-        run({ status: "done", finishedAt: NOON - 5 * 60 * MIN }),
-        run({ kind: "direct", status: "succeeded", finishedAt: NOON - 10 * MIN }),
-        run({ status: "failed", finishedAt: NOON - MIN }),
-        run({ status: "done", finishedAt: NOON - 20 * 60 * MIN }),
-      ],
-      NOON,
-    );
-    expect(counts).toEqual({ running: 2, needsYou: 1, doneToday: 2, failedToday: 1, show: true });
-  });
-
-  it("hides when nothing is open and nothing finished in the last few hours", () => {
-    expect(stripCounts([run({ status: "done", finishedAt: NOON - STRIP_RECENT_MS - 1 })], NOON).show).toBe(false);
-    expect(stripCounts([], NOON).show).toBe(false);
-    expect(stripCounts([run({ status: "done", finishedAt: NOON - MIN })], NOON).show).toBe(true);
   });
 });
 

@@ -1355,7 +1355,7 @@ const UnitList = memo(function UnitList({
         })}
         {hidden > 0 ? (
           <li className="pl-5 text-[11px] text-muted-foreground" style={{ height: UNIT_ROW }}>
-            +{hidden} more on the Board
+            +{hidden} more
           </li>
         ) : null}
       </ul>
@@ -1397,7 +1397,7 @@ const UnitList = memo(function UnitList({
           ))}
           {threads.length > THREAD_LIST_MAX ? (
             <li className="pl-5 text-[11px] text-muted-foreground" style={{ height: UNIT_ROW }}>
-              +{threads.length - THREAD_LIST_MAX} more on the Board
+              +{threads.length - THREAD_LIST_MAX} more
             </li>
           ) : null}
         </ul>
@@ -1527,7 +1527,7 @@ function Overflow({
           <p className="px-2 pb-1 pt-1.5 text-[11px] leading-relaxed text-muted-foreground">
             Click a circle to fly in, the background to back out.{" "}
             <kbd className="font-mono">Esc</kbd> fits all · <kbd className="font-mono">V</kbd>{" "}
-            switches to the Board.
+            switches views.
           </p>
         </div>
       ) : null}
@@ -2757,7 +2757,7 @@ export function MapView({
         ref={viewportRef}
         tabIndex={0}
         role="application"
-        aria-label="Workstreams map. Click a circle to fly into it and the background to back out; wheel or pinch to zoom, drag to pan, Escape to see everything, T to open a focused cluster's newest thread. The Board view lists the same data."
+        aria-label="Workstreams map. Click a circle to fly into it and the background to back out; wheel or pinch to zoom, drag to pan, Escape to see everything, T to open a focused cluster's newest thread."
         // touch-none hands pan and pinch to this element instead of the page.
         className="relative min-h-0 flex-1 touch-none select-none overflow-hidden bg-background outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         style={{ perspective: 1400 }}

@@ -642,8 +642,7 @@ function RuleList({ rules, onRemove, className }: { rules: readonly RuleItem[]; 
 
 const TABS = [{ id: "deck", title: "Efforts", tip: "One effort per card" }, { id: "inventory", title: "All PRs", tip: "Every open PR in one list" }] as const;
 /** The views behind More ▾, which ends with How it works. */
-export const MORE_VIEWS = [{ id: "map", title: "Map" }, { id: "pipeline", title: "Pipeline" }, { id: "work", title: "Work" }, { id: "board", title: "Board" },
-  { id: "efforts", title: "Efforts admin" }] as const;
+export const MORE_VIEWS = [{ id: "map", title: "Map" }, { id: "efforts", title: "Efforts admin" }] as const;
 export type HeaderView = (typeof TABS)[number]["id"] | (typeof MORE_VIEWS)[number]["id"];
 /** Where a header click goes: a view, or the How this works tab. */
 export type HeaderTarget = HeaderView | "how";

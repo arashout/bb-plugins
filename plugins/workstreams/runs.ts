@@ -36,10 +36,6 @@ export function isOpen(status: RunStatus): boolean {
 
 // ---- the outcome in words ---------------------------------------------------
 
-/** Appended to every agent action prompt, so the outcome can be read without a model. */
-export const RESULT_INSTRUCTION =
-  "End your final message with a line starting 'Result:' that says what happened in under 12 words.";
-
 export const RESULT_MAX = 120;
 /** Only the tail of a long message is searched: the Result line is the last thing asked for. */
 const RESULT_SCAN_CHARS = 20_000;
@@ -182,8 +178,6 @@ export function directOutcome(
 const HOUR_MS = 60 * 60 * 1_000;
 /** A finished run stays on its row this long. */
 export const ROW_RUN_MS = 24 * HOUR_MS;
-/** The Agents strip shows while anything finished this recently. */
-export const STRIP_RECENT_MS = 4 * HOUR_MS;
 
 const AGENT_DOING: Record<string, string> = {
   "resolve-conflicts": "resolving conflicts",
@@ -224,42 +218,6 @@ export function runLabel(run: Run, now: number): string {
     case "failed":
       return `Failed: ${run.result ?? run.error ?? (run.kind === "agent" ? "see thread" : "no reason given")}`;
   }
-}
-
-/** The tooltip: the full outcome, and when the run started and finished. */
-export function runDetail(run: Run, format: (at: number) => string): string {
-  const outcome = run.status === "failed" ? [run.result, run.error] : [run.result];
-  return [
-    ...outcome.filter((line): line is string => line !== null),
-    `Started ${format(run.startedAt)}`,
-    run.finishedAt === null ? (isOpen(run.status) ? "Still running" : null) : `Finished ${format(run.finishedAt)}`,
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
-}
-
-export type StripCounts = { running: number; needsYou: number; doneToday: number; failedToday: number; show: boolean };
-
-/**
- * The Agents strip over the given runs (one per row: the row's own run).
- * Shown only while something runs or needs you, or finished in the last few hours.
- */
-export function stripCounts(runs: readonly Run[], now: number): StripCounts {
-  const midnight = new Date(now).setHours(0, 0, 0, 0);
-  const counts: StripCounts = { running: 0, needsYou: 0, doneToday: 0, failedToday: 0, show: false };
-  for (const run of runs) {
-    if (run.status === "running") counts.running += 1;
-    else if (run.status === "needs-you") counts.needsYou += 1;
-    const finished = run.finishedAt;
-    if (finished === null) continue;
-    if (finished >= midnight) {
-      if (run.status === "failed") counts.failedToday += 1;
-      else counts.doneToday += 1;
-    }
-    if (now - finished <= STRIP_RECENT_MS) counts.show = true;
-  }
-  if (counts.running > 0 || counts.needsYou > 0) counts.show = true;
-  return counts;
 }
 
 /** The sidebar badge: needs-you first, else running; nothing when both are zero. */

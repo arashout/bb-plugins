@@ -1,4 +1,4 @@
-export type ViewId = "deck" | "inventory" | "map" | "pipeline" | "work" | "efforts" | "board" | "roster";
+export type ViewId = "deck" | "inventory" | "map" | "efforts" | "roster";
 
 /**
  * Renamed when the effort deck became the front door (plan amendment A15), as it was when the PR inventory did (A13), so a view
@@ -8,8 +8,7 @@ export const VIEW_STORAGE_KEY = "bb-workstreams:last-view-since-deck";
 
 export function viewFromSubPath(subPath: string): ViewId | null {
   const head = subPath.split("/").find(Boolean);
-  return head === "board-v2" ? "board" : head === "deck" || head === "inventory" || head === "map" || head === "pipeline" || head === "work" || head === "efforts" || head === "board"
-    || head === "roster" ? head : null;
+  return head === "deck" || head === "inventory" || head === "map" || head === "efforts" || head === "roster" ? head : null;
 }
 
 /** `roster` (the effort picker), `roster/<effortId>`, or `roster/<effortId>/<n>` (focus row n); null for any other view. */
@@ -41,12 +40,11 @@ export function deckLinkStep(card: string, deck: { ring: readonly string[]; held
   return readSinceLink ? "drop" : "read";
 }
 
-/** The view the panel root opens: the last one chosen, else the effort deck. */
+/** The view the panel root opens: the last one chosen, else the effort deck (also for a removed view's id). */
 export function readLastView(): ViewId {
   try {
     const saved = window.localStorage.getItem(VIEW_STORAGE_KEY);
-    return saved === "board" || saved === "board-v2" ? "board"
-      : saved === "inventory" || saved === "map" || saved === "pipeline" || saved === "work" || saved === "efforts" ? saved : "deck";
+    return saved === "inventory" || saved === "map" || saved === "efforts" ? saved : "deck";
   } catch {
     return "deck";
   }

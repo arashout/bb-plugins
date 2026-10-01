@@ -17,8 +17,8 @@ import { RosterPane } from "./roster-view.js";
 const noop = () => {};
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&#x27;/gu, "'").replace(/\s+/gu, " ").trim();
 const source = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
-const VIEWS: HeaderProps["view"][] = ["deck", "inventory", "map", "pipeline", "work", "board", "efforts", "roster"];
-const MORE = ["Map", "Pipeline", "Work", "Board", "Efforts admin", "How it works"];
+const VIEWS: HeaderProps["view"][] = ["deck", "inventory", "map", "efforts", "roster"];
+const MORE = ["Map", "Efforts admin", "How it works"];
 
 /** What a view's header offers: which view it says it's on, its tabs and the pressed one, More's label, and the right side in order. */
 function items(html: string) {
@@ -55,7 +55,7 @@ function clicks(tree: ReactNode) {
   renderToStaticMarkup(createElement(() => { walk(tree); return null; }));
   return found;
 }
-const TARGETS = ["view-deck", "view-prs", "map", "pipeline", "work", "board", "efforts", "how"];
+const TARGETS = ["view-deck", "view-prs", "map", "efforts", "how"];
 /** The deck on Inkwell's Shelf order card, as its nav view draws it; `run` gets every click. */
 function deckPane(run: DeckPaneProps["run"] = noop): DeckPaneProps {
   const deck = inkwellDeck();
@@ -78,7 +78,7 @@ describe("the shared Workstreams header", () => {
       expect(got.right).toEqual(["palette", "help"]);
     }
     // More names the view it holds, so the Map, which has no title of its own, still says where you are.
-    expect(VIEWS.map((view) => items(header(view)).more)).toEqual(["More ▾", "More ▾", "Map ▾", "Pipeline ▾", "Work ▾", "Board ▾", "Efforts admin ▾", "More ▾"]);
+    expect(VIEWS.map((view) => items(header(view)).more)).toEqual(["More ▾", "More ▾", "Map ▾", "Efforts admin ▾", "More ▾"]);
   });
 
   it("lists the same views in More on every view, marking only the one you're on, then How it works", () => {
@@ -86,7 +86,7 @@ describe("the shared Workstreams header", () => {
       const html = more(view);
       expect([...html.matchAll(/data-ws-more-item="[^"]+"[^>]*>([^<]+)</gu)].map((item) => item[1])).toEqual(MORE);
       expect([...html.matchAll(/data-ws-more-item="([^"]+)" aria-current="page"/gu)].map((item) => item[1])).toEqual(
-        ["map", "pipeline", "work", "board", "efforts"].includes(view) ? [view] : []);
+        ["map", "efforts"].includes(view) ? [view] : []);
     }
   });
 
@@ -107,7 +107,7 @@ describe("the shared Workstreams header", () => {
     // Where ⌘K has no actions, it goes to every other view or How it works.
     const palette = viewPaletteItems("map");
     expect(palette.map((item) => `${item.title}${item.on ? "" : ` · ${item.why}`}`)).toEqual(
-      ["Efforts", "All PRs", "Map · you're here", "Pipeline", "Work", "Board", "Efforts admin", "How it works"]);
+      ["Efforts", "All PRs", "Map · you're here", "Efforts admin", "How it works"]);
   });
 
   it("sends each tab and More item to its own view and How it works to How this works; a click on the view you're on goes nowhere", () => {
@@ -117,18 +117,18 @@ describe("the shared Workstreams header", () => {
       for (const key of TARGETS) on.get(key)!();
       return got;
     };
-    expect(sent("roster")).toEqual(["deck", "inventory", "map", "pipeline", "work", "board", "efforts", "how"]);
-    expect(sent("map")).toEqual(["deck", "inventory", "pipeline", "work", "board", "efforts", "how"]);
-    expect(sent("inventory")).toEqual(["deck", "map", "pipeline", "work", "board", "efforts", "how"]);
+    expect(sent("roster")).toEqual(["deck", "inventory", "map", "efforts", "how"]);
+    expect(sent("map")).toEqual(["deck", "inventory", "efforts", "how"]);
+    expect(sent("inventory")).toEqual(["deck", "map", "efforts", "how"]);
   });
 
-  // The Map and Board keep their Approved filter, Rescan, and scan notices only through this slot.
+  // The Map keeps its Approved filter, Rescan, and scan notices only through this slot.
   it("draws a view's own tools after More and before freshness", () => {
     const html = header("map", { tools: createElement("button", { type: "button", "data-tool": "" }, "Approved 3") });
     expect(html).toMatch(/data-ws-more[\s\S]*<button type="button" data-tool="">Approved 3<\/button>[\s\S]*role="status"/u);
   });
 
-  // A narrow panel, or How this works open beside it, must not cut off ⌘K and ? or hide freshness, as a one-row header did on the Map and Board.
+  // A narrow panel, or How this works open beside it, must not cut off ⌘K and ? or hide freshness, as a one-row header did on the Map.
   it("wraps on a narrow panel, moving freshness, Mark seen, ⌘K, and ? to their own line as one group on the right", () => {
     const html = header("map", { tools: createElement("button", { type: "button" }, "Approved 3") });
     expect(html).toMatch(/<header [^>]*class="[^"]*\bflex-wrap\b/u);
@@ -166,7 +166,7 @@ describe("every Workstreams view", () => {
     const commands: DeckCommand[] = [];
     const click = clicks(createElement(DeckPane, deckPane((command) => commands.push(command))));
     for (const key of [...TARGETS, "seen"]) click.get(key)!();
-    expect(commands).toEqual([...["inventory", "map", "pipeline", "work", "board", "efforts", "how"].map((view) => ({ kind: "view", view })), { kind: "action", id: "seen" }]);
+    expect(commands).toEqual([...["inventory", "map", "efforts", "how"].map((view) => ({ kind: "view", view })), { kind: "action", id: "seen" }]);
     // The nav view hands a view command on as it came, and the page opens How this works for how and the view's path for the rest.
     expect(source("deck-nav-view.tsx")).toContain('case "view": onView(command.view); return;');
     const app = source("app.tsx");
@@ -174,12 +174,12 @@ describe("every Workstreams view", () => {
     expect(app.match(/onView=\{go\}|onView: go/gu)).toHaveLength(4);
   });
 
-  // The Map, Pipeline, Work, legacy Board, Efforts admin, and roster pages call the SDK, so their wiring is checked in the source.
-  it("wires the header into the Map, Pipeline, Work, Board, Efforts admin, and roster pages, and no view draws tabs of its own", () => {
+  // The Map, Efforts admin, and roster pages call the SDK, so their wiring is checked in the source.
+  it("wires the header into the Map, Efforts admin, and roster pages, and no view draws tabs of its own", () => {
     const app = source("app.tsx");
-    for (const view of ["map", "pipeline", "work", "board", "efforts"]) expect(app).toContain(`{header("${view}"`);
-    // The Map and the Board pass their Approved filter, Rescan, and scan notices as the header's tools.
-    expect([...app.matchAll(/\{header\("(\w+)", boardTools\)\}/gu)].map((match) => match[1]).sort()).toEqual(["board", "map"]);
+    for (const view of ["map", "efforts"]) expect(app).toContain(`{header("${view}"`);
+    // The Map passes its Approved filter, Rescan, and scan notices as the header's tools.
+    expect([...app.matchAll(/\{header\("(\w+)", boardTools\)\}/gu)].map((match) => match[1])).toEqual(["map"]);
     expect(app).toMatch(/const boardTools = <>[\s\S]*>Approved \{approvedCount\}<[\s\S]*rpc\.call\("board_refresh"\)[\s\S]*<Warnings warnings=\{board\.warnings\} \/>\}\n\s+<\/>;/u);
     const roster = source("roster-view.tsx");
     expect(roster.match(/<WorkstreamsHeader view="roster"/gu)).toHaveLength(2);

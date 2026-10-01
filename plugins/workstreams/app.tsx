@@ -1,8 +1,7 @@
 // bb-plugin-workstreams — frontend entry.
 //
-// Two views of one fetch: the Map (map.tsx), a spatial picture of the grouping
-// hierarchy, and the Board (inbox.tsx), ordered by effort or next action. Everything either shows comes from
-// board_get; the server publishes "board-changed" after each scan and the board
+// The effort deck and All PRs lead; the Map (map.tsx), a spatial picture of the grouping hierarchy, and Efforts admin sit
+// behind More. The Map reads board_get; the server publishes "board-changed" after each scan and the board
 // refetches. Nothing here computes a count or a sentence — the server already
 // did, so the board and the CLI can never disagree.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,9 +19,6 @@ import { groupChildren, relativeTime, type Lens, type Lifecycle } from "./workst
 import { HOW_TAB, HowThisWorks } from "./howto";
 import { EASE_CSS } from "./layout";
 import { MapView } from "./map";
-import { InboxBoard } from "./inbox";
-import { PipelineView } from "./pipeline-view";
-import { WorkView } from "./work-view";
 import { EffortsView } from "./efforts-view";
 import { countApprovedOpenPrs } from "./approval-filter";
 import { Icon } from "@/components/ui/icon";
@@ -242,7 +238,7 @@ function Warnings({ warnings }: { warnings: string[] }) {
  * back and forward. The panel root redirects to the last view opened here.
  * `V` cycles these outside the deck and All PRs.
  */
-const CYCLE: readonly ViewId[] = ["deck", "inventory", "map", "pipeline", "work", "efforts"];
+const CYCLE: readonly ViewId[] = ["deck", "inventory", "map", "efforts"];
 
 /** How fresh the board is, as the shared header says it on the views that read it. */
 function boardRead(board: Board | null, now: number): HeaderProps["read"] {
@@ -354,9 +350,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
   }, [explicitView, navigate, view]);
   const approvedCount = useMemo(() => {
     if (board === null) return 0;
-    const local = board.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.map((unit) => unit.pr)));
-    return countApprovedOpenPrs(view === "map" ? local : [...local, ...board.prInventory.entries.map((entry) => entry.pr)]);
-  }, [board, view]);
+    return countApprovedOpenPrs(board.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.map((unit) => unit.pr))));
+  }, [board]);
   const now = useNow(30_000);
   const panel = experimental_useAppPanel();
   const openHow = useCallback(() => {
@@ -364,8 +359,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       toast.error("Could not open How this works", { description: "Open BB's right panel and choose its How this works tab." });
     }
   }, [panel]);
-  // The selection all views share: a cluster focused on the Map is the
-  // row either Board opens on, and the circle the Map flies back to.
+  // The cluster focused on the Map, kept while another view shows so the Map flies back to it.
   const [focusTicket, setFocusTicket] = useState<string | null>(null);
 
   const [leaving, setLeaving] = useState<ViewId | null>(null);
@@ -417,9 +411,9 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
   const read = boardRead(board, now);
   const header = (id: Exclude<ViewId, "deck" | "inventory" | "roster">, tools?: ReactNode) => <WorkstreamsHeader view={id} read={read} palette="go to" help="How this works"
     tools={tools} onView={go} onPalette={() => setPalette(true)} onHelp={openHow} />;
-  // The Map and the legacy Board keep their Approved filter, Rescan, and scan notices beside More.
+  // The Map keeps its Approved filter, Rescan, and scan notices beside More.
   const boardTools = <>
-    <Tip label={`Approved open PRs ${view === "map" ? "with scanned checkouts on the Map" : "across tracked checkouts and the PR inventory"}. Approval can still need comment, check, or branch work.`}>
+    <Tip label="Approved open PRs with scanned checkouts on the Map. Approval can still need comment, check, or branch work.">
       <button type="button" aria-pressed={prefs.approvedOnly} disabled={board === null} onClick={() => update({ approvedOnly: !prefs.approvedOnly })}
         className={cn("shrink-0 rounded-md border px-2 py-1 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50", prefs.approvedOnly ? "border-ring/50 bg-foreground/[0.08]" : "border-border text-muted-foreground")}>Approved {approvedCount}</button>
     </Tip>
@@ -450,30 +444,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       <InventoryNavView onView={go} />
     ) : id === "roster" ? (
       <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} chrome={{ read, onView: go, onPalette: () => setPalette(true), onHow: openHow }} />
-    ) : id === "pipeline" ? (
-      <>{header("pipeline")}{board === null ? <div className="p-4"><Notice>Loading the pipeline…</Notice></div> :
-        <PipelineView board={board} prefs={prefs} onPrefs={update} now={now} focusTicket={focusTicket} onFocusTicket={setFocusTicket} onHow={openHow} onRescan={async () => { await rpc.call("board_refresh"); await refetch(); }} />}</>
-    ) : id === "work" ? (
-      <>{header("work")}{board === null ? <div className="p-4"><Notice>Loading work…</Notice></div> :
-        <WorkView board={board} now={now} onPipeline={() => navigate.toPluginPanel("board", { subPath: "pipeline" })} />}</>
     ) : id === "efforts" ? (
       <>{header("efforts")}<EffortsView board={board} /></>
-    ) : id === "board" ? (
-      <>{header("board", boardTools)}{board === null ? (
-        <div className="p-4">
-          <Notice>Loading the board…</Notice>
-        </div>
-      ) : (
-        <InboxBoard
-          dispatchControls
-          board={board}
-          prefs={prefs}
-          onPrefs={update}
-          focusTicket={focusTicket}
-          onFocusTicket={setFocusTicket}
-          onShowOnMap={() => navigate.toPluginPanel("board", { subPath: "map" })}
-        />
-      )}</>
     ) : (
       <>{header("map", boardTools)}<MapView
         board={board}
@@ -493,7 +465,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(["deck", "inventory", "map", "pipeline", "work", "efforts", "board", "roster"] as const).map((id) =>
+        {(["deck", "inventory", "map", "efforts", "roster"] as const).map((id) =>
           id === view || id === leaving ? (
             <ViewLayer key={id} leaving={id !== view}>
               {render(id)}
