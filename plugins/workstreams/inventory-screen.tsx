@@ -5,19 +5,21 @@
 // PR it sent stays on Your turn with one state chip that opens its thread, until GitHub shows its feedback cleared; what it left out, or
 // why nothing started, shows on the rows and the selection bar. f on a row opens the deck's listing confirm for the PR's own thread. It
 // shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the
-// focused row's Nudge, never a write itself.
+// focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the selection reads those PRs from GitHub again, four at a time;
+// a click on Last read reads every open PR again.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, askKind, commentsOnly, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
+import { actionCall, askKind, commentsOnly, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
+  type Outcome } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
-import { HelpBody, HintBar, Kbd, PaletteBody, Spin, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
-import { DeckDialog, useBatchConfirm, useRegistryKeys, workingLabel, type LiveItems, type Undo, type Working } from "./deck-flow";
+import { HelpBody, HintBar, Kbd, PaletteBody, RefreshSelected, Spin, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
+import { DeckDialog, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel, type LiveItems, type Undo, type Working } from "./deck-flow";
 
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
@@ -63,7 +65,8 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
 }
 
 /** The Your turn rows you selected, docked under the lists so it never covers one: Address them together, or clear; and why nothing started. */
-function SelectionBar({ count, refusal, working, onAddress, onClear }: { count: number; refusal?: string | null; working?: Working | null; onAddress(): void; onClear(): void }) {
+function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, onClear }: { count: number; refusal?: string | null; working?: Working | null;
+  refresh?: { busy: boolean; progress: string | null }; onAddress(): void; onRefresh(): void; onClear(): void }) {
   if (!count) return null;
   return <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
     <b className="mr-1 font-semibold">{count} selected</b>
@@ -71,6 +74,7 @@ function SelectionBar({ count, refusal, working, onAddress, onClear }: { count: 
       title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
       className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background", FOCUS)}>
       {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address selected ({count})<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
+    <RefreshSelected count={count} busy={!!refresh?.busy} progress={refresh?.progress ?? null} onClick={onRefresh} />
     {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
     <span className="flex-1" />
     <button type="button" onClick={onClear} className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", FOCUS)}>
@@ -88,12 +92,14 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   /** A batch call out now, whose rows show pending; and each item of a batch sending now, by PR. */
   working?: Working | null; live?: LiveItems;
   /** The deck's shared hint bar, under the lists. */
-  footer?: ReactNode }) {
+  footer?: ReactNode;
+  /** ↻ on a row, Refresh on the selection, and a click on Last read; the rows reading now, and the selection's progress. */
+  onRefresh?(line: InventoryLine): void; onRefreshSelected?(): void; onRefreshAll?(): void; reading?: ReadonlySet<string>; refresh?: { busy: boolean; progress: string | null } }) {
   const split = splitInventory(props.screen);
   const { turn, comments, other } = split;
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge };
+    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading };
   // Address takes only rows nothing it sent is still working on; Your turn's box takes only Your turn's.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
@@ -102,7 +108,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   const noted = comments.reduce((sum, group) => sum + group.lines.length, 0);
   const rows = { ...callbacks, selected: props.selected, onSelect: props.onSelect, notes: props.notes, onUndo: props.onUndo, working: props.working?.prUrls, live: props.live };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
-    <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null }} onView={props.onView}
+    <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null, onRefresh: props.onRefreshAll }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
       <h1 className="px-4 pt-4 text-[18px] font-semibold tracking-tight">All PRs</h1>
@@ -136,7 +142,8 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
           : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
     </div>
-    <SelectionBar count={picked} refusal={props.refusal} working={props.working} onAddress={() => props.onAddress?.()} onClear={() => props.onClear?.()} />
+    <SelectionBar count={picked} refusal={props.refusal} working={props.working} refresh={props.refresh} onAddress={() => props.onAddress?.()}
+      onRefresh={() => props.onRefreshSelected?.()} onClear={() => props.onClear?.()} />
     {props.footer}
   </div>;
 }
@@ -173,10 +180,9 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const navigate = useBbNavigate();
   const { view, error, load } = useInventory();
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, { at: number; action: "nudge"; ok: boolean; text: string }>>(new Map());
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, Outcome>>(new Map());
   const now = Date.now();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, outcomes }), [view, now, outcomes]);
   const rows = useMemo(() => new Map<string, InventoryRow>(view?.groups.flatMap((group) => group.rows.map((row) => [row.prUrl, row] as const)) ?? []), [view]);
   const nudge = async (line: InventoryLine, action: LineAction) => {
     if (busyKey || !action.enabled) return;
@@ -215,6 +221,11 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setFlash(null), ms ?? (withUndo ? 9_000 : 5_000));
   }, []);
+  const refresh = useRefresh({ say, reads: () => load() });
+  // A row's newer outcome wins: a read after a Nudge, or a Nudge after a read.
+  const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, pending: new Map([...refresh.reading].map((prUrl) => [prUrl, "refresh" as const])),
+    outcomes: new Map([...outcomes, ...[...refresh.outcomes].filter(([prUrl, outcome]) => (outcomes.get(prUrl)?.at ?? 0) <= outcome.at)]) }),
+  [view, now, outcomes, refresh.reading, refresh.outcomes]);
   const remember = () => { opener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : opener.current; };
   /** Back to the control that opened a dialog, or its row, never the page body. */
   const returnFocus = () => window.requestAnimationFrame(() => {
@@ -233,8 +244,9 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   });
   // The focused row, in either list: a PR shows in only one.
   const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
-  // Nudge is due exactly where its row shows the button.
+  // Nudge is due exactly where its row shows the button; so is Refresh.
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
+  const readable = !!focused?.actions.some((action) => action.id === "refresh" && action.enabled);
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const fix = focused && askKind(focused) === "fix";
   // Your turn then Comments only in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row
@@ -248,7 +260,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     anchor.current = line.prUrl;
   };
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : []]),
+    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : [], ...readable ? ["refresh" as const] : []]),
       selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
   /** Address the selected Your turn and Comments only rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
@@ -257,6 +269,8 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     say(undone.ok ? "Undone. Nothing was sent." : undone.error);
     load();
   };
+  /** Refresh the selection, else the focused row: four at a time, each row saying what its read got. */
+  const reread = () => { void refresh.read(selected.length ? selected.map((line) => line.prUrl) : focused && readable ? [focused.prUrl] : []); };
   /** Ask a Your turn row's thread to address its feedback: the deck's listing confirm, with the PR's own thread named, then its Undo window. */
   const ask = (line: InventoryLine) => { const kind = askKind(line); if (kind) void batch.plan(kind, null, [line.prUrl]); };
   const on = availability(context);
@@ -280,6 +294,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       case "fix": if (focused && fix) ask(focused); return;
       // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
+      case "refresh": reread(); return;
       case "select": if (focused && selectable.includes(focused)) toggle(focused, false); return;
       case "select-section": setPicked(new Set(turnLines.map((line) => line.prUrl))); say(`Selected ${turnLines.length} on Your turn.`); return;
       case "clear": setPicked(new Set()); return;
@@ -303,7 +318,9 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       onNudge={(line, action) => { void nudge(line, action); }}
       selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : []))} onAddress={address}
       onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} working={batch.working} live={batch.live}
-      footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
+      onRefresh={(line) => void refresh.read([line.prUrl])} onRefreshSelected={reread} onRefreshAll={refresh.all} reading={refresh.reading}
+      refresh={{ busy: refresh.reading.size > 0, progress: refresh.progress }}
+      footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
       : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}
     {batch.element}
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>

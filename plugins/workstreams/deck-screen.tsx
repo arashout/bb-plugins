@@ -195,8 +195,8 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
 // ---------------------------------------------------------------------------
 
 export type RowState = { selected: ReadonlySet<string>; expanded: ReadonlySet<string>; focus: string | null;
-  /** Rows whose Refresh is reading GitHub now, until the read that carries it lands. */
-  refreshing?: ReadonlySet<string>;
+  /** Rows whose Refresh is reading GitHub now, until the read that carries it lands; and what each Refresh got: Read just now, or why it failed. */
+  refreshing?: ReadonlySet<string>; reads?: ReadonlyMap<string, { text: string; ok: boolean }>;
   /** Rows a batch button is planning now, until its plan answers. */
   working?: ReadonlySet<string> };
 /** What a narrow pane drops from a row, as the mock does below 720 px: who approved a merge, the suggested reviewer, and "draft". */
@@ -218,6 +218,7 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
   const selected = state.selected.has(line.prUrl);
   const busy = state.refreshing?.has(line.prUrl) ?? false;
   const working = state.working?.has(line.prUrl) ?? false;
+  const read = state.reads?.get(line.prUrl);
   const trail = line.trail;
   return <div className={cn("ml-7", open && "rounded-md bg-foreground/[0.035]")}>
     <div data-deck-row={line.prUrl} data-deck-section={line.section} data-deck-dim={line.dim || undefined} data-deck-dot={line.dot ? true : undefined}
@@ -236,7 +237,9 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
       <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
         className={cn("min-w-16 flex-1 cursor-pointer truncate @min-[900px]:min-w-0", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
         {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
-      {line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
+      {read ? <span role="status" data-deck-read={read.ok ? "ok" : "failed"} title={read.text} className={cn("min-w-0 max-w-56 truncate whitespace-nowrap text-[11px]",
+        read.ok ? "text-muted-foreground" : "text-destructive")}>{read.text}</span>
+        : line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
         line.checked.failed ? "text-destructive" : "hidden text-muted-foreground @min-[720px]:inline")}>{line.checked.text}</span> : null}
       {line.signals.map((signal) => <span key={signal} className={cn("hidden shrink-0 rounded px-1.5 text-[11px] @min-[720px]:inline", TONE.gray.chip)}>{signal}</span>)}
       {line.info ? <span title={line.info.text} data-deck-change={line.change ? true : undefined} className={cn("min-w-0 truncate text-[11.5px]",
@@ -647,8 +650,8 @@ export type HeaderTarget = HeaderView | "how";
 export type HeaderProps = {
   /** The view under the header; an effort's roster sits under neither tab. */
   view: HeaderView | "roster";
-  /** How fresh this view's read is; `title` gives the exact times. */
-  read: { text: string; error: string | null; title?: string; busy?: boolean };
+  /** How fresh this view's read is; `title` gives the exact times. `onRefresh`: a click reads every open PR again, except while one reads. */
+  read: { text: string; error: string | null; title?: string; busy?: boolean; onRefresh?(): void };
   /** Mark seen, on a view that has it, with its key and what it settles there. */
   seen?: { changed: number; available: boolean; note: string | null; key: string; title?: string };
   /** What ⌘K opens here: this view's actions, or the views. */
@@ -687,7 +690,11 @@ export function WorkstreamsHeader(props: HeaderProps) {
     {props.tools}
     <div className="ml-auto flex min-w-0 items-center gap-2">
       <span role={read.error ? "alert" : "status"} title={read.title} className={cn("inline-flex min-w-0 items-center gap-1.5 text-[11.5px]", read.error ? "text-destructive" : "text-muted-foreground")}>
-        {read.busy && !read.error ? <Icon name="Loading" className="size-3 shrink-0 motion-safe:animate-spin" aria-hidden /> : null}<span className="truncate">{read.error ?? read.text}</span></span>
+        {read.busy && !read.error ? <Icon name="Loading" className="size-3 shrink-0 motion-safe:animate-spin" aria-hidden /> : null}
+        {read.onRefresh ? <button type="button" data-ws-read disabled={read.busy} onClick={read.onRefresh} title="Read every open PR from GitHub again"
+          className={cn("inline-flex min-w-0 items-center gap-1 rounded hover:text-foreground disabled:hover:text-inherit", RING)}>
+          {read.busy ? null : <span aria-hidden>↻</span>}<span className="truncate">{read.error ?? read.text}</span></button>
+          : <span className="truncate">{read.error ?? read.text}</span>}</span>
       {seen?.note ? <span role="status" className="shrink-0 text-[11.5px] text-muted-foreground"><span className={TONE.green.text}>✓</span> {seen.note}</span>
         : seen?.available ? <button type="button" data-deck-focus="seen" onClick={props.onSeen}
           title={seen.title ?? "Settles this view only: rows a read changed, rows that left, and rows you acted on"}
@@ -722,8 +729,10 @@ export function viewPaletteItems(view: HeaderProps["view"]): PaletteItem[] {
  * The selection's moves, docked under the rows so it never covers one; on a service card, the moves into efforts too, and on an effort's
  * card (`leaves`), the move to One-offs. `address` counts the selected Your turn rows, which Address selected takes.
  */
-export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusal, working, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[];
+export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusal, working, refresh, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[];
   sorting: boolean; leaves?: boolean; address?: number;
+  /** The selected rows Refresh reads, and its progress while it reads them. */
+  refresh?: { count: number; busy: boolean; progress: string | null };
   /** Why the last Address started nothing. */
   refusal?: string | null;
   /** The batch button working now: it spins and says so, and the others wait, until its plan answers. */
@@ -746,6 +755,7 @@ export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusa
       {kinds.map((kind) => <button key={kind.id} type="button" data-deck-batch={kind.id} disabled={!!working} aria-busy={busy(kind.id) || undefined}
         onClick={() => run({ kind: "action", id: kind.id })} className={cn(BUTTON, TONE[kind.tone].button, busy(kind.id) && "disabled:opacity-100")}>
         {face(kind.id, <>{ACTION[kind.id].title.replace("…", "")} {kind.count}<Kbd>{ACTION[kind.id].keys[0]}</Kbd></>)}</button>)}
+      {refresh?.count ? <RefreshSelected {...refresh} onClick={() => run({ kind: "action", id: "refresh" })} /> : null}
       {sorting ? <>
         <button type="button" onClick={() => run({ kind: "action", id: "accept" })} className={cn(BUTTON, "border-border")}>Accept suggestions<Kbd>p</Kbd></button>
         <button type="button" onClick={() => run({ kind: "action", id: "move" })} className={cn(BUTTON, "border-border")}>Move…<Kbd>e</Kbd></button>
@@ -756,6 +766,12 @@ export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusa
       <button type="button" onClick={() => run({ kind: "action", id: "clear" })} className={GHOST}>Clear<Kbd>esc</Kbd></button>
     </div>
   </div>;
+}
+
+/** Refresh (N) on a selection bar: reads the selected rows from GitHub, saying how far it got. */
+export function RefreshSelected({ count, busy, progress, onClick }: { count: number; busy: boolean; progress: string | null; onClick(): void }) {
+  return <button type="button" data-batch-refresh disabled={busy} aria-busy={busy || undefined} onClick={onClick} title="Read the selected PRs from GitHub again"
+    className={cn(BUTTON, "border-border", busy && "disabled:opacity-100")}>{busy ? <><Spin />{progress ?? "Reading…"}</> : <>Refresh ({count})<Kbd>{ACTION.refresh.keys[0]}</Kbd></>}</button>;
 }
 
 /** The few keys that matter now, or one status line, which never covers a row; ⌘K and ? stay on the right. */
@@ -1104,7 +1120,7 @@ export type DeckPaneProps = {
   /** Overview's panels while it shows; null before the first read. */
   overview?: OverviewScreen | null;
   held: readonly Pile[]; done: readonly Pile[];
-  read: { text: string; error: string | null };
+  read: HeaderProps["read"];
   seen: { changed: number; available: boolean; note: string | null };
   state: RowState; tiles: ReadonlySet<string>; open: ReadonlySet<string>; pile: "hold" | "done" | null;
   /** The card's own header has scrolled away, so its one-line bar shows and section headers stick below it. */
@@ -1114,7 +1130,8 @@ export type DeckPaneProps = {
   /** The card a flip landed on, said once to screen readers; empty otherwise. */
   announce?: string;
   on: Availability; hints: readonly [string, string][]; flash: { text: string; undo: boolean; busy?: boolean } | null;
-  batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; address?: number; refusal?: string | null; working?: { kind: string; label: string } | null };
+  batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; address?: number; refusal?: string | null; working?: { kind: string; label: string } | null;
+    refresh?: { count: number; busy: boolean; progress: string | null } };
   run: Run; onPalette(): void; onHelp(): void; onUndo(): void;
   rootRef?: RefObject<HTMLDivElement | null>; scrollerRef?: RefObject<HTMLDivElement | null>; slackRef?: RefObject<HTMLDivElement | null>;
   chipsRef?: RefObject<HTMLDivElement | null>; viewRef?: RefObject<HTMLDivElement | null>;
@@ -1149,7 +1166,7 @@ export function DeckPane(props: DeckPaneProps) {
       </div>
     </div>
     <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} address={props.batch.address} refusal={props.batch.refusal} working={props.batch.working}
-      sorting={card?.card.kind === "service"}
+      refresh={props.batch.refresh} sorting={card?.card.kind === "service"}
       leaves={card?.card.kind === "effort" && !card.card.oneOff} run={props.run} />
     <HintBar hints={props.hints} flash={props.flash} onPalette={props.onPalette} onHelp={props.onHelp} onUndo={props.onUndo} />
     <p role="status" data-deck-announce className="sr-only">{props.announce}</p>

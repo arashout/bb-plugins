@@ -464,7 +464,7 @@ describe("what the keys act on", () => {
     expect(hintKeys(none, availability(none))).toContainEqual(["x", "select"]);
     const two = prs({ row: true, thread: false, moves: new Set(), selectable: false, turn: 5, picked: 2 });
     expect([availability(two).select.on, availability(two).address.on, availability(two).clear.on]).toEqual([false, true, true]);
-    expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["esc", "clear"]]);
+    expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["g", "refresh"], ["esc", "clear"]]);
     expect(availability(prs({ row: false, thread: false, moves: new Set(), turn: 0, picked: 0 }))["select-section"]).toEqual({ on: false, why: "nothing is on Your turn" });
   });
 
@@ -561,7 +561,7 @@ describe("what the keys act on", () => {
     expect(hintKeys(context(shelf), availability(context(shelf)))).toEqual([["] →", "flip"], ["j ↓", "rows"], ["m", "merge"]]);
     const focused = shelf.sections[0]!.lines[0]!;
     expect(hintKeys(context(shelf, { focused }), availability(context(shelf, { focused })))).toEqual([["j ↓", "rows"], ["m", "preview merge"],
-      ["x", "select"], ["↵", "details"]]);
+      ["x", "select"], ["↵", "details"], ["g", "refresh"]]);
   });
 
   it("lists every action in the palette with its key, and each effort to go to, resume, or reopen", () => {

@@ -9,6 +9,11 @@ describe("the deck's key registry", () => {
     expect(new Set(DECK_ACTIONS.map((action) => action.id)).size).toBe(DECK_ACTIONS.length);
   });
 
+  // r already asks for a reviewer, and ⇧R resets a row on the roster, so Refresh takes g.
+  it("binds g to Refresh, leaving r to Request a reviewer", () => {
+    expect([actionForKey({ key: "g" }), actionForKey({ key: "r" })]).toEqual([{ id: "refresh" }, { id: "request" }]);
+  });
+
   it("never binds Enter or Space to a merge or a write: Enter only opens a row's details", () => {
     expect(actionForKey({ key: "Enter" })).toEqual({ id: "expand" });
     expect(actionForKey({ key: " " })).toBeNull();

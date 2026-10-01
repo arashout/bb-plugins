@@ -42,6 +42,8 @@ async function setup(options: { advanceJob?: boolean } = {}) {
     polled: listing([pr(42), pr(43)]),
     inspection: (urls: string[]): InventoryInspection => ({ entries: [], closed: urls, failed: [], warnings: [] }),
     resetAt: null as number | null,
+    /** The full read waits on it, so a test can click again while one runs. */
+    gate: Promise.resolve(),
   };
   const spawn = vi.fn(async () => { throw new Error("The poll must start no thread."); });
   const send = vi.fn(async () => { throw new Error("The poll must message no thread."); });
@@ -52,7 +54,7 @@ async function setup(options: { advanceJob?: boolean } = {}) {
   }, experimental_callHostRpc: async ({ method, input }) => {
     calls.push({ method, input });
     if (method === "scan" || method === "inspectPaths") return { units: [{ ...UNIT, pr: state.scanned }], warnings: [] };
-    if (method === "authoredPrs") return listing(state.authored);
+    if (method === "authoredPrs") { await state.gate; return listing(state.authored); }
     if (method === "pollAuthoredPrs") return state.polled;
     if (method === "inspectPrs") return state.inspection((input as { prUrls: string[] }).prUrls);
     if (method === "githubRateLimit") return { resetAt: state.resetAt };
@@ -208,6 +210,83 @@ describe("the inventory poll", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
     await done;
+    expect(env.calls.slice(before)).toEqual([]);
+  });
+});
+
+describe("a forced read from GitHub", () => {
+  const SINCE = "2026-09-24T09:00:00Z", MINE = "2026-09-26T10:00:00Z";
+  const reviewed = (extra: Partial<Pr> = {}): Pr => ({ ...pr(43, { latestReviews: [{ author: { login: "mira" }, state: "COMMENTED", submittedAt: SINCE }] }),
+    unresolvedReviewThreads: 1, ...extra });
+  // Stored: mira had the last word in an open thread. On GitHub now, the thread's last comment is my reply, so nothing waits on me; the
+  // thread stays unresolved and nothing the poll compares moved, so the poll's only-if-moved shortcut keeps the stored read.
+  const stale = reviewed({ reviewFeedback: { openThreads: 1, comment: { login: "mira", at: SINCE }, repliedAt: null, noteAt: null, followUpAt: null } });
+  const fresh = reviewed({ reviewFeedback: { openThreads: 0, comment: { login: "mira", at: SINCE }, repliedAt: MINE, noteAt: null, followUpAt: null } });
+  const turn = async (env: Awaited<ReturnType<typeof setup>>) => ((await env.harness.callRpc("inventory_get", {})) as InventoryView).groups
+    .flatMap((group) => group.rows).find((row) => row.number === 43)?.yourTurn ?? null;
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 2));
+  type Reads = { reads: { prUrl: string; read: { status: string; error?: string } }[] };
+  /** #43 stored with mira's open thread, which a poll that sees nothing moved leaves on Your turn. */
+  async function staleTurn() {
+    const env = await setup();
+    env.state.authored = [pr(42), stale];
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    env.state.polled = listing([pr(42), reviewed()]);
+    expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
+    expect(await turn(env)).toMatchObject({ text: "1 open thread · New comments from @mira", followUp: null });
+    await tick();
+    return env;
+  }
+
+  it("replaces one PR's stale review facts, so a thread whose last comment is now mine leaves Your turn", async () => {
+    const env = await staleTurn();
+    env.state.inspection = (urls) => ({ entries: urls.map(() => ({ repo: "inkwell/folio", pr: fresh })), closed: [], failed: [], warnings: [] });
+    expect(await env.harness.callRpc("pr_refresh_many", { prUrls: [url(43)] })).toMatchObject({ reads: [{ prUrl: url(43), read: { status: "checked" } }] });
+    expect(await turn(env)).toBeNull();
+  });
+
+  it("reads exactly the selected PRs, in one read of at most four", async () => {
+    const env = await setup();
+    env.state.inspection = (urls) => ({ entries: urls.map((prUrl) => ({ repo: "inkwell/folio", pr: pr(Number(prUrl.split("/").pop())) })), closed: [], failed: [], warnings: [] });
+    await tick();
+    const before = env.calls.length;
+    const result = await env.harness.callRpc("pr_refresh_many", { prUrls: [url(43), url(42)] }) as Reads;
+    expect(env.calls.slice(before).filter((call) => call.method === "inspectPrs").map((call) => call.input)).toEqual([{ prUrls: [url(43), url(42)] }]);
+    expect(result.reads.map(({ prUrl, read }) => [prUrl, read.status])).toEqual([[url(43), "checked"], [url(42), "checked"]]);
+    // A fifth is more than one read takes at once: the browser sends the selection four at a time.
+    await expect(env.harness.callRpc("pr_refresh_many", { prUrls: [42, 43, 44, 45, 46].map(url) })).rejects.toThrow();
+  });
+
+  it("reads every open PR in full from Last read, bypassing the poll's only-if-moved shortcut, and ignores a second click while it runs", async () => {
+    const env = await staleTurn();
+    env.state.authored = [pr(42), fresh];
+    let release!: () => void;
+    env.state.gate = new Promise<void>((resolve) => { release = resolve; });
+    const before = env.calls.length;
+    expect(await env.harness.callRpc("inventory_refresh", null)).toEqual({ started: true });
+    expect(await env.harness.callRpc("inventory_refresh", null)).toEqual({ started: false });
+    release();
+    await vi.waitFor(async () => expect(await turn(env)).toBeNull());
+    expect(env.calls.slice(before).map((call) => call.method)).toEqual(["authoredPrs"]);
+    // Once it ends, the next click reads again.
+    await vi.waitFor(async () => expect(await env.harness.callRpc("inventory_refresh", null)).toEqual({ started: true }));
+  });
+
+  it("says why a read failed, GitHub's rate limit among them, and reads nothing until the limit resets", async () => {
+    const env = await setup();
+    await tick();
+    env.state.inspection = (urls) => ({ entries: [], closed: [], failed: urls,
+      warnings: urls.map((prUrl) => `inkwell/folio #${prUrl.split("/").pop()}: PR refresh failed: GraphQL: API rate limit exceeded for user ID 1.`) });
+    expect(((await env.harness.callRpc("pr_refresh_many", { prUrls: [url(43)] })) as Reads).reads[0]!.read)
+      .toEqual({ status: "failed", checkedAt: expect.any(String), error: "GraphQL: API rate limit exceeded for user ID 1." });
+    // The poll found the limit: until GitHub's reset, a row, a selection, or Last read says so and reads nothing.
+    env.state.resetAt = Date.now() + 15 * 60_000;
+    env.state.polled = listing([], { complete: false, discoveryComplete: false, warnings: ["Authored PR poll failed: GraphQL: API rate limit exceeded for user ID 1."] });
+    await env.poll();
+    const before = env.calls.length;
+    expect(((await env.harness.callRpc("pr_refresh_many", { prUrls: [url(42)] })) as Reads).reads[0]!.read)
+      .toMatchObject({ status: "failed", error: expect.stringMatching(/^GitHub's rate limit holds reads until \S/u) });
+    expect(await env.harness.callRpc("inventory_refresh", null)).toEqual({ started: false, limitedUntil: expect.any(Number) });
     expect(env.calls.slice(before)).toEqual([]);
   });
 });

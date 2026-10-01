@@ -10,6 +10,8 @@ import type { ActedKind, DeckWrite } from "./deck-shared";
 import type { BatchItem, Skipped } from "./deck-batch";
 import { ACTION, actionForKey, typingTarget, type DeckActionId } from "./deck-keys";
 import { SECTIONS, type Availability } from "./deck-view-model";
+import { withOutcome, type Outcome } from "./inventory-view-model";
+import { clock } from "./roster-view-model";
 import { ConfirmBody, type ConfirmPlan } from "./deck-screen";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./components/ui/dialog";
 import { cn, POINTER_CURSORS } from "./lib/utils";
@@ -75,9 +77,9 @@ export const workingLabel = (working: Working) => working.kind === "address" ? "
  * One batch call at a time: another click or key while one is out is ignored. `set` shows what's working, and clears it once the call
  * answers or fails. Resolves false for an ignored call.
  */
-export function oneAtATime(set: (working: Working | null) => void) {
+export function oneAtATime<W = Working>(set: (working: W | null) => void) {
   let out = false;
-  return async (working: Working, call: () => Promise<unknown>): Promise<boolean> => {
+  return async (working: W, call: () => Promise<unknown>): Promise<boolean> => {
     if (out) return false;
     out = true;
     set(working);
@@ -92,6 +94,63 @@ export function sendingText(batch: { state: string; kind: string; items: readonl
   if (batch.kind === "address") return `Starting a thread for ${n} PR${n === 1 ? "" : "s"}…`;
   return `Sending ${Math.min(n, batch.items.filter((item) => item.state !== "pending" && item.state !== "sending").length + 1)} of ${n}…`;
 }
+/** One PR's read as pr_refresh_many answers it. */
+export type PrRead = { prUrl: string; read: { status: "checked" | "failed" | "busy"; checkedAt: string | null; error?: string } };
+/** A refresh reads four PRs to a call, one call at a time; the host reads a call's four at once. */
+export const READ_CHUNK = 4;
+/** A refresh's line as it goes: "Reading 3 of 7…". */
+export const readingText = (upTo: number, total: number) => `Reading ${Math.min(upTo, total)} of ${total}…`;
+/**
+ * Refresh from GitHub, one at a time: a row's ↻, a key, or Refresh on a selection while one reads is ignored. It reads the PRs four to a
+ * call, never more at once; `on.rows` hears which PRs read now, `on.progress` how far it got, and `on.reads` each call's answers, a
+ * failed call answering for each of its PRs. Resolves false for an ignored trigger.
+ */
+export function refresher(read: (prUrls: string[]) => Promise<PrRead[]>, on: { rows(prUrls: ReadonlySet<string> | null): void;
+  progress(text: string | null): void; reads(reads: PrRead[]): void }) {
+  const once = oneAtATime<ReadonlySet<string>>(on.rows);
+  return (prUrls: readonly string[]): Promise<boolean> => !prUrls.length ? Promise.resolve(false) : once(new Set(prUrls), async () => {
+    try {
+      for (let offset = 0; offset < prUrls.length; offset += READ_CHUNK) {
+        const chunk = prUrls.slice(offset, offset + READ_CHUNK);
+        if (prUrls.length > 1) on.progress(readingText(offset + chunk.length, prUrls.length));
+        on.reads(await read(chunk).catch((cause: unknown) => chunk.map((prUrl): PrRead => ({ prUrl, read: { status: "failed", checkedAt: null, error: message(cause) } }))));
+      }
+    } finally { on.progress(null); }
+  });
+}
+/** What each read leaves on its row: Read just now, or why it failed. */
+export const readOutcomes = (outcomes: ReadonlyMap<string, Outcome>, reads: readonly PrRead[], at: number): ReadonlyMap<string, Outcome> =>
+  reads.reduce((next, { prUrl, read }) => withOutcome(next, prUrl, { at, action: "refresh", ok: read.status === "checked",
+    text: read.status === "checked" ? "Read" : read.error ?? "GitHub didn't answer" }), outcomes);
+/**
+ * The deck's and All PRs' refresh: the PRs reading now, which spin, the selection's progress line, and what each read left on its row;
+ * `on.started` hears the PRs a read takes once it starts, and `on.reads` each call's answers. `all` reads every open PR again, in full;
+ * a click while that's out is ignored, and `say` hears why GitHub's rate limit refused it.
+ */
+export function useRefresh(on: { started?(prUrls: ReadonlySet<string>): void; reads?(reads: PrRead[]): void; say(text: string): void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [reading, setReading] = useState<ReadonlySet<string>>(new Set());
+  const [progress, setProgress] = useState<string | null>(null);
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, Outcome>>(new Map());
+  const latest = useRef(on);
+  latest.current = on;
+  const [read] = useState(() => refresher((prUrls) => rpc.call("pr_refresh_many", { prUrls }).then((result) => result.reads), {
+    rows: (prUrls) => { setReading(prUrls ?? new Set()); if (prUrls) latest.current.started?.(prUrls); }, progress: setProgress,
+    reads: (reads) => {
+      const done = new Set(reads.map((item) => item.prUrl));
+      setReading((current) => new Set([...current].filter((prUrl) => !done.has(prUrl))));
+      setOutcomes((current) => readOutcomes(current, reads, Date.now()));
+      latest.current.reads?.(reads);
+    } }));
+  const [all] = useState(() => {
+    const once = oneAtATime<true>(() => undefined);
+    return () => void once(true, () => rpc.call("inventory_refresh", null).then((result) => {
+      if (result.limitedUntil) latest.current.say(`GitHub's rate limit holds reads until ${clock(result.limitedUntil, Date.now())}`);
+    }, (cause: unknown) => latest.current.say(message(cause))));
+  });
+  return { reading, progress, outcomes, read, all };
+}
+
 /** Each item of a batch sending now, by PR, as its row shows it. */
 export type LiveItems = ReadonlyMap<string, { kind: ActedKind; state: BatchItem["state"] }>;
 const NO_ITEMS: LiveItems = new Map();

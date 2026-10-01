@@ -23,6 +23,8 @@ export type SimpleRowsProps = {
   onUndo?(batchId: string): void;
   /** Rows a batch call is planning now; and each item of a batch sending now, by PR. */
   working?: ReadonlySet<string>; live?: LiveItems;
+  /** ↻ on a row reads it from GitHub again; the rows reading now spin. */
+  onRefresh?(line: InventoryLine): void; reading?: ReadonlySet<string>;
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
 
@@ -60,9 +62,11 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const sent = turn && !note ? line.sent : null;
           const live = turn ? props.live?.get(line.prUrl) ?? null : null;
           const working = !!turn && !!props.working?.has(line.prUrl);
+          const refresh = props.onRefresh ? line.actions.find((action) => action.id === "refresh") : undefined;
+          const reading = !!props.reading?.has(line.prUrl);
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
             data-inventory-working={working || undefined} aria-busy={working || undefined}
-            className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]", working && WORKING_ROW, FOCUS)}>
+            className={cn("group flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]", working && WORKING_ROW, FOCUS)}>
             {turn && props.onSelect ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
               onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className="size-3.5 shrink-0 accent-sky-600" />
               : <span aria-hidden className="size-3.5 shrink-0" /> : null}
@@ -79,6 +83,11 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                 {turn.rest ? <span data-inventory-rest className="text-muted-foreground/60"> · {turn.rest}</span> : null}{age}</> : info}</p>
               {line.last ? <p role="status" className={cn("text-[11px]", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
             </div>
+            {refresh ? <button type="button" tabIndex={-1} data-inventory-action="refresh" disabled={reading || !refresh.enabled} aria-busy={reading || undefined}
+              aria-label={reading ? `Reading ${line.slug}#${line.number} from GitHub` : refresh.title} title={reading ? "Reading GitHub now…" : refresh.why ?? `${refresh.title} (g)`}
+              onClick={() => props.onRefresh!(line)} className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground disabled:hover:bg-transparent",
+                FOCUS, reading ? "text-sky-700 dark:text-sky-300" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
+              <span aria-hidden className={cn("inline-block leading-none", reading && "motion-safe:animate-spin")}>↻</span></button> : null}
             {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
               : note ? <span role="alert" data-inventory-left title={note} className={cn(CHIP, TONE.red.chip)}><span className="truncate">Left out: {note}</span></span>
               : sent ? <SentChip sent={sent} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />

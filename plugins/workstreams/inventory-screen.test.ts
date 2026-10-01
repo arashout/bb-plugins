@@ -24,6 +24,37 @@ const line = (pr: string): InventoryLine => SCREEN.groups.flatMap((group) => gro
 /** One row's markup, from its start to the next row's. */
 const rowOf = (html: string, ref: string) => { const start = html.indexOf(`data-inventory-row="${ref}"`); return html.slice(start, html.indexOf("data-inventory-row=", start + 20)); };
 
+describe("Refresh in All PRs", () => {
+  const read = (prUrls: string[], outcomes: Parameters<typeof inventoryScreen>[1]["outcomes"] = new Map(), header?: () => void) =>
+    renderToStaticMarkup(createElement(InventoryPane, { screen: inventoryScreen(VIEW, { now: NOW, filter: null, outcomes,
+      pending: new Map(prUrls.map((prUrl) => [prUrl, "refresh" as const])) }), error: null, ...CALLBACKS, onRefresh: noop, reading: new Set(prUrls), onRefreshAll: header }));
+  const ref = (prUrl: string) => prUrl.replace("https://github.com/", "").replace("/pull/", "#");
+
+  // Every list, Your turn's and the rest, so a stale row anywhere can be read again.
+  it("puts ↻ on every row, which spins in sight while GitHub reads it", () => {
+    const quill = "https://github.com/inkwell/quill/pull/210", catalog = "https://github.com/inkwell/catalog/pull/96";
+    const html = read([quill]);
+    const rows = SCREEN.groups.flatMap((group) => group.lines);
+    expect(rows.filter((item) => rowOf(html, ref(item.prUrl)).includes('data-inventory-action="refresh"'))).toHaveLength(rows.length);
+    expect(rowOf(html, ref(quill))).toMatch(/data-inventory-action="refresh" disabled="" aria-busy="true" aria-label="Reading inkwell\/quill#210 from GitHub"[^>]*class="(?![^"]*opacity-0)[^"]*"><span aria-hidden="true" class="[^"]*motion-safe:animate-spin">↻/u);
+    expect(rowOf(html, ref(catalog))).toMatch(/data-inventory-action="refresh" aria-label="Read catalog #96 from GitHub now" title="Read catalog #96 from GitHub now \(g\)" class="[^"]*opacity-0 group-hover:opacity-100/u);
+  });
+
+  it("says Read just now on a row its read answered, and why on a row whose read failed", () => {
+    const quill = "https://github.com/inkwell/quill/pull/210", folio = "https://github.com/inkwell/folio/pull/330";
+    const html = read([], new Map([[quill, { at: NOW, action: "refresh" as const, ok: true, text: "Read" }],
+      [folio, { at: NOW, action: "refresh" as const, ok: false, text: "GraphQL: API rate limit exceeded" }]]));
+    expect(text(rowOf(html, ref(quill)))).toContain("Read just now");
+    expect(rowOf(html, ref(folio))).toMatch(/role="status" class="[^"]*text-destructive">Refresh failed 0s ago: GraphQL: API rate limit exceeded</u);
+  });
+
+  it("reads every open PR again from Last read, which takes no click while a read runs", () => {
+    expect(read([], new Map(), noop)).toMatch(/<button type="button" data-ws-read="true" title="Read every open PR from GitHub again"[^>]*><span aria-hidden="true">↻<\/span><span class="truncate">Last read 25s ago<\/span>/u);
+    const busy = renderToStaticMarkup(createElement(InventoryPane, { screen: inventoryScreen({ ...VIEW, refreshing: true }, { now: NOW, filter: null }), error: null, ...CALLBACKS, onRefreshAll: noop }));
+    expect(busy).toMatch(/<button type="button" data-ws-read="true" disabled=""[^>]*><span class="truncate">Last read 25s ago · reading now<\/span>/u);
+  });
+});
+
 describe("simple All PRs list", () => {
   // The server marks Your turn: the three change requests and the two approvals with comments. CI, conflicts, and waits stay below.
   it("puts Your turn first by effort, and shows each PR in only one list", () => {
@@ -278,7 +309,7 @@ describe("selecting Your turn PRs to address together", () => {
     const html = selectedPane(picked);
     expect(rowOf(html, "inkwell/quill#210")).toContain('data-inventory-selected="true"');
     expect(rowOf(html, "inkwell/quill#211")).not.toContain("data-inventory-selected");
-    expect(text(html)).toContain("2 selected Address selected (2) b Clear esc");
+    expect(text(html)).toContain("2 selected Address selected (2) b Refresh (2) g Clear esc");
     expect(html).toMatch(/data-inventory-action="address" title="Starts one thread for them now, with 8 s to Undo\. Nothing merges\."/u);
     expect(html).not.toContain("data-inventory-refusal");
     // Every row selected: the list's box reads as clearing them.

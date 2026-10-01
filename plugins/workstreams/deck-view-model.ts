@@ -603,8 +603,10 @@ export function availability(context: KeyContext): Availability {
   set("address", (deck ? live : true) && picked > 0, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : "select Your turn rows first");
   set("undo", context.undo, "nothing to undo");
   const row = deck ? !!focused?.row && !focused.ghost : !!prs?.row;
-  // In All PRs, a row holds or refreshes only when its list offers it.
-  for (const id of ["hold-pr", "refresh"] as const) set(id, deck ? row : !!prs?.moves.has(id), deck || !row ? "focus a row first" : "the row has no such move");
+  // In All PRs, a row holds or refreshes only when its list offers it. Refresh takes the selection when there is one.
+  set("hold-pr", deck ? row : !!prs?.moves.has("hold-pr"), deck || !row ? "focus a row first" : "the row has no such move");
+  set("refresh", deck ? row || selected.some((line) => !!line.row) : !!prs?.picked || !!prs?.moves.has("refresh"),
+    deck || !row ? "focus or select a row first" : "the row has no such move");
   set("row-next", !deck || context.cur !== "overview", "no rows on Overview"); set("row-prev", !deck || context.cur !== "overview", "no rows on Overview");
   set("select", deck ? !!focused && !focused.dim : !!prs?.selectable, deck ? "focus a live row first" : "focus a Your turn row first");
   set("select-section", deck ? !!focused : (prs?.turn ?? 0) > 0, deck ? "focus a row first" : "nothing is on Your turn");
@@ -636,18 +638,18 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
   const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : move === "fix" ? "ask to fix"
     : ACTION[move].title.replace("…", "").toLowerCase()] as
     [DeckActionId, string] : false;
-  if (context.view === "prs") return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["clear", "clear"])
-    : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["view", "Efforts"]);
+  if (context.view === "prs") return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["refresh", "refresh"], ["clear", "clear"])
+    : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
   // a takes the focused row when its step is safe, else the whole card: the hint says which.
   const scope = advanceTarget(context)?.scope;
   const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
     : card?.card.kind === "effort" ? "advance effort" : "advance card"];
   // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
   const rowHint = move === "merge" || move === "release" || move === "confirm" || move === "fix" ? moveHint : false;
-  if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["address", "address selected"], ["accept", "accept"], ["move", "move…"], ["clear", "clear"])];
+  if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["address", "address selected"], ["accept", "accept"], ["move", "move…"], ["refresh", "refresh"], ["clear", "clear"])];
   if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
   if (focused && card?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
-  if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"]);
+  if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"], ["refresh", "refresh"]);
   return pick(["next", "flip"], ["row-next", "rows"], advance, context.filter ? ["clear", "show all"] : ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
 }
 

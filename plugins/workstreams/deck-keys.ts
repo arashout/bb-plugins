@@ -56,7 +56,7 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "address", group: "Act", title: "Address selected", keys: ["b"], effect: "start" },
   { id: "undo", group: "Act", title: "Undo the last action", keys: ["z"], effect: "local" },
   { id: "hold-pr", group: "Act", title: "Hold or release the PR…", keys: [], effect: "dialog" },
-  { id: "refresh", group: "Act", title: "Refresh the PR from GitHub", keys: [], effect: "local" },
+  { id: "refresh", group: "Act", title: "Refresh from GitHub", keys: ["g"], effect: "local" },
   { id: "row-next", group: "Rows", title: "Next row", keys: ["j", "↓"], effect: "nav" },
   { id: "row-prev", group: "Rows", title: "Previous row", keys: ["k", "↑"], effect: "nav" },
   { id: "select", group: "Rows", title: "Select or unselect the row", keys: ["x"], effect: "local" },

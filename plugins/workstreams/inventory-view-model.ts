@@ -29,7 +29,8 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
     ["Ask its thread", "f on a row lists what the PR's own thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],
-    ["Last read", "When the inventory last finished reading GitHub. A failed read keeps the last available rows visible."],
+    ["Refresh", "↻ on a row, g, or Refresh on a selection reads those PRs from GitHub again, review threads included. The row says Read just now, or why the read failed."],
+    ["Last read", "When the inventory last finished reading GitHub; click it to read every open PR again. A failed read keeps the last available rows visible."],
   ],
 };
 
@@ -288,14 +289,21 @@ export function withOutcome(outcomes: ReadonlyMap<string, Outcome>, prUrl: strin
   return next;
 }
 
+/** A refresh's result on its row: Read just now for a minute after a good read, then nothing; a failed read says why until a good one. */
+export function readNote(outcome: Pick<Outcome, "at" | "ok" | "text">, now: number): { text: string; ok: boolean } | null {
+  if (outcome.ok) return now - outcome.at < 60_000 ? { text: "Read just now", ok: true } : null;
+  return { text: `Refresh failed ${age(outcome.at, now)} ago: ${outcome.text}`, ok: false };
+}
+
 /** The newer of the server's record of the last action and this visit's own click. */
 function lastOf(row: InventoryRow, outcome: Outcome | undefined, now: number): InventoryLine["last"] {
   const server = row.lastAction && { at: row.lastAction.at, action: row.lastAction.action, ok: row.lastAction.ok, text: row.lastAction.detail };
   const last = outcome && (!server || outcome.at >= server.at) ? outcome : server;
   if (!last) return null;
+  if (last.action === "refresh") return readNote(last, now);
   const when = `${age(last.at, now)} ago`;
   const word = last.action === "ask-thread" || last.action === "ask-fix" || last.action === "revoke-confirmation" ? RECORDED[last.action] : WORD[last.action];
-  return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${word} ${last.action === "refresh" ? "failed" : "refused"} ${when}: ${last.text}` };
+  return { ok: last.ok, text: last.ok ? `${last.text} · ${when}` : `${word} refused ${when}: ${last.text}` };
 }
 
 export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, InventoryRow>, context: { now: number; limitedUntil: number | null;

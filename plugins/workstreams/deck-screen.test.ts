@@ -244,6 +244,20 @@ describe("the effort deck's markup", () => {
     for (const [id, prUrl] of [[ONE_OFFS, url("folio", 301)], [FOLIO, url("folio", 325)]] as const) expect(open(id, prUrl)).not.toContain("Move to One-offs");
   });
 
+  it("says Read just now, or why the read failed, on the row a Refresh read; and offers Refresh (N), with its progress, on the selection", () => {
+    const pr340 = url("folio", 340), pr341 = url("folio", 341);
+    const html = pane(inkwellDeck(), SHELF, { state: { selected: new Set([pr340, pr341]), expanded: new Set(), focus: null,
+      reads: new Map([[pr340, { text: "Read just now", ok: true }], [pr341, { text: "Refresh failed 0s ago: GraphQL: API rate limit exceeded", ok: false }]]) },
+      batch: { kinds: [], refresh: { count: 2, busy: false, progress: null } } });
+    const row = (prUrl: string) => section(html, "merge").split("data-deck-row=").find((part) => part.startsWith(`"${prUrl}"`))!;
+    expect(row(pr340)).toMatch(/data-deck-read="ok"[^>]*>Read just now</u);
+    expect(row(pr341)).toMatch(/data-deck-read="failed"[^>]*text-destructive">Refresh failed 0s ago: GraphQL: API rate limit exceeded</u);
+    expect(text(html.slice(html.indexOf('aria-label="Selection"')))).toContain("Refresh (2) g");
+    const reading = pane(inkwellDeck(), SHELF, { state: { selected: new Set([pr340, pr341]), expanded: new Set(), focus: null },
+      batch: { kinds: [], refresh: { count: 2, busy: true, progress: "Reading 2 of 2…" } } });
+    expect(reading).toMatch(/data-batch-refresh="true" disabled="" aria-busy="true"[^>]*><span[^>]*data-spin="true"[^>]*>↻<\/span>Reading 2 of 2…<\/button>/u);
+  });
+
   it("puts Refresh on each row, shown on the row you point at, and spins it in sight while GitHub reads the PR", () => {
     const pr340 = url("folio", 340);
     const idle = section(pane(inkwellDeck(), SHELF), "merge").split("data-deck-row=").find((part) => part.startsWith(`"${pr340}"`))!;

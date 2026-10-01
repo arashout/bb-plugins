@@ -1,7 +1,8 @@
 // Address selected with no listing: one click plans one batch thread and starts it into the Undo window, and every way it can start
 // nothing comes back in the server's words for the selection bar and the rows. Every name here is synthetic.
 import { describe, expect, it } from "vitest";
-import { addressToast, oneAtATime, sendingText, startAddress, workingLabel, type Working } from "./deck-flow.js";
+import { addressToast, oneAtATime, readOutcomes, refresher, sendingText, startAddress, workingLabel, type PrRead, type Working } from "./deck-flow.js";
+import { readNote } from "./inventory-view-model.js";
 
 const url = (number: number) => `https://github.com/inkwell/folio/pull/${number}`;
 const held = { prUrl: url(45), ref: "folio #45", reason: "On hold. Release it first." };
@@ -94,5 +95,56 @@ describe("a batch while it sends", () => {
     expect(sendingText({ state: "dispatching", kind: "address", items: items("sending", "sending") })).toBe("Starting a thread for 2 PRs…");
     expect(sendingText({ state: "scheduled", kind: "advance", items: items("pending") })).toBeNull();
     expect(sendingText({ state: "done", kind: "advance", items: items("sent") })).toBeNull();
+  });
+});
+
+describe("Refresh from GitHub", () => {
+  /** A refresher whose reads answer on the next tick, recording what it read, how many PRs read at once, and what it said. */
+  function reads(answer: (prUrl: string) => PrRead["read"] | Error = () => ({ status: "checked", checkedAt: "2026-09-30T10:00:00Z" })) {
+    const log = { read: [] as string[], most: 0, now: 0, progress: [] as (string | null)[], rows: [] as (number | null)[], answered: [] as PrRead[] };
+    const run = refresher(async (prUrls) => {
+      log.read.push(...prUrls);
+      log.now += prUrls.length;
+      log.most = Math.max(log.most, log.now);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      log.now -= prUrls.length;
+      const failed = prUrls.map(answer).find((item) => item instanceof Error);
+      if (failed) throw failed;
+      return prUrls.map((prUrl) => ({ prUrl, read: answer(prUrl) as PrRead["read"] }));
+    }, { rows: (prUrls) => log.rows.push(prUrls?.size ?? null), progress: (text) => log.progress.push(text), reads: (items) => log.answered.push(...items) });
+    return { log, run };
+  }
+
+  // A selection of seven reads four, then three: never more at once, which keeps GitHub's limit in reach.
+  it("reads exactly the selected PRs, four at a time, saying how far it got, and ignores another Refresh while it reads", async () => {
+    const { log, run } = reads();
+    const seven = [301, 302, 303, 304, 305, 306, 307].map(url);
+    const first = run(seven);
+    expect(await run([url(301)])).toBe(false);
+    expect(await first).toBe(true);
+    expect(log.read).toEqual(seven);
+    expect(log.most).toBe(4);
+    expect(log.progress).toEqual(["Reading 4 of 7…", "Reading 7 of 7…", null]);
+    expect(log.rows).toEqual([7, null]);
+    expect(log.answered.map((item) => item.prUrl)).toEqual(seven);
+    // Once it ends, a row's ↻ reads again; one row needs no progress line.
+    expect(await run([url(301)])).toBe(true);
+    expect(log.progress.at(-1)).toBe(null);
+    expect(log.progress).toHaveLength(4);
+  });
+
+  it("leaves Read just now on a row its read answered, and why on a row it couldn't, a call that failed answering for each of its PRs", async () => {
+    const { log, run } = reads((prUrl) => prUrl === url(302) ? { status: "failed", checkedAt: null, error: "GraphQL: API rate limit exceeded" }
+      : prUrl === url(305) ? new Error("The plugin host stopped") : { status: "checked", checkedAt: "2026-09-30T10:00:00Z" });
+    await run([301, 302, 303, 304, 305].map(url));
+    const at = 1_000_000;
+    const kept = readOutcomes(new Map(), log.answered, at);
+    const note = (number: number, now = at) => readNote(kept.get(url(number))!, now);
+    expect([note(301), note(302), note(305)]).toEqual([{ text: "Read just now", ok: true },
+      { text: "Refresh failed 0s ago: GraphQL: API rate limit exceeded", ok: false }, { text: "Refresh failed 0s ago: The plugin host stopped", ok: false }]);
+    // A good read goes quiet after a minute; a failure stays until a read answers.
+    expect([note(301, at + 60_000), note(302, at + 60_000)?.ok]).toEqual([null, false]);
+    expect(readNote(readOutcomes(kept, [{ prUrl: url(302), read: { status: "checked", checkedAt: "2026-09-30T10:01:00Z" } }], at + 1).get(url(302))!, at + 2))
+      .toEqual({ text: "Read just now", ok: true });
   });
 });

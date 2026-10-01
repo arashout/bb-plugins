@@ -377,15 +377,21 @@ const writeResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: z.string() }),
 ]);
 const threadModeSchema = z.enum(["continue", "subthread", "new"]);
+/** What one PR's read from GitHub got: fresh facts, why it failed (GitHub's own reason, a rate limit among them), or another read held it. */
+const prReadSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("checked"), checkedAt: z.string() }),
+  z.object({ status: z.literal("failed"), checkedAt: z.string().nullable(), error: z.string() }),
+  z.object({ status: z.literal("busy"), checkedAt: z.string().nullable(), error: z.string() }),
+]);
+type PrRead = z.infer<typeof prReadSchema>;
 
 export const rpcContract = defineRpcContract({
   board_get: { input: z.null(), output: boardSchema },
   pr_poll: { input: z.null(), output: z.object({ scheduled: z.number() }) },
-  pr_refresh: { input: prUrlInput, output: z.discriminatedUnion("status", [
-    z.object({ status: z.literal("checked"), checkedAt: z.string() }),
-    z.object({ status: z.literal("failed"), checkedAt: z.string().nullable(), error: z.string() }),
-    z.object({ status: z.literal("busy"), checkedAt: z.string().nullable(), error: z.string() }),
-  ]) },
+  pr_refresh: { input: prUrlInput, output: prReadSchema },
+  /** A full read of up to four PRs at once, review threads and comments included, the read pr_refresh makes: what each read got. */
+  pr_refresh_many: { input: z.object({ prUrls: z.array(prUrlInput.shape.prUrl).min(1).max(4) }).strict(),
+    output: z.object({ reads: z.array(z.object({ prUrl: z.string(), read: prReadSchema })) }) },
   pr_hold_set: { input: z.object({ prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null, "Choose a valid GitHub PR URL"), held: z.boolean(), reason: z.string().max(1_000).optional() }).strict(), output: prHoldsSchema },
   effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
   effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
@@ -439,7 +445,8 @@ export const rpcContract = defineRpcContract({
     threadId: z.string().min(1).max(200), prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null),
     expectedParentThreadId: z.null(), apply: z.boolean() }).strict(),
     output: z.object({ threadId: z.string(), parentThreadId: z.string().nullable(), updated: z.boolean() }).strict() },
-  inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean() }) },
+  /** A full read of every open PR, bypassing the poll's only-if-moved shortcut; not while one runs, or while GitHub's rate limit holds reads (`limitedUntil`). */
+  inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean(), limitedUntil: z.number().optional() }) },
   /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
   inventory_get: { input: z.object({ attention: z.enum(INVENTORY_QUESTIONS).optional() }).strict(), output: inventoryViewSchema },
   /**
@@ -1165,12 +1172,17 @@ export default async function plugin(bb: BbPluginApi) {
     if (inventoryRefreshing || inventoryTargeting || signal.aborted) return false;
     inventoryRefreshing = true;
     const owners = inventoryOwners();
+    // The deck and All PRs say "reading now" from its start.
     bb.realtime.publish(BOARD_CHANGED, { scanning });
+    inventoryChanged();
     try {
       const hostId = (await bb.sdk.system.config()).primaryHostId;
       if (hostId === null) throw new Error("No primary BB host is available to read authored PRs.");
       const began = ++githubReads;
       const listed = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
+      // GitHub's rate limit holds the poll and the next forced read until its reset, as the poll's own does.
+      const said = listed.warnings.join("\n");
+      if (githubRateLimit(said)) pollLimitedUntil = await effortV2.reconciler.rateLimitedUntil(said) ?? pollLimitedUntil;
       const result = { ...listed, entries: listed.entries.flatMap((entry) => {
         const pr = refreshedAfter(entry.pr.url, began);
         return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
@@ -1258,6 +1270,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let polling: Promise<void> = Promise.resolve();
+  /** inventory_refresh's full read, from its click until it ends. */
+  let forcedRead: Promise<boolean> | null = null;
   /** GitHub's rate limit holds the poll until then. */
   let pollLimitedUntil: number | null = null;
   /**
@@ -1367,8 +1381,8 @@ export default async function plugin(bb: BbPluginApi) {
     for (const url of urls) inventoryRefreshes.add(url);
   }
   const prPoll = createPrPoll({ now: Date.now, intervalMs: 45_000, batchSize: 20 });
-  const directPrRefreshes = new Map<string, Promise<z.infer<typeof rpcContract.pr_refresh.output>>>();
-  const directPrResults = new Map<string, { at: number; result: z.infer<typeof rpcContract.pr_refresh.output> }>();
+  const directPrRefreshes = new Map<string, Promise<PrRead>>();
+  const directPrResults = new Map<string, { at: number; result: PrRead }>();
   function knownPrUrl(raw: string): string | null {
     const url = canonicalPrUrl(raw);
     if (url === null) return null;
@@ -1384,37 +1398,51 @@ export default async function plugin(bb: BbPluginApi) {
     scheduleInventoryUrls(selected);
     return selected.length;
   }
-  async function refreshPrNow(raw: string): Promise<z.infer<typeof rpcContract.pr_refresh.output>> {
+  /** Why a read can't start while GitHub's rate limit holds reads, or null. */
+  const limitedText = () => Date.now() < (pollLimitedUntil ?? 0)
+    ? `GitHub's rate limit holds reads until ${new Date(pollLimitedUntil!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : null;
+  /**
+   * Read these tracked PRs from GitHub now, in full, once no other read holds the inventory: one targeted read, which the host takes four
+   * at a time. Each says what its read got, with GitHub's reason when it failed; GitHub's rate limit refuses them all until its reset.
+   */
+  async function readPrsNow(urls: readonly string[]): Promise<PrRead[]> {
+    const prior = urls.map((url) => inventory.observation(url));
+    const limited = limitedText();
+    if (limited) return urls.map((url) => ({ status: "failed", checkedAt: inventory.observation(url)?.checkedAt ?? null, error: limited }));
+    const deadline = Date.now() + 30_000;
+    while ((inventoryRefreshing || inventoryTargeting) && Date.now() < deadline && !disposal.signal.aborted)
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    if (inventoryRefreshing || inventoryTargeting || disposal.signal.aborted)
+      return urls.map((url) => ({ status: "busy", checkedAt: inventory.observation(url)?.checkedAt ?? null, error: "A GitHub refresh is still running. Try again shortly." }));
+    // What a read since `prior` got, a read that ran during the wait among them; the PR's own failure names GitHub's reason.
+    const answered = (index: number): PrRead | null => {
+      const latest = inventory.observation(urls[index]!);
+      if (latest?.failedAt && latest.failedAt !== prior[index]?.failedAt) return { status: "failed", checkedAt: latest.checkedAt,
+        error: latest.error?.replace(/^\S+ #\d+: (?:PR refresh failed: )?/u, "") || "GitHub status could not be checked. Try again shortly." };
+      return latest?.checkedAt && latest.checkedAt !== prior[index]?.checkedAt && !latest.failedAt ? { status: "checked", checkedAt: latest.checkedAt } : null;
+    };
+    const waited = urls.map((_, index) => answered(index));
+    const left = urls.filter((_, index) => waited[index] === null);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const completed = !left.length || await Promise.race([
+      refreshInventoryUrls(left).then(() => true),
+      new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 30_000); }),
+    ]).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
+    return urls.map((url, index): PrRead => {
+      const checkedAt = inventory.observation(url)?.checkedAt ?? null;
+      if (waited[index]) return waited[index];
+      if (!completed) return { status: "busy", checkedAt, error: "GitHub is still checking this PR. The board will update when it finishes." };
+      return answered(index) ?? { status: "failed", checkedAt, error: "GitHub did not return fresh status for this PR." };
+    });
+  }
+  async function refreshPrNow(raw: string): Promise<PrRead> {
     const url = knownPrUrl(raw);
     if (url === null) return { status: "failed", checkedAt: null, error: "This PR is not tracked on the board." };
     const existing = directPrRefreshes.get(url);
     if (existing) return existing;
-    const prior = inventory.observation(url);
     const recent = directPrResults.get(url);
     if (recent && Date.now() - recent.at < 5_000) return recent.result;
-    const run = (async (): Promise<z.infer<typeof rpcContract.pr_refresh.output>> => {
-      const deadline = Date.now() + 30_000;
-      while ((inventoryRefreshing || inventoryTargeting) && Date.now() < deadline && !disposal.signal.aborted)
-        await new Promise<void>((resolve) => setTimeout(resolve, 250));
-      if (inventoryRefreshing || inventoryTargeting || disposal.signal.aborted)
-        return { status: "busy", checkedAt: inventory.observation(url)?.checkedAt ?? null, error: "A GitHub refresh is still running. Try again shortly." };
-      const afterWait = inventory.observation(url);
-      if (afterWait?.checkedAt && afterWait.checkedAt !== prior?.checkedAt && !afterWait.failedAt)
-        return { status: "checked", checkedAt: afterWait.checkedAt };
-      if (afterWait?.failedAt && afterWait.failedAt !== prior?.failedAt)
-        return { status: "failed", checkedAt: afterWait.checkedAt, error: "GitHub status could not be checked. Try again shortly." };
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const completed = await Promise.race([
-        refreshInventoryUrls([url]).then(() => true),
-        new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 30_000); }),
-      ]).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
-      const latest = inventory.observation(url);
-      if (!completed) return { status: "busy", checkedAt: latest?.checkedAt ?? null, error: "GitHub is still checking this PR. The board will update when it finishes." };
-      if (latest?.failedAt && latest.failedAt !== prior?.failedAt)
-        return { status: "failed", checkedAt: latest?.checkedAt ?? null, error: "GitHub status could not be checked. Try again shortly." };
-      if (latest?.checkedAt && latest.checkedAt !== prior?.checkedAt) return { status: "checked", checkedAt: latest.checkedAt };
-      return { status: "failed", checkedAt: latest?.checkedAt ?? null, error: "GitHub did not return fresh status for this PR." };
-    })();
+    const run = readPrsNow([url]).then((reads) => reads[0]!);
     directPrRefreshes.set(url, run);
     try {
       const result = await run;
@@ -1423,6 +1451,13 @@ export default async function plugin(bb: BbPluginApi) {
       return result;
     }
     finally { directPrRefreshes.delete(url); }
+  }
+  /** Up to four PRs read at once, each answered as pr_refresh answers it. */
+  async function refreshPrsNow(raws: readonly string[]): Promise<{ prUrl: string; read: PrRead }[]> {
+    const known = raws.map((raw) => ({ raw, url: knownPrUrl(raw) }));
+    const urls = [...new Set(known.flatMap((item) => item.url ?? []))];
+    const reads = new Map((await readPrsNow(urls)).map((read, index) => [urls[index]!, read]));
+    return known.map(({ raw, url }) => ({ prUrl: raw, read: url === null ? { status: "failed", checkedAt: null, error: "This PR is not tracked on the board." } : reads.get(url)! }));
   }
   bb.onDispose(() => inventoryRefreshes.dispose());
 
@@ -6261,6 +6296,7 @@ export default async function plugin(bb: BbPluginApi) {
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
+    pr_refresh_many: async ({ prUrls }) => ({ reads: await refreshPrsNow(prUrls) }),
     pr_hold_set: ({ prUrl, held, reason }) => setHold(prUrl, held, reason),
     advance_preview: ({ prUrls }) => advance.preview(prUrls),
     advance_start: ({ token }) => advance.start(token),
@@ -6692,8 +6728,10 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_confirm_revoke: ({ prUrl }) => revokeConfirmation(prWorkItemKey(prUrl)),
     inventory_confirm_handled: ({ prUrl, headOid, fingerprint, anyway }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint, anyway),
     inventory_refresh: () => {
-      if (inventoryRefreshing || inventoryTargeting) return { started: false };
-      void refreshInventory();
+      // A click while the last one's read waits on the poll is a repeat too.
+      if (forcedRead || inventoryRefreshing || inventoryTargeting) return { started: false };
+      if (limitedText()) return { started: false, limitedUntil: pollLimitedUntil! };
+      forcedRead = refreshInventory().finally(() => { forcedRead = null; });
       return { started: true };
     },
     dispatch_set: async ({ mode, effortKey }): Promise<DispatchState> => {

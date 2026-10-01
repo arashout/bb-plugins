@@ -20,7 +20,8 @@ import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardS
   type PaletteItem, type RowFacts } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
   type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
-import { DeckDialog, message, useBatchConfirm, useRegistryKeys, workingLabel, type Undo } from "./deck-flow";
+import { DeckDialog, message, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel, type Undo } from "./deck-flow";
+import { readNote } from "./inventory-view-model";
 import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
@@ -194,6 +195,17 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const batch = useBatchConfirm({ seenAt: () => seenRef.current.at, scopeName: (id) => view?.active.find((item) => item.id === id)?.name ?? null, say, setUndo, load,
     onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; }, onReturn: () => returnFocus(), reread: view });
   const details = batch.details;
+  /** The rows a Refresh is about to read, with what each was, for when it starts. */
+  const starting = useRef<Map<string, { ref: string; was: { status: string; section: keyof typeof SECTIONS }; after: null }>>(new Map());
+  const refresh = useRefresh({ say, started: () => setRefreshing((current) => new Map([...current, ...starting.current])),
+    reads: (reads) => {
+      // A read already running may have started before GitHub answered, so the one after it carries the answer; a failed read stops now.
+      const after = readsRef.current + (readingNow() ? 1 : 0);
+      const answers = new Map(reads.map((item) => [item.prUrl, item.read.status]));
+      setRefreshing((current) => new Map([...current].flatMap(([prUrl, item]) => !answers.has(prUrl) ? [[prUrl, item] as const]
+        : answers.get(prUrl) === "checked" ? [[prUrl, { ...item, after }] as const] : [])));
+      load();
+    } });
   const live = batch.live;
   const notes = useNotesConfirm({ say, load, onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; },
     onReturn: () => returnFocus(), ask: (prUrl, effortId) => void batch.plan("ask", effortId, [prUrl]) });
@@ -567,20 +579,14 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   }
 
   // ---- Refresh -------------------------------------------------------------
-  /** One row read from GitHub now: its spinner runs until the read that carries the answer lands, and the row changes in place. */
-  function refreshRow(line: DeckLine) {
-    if (refreshing.has(line.prUrl) || !line.row) return;
-    const prUrl = line.prUrl;
-    const was = { status: line.row.status, section: line.row.section };
-    setRefreshing((current) => new Map([...current, [prUrl, { ref: line.ref, was, after: null }]]));
-    const stop = (text: string) => { say(text); setRefreshing((current) => new Map([...current].filter(([url]) => url !== prUrl))); };
-    void rpc.call("pr_refresh", { prUrl }).then((read) => {
-      if (read.status !== "checked") { stop(read.error); load(); return; }
-      // A read already running may have started before GitHub answered, so the one after it carries the answer.
-      const after = readsRef.current + (readingNow() ? 1 : 0);
-      setRefreshing((current) => current.has(prUrl) ? new Map([...current, [prUrl, { ref: line.ref, was, after }]]) : current);
-      load();
-    }, (cause: unknown) => stop(message(cause)));
+  /**
+   * Rows read from GitHub now, the selection four at a time: each spinner runs until the read that carries its answer lands, and the row
+   * changes in place and says Read just now, or why its read failed. Another Refresh while one reads is ignored.
+   */
+  function refreshRows(list: readonly DeckLine[]) {
+    const rows = list.filter((line) => line.row && !line.ghost);
+    starting.current = new Map(rows.map((line) => [line.prUrl, { ref: line.ref, was: { status: line.row!.status, section: line.row!.section }, after: null }]));
+    void refresh.read(rows.map((line) => line.prUrl));
   }
 
   // ---- Mark seen -----------------------------------------------------------
@@ -725,7 +731,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         else openDialog({ kind: "hold-pr", prUrl: row.prUrl, ref: row.ref, reason: "" });
         return;
       }
-      case "refresh": if (row) refreshRow(row); return;
+      // A row's ↻ takes that row; the key and the bar take the selection, else the focused row.
+      case "refresh": refreshRows(line ? [line] : selected.length ? selected : row ? [row] : []); return;
       case "row-next": moveRow(1); return;
       case "row-prev": moveRow(-1); return;
       case "select": if (row && !row.dim) toggleSelect(row.prUrl, false); return;
@@ -913,15 +920,17 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
 
   return <>
     <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
-      read={{ text: view ? readText(view, now) : "Reading…", error }}
+      read={{ text: view ? readText(view, now) : "Reading…", error, busy: !!view?.refreshing, onRefresh: view ? refresh.all : undefined }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
-      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()),
+      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set([...refreshing.keys(), ...refresh.reading]),
+        reads: new Map([...refresh.outcomes].flatMap(([prUrl, outcome]) => { const note = readNote(outcome, now); return note ? [[prUrl, note] as const] : []; })),
         working: batch.working?.prUrls }} tiles={new Set(here.tiles)}
       open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null}
-      flash={flash ?? (batch.sending ? { text: batch.sending, undo: false, busy: true } : null)}
+      flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)}
       batch={{ kinds, address: on.address.on ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : 0, refusal: batch.refusal,
-        working: batch.working && { kind: batch.working.kind, label: workingLabel(batch.working) } }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
+        working: batch.working && { kind: batch.working.kind, label: workingLabel(batch.working) },
+        refresh: { count: selected.filter((line) => line.row && !line.ghost).length, busy: refresh.reading.size > 0, progress: refresh.progress } }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
       notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} filter={here.filter?.kind ?? null} />
     {batch.element}
