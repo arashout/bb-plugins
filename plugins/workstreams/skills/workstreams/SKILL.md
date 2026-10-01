@@ -951,7 +951,8 @@ checkout, no feedback waiting, or a write just sent. A batch plan returns its
 shares that effort, else none. When it sends, it reads each PR again, claims
 every PR still waiting in the run record (one `address-feedback` run per PR)
 with nothing awaited between the last check and the last claim, and starts one
-worker titled "Address feedback on N PRs" on the code-work model. The worker
+worker titled by its PRs ("Address feedback: quill #210, #211 · folio #301", with
+"+N more" past 80 characters) on the code-work model. The worker
 follows the `address_review_feedback` recipe per PR, replies to each note,
 never merges, and ends with one `Workstreams result v1` line per PR. Agent
 and thread starts refuse a PR or checkout a claim holds; the claims end when

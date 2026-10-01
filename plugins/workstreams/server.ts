@@ -153,7 +153,7 @@ import {
   withinPath,
 } from "./threads.js";
 import { startThread } from "./spawn.js";
-import { addressBatchPrompt, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
+import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
 import { sentState, turnSummary, yourTurn, type Sent } from "./your-turn.js";
 import { batchResults } from "./completion-envelope.js";
 import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
@@ -5953,7 +5953,7 @@ export default async function plugin(bb: BbPluginApi) {
       action: ADDRESS_RUN, mode: "new", threadId: null }) }));
     if (!claimed.length) return results;
     for (const { runId } of claimed) addressStarting.add(runId);
-    const title = `Address feedback on ${claimed.length} PR${claimed.length === 1 ? "" : "s"}`;
+    const title = addressBatchTitle(claimed.map(({ item, pr }) => ({ repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number })));
     try {
       const prompt = addressBatchPrompt(claimed.map(({ item, pr, path, feedback, runId }) => ({ attemptId: `address-${runId}`, prUrl: prWorkItemKey(item.prUrl),
         repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title, headOid: item.headOid!, headBranch: pr.headRefName, baseBranch: pr.baseRefName,

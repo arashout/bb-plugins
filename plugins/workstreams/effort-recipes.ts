@@ -287,6 +287,26 @@ export const REPLY_RULE = "Reply to each reviewer's note on the PR, on its threa
 const BATCH_FEEDBACK_WORK = FEEDBACK_WORK.address.split(/(?<=\.) /u).filter((sentence) => !/when useful|PTAL|approving reviewer/u.test(sentence)).join(" ");
 
 /**
+ * A batch thread's title names its PRs, each repository's short name once, in the order listed: "Address feedback: quill #210, #211 ·
+ * folio #301". Past `max` characters it names as many as fit and ends "+N more".
+ */
+export function addressBatchTitle(prs: readonly Pick<AddressBatchPr, "repo" | "number">[], max = 80): string {
+  const order = new Map<string, number[]>();
+  for (const pr of prs) { const name = pr.repo.split("/").at(-1) ?? pr.repo; order.set(name, [...order.get(name) ?? [], pr.number]); }
+  const flat = [...order].flatMap(([name, numbers]) => numbers.map((number) => ({ name, number })));
+  const named = (count: number) => {
+    const shown = new Map<string, number[]>();
+    for (const { name, number } of flat.slice(0, count)) shown.set(name, [...shown.get(name) ?? [], number]);
+    return `Address feedback: ${[...shown].map(([name, numbers]) => `${name} ${numbers.map((number) => `#${number}`).join(", ")}`).join(" · ")}`;
+  };
+  for (let count = flat.length; count > 0; count--) {
+    const title = `${named(count)}${count < flat.length ? ` +${flat.length - count} more` : ""}`;
+    if (title.length <= max) return title;
+  }
+  return `Address feedback on ${flat.length} PR${flat.length === 1 ? "" : "s"}`;
+}
+
+/**
  * The address_review_feedback recipe for several of your PRs in one new thread, each in turn, in its own checkout when it has one: read
  * the feedback, fix what's actionable, reply to each note, resolve only addressed threads, and push only to its branch. It ends with a report
  * per PR and one typed result line per PR, which Workstreams reads against fresh facts. It never merges, and clears nothing itself.

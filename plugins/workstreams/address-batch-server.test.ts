@@ -198,12 +198,12 @@ describe("addressing Your turn PRs in one batch thread", () => {
     await vi.advanceTimersByTimeAsync(200);
     await env.settled(plan.batchId!);
     expect((await env.batch(plan.batchId!)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([42, 43, 44].map((number) =>
-      [`folio #${number}`, "sent", "Started “Address feedback on 3 PRs”."]));
+      [`folio #${number}`, "sent", "Started “Address feedback: folio #42, #43, #44”."]));
 
     // One worker, on the code-work model, under the effort's parent, in a context workspace; each PR's feedback, bound to its claim.
     const [args] = spawned(env);
     expect(env.spawn).toHaveBeenCalledTimes(1);
-    expect(args).toMatchObject({ title: "Address feedback on 3 PRs", parentThreadId: "thr-coordinator", projectId: PROJECT, providerId: "codex", model: "gpt-6-sol",
+    expect(args).toMatchObject({ title: "Address feedback: folio #42, #43, #44", parentThreadId: "thr-coordinator", projectId: PROJECT, providerId: "codex", model: "gpt-6-sol",
       reasoningLevel: "high", environment: { type: "host", hostId: HOST, workspace: { type: "unmanaged", path: "/synthetic/workstreams/context/batch" } },
       pluginMetadata: { role: "address-feedback" } });
     const runIds = args!.pluginMetadata.runIds;
@@ -219,8 +219,8 @@ describe("addressing Your turn PRs in one batch thread", () => {
     // Each PR in it reads Working, In flight on the deck, and stays on Your turn where you sent it from; the thread shows on the card.
     await env.refresh();
     const rows = await env.rows();
-    for (const number of [42, 43, 44]) expect(rows.get(number)).toMatchObject({ section: "flight", addressing: { threadId: "thr-batch-1", title: "Address feedback on 3 PRs" },
-      sent: { state: "working", threadId: "thr-batch-1", title: "Address feedback on 3 PRs" } });
+    for (const number of [42, 43, 44]) expect(rows.get(number)).toMatchObject({ section: "flight", addressing: { threadId: "thr-batch-1", title: "Address feedback: folio #42, #43, #44" },
+      sent: { state: "working", threadId: "thr-batch-1", title: "Address feedback: folio #42, #43, #44" } });
     expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
     expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
   });
@@ -309,7 +309,7 @@ describe("addressing Your turn PRs in one batch thread", () => {
     await vi.advanceTimersByTimeAsync(200);
     await env.settled(kept.batchId!);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(spawned(env).map((args) => args.title)).toEqual(["Address feedback on 2 PRs"]);
+    expect(spawned(env).map((args) => args.title)).toEqual(["Address feedback: folio #42, #43"]);
     expect((await env.batch(undone.batchId!)).state).toBe("cancelled");
     await env.refresh();
     expect((await env.rows()).get(44)).toMatchObject({ addressing: null, acted: null });
@@ -422,12 +422,12 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     expect(await confirm(env, plan.batchId, async () => {
       env.current.set(43, { ...env.current.get(43)!, headRefOid: "d".repeat(40) });
       env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 0, comment: { login: "ines", at: ago(HOUR) }, repliedAt: ago(HOUR / 2) } });
-    })).toEqual(["folio #42: sent: Started “Address feedback on 1 PR”.",
+    })).toEqual(["folio #42: sent: Started “Address feedback: folio #42”.",
       "folio #43: refused: New commits landed since the listing. Review it and try again; nothing was started.",
       "folio #44: refused: No feedback waits on you now; nothing was started."]);
     expect(claims(env)).toEqual([[42, "running"]]);
     expect(spawned(env).map((args) => [args.title, args.prompt.includes(url(42)), args.prompt.includes(url(43)), args.prompt.includes(url(44))]))
-      .toEqual([["Address feedback on 1 PR", true, false, false]]);
+      .toEqual([["Address feedback: folio #42", true, false, false]]);
   });
 
   it("starts nothing when the parent thread it listed is gone", async () => {

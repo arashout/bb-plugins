@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EFFECTS, VERBS, WORK_RECIPES, type Effect } from "./effort-command.js";
-import { addressBatchPrompt, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
+import { addressBatchPrompt, addressBatchTitle, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
   type WorkOrderInput }
   from "./effort-recipes.js";
 import { GATE_IDS } from "./pr-gates.js";
@@ -201,6 +201,25 @@ describe("asking a PR's thread to fix it", () => {
 });
 
 describe("one batch thread for Your turn feedback", () => {
+  // Matt: "can the thread title be unique or use the PR #". Every batch was "Address feedback on N PRs", so two of them read the same in
+  // the thread list; the title names its PRs by repository instead, and stays short enough to read there.
+  it("names its PRs by repository in the order listed, so two batches read apart, and ends +N more past 80 characters", () => {
+    const pr = (repo: string, number: number) => ({ repo: `inkwell/${repo}`, number });
+    expect(addressBatchTitle([pr("catalog-api", 635), pr("catalog-api", 636)])).toBe("Address feedback: catalog-api #635, #636");
+    expect(addressBatchTitle([pr("quill", 210), pr("folio", 301), pr("quill", 211)])).toBe("Address feedback: quill #210, #211 · folio #301");
+    expect(addressBatchTitle([pr("quill", 210), pr("quill", 211)])).not.toBe(addressBatchTitle([pr("quill", 212), pr("quill", 213)]));
+    const many = [pr("quill", 210), pr("quill", 211), pr("folio", 301), ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => pr("spine-labels-and-catalog", 1_000 + n))];
+    const title = addressBatchTitle(many);
+    expect(title.length).toBeLessThanOrEqual(80);
+    // A name that won't fit with its PR leaves the rest to the count.
+    expect(title).toBe("Address feedback: quill #210, #211 · folio #301 +9 more");
+    // What it names and the count it leaves out add up to every PR.
+    expect((title.match(/#\d+/gu) ?? []).length + Number(/\+(\d+) more$/u.exec(title)![1])).toBe(many.length);
+    expect(addressBatchTitle([pr("quill", 210), pr("quill", 211), pr("folio", 301), pr("folio", 302), pr("spine", 155)], 55))
+      .toBe("Address feedback: quill #210, #211 · folio #301 +2 more");
+  });
+
+
   const prs = [
     { attemptId: "address-7", prUrl: "https://github.com/inkwell/folio/pull/42", repo: "inkwell/folio", number: 42, title: "ABC-42 Keep manuscripts in order",
       headOid: "a".repeat(40), headBranch: "abc-42-order", baseBranch: "main", checkout: "/p/folio-abc-42", feedback: "Approval comment from @mira · 2 open threads" },
