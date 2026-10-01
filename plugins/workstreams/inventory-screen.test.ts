@@ -197,9 +197,9 @@ describe("simple All PRs list", () => {
 
   it("shows each row's state word and next step with its age", () => {
     const words = text(pane());
-    expect(words).toContain("inkwell/catalog #96 ABC-121 Show series order on catalog pages Awaiting review · Nudge @mira-l, @theo-k · 2d Nudge");
-    expect(words).toContain("inkwell/folio #330 ABC-364 Keep shelf filters in the link Conflicts · Resolve the conflicts · 2d+");
-    expect(words).toContain("inkwell/quill #212 ABC-372 Email when a hold is ready Behind #210 · Waits on #210");
+    expect(words).toContain("catalog #96 ABC-121 Show series order on catalog pages Awaiting review · Nudge @mira-l, @theo-k · 2d Nudge");
+    expect(words).toContain("folio #330 ABC-364 Keep shelf filters in the link Conflicts · Resolve the conflicts · 2d+");
+    expect(words).toContain("quill #212 ABC-372 Email when a hold is ready Behind #210 · Waits on #210");
   });
 
   // Confirming review notes is the deck's: one PR's notes, read fresh, in its confirm. All PRs shows the wait and offers no way around it.
@@ -218,7 +218,7 @@ describe("simple All PRs list", () => {
     const numbers = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span><b class="shrink-0 [^"]*">#(\d+)<\/b>/gu)];
     expect(numbers).toHaveLength(17);
     for (const [, repo] of numbers) expect(repo).not.toMatch(/#\d/u);
-    expect(numbers.map((match) => `${match[1]}#${match[2]}`)).toEqual(expect.arrayContaining([`${long}#96`, `${long}#210`]));
+    expect(numbers.map((match) => `${match[1]}#${match[2]}`)).toEqual(expect.arrayContaining([`${long.split("/").pop()}#96`, `${long.split("/").pop()}#210`]));
   });
 
   // The title gets all the width beside the PR, so the why moves under it, where a narrow pane wraps it rather than cutting it short.

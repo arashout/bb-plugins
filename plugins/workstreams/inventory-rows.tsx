@@ -78,7 +78,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
               {box ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
                 onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className={cn(CHECKBOX, "mt-[3px]")} />
                 : <span aria-hidden className="size-3.5 shrink-0" /> : null}
-              <PrRef repo={line.slug} number={line.number} strong={mine || !!nudge} onClick={() => props.onOpenPr(line.prUrl)} />
+              <PrRef repo={line.repo} number={line.number} strong={mine || !!nudge} onClick={() => props.onOpenPr(line.prUrl)} />
               <div className="min-w-0 flex-1">
                 <p className={cn("truncate", mine || nudge ? "text-foreground" : "text-foreground/80")} title={line.title}>{line.title}</p>
                 {/* Why, then the chips and action at its right; in a narrow pane they wrap under it rather than cut it short. */}
