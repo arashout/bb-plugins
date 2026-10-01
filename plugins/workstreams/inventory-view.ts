@@ -96,7 +96,7 @@ export type InventoryRowInput = {
   dismissal?: Dismissal | null;
 };
 
-const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
+const EXECUTORS = new Set(["advance", "run", "worker"]);
 
 /** The thread a PR's work started in, and the one working on it now or last, as its row and its Open thread name them. */
 export function rowThreads(input: Pick<InventoryRowInput, "links" | "attemptThread" | "threads">): InventoryRow["threads"] {
@@ -107,7 +107,7 @@ export function rowThreads(input: Pick<InventoryRowInput, "links" | "attemptThre
   const known = (link: ResolvedThreadLink) => input.threads.has(link.threadId);
   // Where the work started: a thread started for its ticket, or one whose metadata names the PR.
   const origin = input.links.find((link) => known(link) && link.tier === "started" && link.sources.some((source) => source === "cluster" || source === "metadata"));
-  // Who works on it: our v2 attempt's thread, else the busiest, newest legacy worker, dispatch, or run thread.
+  // Who works on it: our v2 attempt's thread, else the busiest, newest legacy worker or run thread.
   const executor = input.attemptThread ?? input.links.filter((link) => known(link) && link.sources.some((source) => EXECUTORS.has(source)))
     .sort((a, b) => Number(input.threads.get(b.threadId)!.status === "active") - Number(input.threads.get(a.threadId)!.status === "active") ||
       input.threads.get(b.threadId)!.updatedAt - input.threads.get(a.threadId)!.updatedAt)[0]?.threadId;

@@ -1,6 +1,6 @@
 // One execution authority per effort. An effort runs on legacy launchers until
 // it opts into v2; from then on every PR its roster owns is fenced from legacy
-// Advance, dispatch, repair, and agent runs. The owned set is kept here so each
+// Advance, repair, and agent runs. The owned set is kept here so each
 // fence reads it synchronously, and it is rewritten with the mode in one
 // transaction, so an effort is never on v2 with its PRs unfenced.
 //

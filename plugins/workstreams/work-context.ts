@@ -2,7 +2,7 @@ import { prWorkItemKey, workItemIndex, type LocalPrObservation, type RemotePrObs
 
 export type WorkOwner = { id: string; key: string; name: string };
 export type WorkOwnerKind = "ticket" | "prUrl" | "checkoutPath";
-export type ThreadLinkSource = "cluster" | "metadata" | "run" | "advance" | "dispatch" | "worker" | "coordinator" | "repo";
+export type ThreadLinkSource = "cluster" | "metadata" | "run" | "advance" | "worker" | "coordinator" | "repo";
 export type WorkThreadLink = {
   prUrl: string; threadId: string; source: ThreadLinkSource; role: "coordinator" | "repo" | "pr" | "linked";
   title: string; tier: "started" | "environment" | "ticket" | "paths"; contextual?: boolean;

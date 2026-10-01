@@ -224,8 +224,7 @@ separately: `bb plugin logs workstreams`.
   only select, assign, and name. The board and `list` can never disagree.
 - **Writes require an explicit start.** Scans never run a git mutation or touch
   a pull request. `group` / `ungroup` change a local ticket → effort name map;
-  Every GitHub write runs from a confirm. Automatic repair starts only after
-  `dispatch_set` selects **Run automatically** for an effort.
+  Every GitHub write runs from a confirm.
   See [Row actions](#row-actions).
 - **A manual name always wins.** `group` beats any model assignment.
 - **No single signal groups anything.** Seeding compares four independent
@@ -341,30 +340,6 @@ and the last day's, newest first. Nothing polls:
 
 BB's sidebar shows a count beside Workstreams: needs-you first, else running.
 
-### Automatic dispatch
-
-Automatic dispatch runs for one effort in one of three modes: **Off** (the
-default), **Preview only**, or **Run automatically**. `dispatch_set` sets them;
-no view does. Preview only puts the next candidate in the board's
-`dispatch.candidate` without starting a thread. Run automatically starts at
-most one repair thread at a time for failing CI, merge conflicts, requested
-changes, or unresolved inline comments in that workstream. Written approval
-notes remain a manual step. It skips dirty or unverified checkouts, stacked PRs
-blocked below, duplicate checkouts for a PR, and items with active work. The
-agent uses the BB project's default harness and is instructed to repair
-locally, test, and ask before a push or GitHub reply. The dispatcher itself
-does not write to GitHub, merge, or deploy.
-
-Each launch has a durable attempt record. Before launch, Workstreams inspects
-the PR again. After the agent finishes, a fresh scan must confirm that the
-specific gate cleared before the attempt reads **Verified**. An agent's
-`Result:` line alone is not proof. If the gate remains or inspection fails,
-the attempt reads **Needs you** and blocks further automatic launches until
-a later fresh scan confirms progress. **Off** stops future launches but does
-not cancel an already running thread. Workstreams never retries an unchanged
-attempt automatically. GitHub reporting the PR merged is the workflow's end;
-issue intake, PR creation, review requests, and merging remain manual steps.
-
 ## Views
 
 The **Efforts** administration view lists explicitly saved efforts. Create an
@@ -396,8 +371,7 @@ an Undo: `thread_effort_undo` puts the thread's effort and linked PR back, moves
 moved work back with the effort each piece came from, lets go work the change
 brought in, and removes an effort it created while that effort is still empty.
 Undo refuses, changing nothing, once anything it touched changed, and keeps a
-forward change's guards: nothing goes back into a done effort, and no effort
-under automatic dispatch changes.
+forward change's guard: nothing goes back into a done effort.
 
 Assigning a thread lets confirmed, unassigned PR work inherit the effort from
 exact checkout links, recorded actions, or explicit PR links. Title and
@@ -410,16 +384,14 @@ thread's effort; each linked PR's `also` names what else that move takes, and
 the popover lists it and waits for Move all before moving. **+ Link PR** adds a tracked PR as thread context. A done
 effort takes no thread or moved work. Explicit membership survives rescans.
 Organizing an effort doesn't launch its coordinator, start an agent, or change
-existing thread parents. Automatic dispatch must be off for an affected effort
-before a move; automatic inheritance pauses while the destination effort has
-automatic dispatch enabled.
+existing thread parents.
 
 The panel opens on the last view you used in this browser, or the effort deck
 on your first visit. Each view has a deep link.
 
 To hold one PR, the deck's **Hold PR** in its details calls `pr_hold_set` with
 an optional `reason`. A held PR keeps its readiness and thread access; no
-batch, Advance, or automatic action touches it. `pr_hold_set` with `held: false`
+batch or Advance touches it. `pr_hold_set` with `held: false`
 releases it without changing GitHub.
 
 The Map's **Approved** filter persists across reloads, including approved PRs
@@ -544,8 +516,7 @@ Every unarchived effort sits on one pile: active, on hold, or done.
 only when the user asks. A move never changes members, threads, or the effort
 itself. `effort_complete` returns the effort's open PRs and active threads. A
 resumed or reopened effort joins the end of the active pile (`since`). A v2
-effort returns to legacy, and automatic dispatch for an effort turns off,
-before it is held or completed; dispatch turns on only for an active effort.
+effort returns to legacy before it is held or completed.
 Archiving and merging work as before.
 
 ## Classifying PRs
@@ -764,7 +735,7 @@ bb workstreams v2 set <effort> --mode v2|legacy --revision <n> (--parent <thread
 ```
 
 Moving an effort to its roster never changes membership or reparents a thread.
-From then on, dispatch, repairs, and agent runs refuse its PRs with
+From then on, repairs and agent runs refuse its PRs with
 "Managed by the <effort> roster; instruct there." `board_get` lists those PRs
 under `v2Managed` with their roster state.
 

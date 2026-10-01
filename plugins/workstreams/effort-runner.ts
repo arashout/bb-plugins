@@ -73,7 +73,7 @@ export type EffortRunnerDeps = {
   settings(): Promise<{ execution: V2Execution; concurrency: number }>;
   models(): Promise<Record<ModelRole, ModelChoice>>;
   /**
-   * Anyone outside v2 writing the PR or checkout now: a legacy reservation, a manual action or launch, dispatch,
+   * Anyone outside v2 writing the PR or checkout now: a legacy reservation, a manual action or launch,
    * or an open run. It must read synchronously: it runs inside the claim's transaction.
    */
   writer(prUrl: string, path: string | null): ResourceWriter | null;

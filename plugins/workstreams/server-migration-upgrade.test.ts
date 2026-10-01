@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ADVANCE_MIGRATIONS } from "./bulk-advance.js";
 import { DECK_BATCH_MIGRATION } from "./deck-batch.js";
-import { DISPATCH_MIGRATIONS } from "./dispatch.js";
 import { EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION } from "./effort-assignments.js";
 import { EFFORT_PILE_MIGRATION } from "./effort-piles.js";
 import { EFFORT_NOTES_MIGRATION } from "./effort-notes.js";
@@ -39,7 +38,16 @@ const deployedMigrations = [
   LINEAR_DETAIL_MIGRATION,
   `CREATE TABLE IF NOT EXISTS cluster_asks (ticket TEXT PRIMARY KEY, hash TEXT NOT NULL, streak INTEGER NOT NULL, pinned INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS pr_linkbacks (url TEXT PRIMARY KEY, ticket TEXT, checked_at INTEGER NOT NULL, final INTEGER NOT NULL)`,
-  ...DISPATCH_MIGRATIONS,
+  `CREATE TABLE IF NOT EXISTS dispatch_policy (id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT NOT NULL, effort_key TEXT)`,
+  `CREATE TABLE IF NOT EXISTS dispatch_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, unit_path TEXT NOT NULL, pr_url TEXT NOT NULL,
+    action TEXT NOT NULL, reason TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL, detail TEXT NOT NULL, thread_id TEXT, started_at INTEGER NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS dispatch_active_pr ON dispatch_attempts (pr_url)
+    WHERE status IN ('launching', 'running', 'verifying', 'needs-you')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS dispatch_active_path ON dispatch_attempts (unit_path)
+    WHERE status IN ('launching', 'running', 'verifying', 'needs-you')`,
   ...INVENTORY_MIGRATIONS,
   ...EFFORT_MIGRATIONS,
   `CREATE TABLE IF NOT EXISTS grouping_repairs (ticket TEXT PRIMARY KEY, label TEXT NOT NULL, hash TEXT NOT NULL, evidence TEXT NOT NULL)`,

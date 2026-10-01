@@ -81,8 +81,7 @@ effort** creates an effort from the name you typed. **Remove from effort** is
 at the bottom. A pick applies at once, and **Undo** appears beside the chip for
 8 seconds. Undo puts back the thread's effort and lets go the work that the
 change brought in. It refuses, changing nothing, once that work moved again,
-or when it would put work back into a done effort or change an effort under
-automatic dispatch.
+or when it would put work back into a done effort.
 
 After you assign a thread, its confirmed, unassigned work inherits the effort,
 including existing recorded work and work discovered later. Workstreams
@@ -101,9 +100,7 @@ Undo. A done effort takes no new work: reopen it first.
 
 Explicit assignments use the same ticket and PR membership as the board.
 Assigning work preserves existing thread parents and worker history and does
-not create a coordinator or start an agent. Turn off automatic dispatch for an
-affected effort before moving its work. Automatic inheritance pauses while the
-destination effort has automatic dispatch enabled.
+not create a coordinator or start an agent.
 
 ## How work and agents connect
 
@@ -201,9 +198,8 @@ or a roster's keys on a roster.
   The destination keeps its identity, and old effort IDs resolve to it.
   Thread conversations remain separate. Resolve any preview blockers before
   merging; pending thread updates remain visible for retry. Archiving waits
-  for queued or active preparation to settle and requires automatic dispatch
-  to be off. Renaming also updates an idle coordinator's title; if that update
-  fails, save again to retry.
+  for queued or active preparation to settle. Renaming also updates an idle
+  coordinator's title; if that update fails, save again to retry.
 - **Map:** Explore the grouping hierarchy. Switch between theme and risk faces,
   filter by status and code surface, and open a linked agent thread.
 - **Approved filter:** Keep approved open PRs in view on the Map; the selection

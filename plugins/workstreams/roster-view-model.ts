@@ -92,7 +92,7 @@ const GROUPS: { key: GroupKey; label: string; collapsed: boolean }[] = [
 ];
 const LEGACY_WHY = "Runs on legacy launchers; move it to its roster first";
 const OWNER_LABEL: Record<NonNullable<RosterRow["owner"]>, string> = { you: "you", ci: "CI", reviewer: "review", parent: "parent", github: "GitHub",
-  "legacy-job": "legacy", run: "action", dispatch: "dispatch", thread: "thread", v2: "v2" };
+  "legacy-job": "legacy", run: "action", thread: "thread", v2: "v2" };
 
 /** An observation's or hold's age: 25s, 52m, 5h, 2d. */
 export function age(at: number, now: number): string {

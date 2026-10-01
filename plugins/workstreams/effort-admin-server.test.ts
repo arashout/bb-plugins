@@ -1,7 +1,6 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, expect, it } from "vitest";
 import { createEffortStore } from "./effort-store.js";
-import { createDispatchStore } from "./dispatch.js";
 import { createRunStore } from "./runstore.js";
 import { effortTitle } from "./effort-title.js";
 import plugin from "./server.js";
@@ -127,7 +126,7 @@ it("blocks a merge while an affected action run or repository controller claim i
     preview: { blockers: expect.arrayContaining([expect.stringContaining("controller")]) } });
 });
 
-it("blocks unresolved launches, active threads, and automatic dispatch before merging", async () => {
+it("blocks unresolved launches and active threads before merging", async () => {
   const env = await setup();
   const { source, destination } = env.seed();
   const keys = { sourceKey: source.key, destinationKey: destination.key };
@@ -139,20 +138,15 @@ it("blocks unresolved launches, active threads, and automatic dispatch before me
   env.metadata.set("thr-active", { workEffortId: source.id });
   expect(await env.call("effort_admin_merge_preview", keys)).toMatchObject({ ok: true,
     preview: { blockers: expect.arrayContaining([expect.stringContaining("thr-active")]) } });
-  env.threads.set("thr-active", { ...env.threads.get("thr-active")!, status: "idle" });
-  createDispatchStore(env.bb.storage.database()).setPolicy("auto", source.key);
-  expect(await env.call("effort_admin_merge_preview", keys)).toMatchObject({ ok: true,
-    preview: { blockers: expect.arrayContaining([expect.stringContaining("automatic dispatch")]) } });
 });
 
-it("keeps archived efforts on the board while refusing new automatic dispatch", async () => {
+it("keeps an archived effort's ownership on the board", async () => {
   const env = await setup();
   const { source } = env.seed();
   const scope = (await env.list()).scopes[source.key];
   expect(await env.call("effort_admin_archive", { effortKey: source.key, archived: true, expectedScope: scope }))
     .toMatchObject({ ok: true, effort: { archivedAt: expect.any(Number) } });
   expect(env.store.owner("ticket", "ABC-101")?.id).toBe(source.id);
-  await expect(env.call("dispatch_set", { mode: "auto", effortKey: source.key })).rejects.toThrow("Restore this effort");
 });
 
 it("retains a committed merge when metadata sync fails and completes it on retry", async () => {

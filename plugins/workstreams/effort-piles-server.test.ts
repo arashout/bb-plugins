@@ -86,18 +86,4 @@ describe("effort piles over RPC", () => {
     expect((await env.piles()).get(env.shelf.id)).toMatchObject({ pile: "active" });
     expect(await env.call("effort_resume", { effortKey: env.shelf.key })).toEqual({ ok: false, error: "This effort is already active." });
   });
-
-  // Automatic dispatch launches workers for its one effort, so a held or done effort under it would keep getting them.
-  it("holds or completes an effort only while automatic dispatch is off for it, and turns dispatch on only for an active effort", async () => {
-    const env = await setup();
-    env.bb.storage.database().prepare("INSERT OR REPLACE INTO dispatch_policy (id, mode, effort_key) VALUES (1, 'auto', ?)").run(env.shelf.key);
-    for (const method of ["effort_hold", "effort_complete"]) expect(await env.call(method, { effortKey: env.shelf.key }))
-      .toEqual({ ok: false, error: "Turn off automatic dispatch for this effort before you hold or complete it." });
-    expect((await env.piles()).get(env.shelf.id)).toMatchObject({ pile: "active" });
-    await env.call("effort_hold", { effortKey: env.pickup.key });
-    await expect(env.call("dispatch_set", { mode: "auto", effortKey: env.pickup.key })).rejects.toThrow("Resume or reopen this effort before enabling automatic dispatch.");
-    await env.call("effort_resume", { effortKey: env.pickup.key });
-    await env.call("effort_complete", { effortKey: env.pickup.key });
-    await expect(env.call("dispatch_set", { mode: "auto", effortKey: env.pickup.key })).rejects.toThrow("Resume or reopen this effort before enabling automatic dispatch.");
-  });
 });

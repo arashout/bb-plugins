@@ -7,7 +7,6 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { RawUnit } from "./contract.js";
-import { createDispatchStore } from "./dispatch.js";
 import { createEffortStore, type EstablishedEffort } from "./effort-store.js";
 import { effortTitle } from "./effort-title.js";
 import type { createEffortV2, EffortV2Preview } from "./effort-v2-server.js";
@@ -196,25 +195,6 @@ describe("v2 execution fence", () => {
 
 
 
-
-  it("refuses Auto for a v2 effort and never dispatches its PR under any key, while Auto still repairs a legacy effort's PR", async () => {
-    const env = await setup();
-    await env.optIn();
-    await expect(env.rpc("dispatch_set", { mode: "auto", effortKey: env.returns.key })).rejects.toThrow(POINTER);
-    // A policy saved before opt-in still points at the effort's board group: the fence, not the key, decides.
-    const dispatch = createDispatchStore(env.db);
-    const group = (ticket: string) => (env.rpc("board_get", null) as Promise<Board>).then((board) => board.groups
-      .find((entry) => entry.clusters.some((cluster) => cluster.ticket === ticket))!.key);
-    dispatch.setPolicy("auto", await group("ABC-12"));
-    expect((await env.rpc("board_get", null) as Board).dispatch.candidate).toBeNull();
-    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-    // A scan ends with one automatic dispatch pass, which signals nothing when it finds no candidate.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(dispatch.attempts()).toEqual([]);
-    expect(env.workedOn(RETURNS)).toEqual([]);
-    await env.rpc("dispatch_set", { mode: "auto", effortKey: await group("ABC-14") });
-    await vi.waitFor(() => expect(dispatch.attempts()).toMatchObject([{ prUrl: USED, action: "resolve-conflicts" }]));
-  });
 
   it("refuses an agent action on a v2 PR and runs it on a legacy effort's PR", async () => {
     const env = await setup();
@@ -490,7 +470,7 @@ describe("v2 opt-in", () => {
     const rpc = (method: string, input: unknown) => restarted.harness.callRpc(method as never, input as never) as Promise<any>;
     const preview = await rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview;
     expect(preview).toMatchObject({ v2Execution: "dry-run", blockers: [],
-      consequence: "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
+      consequence: "Legacy Advance stops for this effort. v2 plans work but runs nothing until v2 execution is on.",
       members: { tickets: 3, prUrls: 1, prs: 3, open: 3 } });
     expect(preview.legacy.queued.map((job) => [job.number, job.status])).toEqual([[12, "queued"]]);
     expect(preview.legacy.draining.map((job) => [job.number, job.status, job.uncertain]).sort()).toEqual([[14, "needs-attention", true], [16, "running", false]]);
@@ -503,16 +483,12 @@ describe("v2 opt-in", () => {
   });
 
 
-  it("refuses opt-in for an archived or merged effort, or while Auto dispatch targets it, and changes nothing", async () => {
+  it("refuses opt-in for an archived or merged effort, and changes nothing", async () => {
     const env = await setup();
     const refused = async (effort: EstablishedEffort, blocker: string) => {
       expect((await env.rpc("effort_v2_preview", { effortId: effort.id }) as Preview).blockers).toEqual([blocker]);
       await expect(env.rpc("effort_v2_set", { effortId: effort.id, mode: "v2", expectedRevision: 0, parentThreadId: null })).rejects.toThrow(blocker);
     };
-    const dispatch = createDispatchStore(env.db);
-    dispatch.setPolicy("auto", env.used.key);
-    await refused(env.used, "Turn off automatic dispatch for this effort before moving it to its roster.");
-    dispatch.setPolicy("off", null);
     env.store.setArchived(env.returns.id, true);
     await refused(env.returns, "Restore this effort before moving it to its roster.");
     const gifts = giftWrap(env);
@@ -550,10 +526,10 @@ describe("v2 opt-in", () => {
       workerConcurrency: { type: "number", default: 2 } });
     const preview = async () => await env.rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview;
     expect(await preview()).toMatchObject({ v2Execution: "dry-run",
-      consequence: "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on." });
+      consequence: "Legacy Advance stops for this effort. v2 plans work but runs nothing until v2 execution is on." });
     await env.harness.setSettings({ v2Execution: "on" });
     expect(await preview()).toMatchObject({ v2Execution: "on",
-      consequence: "Legacy Advance and dispatch stop for this effort. v2 claims each PR it works on and launches the work its instruction authorizes." });
+      consequence: "Legacy Advance stops for this effort. v2 claims each PR it works on and launches the work its instruction authorizes." });
   });
 
   it("previews and opts in from the CLI with the revision the preview showed", async () => {
@@ -561,7 +537,7 @@ describe("v2 opt-in", () => {
     const preview = await env.harness.runCli(["v2", "preview", "Returns", "desk"]);
     expect(preview).toMatchObject({ exitCode: 0 });
     expect(preview.stdout!.split("\n").slice(0, 4)).toEqual(["Returns desk · legacy · revision 0",
-      "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
+      "Legacy Advance stops for this effort. v2 plans work but runs nothing until v2 execution is on.",
       "PRs: 1 (1 open) from 1 tickets and 0 PRs",
       "Parent: a new thread. No coordinator or originating thread is available on the planning model, so one new parent starts unless you choose a linked thread."]);
     const stale = await env.harness.runCli(["v2", "set", "Returns", "desk", "--mode", "v2", "--revision", "3", "--new-parent"]);
@@ -634,16 +610,10 @@ describe("v2 claims", () => {
     seed(env, "A-12", RETURNS, "uncertain", { path: "/p/folio-14" });
     const agent = (path: string) => env.rpc("agent_run", { path, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Resolve the conflict." });
     expect(await agent("/p/folio-14")).toEqual({ ok: false, error: CLAIM });
-    // Auto dispatch for Used books reaches the same checkout, and holds off until the claim ends.
-    const group = (await env.rpc("board_get", null) as Board).groups.find((entry) => entry.clusters.some((cluster) => cluster.ticket === "ABC-14"))!.key;
-    await env.rpc("dispatch_set", { mode: "auto", effortKey: group });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const dispatch = createDispatchStore(env.db);
-    expect(dispatch.attempts()).toEqual([]);
     expect(await agent("/p/folio-16")).toMatchObject({ ok: true });
+    // Used books' own writer holds off until the claim ends.
     end(env, "A-12");
-    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-    await vi.waitFor(() => expect(dispatch.attempts()).toMatchObject([{ prUrl: USED, action: "resolve-conflicts" }]));
+    expect(await agent("/p/folio-14")).toMatchObject({ ok: true });
   });
 
 

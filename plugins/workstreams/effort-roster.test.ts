@@ -16,7 +16,7 @@ const legacy = currentLegacyAttempts(INKWELL_ADVANCE_BATCHES);
 
 function roster(prUrls: string[], patch: Partial<RosterSources> = {}, facts: Record<string, Pr | null> = {}, confirm?: (target: string) => void) {
   const sources: RosterSources = {
-    now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
+    now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], threads: [], full: () => null,
     work: { items: new Map(prUrls.map((url) => [url, { paths: [`/Users/reader/src/${url.split("/").at(-1)}`], tickets: [] }])), ownerForPr: () => null },
     facts: (url) => url in facts ? facts[url]! : pr(url), observation: () => ({ checkedAt: "2026-09-28T00:00:00.000Z", failedAt: null }),
     feedback: () => null, tickets: () => new Map(), ...patch,
@@ -28,21 +28,19 @@ const urls = Array.from({ length: 8 }, (_, index) => `https://github.com/inkwell
 const byTarget = (rows: ReturnType<typeof roster>["rows"]) => new Map(rows.map((row) => [row.target, row]));
 
 describe("effort roster rows", () => {
-  it("is Doing only while a legacy worker, an action or dispatch on the PR or in its checkout, or an active checkout thread writes the PR", () => {
+  it("is Doing only while a legacy worker, an action on the PR or in its checkout, or an active checkout thread writes the PR", () => {
     const ticketRun = "https://github.com/inkwell/atlas/pull/418";
-    const [queued, launching, verifying, running, idleRun, dispatched, verified, threaded] = urls;
+    const [queued, launching, verifying, running, idleRun, , , threaded] = urls;
     const job = (status: string, prUrl: string) => ({ ...legacy.get(INKWELL_ADVANCE_EFFORTS["Reader accounts"][0]!)!,
       ...{ cause: status === "queued" ? "queued" as const : "running" as const, label: status === "verifying" ? "Verifying the worker's result" : "Worker running" },
       job: { ...legacy.get(INKWELL_ADVANCE_EFFORTS["Reader accounts"][0]!)!.job, prUrl, status: status as "queued" } });
-    const rows = byTarget(roster([...urls, ticketRun], {
+    const rows = byTarget(roster([queued!, launching!, verifying!, running!, idleRun!, threaded!, ticketRun], {
       legacy: new Map([[queued!, job("queued", queued!)], [launching!, job("launching", launching!)], [verifying!, job("verifying", verifying!)]]),
       runs: [{ id: 1, path: "/Users/reader/src/413", prUrl: running!, status: "running", action: "resolve-conflicts" },
         { id: 2, path: "/Users/reader/src/414", prUrl: idleRun!, status: "needs-you", action: "address-review" },
         { id: 3, path: "/Users/reader/src/414", prUrl: idleRun!, status: "done", action: "investigate-ci" },
         // A ticket's run names no PR, but it writes in this PR's checkout.
         { id: 4, path: "/Users/reader/src/418", prUrl: null, status: "running", action: "investigate-ci" }],
-      dispatch: [{ id: 1, path: "/Users/reader/src/415", prUrl: dispatched!, status: "launching", action: "address-comments" },
-        { id: 2, path: "/Users/reader/src/416", prUrl: verified!, status: "verified", action: "address-comments" }],
       threads: [{ id: "thr_idle", status: "idle", environmentPath: "/Users/reader/src/414" },
         { id: "thr_writer", status: "active", environmentPath: "/Users/reader/src/417/" }],
     }).rows);
@@ -52,8 +50,6 @@ describe("effort roster rows", () => {
       [verifying, "doing", "verifying", "legacy-job"],
       [running, "doing", "worker", "run"],
       [idleRun, "not-in-instruction", "review", "you"],
-      [dispatched, "doing", "worker", "dispatch"],
-      [verified, "not-in-instruction", "review", "you"],
       [threaded, "doing", "worker", "thread"],
       [ticketRun, "doing", "worker", "run"],
     ]);
@@ -79,7 +75,7 @@ describe("effort roster rows", () => {
     const unrepairable = "The worker's report still can't be read after 2 corrections in its thread";
     const rows = [issue(first!, 1, "ci-infrastructure", rerun("3333333")), issue(second!, 2, "report-unrepairable", unrepairable),
       issue(third!, 3, "ci-infrastructure", rerun("4444444")), issue(fourth!, 4, "report-unrepairable", unrepairable)];
-    const sources: RosterSources = { now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
+    const sources: RosterSources = { now: Date.UTC(2026, 8, 28), groups: null, holds: {}, legacy: new Map(), runs: [], threads: [], full: () => null,
       work: { items: new Map(), ownerForPr: () => null }, facts: (url) => pr(url), observation: () => null, feedback: () => null, tickets: () => new Map() };
     const targets = [first!, second!, third!, fourth!];
     const result = effortRoster({ effort: effort(targets), redirectedFrom: null, sources,
@@ -215,7 +211,7 @@ describe("effort roster rows", () => {
     const reader = INKWELL_ADVANCE_EFFORTS["Reader accounts"];
     const result = effortRoster({ effort: { ...effort(reader), members: { tickets: ["ABC-205", "ABC-299"], prUrls: reader } }, redirectedFrom: null,
       number: (targets) => ({ snapshotId: "S-000000000000", rows: targets.map((target, index) => ({ n: index + 1, target, provisional: false })) }),
-      sources: { now: 0, groups: null, holds: {}, legacy, runs: [], dispatch: [], threads: [], facts: () => null, full: () => null, observation: () => null, feedback: () => null,
+      sources: { now: 0, groups: null, holds: {}, legacy, runs: [], threads: [], facts: () => null, full: () => null, observation: () => null, feedback: () => null,
         work: { items: new Map([[reader[0]!, { paths: [], tickets: ["ABC-205"] }]]), ownerForPr: () => null },
         tickets: (ids) => new Map(ids.filter((id) => id === "ABC-205").map((id) => [id, { title: "Let readers update their email", url: `https://linear.app/inkwell/issue/${id}` }])) } });
     expect(result.rows[0]!.tickets).toEqual([{ id: "ABC-205", title: "Let readers update their email", url: "https://linear.app/inkwell/issue/ABC-205" }]);
@@ -242,7 +238,7 @@ describe("roster presentation facts", () => {
         settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null } });
   /** An effort on its roster whose instruction includes every target, with these v2 rows and claims. */
   function instructed(targets: string[], rows: WorkRow[], options: { claims?: StoredAttempt[]; sources?: Partial<RosterSources>; facts?: Record<string, Pr | null> } = {}) {
-    const sources: RosterSources = { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null,
+    const sources: RosterSources = { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], threads: [], full: () => null,
       work: { items: new Map(targets.map((target) => [target, { paths: [], tickets: [] }])), ownerForPr: () => null },
       facts: (target) => target in (options.facts ?? {}) ? options.facts![target]! : pr(target), observation: () => ({ checkedAt: new Date(NOW - MINUTE).toISOString(), failedAt: null }),
       feedback: () => null, tickets: () => new Map(), ...options.sources };
@@ -358,7 +354,7 @@ describe("roster presentation facts", () => {
       workRow(duplicated, "repair-needed", body(2, { cause: "duplicate-writer", detail: "More than one BB thread answers to attempt A-191", userState: "issue",
         recovery: ["reset N release"] }))];
     const read = (breakerOpen: boolean) => effortRoster({ effort: effort([series, duplicated]), redirectedFrom: null, execution: { mode: "v2", revision: 1 }, v2Execution: "on",
-      sources: { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], dispatch: [], threads: [], full: () => null, facts: (target) => pr(target), feedback: () => null,
+      sources: { now: NOW, groups: null, holds: {}, legacy: new Map(), runs: [], threads: [], full: () => null, facts: (target) => pr(target), feedback: () => null,
         observation: () => null, tickets: () => new Map(), work: { items: new Map(), ownerForPr: () => null } },
       number: (list) => ({ snapshotId: null, rows: list.map((target) => ({ n: target === series ? 17 : 8, target, provisional: false })) }),
       launches: { breakerOpen, capacityFull: false, uncertain: [uncertain] },

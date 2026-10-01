@@ -25,8 +25,8 @@ export type ResourceThread = { id: string; providerId: string; status: string; a
   environmentPath: string | null; updatedAt: number;
   /** Share of the context window in use, 0-1, or null when BB doesn't report it. */
   contextUsed: number | null };
-/** Anyone else writing the PR (`path` null) or a checkout: a legacy job, an action run, dispatch, a manual write, or an active thread. */
-export type ResourceWriter = { owner: "legacy-job" | "run" | "dispatch" | "manual" | "thread"; ref: string; path: string | null };
+/** Anyone else writing the PR (`path` null) or a checkout: a legacy job, an action run, a manual write, or an active thread. */
+export type ResourceWriter = { owner: "legacy-job" | "run" | "manual" | "thread"; ref: string; path: string | null };
 export type ResourceAttempt = { id: string; status: "launching" | "running" | "uncertain" | "completed" | "failed" | "released";
   threadId: string | null; path: string | null; workspace: Workspace | null };
 
@@ -82,7 +82,7 @@ export function prWriter({ legacy, writers }: Pick<ResourceInput, "legacy" | "wr
 export function prBlocker(input: Pick<ResourceInput, "legacy" | "writers"> & { pr: Pick<ResourceInput["pr"], "isCrossRepository"> }): Extract<Resource, { kind: "wait" | "repair" }> | null {
   return prWriter(input) ?? (input.pr.isCrossRepository ? { kind: "repair", cause: "fork", reason: "Fork PRs need manual preparation; v2 can't push their branch." } : null);
 }
-const WRITER: Record<ResourceWriter["owner"], string> = { "legacy-job": "Legacy Advance job", run: "Action run", dispatch: "Dispatch", manual: "Manual write", thread: "Thread" };
+const WRITER: Record<ResourceWriter["owner"], string> = { "legacy-job": "Legacy Advance job", run: "Action run", manual: "Manual write", thread: "Thread" };
 function writerWait(writer: ResourceWriter): Extract<Resource, { kind: "wait" }> {
   return { kind: "wait", cause: writer.owner === "legacy-job" ? "legacy-drain" : "writer-available",
     reason: `${WRITER[writer.owner]} ${writer.ref} is writing ${writer.path ? `in ${writer.path}` : "this PR"}`, ref: writer.ref };

@@ -306,22 +306,6 @@ it("preserves an explicit owner and reports the blocked linked PR", async () => 
   expect(env.store.owner("prUrl", a)?.id).toBe(other.id);
 });
 
-it("pauses inheritance while automatic dispatch is on, then resumes when it is off", async () => {
-  const env = await setup();
-  const preview = await env.context();
-  const target = preview.efforts.find((effort) => effort.scope.includes("ABC-202"))!;
-  expect(await env.harness.callRpc("thread_effort_set", { threadId: "thread", destinationKey: target.key,
-    expectedScope: threadEffortAssignmentScope(preview, target.key) })).toMatchObject({ ok: true });
-  const effort = env.store.source(target.key)!;
-  await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: effort.key });
-  env.setEnvironmentPath("/p/folio-42");
-  await env.harness.runCli(["refresh"]);
-  expect(env.store.owner("prUrl", a)).toBeNull();
-  expect((await env.context()).inheritanceNotice).toContain("Automatic dispatch");
-  await env.harness.callRpc("dispatch_set", { mode: "off", effortKey: effort.key });
-  await vi.waitFor(() => expect(env.store.owner("prUrl", a)?.id).toBe(effort.id));
-});
-
 it("does not claim after an archive event races a metadata read", async () => {
   const env = await setup();
   const preview = await env.context();
@@ -576,21 +560,6 @@ it("pins an unowned ticket beside its already owned PR", async () => {
   expect((await context()).sources[0]?.explicit).toBe(true);
 });
 
-it("refuses a mixed-owner move while either exact owner has automatic dispatch enabled", async () => {
-  const { harness, context, store } = await setup();
-  const ticketOwner = store.establish({ sourceKey: "ticket-owner", name: "Editorial", goal: "", projectId: "", coordinatorState: "none",
-    members: { tickets: ["ABC-101"], prUrls: [] } });
-  const prOwner = store.establish({ sourceKey: "pr-owner", name: "Review", goal: "", projectId: "", coordinatorState: "none",
-    members: { tickets: [], prUrls: [a] } });
-  await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a });
-  const preview = await context();
-  await harness.callRpc("dispatch_set", { mode: "auto", effortKey: prOwner.key });
-  expect(await harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"],
-    destinationKey: ticketOwner.key, expectedScope: threadEffortMoveScope(preview, ["ticket:ABC-101"], ticketOwner.key) }))
-    .toMatchObject({ ok: false, error: expect.stringContaining("automatic dispatch") });
-  expect(store.owner("prUrl", a)?.id).toBe(prOwner.id);
-});
-
 describe("Undo for a thread's effort change", () => {
   const establish = (env: Awaited<ReturnType<typeof setup>>, sourceKey: string, name: string, members: { tickets: string[]; prUrls: string[]; checkoutPaths?: string[] } =
     { tickets: [], prUrls: [] }) => env.store.establish({ sourceKey, name, goal: "", projectId: "proj", coordinatorState: "none", members });
@@ -706,13 +675,10 @@ describe("Undo for a thread's effort change", () => {
     expect(env.store.owner("prUrl", a)?.id).toBe(manuscripts.id);
   });
 
-  it("keeps a forward change's guards: nothing goes back into a done effort or changes an effort under automatic dispatch", async () => {
+  it("keeps a forward change's guard: nothing goes back into a done effort", async () => {
     const env = await setup();
     const review = establish(env, "review", "Review", { tickets: ["ABC-101"], prUrls: [a] }), manuscripts = establish(env, "manuscripts", "Manuscripts");
     const moved = await moveHere(env, manuscripts.key);
-    await env.harness.callRpc("dispatch_set", { mode: "auto", effortKey: review.key });
-    expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "Automatic dispatch is on for an effort this changes, so Undo no longer applies." });
-    await env.harness.callRpc("dispatch_set", { mode: "off", effortKey: review.key });
     createEffortPileStore(env.db).move(review, "complete");
     expect(await undo(env, moved.undoId)).toEqual({ ok: false, error: "An effort this goes back to is done, so Undo no longer applies." });
     expect(env.store.owner("prUrl", a)?.id).toBe(manuscripts.id);

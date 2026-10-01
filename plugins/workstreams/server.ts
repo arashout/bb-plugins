@@ -175,7 +175,6 @@ import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, cre
   feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { confirmReadSchema, type ApprovalHandling, type ConfirmRead } from "./approval-evidence.js";
 import { projectForPath } from "./spawn.js";
-import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
 const DEFAULT_TICKET_PATTERN = "([A-Za-z]{2,5})-(\\d{1,6})";
 const SCAN_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -336,14 +335,6 @@ const boardSchema = z.object({
   health: z.object({ refreshMinutes: z.number(), enrichment: enrichmentSchema.nullable() }),
   /** Open runs and the last day's, newest first: what the rows, the Agents strip and How this works report. */
   runs: z.array(runSchema),
-  dispatch: z.object({
-    mode: z.enum(["off", "shadow", "auto"]),
-    effortKey: z.string().nullable(),
-    candidate: z.object({ path: z.string(), prUrl: z.string(), action: z.enum(AGENT_ACTIONS), reason: z.string() }).nullable(),
-    attempts: z.array(z.object({ id: z.number(), path: z.string(), prUrl: z.string(), action: z.string(),
-      status: z.enum(["launching", "running", "verifying", "verified", "needs-you", "failed"]),
-      detail: z.string(), threadId: z.string().nullable(), startedAt: z.number() })),
-  }),
   /** PRs a v2 roster manages, by PR key, as their roster rows stand: their legacy cards show the roster's state and start no legacy work. */
   v2Managed: z.record(z.string(), z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(),
     state: z.enum([...USER_STATES, "not-in-instruction"]), owner: z.string().nullable(), modifiers: z.array(z.string()) })).default({}),
@@ -441,10 +432,6 @@ export const rpcContract = defineRpcContract({
     /** Confirm though nothing since the approval shows its notes handled; the record says so. */
     anyway: z.boolean().optional() }).strict(),
     output: writeResult },
-  dispatch_set: {
-    input: z.object({ mode: z.enum(["off", "shadow", "auto"]), effortKey: z.string().nullable() }).strict(),
-    output: boardSchema.shape.dispatch,
-  },
   /** Read-only: re-read the PR live for the merge dialog. */
   action_merge_preview: {
     input: directInput,
@@ -645,7 +632,17 @@ export const MIGRATIONS = [
   // when it was read. `final` marks a PR that was merged or closed when read:
   // never read again. Comment text is never stored.
   `CREATE TABLE IF NOT EXISTS pr_linkbacks (url TEXT PRIMARY KEY, ticket TEXT, checked_at INTEGER NOT NULL, final INTEGER NOT NULL)`,
-  ...DISPATCH_MIGRATIONS,
+  // Automatic dispatch's policy and attempts. Dispatch is gone; its tables stay (migrations are append-only).
+  `CREATE TABLE IF NOT EXISTS dispatch_policy (id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT NOT NULL, effort_key TEXT)`,
+  `CREATE TABLE IF NOT EXISTS dispatch_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, unit_path TEXT NOT NULL, pr_url TEXT NOT NULL,
+    action TEXT NOT NULL, reason TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL, detail TEXT NOT NULL, thread_id TEXT, started_at INTEGER NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS dispatch_active_pr ON dispatch_attempts (pr_url)
+    WHERE status IN ('launching', 'running', 'verifying', 'needs-you')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS dispatch_active_path ON dispatch_attempts (unit_path)
+    WHERE status IN ('launching', 'running', 'verifying', 'needs-you')`,
   ...INVENTORY_MIGRATIONS,
   ...EFFORT_MIGRATIONS,
   `CREATE TABLE IF NOT EXISTS grouping_repairs (ticket TEXT PRIMARY KEY, label TEXT NOT NULL, hash TEXT NOT NULL, evidence TEXT NOT NULL)`,
@@ -845,7 +842,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, MIGRATIONS);
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);
-  const dispatch = createDispatchStore(db);
   /** Legacy Advance's saved jobs: history, and a fence while any never settled. */
   const advance = createAdvanceHistory(db);
   const inventory = createInventoryStore(db);
@@ -866,14 +862,11 @@ export default async function plugin(bb: BbPluginApi) {
     return effort && effortWork.execution(effort.id).mode === "v2" ? `Managed by the ${effort.name} roster; instruct there.` : null;
   };
   const v2Managed = (prUrl: string): string | null => v2Pointer(effortWork.managedBy(prUrl));
-  const v2Excluded = (prUrl: string): boolean => v2Managed(prUrl) !== null;
   /** The refusal every writer outside v2 gets while a v2 attempt claims this PR or checkout: launching, running, or uncertain. */
   const v2Claimed = (prUrl: string | null | undefined, path: string | null | undefined): string | null => {
     const claim = effortWork.claimOn(prUrl ?? null, path ?? null);
     return claim ? `A worker from the ${effortStore.get(claim.effortId)?.name ?? claim.effortId} roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.` : null;
   };
-  dispatch.closeStranded();
-
   const host = bb.hosts.experimental_client({ contract: hostContract });
 
   async function contextWorkspace(hostId: string): Promise<{ type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } }> {
@@ -1409,13 +1402,11 @@ export default async function plugin(bb: BbPluginApi) {
 
       await bb.storage.kv.set("lastScanAt", new Date().toISOString());
       await bb.storage.kv.set("warnings", warnings.slice(0, 50));
-      recoverDispatch();
       bb.log.info(`scanned ${result.units.length} units across ${roots.length} roots`);
       // After the scan, never inside it: a slow thread log must not hold the
       // board, and a failed one must not fail the scan.
       void syncThreads();
       queueMicrotask(() => void reconcileAllThreadIntents());
-      queueMicrotask(() => void dispatchOne());
       queueMicrotask(() => applyRules().catch(() => undefined));
       return true;
     } catch (error) {
@@ -1940,7 +1931,6 @@ export default async function plugin(bb: BbPluginApi) {
           offer(job.prUrl, job.threadId, "advance", "pr", "Advance worker");
           for (const attempt of job.previousAttempts) offer(job.prUrl, attempt.threadId, "advance", "pr", "Previous Advance worker");
         }
-        for (const attempt of dispatch.attempts()) offer(attempt.prUrl, attempt.threadId, "dispatch", "pr", "Review worker");
         for (const item of items.values()) {
           const owner = ownerForPr(item.key);
           const effort = owner ? effortStore.get(owner.id) : null;
@@ -2006,11 +1996,6 @@ export default async function plugin(bb: BbPluginApi) {
         ),
       })),
     }));
-    const dispatchPolicy = dispatch.policy();
-    const dispatchAttempts = dispatch.attempts();
-    const dispatchPaused = dispatchAttempts.some((attempt) =>
-      attempt.status === "launching" || attempt.status === "running" || attempt.status === "verifying" || attempt.status === "needs-you");
-    const dispatchChoice = dispatchPaused ? null : selectCandidate(wired, dispatchPolicy.effort_key, dispatchAttempts, runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
     const established = await Promise.all(effortStore.list().map(async (effort) => {
       if (!effort.coordinatorThreadId) return effort;
       try {
@@ -2077,12 +2062,6 @@ export default async function plugin(bb: BbPluginApi) {
         enrichment: enrichmentSchema.nullable().catch(null).parse((await bb.storage.kv.get<unknown>("lastEnrichment")) ?? null),
       },
       runs: runs.recent(Date.now() - ROW_RUN_MS),
-      dispatch: {
-        mode: dispatchPolicy.mode,
-        effortKey: dispatchPolicy.effort_key,
-        candidate: dispatchPolicy.mode === "off" ? null : dispatchChoice?.candidate ?? null,
-        attempts: dispatchAttempts.slice(0, 50).map(({ fingerprint: _fingerprint, ...attempt }) => attempt),
-      },
       v2Managed: v2ManagedPrs(established),
     };
   }
@@ -2162,7 +2141,6 @@ export default async function plugin(bb: BbPluginApi) {
       const urlsByCluster = new Map(clusters.map((cluster) => [cluster.ticket,
         cluster.units.flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : [])]));
       const recentRuns = runs.recent(0, 1_000);
-      const attempts = dispatch.attempts();
       const controllers = effortStore.list().flatMap((effort) => [...new Set(effort.members.prUrls.map((url) => prTarget(url)?.slug).filter((repo): repo is string => !!repo))]
         .flatMap((repo) => {
           const controller = effortStore.repoController(effort.id, repo);
@@ -2173,7 +2151,6 @@ export default async function plugin(bb: BbPluginApi) {
         threadId, environmentId: threadEnvironments.get(threadId) ?? null,
         urls: [...new Set([...[...(links.get(threadId)?.keys() ?? [])].flatMap((ticket) => urlsByCluster.get(ticket) ?? []),
           ...recentRuns.filter((run) => run.threadId === threadId && run.prUrl).map((run) => run.prUrl!),
-          ...attempts.filter((attempt) => attempt.threadId === threadId).map((attempt) => attempt.prUrl),
           ...controllers.filter((controller) => controller.threadId === threadId).flatMap((controller) => controller.urls),
           ...[...pendingPrThreads].filter(([, pending]) => pending.id === threadId).map(([url]) => url),
           ...(threadPrUrls.get(threadId) ?? [])])],
@@ -2590,14 +2567,6 @@ export default async function plugin(bb: BbPluginApi) {
         // Not a row: nothing to rescan. Its answer is read and stored instead.
         if (run.status === "done") void settleLinearFetch(run);
         else if (run.status === "failed") void forgetLinearFetch(run.id);
-      } else if (run.threadId !== null && dispatch.byThread(run.threadId) !== undefined) {
-        const attempt = dispatch.byThread(run.threadId)!;
-        if (run.status === "done") {
-          dispatch.update(attempt.id, "verifying", "Checking the PR with a fresh scan");
-          void verifyDispatch(attempt.id, attempt.path, attempt.prUrl, attempt.action);
-        } else if (run.status === "failed") dispatch.update(attempt.id, "failed", run.error ?? "Agent thread failed");
-        else if (run.status === "needs-you") dispatch.update(attempt.id, "needs-you", "Agent needs your decision");
-        else if (run.status === "running" && attempt.status === "needs-you") dispatch.update(attempt.id, "running", "Agent resumed");
       } else if (finished && (run.action !== ADDRESS_RUN || run.path)) rescans.add(run.path);
       bb.log.info(`run ${run.id} (${run.action}) ${run.status}${run.result === null ? "" : `: ${run.result}`}`);
     }
@@ -3457,7 +3426,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const efforts = availableWorkEfforts(current);
       const intended = typeof metadata.workEffortId === "string" ? effortStore.get(metadata.workEffortId) : null;
-      const paused = intended && dispatch.policy().mode === "auto" && dispatch.policy().effort_key === intended.key;
       // Only the thread's own work counts: its recorded PRs and exact checkout, never a link by branch name or worked path alone.
       const recorded = new Set([linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null, ...checkout]);
       const direct = [...new Set([...linked, ...sources.flatMap((source) => source.prUrls)])].filter((url) => recorded.has(url) || work.linksForPr(url, false)
@@ -3467,8 +3435,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true, sources, efforts, linkablePrs: [...known.values()].sort((a, b) => a.label.localeCompare(b.label))
         .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl,
         threadEffort: intended ? { key: intended.key, name: intended.name } : null,
-        inheritanceNotice: paused ? "Automatic dispatch is on for this effort. Unassigned thread work will be assigned after dispatch is off."
-          : intentNotes.get(threadId) ?? null, ...picker ? { picker } : {} };
+        inheritanceNotice: intentNotes.get(threadId) ?? null, ...picker ? { picker } : {} };
     } catch (error) { return { ok: false, error: `Thread work could not be read: ${String(error).slice(0, 300)}` }; }
   }
 
@@ -3576,14 +3543,10 @@ export default async function plugin(bb: BbPluginApi) {
       return refuse("This work moved since, so Undo no longer applies.");
     if (undo.moved?.back.some((item) => item.ownerId !== null && (!effortStore.get(item.ownerId) || effortStore.get(item.ownerId)!.archivedAt)))
       return refuse("An effort this work came from changed, so Undo no longer applies.");
-    // A forward change's guards: nothing goes into a done effort, and no effort under automatic dispatch changes.
+    // A forward change's guard: nothing goes into a done effort.
     const receiving = [...(undo.moved?.back ?? []).flatMap((item) => item.ownerId ?? []), ...undo.intent?.prior ? [undo.intent.prior] : []];
     if (receiving.some((id) => { const effort = effortStore.get(id); return effort && piles.get(effort).pile === "done"; }))
       return refuse("An effort this goes back to is done, so Undo no longer applies.");
-    const policy = dispatch.policy();
-    if (policy.mode === "auto" && [...receiving, ...claims.map((claim) => claim.effortId), ...undo.moved ? [undo.moved.destinationId] : []]
-      .some((id) => effortStore.get(id)?.key === policy.effort_key))
-      return refuse("Automatic dispatch is on for an effort this changes, so Undo no longer applies.");
     intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
     try {
       for (const claim of claims) effortStore.release(claim.effortId, claim.members);
@@ -3655,10 +3618,6 @@ export default async function plugin(bb: BbPluginApi) {
       if (value === null) intentNotes.delete(threadId); else intentNotes.set(threadId, value);
       if (value !== previous) bb.realtime.publish(BOARD_CHANGED, { scanning });
     };
-    if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === effort.key) {
-      note("Automatic dispatch is on for this effort. Unassigned thread work will be assigned after dispatch is off.");
-      return;
-    }
     const environment = "environment" in thread ? thread.environment : null;
     const urls = confirmedThreadPrUrls({ metadata, recordedUrls, environmentPath: environment?.path ?? null,
       scanned: scanned.filter((unit) => unit.observed?.pr === true), knownUrls: [...work.keys()] });
@@ -3770,7 +3729,7 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
 
-  /** A pile move never touches the effort's record. A v2 roster or automatic dispatch would keep working a held or done effort, so each stops first. */
+  /** A pile move never touches the effort's record. A v2 roster would keep working a held or done effort, so it stops first. */
   function movePile(effortKey: string, move: PileMove, reason?: string) {
     const effort = adminRecord(effortKey);
     if (!effort || effort.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the deck." };
@@ -3779,8 +3738,6 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: false as const, error: "One-offs stays active: each one-off merges on its own." };
     if ((move === "hold" || move === "complete") && effortWork.execution(effort.id).mode === "v2")
       return { ok: false as const, error: "Its roster runs v2 work. Switch it back to legacy before you hold or complete it." };
-    if ((move === "hold" || move === "complete") && dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
-      return { ok: false as const, error: "Turn off automatic dispatch for this effort before you hold or complete it." };
     try {
       const pile = piles.move(effort, move, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -3809,8 +3766,6 @@ export default async function plugin(bb: BbPluginApi) {
     if (!effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
     if (piles.get(effort).pile === "done") return { ok: false as const, error: "Reopen this effort first." };
-    if (dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effort.id)
-      return { ok: false as const, error: "Turn off automatic dispatch for this effort before adding work." };
     // A ticket brings every PR that names it. Each open PR of yours on it must be chosen too, and none may be another effort's:
     // a PR whose tickets two efforts own belongs to neither.
     for (const item of work.items.values()) {
@@ -3845,8 +3800,6 @@ export default async function plugin(bb: BbPluginApi) {
     const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     const elsewhere = keys.filter((url) => work.ownerForPr(url)?.id !== from.id).map(label);
     if (elsewhere.length) return { ok: false as const, error: `${elsewhere.join(", ")} ${elsewhere.length === 1 ? "isn't" : "aren't"} in ${from.name} now. Refresh and try again.` };
-    if (dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === from.id)
-      return { ok: false as const, error: "Turn off automatic dispatch for this effort before moving work." };
     const writing = keys.map((url) => v2Claimed(url, null)).find(Boolean);
     if (writing) return { ok: false as const, error: writing };
     const existed = effortStore.source(ONE_OFFS_SOURCE) !== null;
@@ -4110,14 +4063,8 @@ export default async function plugin(bb: BbPluginApi) {
       const touches = (path: string | null, prUrl: string | null, ticket?: string | null) =>
         (path !== null && paths.has(path)) || (prUrl !== null && prs.has(canonicalPrUrl(prUrl) ?? prUrl)) ||
         (ticket != null && tickets.has(ticket));
-      const policy = dispatch.policy();
-      if (!retry && policy.mode === "auto" && [source.id, destination.id].includes(effortStore.source(policy.effort_key ?? "")?.id ?? ""))
-        blockers.push("Turn off automatic dispatch for these efforts before merging.");
-      if (!retry && dispatching) blockers.push("Automatic dispatch is preparing a worker. Wait for it to settle before merging.");
       for (const run of runs.recent(Number.MAX_SAFE_INTEGER)) if (run.status === "running" && touches(run.path, run.prUrl, run.ticket))
         blockers.push(`Run ${run.id} is ${run.status} for affected work.`);
-      for (const attempt of dispatch.attempts()) if (["launching", "running", "verifying", "needs-you"].includes(attempt.status) && touches(attempt.path, attempt.prUrl))
-        blockers.push(`Dispatch attempt ${attempt.id} is ${attempt.status} for affected work.`);
       for (const batch of advance.list()) for (const job of batch.jobs) if ((job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) &&
         touches(job.path, job.prUrl)) blockers.push(`Advance job ${job.id} is ${job.status}${job.uncertain ? " and uncertain" : ""} for affected work.`);
       for (const thread of threads) if (!["idle", "error"].includes(thread.status))
@@ -4286,7 +4233,7 @@ export default async function plugin(bb: BbPluginApi) {
     const repo = raw?.pr ? prTarget(raw.pr.url)?.slug : raw?.githubRepo ?? null;
     return { raw, effort, scope, repo };
   }
-  const agentSdkFor = (beforeSpawn?: () => void): AgentSdk => ({
+  const agentSdk: AgentSdk = {
     projects: { list: () => bb.sdk.projects.list() },
     threads: {
       spawn: async (args) => {
@@ -4296,7 +4243,6 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const active = await activeCheckoutThread(path, args.environment.hostId, (offset) => bb.sdk.threads.list({ archived: false, includeHidden: true, limit: 100, offset }));
           if (active) throw new Error(`Thread ${active} is already working in this checkout. Wait for it or stop it before starting another writer.`);
-          beforeSpawn?.();
           const found = await spawnPlacement(path, args.pluginMetadata.ticket);
           const { raw, scope, repo } = found;
           let effort = found.effort;
@@ -4322,7 +4268,6 @@ export default async function plugin(bb: BbPluginApi) {
             ...(effort ? { effortId: effort.id } : {}) };
           const { parentThreadId: _previous, ...request } = args;
           const prompt = effort ? `${request.prompt}\nEffort context (data): ${JSON.stringify({ name: effort.name, goal: effort.goal, coordinatorThreadId: effort.coordinatorThreadId })}. Keep this action scoped to the requested checkout or PR and report the outcome and remaining blockers.` : request.prompt;
-          beforeSpawn?.();
           const thread = await bb.sdk.threads.spawn({ ...request, prompt, ...(parentThreadId ? { parentThreadId } : {}), pluginMetadata: metadata });
           if (raw?.pr) pendingPrThreads.set(raw.pr.url.toLowerCase(), { id: thread.id, startedAt: Date.now() });
           if (effort && raw?.pr) effortStore.recordWorker(effort.id, thread.id, raw.pr.url, workerRole);
@@ -4333,160 +4278,7 @@ export default async function plugin(bb: BbPluginApi) {
       get: (args) => bb.sdk.threads.get(args),
       context: (args) => bb.sdk.threads.context(args),
     },
-  });
-  const agentSdk = agentSdkFor();
-
-  function recoverDispatch(): void {
-    const units = readUnits();
-    for (const attempt of dispatch.attempts()) {
-      if (attempt.status !== "needs-you") continue;
-      if (attempt.threadId !== null && runs.openIn(attempt.threadId).length > 0) continue;
-      const unit = units.find((entry) => entry.path === attempt.path && entry.pr?.url === attempt.prUrl);
-      if (unit?.observed?.status === true && unit.observed.pr === true && unit.pr !== null) {
-        if (unit.pr.state === "MERGED") dispatch.update(attempt.id, "verified", "Fresh scan confirms GitHub reports this PR merged");
-        else if (unit.pr.state === "OPEN" && !gateStillOpen(unit.pr, attempt.action)) {
-          dispatch.update(attempt.id, "verified", "Fresh scan confirms the PR gate cleared");
-        }
-      }
-    }
-  }
-
-  const verificationTimers = new Set<ReturnType<typeof setTimeout>>();
-  bb.onDispose(() => {
-    for (const timer of verificationTimers) clearTimeout(timer);
-    verificationTimers.clear();
-  });
-  function retryVerification(id: number, path: string, prUrl: string, action: string, retries: number): void {
-    if (disposal.signal.aborted || dispatch.status(id) !== "verifying") return;
-    if (retries >= 10) {
-      dispatch.finishVerification(id, "needs-you", "Fresh PR inspection stayed busy; refresh the board and inspect this attempt");
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-      return;
-    }
-    const timer = setTimeout(() => {
-      verificationTimers.delete(timer);
-      void verifyDispatch(id, path, prUrl, action, retries + 1);
-    }, RESCAN_DELAY_MS);
-    verificationTimers.add(timer);
-  }
-  async function verifyDispatch(id: number, path: string, prUrl: string, action: string, retries = 0): Promise<void> {
-    if (disposal.signal.aborted || dispatch.status(id) !== "verifying") return;
-    if (scanning || targeting) {
-      retryVerification(id, path, prUrl, action, retries);
-      return;
-    }
-    const scanned = await rescanPaths([path]);
-    if (disposal.signal.aborted || dispatch.status(id) !== "verifying") return;
-    if (!scanned && (scanning || targeting)) {
-      retryVerification(id, path, prUrl, action, retries);
-      return;
-    }
-    const unit = scanned ? readUnits().find((entry) => entry.path === path && entry.pr?.url === prUrl) : undefined;
-    if (unit === undefined || unit.observed?.status !== true || unit.observed?.pr !== true || unit.pr === null) {
-      dispatch.finishVerification(id, "needs-you", "Fresh PR inspection failed; check the agent thread and refresh the board");
-    } else if (unit.pr.state === "MERGED") {
-      dispatch.finishVerification(id, "verified", "Fresh scan confirms GitHub reports this PR merged");
-    } else if (unit.pr.state !== "OPEN") {
-      dispatch.finishVerification(id, "needs-you", "GitHub reports this PR closed without a merge");
-    } else if (gateStillOpen(unit.pr, action)) {
-      dispatch.finishVerification(id, "needs-you", "The PR gate remains after a fresh scan; inspect the agent's local proposal");
-    } else {
-      dispatch.finishVerification(id, "verified", "Fresh scan confirms the PR gate cleared");
-    }
-    bb.realtime.publish(BOARD_CHANGED, { scanning });
-    void dispatchOne();
-  }
-
-  /** One durable reservation per launch; the prompt confines autonomous work to local repairs. */
-  let dispatching = false;
-  async function dispatchOne(preflightPass = 0): Promise<void> {
-    if (dispatching || disposal.signal.aborted || scanning || targeting || dispatch.policy().mode !== "auto") return;
-    if (effortStore.source(dispatch.policy().effort_key ?? "")?.archivedAt) return;
-    dispatching = true;
-    try {
-      const current = await board();
-      const choice = selectCandidate(current.groups, current.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
-      if (choice === null) return;
-      // The board may have been built from an old scan. Inspect this checkout before committing to a launch.
-      if (!(await rescanPaths([choice.candidate.path]))) return;
-      if (dispatch.policy().mode !== "auto" || disposal.signal.aborted) return;
-      if (effortStore.source(dispatch.policy().effort_key ?? "")?.archivedAt) return;
-      const fresh = await board();
-      const checked = selectCandidate(fresh.groups, fresh.dispatch.effortKey, dispatch.attempts(), runs.recent(Number.MAX_SAFE_INTEGER), prHolds.list(), v2Excluded);
-      if (checked === null) return;
-      if (checked.candidate.path !== choice.candidate.path || checked.candidate.prUrl !== choice.candidate.prUrl ||
-        checked.candidate.action !== choice.candidate.action) {
-        if (preflightPass === 0) queueMicrotask(() => void dispatchOne(1));
-        return;
-      }
-      if (advance.reserved(checked.candidate.prUrl, checked.candidate.path) || v2Claimed(checked.candidate.prUrl, checked.candidate.path)) return;
-      const id = dispatch.reserve(checked);
-      if (id === null) return;
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-      const { candidate } = checked;
-      const found = await scannedUnit(candidate.path);
-      if (found === undefined || found.raw.pr?.url !== candidate.prUrl) {
-        dispatch.update(id, "needs-you", "Checkout or PR changed before launch; refresh the board");
-        return;
-      }
-      const linked = await linkedThreads(candidate.path);
-      const plan = await planAgent(agentSdk, candidate.action, linked);
-      if (dispatch.policy().mode !== "auto" || disposal.signal.aborted) {
-        dispatch.update(id, "needs-you", "Automatic dispatch was switched off before launch");
-        return;
-      }
-      if (plan.candidates.some((thread) => thread.running) ||
-        runs.recent(Number.MAX_SAFE_INTEGER).some((run) =>
-          (run.path === candidate.path || run.prUrl === candidate.prUrl) && (run.status === "running" || run.status === "needs-you"))) {
-        dispatch.update(id, "needs-you", "A linked thread or row action became active before launch");
-        return;
-      }
-      const recommendation = await effortScope(candidate.prUrl) ? { mode: "new" as const, threadId: null } : plan.recommendation;
-      const mode = recommendation.mode === "subthread" ? "subthread" : "new";
-      const prompt = `Work on ${candidate.prUrl} in checkout ${candidate.path}. ${candidate.reason}. Inspect the relevant failure or review feedback, make a focused local repair, and run relevant tests. Do not push, reply to GitHub, update the branch remotely, merge, or deploy. Before any remote write, pause for the user's approval; if an approval interaction is unavailable, stop with a local proposal and report what remains. Do not claim the PR gate cleared until a fresh remote scan confirms it.`;
-      const runId = runs.begin({ ...(await runTarget(candidate.path)), action: candidate.action, mode, threadId: null });
-      if (dispatch.policy().mode !== "auto" || disposal.signal.aborted) {
-        runs.discard(runId);
-        dispatch.update(id, "needs-you", "Automatic dispatch was switched off before launch");
-        return;
-      }
-      const held = holdMessage(candidate.prUrl);
-      if (held) {
-        runs.discard(runId);
-        dispatch.update(id, "failed", held);
-        return;
-      }
-      let result: Awaited<ReturnType<typeof runAgent>>;
-      try {
-        result = await runAgent(agentSdkFor(() => {
-          const held = holdMessage(candidate.prUrl);
-          if (held) throw new Error(held);
-        }), {
-          unit: { path: found.raw.path, ticket: found.ticket }, mode, threadId: recommendation.threadId,
-          prompt, linked: linked.map((thread) => thread.id), model: await modelFor("code"),
-        });
-      } catch (error) {
-        runs.discard(runId);
-        throw error;
-      }
-      if (!result.ok) {
-        runs.discard(runId);
-        dispatch.update(id, "failed", result.error);
-      } else {
-        runs.attach(runId, result.threadId);
-        dispatch.update(id, "running", "Agent is inspecting and repairing locally", result.threadId);
-        startedFor.set(result.threadId, result.ticket);
-        announceThreads();
-      }
-    } catch (error) {
-      const launching = dispatch.attempts().find((attempt) => attempt.status === "launching");
-      if (launching !== undefined) dispatch.update(launching.id, "failed", `Launch failed: ${String(error).slice(0, 300)}`);
-      bb.log.warn(`dispatch launch failed: ${String(error).slice(0, 300)}`);
-    } finally {
-      dispatching = false;
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-    }
-  }
+  };
 
   /** Where a run points: the row's ticket and PR from the last scan. */
   async function runTarget(path: string) {
@@ -4809,7 +4601,6 @@ export default async function plugin(bb: BbPluginApi) {
       // Legacy batches are read-only history now.
       cancelQueued: () => false,
     },
-    autoDispatches: (effortId) => dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effortId,
     async sources() {
       const current = await board();
       const { ticketPattern, refreshMinutes } = await settings.get();
@@ -4824,7 +4615,6 @@ export default async function plugin(bb: BbPluginApi) {
         holds: prHolds.list(),
         legacy: currentLegacyAttempts(advance.list()),
         runs: runs.recent(Number.MAX_SAFE_INTEGER),
-        dispatch: dispatch.attempts(),
         threads: [...threadFacts.values()],
         tickets: (ids) => new Map([...linear.read(ids)].map(([id, detail]) => [id, { title: detail.title, url: detail.url }])),
         groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !effortStore.get(group.key)),
@@ -4853,8 +4643,6 @@ export default async function plugin(bb: BbPluginApi) {
       const pending = pendingPrThreads.get(key);
       if (manualPrWrites.has(key) || pending) return { owner: "manual", ref: pending?.id ?? "a board action", path: null };
       if (path !== null && launchingCheckouts.has(path)) return { owner: "manual", ref: "a launching board action", path: null };
-      const attempt = dispatch.attempts().find((entry) => ["launching", "running", "verifying", "needs-you"].includes(entry.status) && touches(entry.prUrl, entry.path));
-      if (attempt) return { owner: "dispatch", ref: String(attempt.id), path: null };
       const run = runs.recent(Number.MAX_SAFE_INTEGER).find((entry) => ["running", "needs-you"].includes(entry.status) && touches(entry.prUrl, entry.path));
       return run ? { owner: "run", ref: String(run.id), path: null } : null;
     },
@@ -5129,13 +4917,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /**
    * Why an agent or another action already holds this PR or its checkout, or null: an open run on either (a batch thread's claim among
-   * them), an Advance reservation, automatic dispatch, a board action in flight, a thread just asked to work on it, or an active thread in
+   * them), an Advance reservation, a board action in flight, a thread just asked to work on it, or an active thread in
    * its checkout. Synchronous, so a claim reads it in the same step it writes.
    */
   function agentOn(prUrl: string, path: string | null): string | null {
     const key = prWorkItemKey(prUrl);
     if (openRunOn(prUrl, path)) return "An agent is already working on it.";
-    if (advance.reserved(prUrl, path) || dispatch.activeFor(path ?? "", prUrl) || manualPrWrites.has(key) || (path !== null && launchingCheckouts.has(path))) {
+    if (advance.reserved(prUrl, path) || manualPrWrites.has(key) || (path !== null && launchingCheckouts.has(path))) {
       return "Another action owns it now.";
     }
     const pending = pendingPrThreads.get(key);
@@ -5533,7 +5321,6 @@ export default async function plugin(bb: BbPluginApi) {
     effort_coordinate: async (input) => {
       if (effortStore.source(input.groupKey)?.archivedAt) return { ok: false as const, error: "Restore this effort before coordinating it." };
       const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
-      if (result.ok && dispatch.policy().effort_key === input.groupKey) dispatch.setPolicy(dispatch.policy().mode, result.effort.key);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       await syncV2Targets();
       return result;
@@ -5586,8 +5373,6 @@ export default async function plugin(bb: BbPluginApi) {
       const record = adminRecord(effortKey);
       if (!record || record.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the effort list." };
       if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
-      if (archived && dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === record.id)
-        return { ok: false as const, error: "Turn off automatic dispatch for this effort before archiving it." };
       const paths = new Set(record.members.checkoutPaths ?? []);
       const prs = new Set(record.members.prUrls.map((url) => canonicalPrUrl(url) ?? url));
       if (archived && (advance.list().some((batch) => batch.jobs.some((job) =>
@@ -5625,8 +5410,6 @@ export default async function plugin(bb: BbPluginApi) {
             effortStore.repoControllers(freshSource.id), effortStore.repoControllers(freshDestination.id),
             result.threadDetails.map((thread) => JSON.stringify([thread.id, thread.status, thread.parentThreadId, thread.metadataEffortId, thread.metadataWorkEffortId]))) !== expectedScope)
             throw new Error("Effort ownership or controller bindings changed. Reopen the merge preview.");
-          if (dispatching || (dispatch.policy().mode === "auto" && [freshSource.id, freshDestination.id].includes(effortStore.source(dispatch.policy().effort_key ?? "")?.id ?? "")))
-            throw new Error("Automatic dispatch is active for these efforts. Turn it off before merging.");
           if (effortWork.instruction(freshSource.id) || effortWork.instruction(freshDestination.id))
             throw new Error("An instruction became active for these efforts. Reopen the merge preview.");
           if (effortWork.claims(freshSource.id).length || effortWork.claims(freshDestination.id).length)
@@ -5637,7 +5420,6 @@ export default async function plugin(bb: BbPluginApi) {
           const touches = (path: string | null, pr: string | null, ticket?: string | null) =>
             (path !== null && paths.has(path)) || (pr !== null && prs.has(canonicalPrUrl(pr) ?? pr)) || (ticket != null && tickets.has(ticket));
           if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && touches(run.path, run.prUrl, run.ticket)) ||
-            dispatch.attempts().some((attempt) => ["launching", "running", "verifying", "needs-you"].includes(attempt.status) && touches(attempt.path, attempt.prUrl)) ||
             advance.list().some((batch) => batch.jobs.some((job) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.path, job.prUrl))))
             throw new Error("Affected work became active or uncertain. Reopen the merge preview after it settles.");
           prepareAdminSync(result.preview.source, result.preview.destination, result.threadDetails);
@@ -5822,18 +5604,12 @@ export default async function plugin(bb: BbPluginApi) {
         intentNotes.delete(threadId);
       } else {
         const destination = context.efforts.find((effort) => effort.key === destinationKey)!;
-        if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === destinationKey) {
-          return { ok: false as const, error: "Turn off automatic dispatch for this effort before assigning a thread." };
-        }
         const established = effortStore.source(destinationKey);
         const initial = JSON.parse(destination.scope) as { members: EffortMembers };
         let effort;
         try { effort = established ?? effortStore.transfer(destinationKey, { tickets: [], prUrls: [] },
           { name: destination.name, members: initial.members }); }
         catch (error) { return { ok: false as const, error: String(error).slice(0, 400) }; }
-        if (dispatch.policy().mode === "auto" && dispatch.policy().effort_key === effort.key) {
-          return { ok: false as const, error: "Turn off automatic dispatch for this effort before assigning a thread." };
-        }
         await bb.sdk.threads.updatePluginMetadata({ threadId, set: { workEffortId: effort.id } });
         next = effort.id;
         intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
@@ -5854,15 +5630,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const selected = context.sources.filter((source) => sourceIds.includes(source.id));
       const destination = context.efforts.find((effort) => effort.key === destinationKey)!;
-      const affected = new Set<string | null>([destinationKey, ...selected.map((source) => source.effortKey)]);
-      for (const source of selected) {
-        if (source.ticket) affected.add(effortStore.owner("ticket", source.ticket)?.key ?? null);
-        for (const url of source.prUrls) affected.add(effortStore.owner("prUrl", url)?.key ?? null);
-        for (const path of source.checkoutPaths) affected.add(effortStore.owner("checkoutPath", path)?.key ?? null);
-      }
-      if (dispatch.policy().mode === "auto" && affected.has(dispatch.policy().effort_key)) {
-        return { ok: false as const, error: "Turn off automatic dispatch for the affected effort before moving work." };
-      }
       const movingTickets = new Set(selected.flatMap((source) => source.ticket ? [source.ticket] : []));
       const movingPrs = new Set(selected.flatMap((source) => source.prUrls));
       const movingPaths = new Set(selected.flatMap((source) => source.checkoutPaths.filter((path) => effortStore.owner("checkoutPath", path))));
@@ -5931,24 +5698,6 @@ export default async function plugin(bb: BbPluginApi) {
       if (limitedText()) return { started: false, limitedUntil: pollLimitedUntil! };
       forcedRead = refreshInventory().finally(() => { forcedRead = null; });
       return { started: true };
-    },
-    dispatch_set: async ({ mode, effortKey }): Promise<DispatchState> => {
-      const current = await board();
-      if (mode === "auto" && effortKey === null) throw new Error("Choose an effort before enabling automatic dispatch.");
-      if (mode === "auto" && effortKey && effortStore.source(effortKey)?.archivedAt)
-        throw new Error("Restore this effort before enabling automatic dispatch.");
-      const target = mode === "auto" && effortKey ? effortStore.source(effortKey) : null;
-      if (target && piles.get(target).pile !== "active") throw new Error("Resume or reopen this effort before enabling automatic dispatch.");
-      const managed = mode === "auto" && effortKey ? v2Pointer(effortStore.source(effortKey)?.id) : null;
-      if (managed) throw new Error(managed);
-      if (effortKey !== null && !current.groups.some((group) => group.key === effortKey && !current.groups.some((child) => child.parentKey === group.key))) {
-        throw new Error("That effort is no longer on the board. Refresh and choose an effort.");
-      }
-      dispatch.setPolicy(mode, effortKey);
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-      if (mode !== "auto") queueMicrotask(() => void reconcileAllThreadIntents());
-      if (mode === "auto") queueMicrotask(() => void dispatchOne());
-      return (await board()).dispatch;
     },
     // Nothing starts after the end of time, so this is exactly the open runs.
     runs_open: () => runs.recent(Number.MAX_SAFE_INTEGER),
@@ -6024,11 +5773,6 @@ export default async function plugin(bb: BbPluginApi) {
         if (job.status === "queued") return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
         if (!job.threadId) return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
         activeOwnerIds.add(job.threadId);
-      }
-      for (const attempt of dispatch.attempts()) if (canonicalPrUrl(attempt.prUrl) === canonical &&
-        ["launching", "running", "verifying", "needs-you"].includes(attempt.status)) {
-        if (!attempt.threadId) return { ok: false as const, error: "Automatic dispatch is launching a worker for this PR." };
-        activeOwnerIds.add(attempt.threadId);
       }
       const pending = pendingPrThreads.get(canonical);
       if (pending && pending.id !== threadId) {
@@ -6166,13 +5910,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (mode === "subthread" && (!parentId || threadId !== parentId)) {
         return { ok: false as const, error: "Choose this work's current parent, or reopen the action preview." };
       }
-      if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
-        return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
-      }
       const linked = [...new Set([...(await linkedThreads(path)).map((thread) => thread.id), ...(parentId ? [parentId] : [])])];
-      if (advance.reserved(found?.raw.pr?.url ?? "", path) || dispatch.activeFor(path, found?.raw.pr?.url ?? null)) {
-        return { ok: false as const, error: "Automatic dispatch is working on this PR or waiting for a decision." };
-      }
       // Recorded before launch; bound to the dedicated thread when spawn returns.
       const runId = runs.begin({ ...(await runTarget(path)), action, mode, threadId: null });
       let result: Awaited<ReturnType<typeof runAgent>>;

@@ -91,12 +91,9 @@ describe("Assigning PRs to an effort", () => {
       .toEqual({ ok: false, error: "inkwell/folio #314 is in an effort now. Refresh and try again." });
     createEffortPileStore(env.bb.storage.database()).move(pickup, "complete");
     expect(await env.call("classify_assign", { effortKey: pickup.key, prUrls: [url(313)] })).toEqual({ ok: false, error: "Reopen this effort first." });
-    // Automatic dispatch works its effort's PRs unasked, and an archived effort is out of use.
+    // An archived effort is out of use.
     const vault = env.efforts.establish({ sourceKey: "ticket:ABC-360", name: "Vault audits", goal: "", projectId: "", coordinatorState: "none",
       members: { tickets: ["ABC-360"], prUrls: [] } });
-    env.bb.storage.database().prepare("INSERT OR REPLACE INTO dispatch_policy (id, mode, effort_key) VALUES (1, 'auto', ?)").run(vault.key);
-    expect(await env.call("classify_assign", { effortKey: vault.key, prUrls: [url(313)] }))
-      .toEqual({ ok: false, error: "Turn off automatic dispatch for this effort before adding work." });
     env.efforts.setArchived(vault.id, true);
     expect(await env.call("classify_assign", { effortKey: vault.key, prUrls: [url(313)] })).toEqual({ ok: false, error: "Restore this effort first." });
     expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316, 321] });

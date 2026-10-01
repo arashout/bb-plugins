@@ -376,7 +376,7 @@ describe("the 22-PR acceptance case", () => {
     expect(Object.fromEntries(unfinished().map((row) => [PR.indexOf(row.target), [row.phase, row.body.cause]]))).toEqual(expected);
     expect(check()).toEqual(unfinished().map((row) => [PR.indexOf(row.target), 1]));
 
-    // The counts agree and explain each other: 22 current rows; 37 legacy job rows in 15 batches behind them; v2's attempts; no row runs or dispatch.
+    // The counts agree and explain each other: 22 current rows; 37 legacy job rows in 15 batches behind them; v2's attempts; no row runs.
     const final = await Promise.all(efforts.map((effort) => env.roster(effort)));
     expect(final.reduce((sum, item) => sum + item.rows.length, 0)).toBe(22);
     expect(final.map((item) => item.history)).toEqual([{ legacyJobs: 30, legacyPrs: 18, v2Attempts: 2 }, { legacyJobs: 1, legacyPrs: 1, v2Attempts: 0 },
@@ -385,7 +385,7 @@ describe("the 22-PR acceptance case", () => {
     expect([batches.length, batches.reduce((sum, batch) => sum + batch.jobs.length, 0)]).toEqual([15, 37]);
     expect(env.db.prepare(`SELECT count(*) AS count FROM effort_attempts`).get()).toEqual({ count: 3 });
     const board = await env.rpc("board_get", null) as Board;
-    expect([board.runs, board.dispatch.attempts]).toEqual([[], []]);
+    expect(board.runs).toEqual([]);
     // Each instruction's rollup names what is validated and what remains: a ticket holds only through its PRs being Ready or merged.
     for (const item of final) expect(item.rollup?.map((line) => line.split(":")[0])).toEqual(["Outcome", "Validated", "Still needed", "Needs a decision"]);
     const [readerRollup, catalogRollup, vaultRollup] = final.map((item) => item.rollup!);

@@ -88,8 +88,7 @@ export const effortV2PreviewSchema = z.object({
   parent: z.object({ candidates: z.array(parentCandidateSchema), recommended: z.string().nullable(), reason: z.string() }),
   /** Queued jobs are cancelled one by one at opt-in; started or uncertain ones drain. */
   legacy: z.object({ queued: z.array(legacyJobSchema), draining: z.array(legacyJobSchema) }),
-  active: z.object({ runs: z.array(z.object({ prUrl: z.string(), action: z.string(), status: z.string() })),
-    dispatch: z.array(z.object({ prUrl: z.string(), action: z.string(), status: z.string() })) }),
+  active: z.object({ runs: z.array(z.object({ prUrl: z.string(), action: z.string(), status: z.string() })) }),
 });
 export type EffortV2Preview = z.infer<typeof effortV2PreviewSchema>;
 const effortV2SetResultSchema = z.object({ execution: executionSchema, parentThreadId: z.string().nullable(),
@@ -476,7 +475,6 @@ export type EffortV2Deps = {
     /** Cancel one job that never started; false when it has moved on. */
     cancelQueued(batchId: string, jobId: string): boolean;
   };
-  autoDispatches(effortId: string): boolean;
 };
 
 export function createEffortV2(deps: EffortV2Deps) {
@@ -1306,7 +1304,6 @@ export function createEffortV2(deps: EffortV2Deps) {
     const blockers = execution.mode === "v2" ? [] : [
       ...(redirectedFrom ? [`This effort was merged into ${effort.name}. Opt in ${effort.name} instead.`] : []),
       ...(effort.archivedAt ? ["Restore this effort before moving it to its roster."] : []),
-      ...(deps.autoDispatches(effort.id) ? ["Turn off automatic dispatch for this effort before moving it to its roster."] : []),
       // An unresolved launch never starts a second parent, so opting in waits until the thread it started can be linked.
       ...(effort.coordinatorState === "creating" && !coordinator ? ["A coordinator launch is unresolved. Inspect it before moving this effort to its roster."] : []),
     ];
@@ -1315,9 +1312,9 @@ export function createEffortV2(deps: EffortV2Deps) {
     const summary: EffortV2Preview = {
       effort: { id: effort.id, key: effort.key, name: effort.name, coordinatorThreadId: effort.coordinatorThreadId },
       execution, v2Execution, blockers,
-      consequence: execution.mode === "v2" ? "Legacy Advance and dispatch apply to this effort again. Every v2 record is kept."
-        : v2Execution === "on" ? "Legacy Advance and dispatch stop for this effort. v2 claims each PR it works on and launches the work its instruction authorizes."
-        : "Legacy Advance and dispatch stop for this effort. v2 plans work but runs nothing until v2 execution is on.",
+      consequence: execution.mode === "v2" ? "Legacy Advance applies to this effort again. Every v2 record is kept."
+        : v2Execution === "on" ? "Legacy Advance stops for this effort. v2 claims each PR it works on and launches the work its instruction authorizes."
+        : "Legacy Advance stops for this effort. v2 plans work but runs nothing until v2 execution is on.",
       members: { tickets: effort.members.tickets.length, prUrls: effort.members.prUrls.length, prs: rows.length,
         open: rows.filter((row) => row.state !== "done").length },
       parent: { candidates, recommended: (coordinator ?? origin)?.threadId ?? null,
@@ -1327,8 +1324,6 @@ export function createEffortV2(deps: EffortV2Deps) {
       active: {
         runs: sources.runs.filter((run) => onRoster(run.prUrl) && ["running", "needs-you"].includes(run.status))
           .map((run) => ({ prUrl: run.prUrl!, action: run.action, status: run.status })),
-        dispatch: sources.dispatch.filter((attempt) => onRoster(attempt.prUrl) && ["launching", "running", "verifying", "needs-you"].includes(attempt.status))
-          .map(({ prUrl, action, status }) => ({ prUrl, action, status })),
       },
     };
     return { preview: summary, targets };

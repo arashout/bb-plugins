@@ -11,7 +11,6 @@ import { z } from "zod";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
 import type { Pr } from "./contract.js";
-import type { DispatchAttempt } from "./dispatch.js";
 import { dryRunStopRefusal, effortCommandResultSchema, formatTargets, interventionRefusal, legacyRefusal, type CommandRow, type InstructionScope } from "./effort-command.js";
 import { PLANNED_POLL, wakePoll } from "./effort-phase.js";
 import { recipe } from "./effort-recipes.js";
@@ -37,7 +36,7 @@ const actionSchema = z.object({ ok: z.boolean(), why: z.string().nullable() });
 export const rosterRowSchema = z.object({
   n: z.number(), provisional: z.boolean(), target: z.string(), repo: z.string(), number: z.number(), title: z.string(),
   state: z.enum([...USER_STATES, "not-in-instruction"]), cause: z.string(), label: z.string(),
-  owner: z.enum(["you", "ci", "reviewer", "parent", "github", "legacy-job", "run", "dispatch", "thread", "v2"]).nullable(),
+  owner: z.enum(["you", "ci", "reviewer", "parent", "github", "legacy-job", "run", "thread", "v2"]).nullable(),
   /** Included by the instruction without being a member; membership is unchanged. */
   outsideMembership: z.boolean(),
   modifiers: z.array(z.string()),
@@ -154,7 +153,6 @@ export type RosterSources = {
   holds: PrHolds;
   legacy: ReadonlyMap<string, LegacyAttempt>;
   runs: readonly Pick<Run, "id" | "path" | "prUrl" | "status" | "action">[];
-  dispatch: readonly Pick<DispatchAttempt, "id" | "path" | "prUrl" | "status" | "action">[];
   /** Null when thread state is unknown, as it is offline without an export. */
   threads: readonly Pick<ThreadFacts, "id" | "status" | "environmentPath">[] | null;
   tickets(ids: readonly string[]): ReadonlyMap<string, { title: string | null; url: string | null }>;
@@ -237,20 +235,17 @@ function observedNeed(gates: Gates, facts: Pick<AdvanceFacts, "mergeStateStatus"
 const normalizePath = (path: string) => path.replace(/\/+$/u, "");
 const latest = (...times: (number | null | undefined)[]) => times.reduce<number | null>((max, time) => time == null ? max : Math.max(max ?? time, time), null);
 
-export type ActiveWriter = { owner: "run" | "dispatch" | "thread"; ref: string; cause: "worker" | "verifying"; label: string };
+export type ActiveWriter = { owner: "run" | "thread"; ref: string; cause: "worker"; label: string };
 /**
- * Everyone else writing a PR, as stored facts show it: a running action or a live dispatch on the PR or in one of its
- * checkouts, or a thread active in one. The roster shows the first as Doing; v2 waits for all of them. Legacy Advance is read apart.
+ * Everyone else writing a PR, as stored facts show it: a running action on the PR or in one of its checkouts, or a
+ * thread active in one. The roster shows the first as Doing; v2 waits for all of them. Legacy Advance is read apart.
  */
-export function activeWriters(target: string, checkouts: readonly string[], sources: Pick<RosterSources, "runs" | "dispatch" | "threads">): ActiveWriter[] {
+export function activeWriters(target: string, checkouts: readonly string[], sources: Pick<RosterSources, "runs" | "threads">): ActiveWriter[] {
   const paths = new Set(checkouts.map(normalizePath));
   const touches = (prUrl: string | null, path: string | null) => (prUrl !== null && prWorkItemKey(prUrl) === target) || (path !== null && paths.has(normalizePath(path)));
   return [
     ...sources.runs.filter((run) => run.status === "running" && touches(run.prUrl, run.path))
       .map((run): ActiveWriter => ({ owner: "run", ref: String(run.id), cause: "worker", label: `Action running: ${run.action}` })),
-    ...sources.dispatch.filter((attempt) => ["launching", "running", "verifying"].includes(attempt.status) && touches(attempt.prUrl, attempt.path))
-      .map((attempt): ActiveWriter => ({ owner: "dispatch", ref: String(attempt.id), cause: attempt.status === "verifying" ? "verifying" : "worker",
-        label: `Dispatch ${attempt.status}: ${attempt.action}` })),
     ...(sources.threads ?? []).filter((thread) => !["idle", "error"].includes(thread.status) && touches(null, thread.environmentPath))
       .map((thread): ActiveWriter => ({ owner: "thread", ref: thread.id, cause: "worker", label: `Thread ${thread.id} is active in its checkout` })),
   ];

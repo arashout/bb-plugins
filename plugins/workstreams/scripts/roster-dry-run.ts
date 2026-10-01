@@ -17,7 +17,6 @@ import { parseArgs } from "node:util";
 import { createApprovalFeedbackStore } from "../approval-feedback.js";
 import { advanceBatchSchema } from "../bulk-advance.js";
 import { rawUnitSchema } from "../contract.js";
-import { createDispatchStore } from "../dispatch.js";
 import { formatTargets, interpretEffortCommand } from "../effort-command.js";
 import { effortRoster, observedFacts, rosterTargets, type RosterSources } from "../effort-roster.js";
 import { createEffortRosterStore, createPrFactsStore } from "../effort-roster-store.js";
@@ -269,7 +268,6 @@ export async function dryRun(argv: string[], io: Io): Promise<number> {
       holds: createPrHoldStore(db).list(),
       legacy: currentLegacyAttempts(advanceBatches(db)),
       runs: createRunStore(db).recent(Number.MAX_SAFE_INTEGER),
-      dispatch: createDispatchStore(db).attempts(),
       threads,
       tickets: (ids) => new Map([...linear.read(ids)].map(([id, detail]) => [id, { title: detail.title, url: detail.url }])),
       groups: null,
