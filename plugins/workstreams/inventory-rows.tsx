@@ -60,7 +60,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const mine = props.kind === "turn";
           const info = turn ? `${turn.why}${turn.age ? ` · ${turn.age}` : ""}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
           const picked = mine && !!props.selected?.has(line.prUrl);
-          // One thing beside it: a batch sending it now, why the last Address didn't send it, its sent thread, or its re-request.
+          // One thing beside it: a batch sending it now, why the last Address didn't send it, its sent thread, or, off Your turn, its Nudge.
           const note = mine ? props.notes?.get(line.prUrl) ?? null : null;
           const sent = note ? { state: "refused" as const, threadId: null, title: null, detail: note, batchId: null } : mine || line.sent?.threadId ? line.sent : null;
           const live = mine ? props.live?.get(line.prUrl) ?? null : null;

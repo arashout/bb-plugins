@@ -8,7 +8,7 @@ import { createInventoryActions } from "./inventory-actions.js";
 import { inventoryViewSchema, type InventoryRow, type InventoryView } from "./inventory-view.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, type AttentionReason } from "./pr-attention.js";
 import type { Sent } from "./your-turn.js";
-import { actionCall, askKind, onYourTurn, pickRows, sendable, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
+import { actionCall, onYourTurn, pickRows, sendable, INVENTORY_CHANGED, INVENTORY_HOW, inventoryLine, inventoryScreen, LOGIN, parseLogins, QUESTIONS, withOutcome, type InventoryLine, type Outcome,
   type Pending } from "./inventory-view-model.js";
 
 const VIEW = inkwellInventory();
@@ -303,24 +303,24 @@ describe("the PR inventory screen view model", () => {
     expect(action(inFlight, "nudge")).toMatchObject({ enabled: true, label: "Nudge", reviewers: ["mira-l", "theo-k"] });
   });
 
-  it("names the re-request on a Your turn row, for every reviewer it asks again", () => {
+  // Your turn's moves are Address, Refresh, and Dismiss: while a person's feedback waits on you, asking a reviewer again only hands them a
+  // PR you haven't answered. Off Your turn, an answered change request reads Re-request for every reviewer it asks again.
+  it("offers no Nudge or Re-request on a Your turn row, and names the re-request once it leaves", () => {
     const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v, @ines-v", owner: "you", reviewers: ["otto-v", "ines-v"] });
-    const line = find("quill #211", withRow("quill #211", { attention: [rerequest] }));
-    expect(onYourTurn(line)).toBe(true);
+    for (const attention of [[rerequest], [reason({ reviewers: ["mira-l"] }), rerequest]]) {
+      const turn = find("quill #211", withRow("quill #211", { attention }));
+      expect([onYourTurn(turn), action(turn, "nudge")]).toEqual([true, undefined]);
+    }
+    const line = find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null }));
     expect(action(line, "nudge")).toMatchObject({ label: "Re-request @otto-v, @ines-v", title: "Re-request review from @otto-v, @ines-v on quill #211",
       enabled: true, reviewers: ["otto-v", "ines-v"] });
     // The write is the existing nudge, so the server re-adds those reviewers.
     expect(actionCall(rowOf("quill #211"), action(line, "nudge")!)).toEqual({ kind: "rpc", method: "inventory_nudge",
       input: { prUrl: "https://github.com/inkwell/quill/pull/211", reviewers: ["otto-v", "ines-v"] } });
-    const running = screen(withRow("quill #211", { attention: [rerequest] }), { pending: new Map([["https://github.com/inkwell/quill/pull/211", "nudge"]]) })
+    const running = screen(withRow("quill #211", { attention: [rerequest], yourTurn: null }), { pending: new Map([["https://github.com/inkwell/quill/pull/211", "nudge"]]) })
       .groups.flatMap((group) => group.lines).find((item) => item.number === 211)!;
     expect(action(running, "nudge")).toMatchObject({ label: "Re-requesting…", enabled: false });
-    // The server re-requests everyone due or no one, so with an overdue review beside it no Your turn button would ask only the answered
-    // reviewers: it offers none, rather than nudge @mira-l or a click the server refuses.
-    const both = find("quill #211", withRow("quill #211", { attention: [reason({ reviewers: ["mira-l"] }), rerequest] }));
-    expect([onYourTurn(both), action(both, "nudge")]).toEqual([true, undefined]);
-    // Off Your turn, a change request you answered with a push or a reply still reads Re-request; an overdue review beside it keeps Nudge.
-    expect(action(find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null })), "nudge")).toMatchObject({ label: "Re-request @otto-v, @ines-v" });
+    // An overdue review beside it keeps Nudge, for everyone due.
     expect(action(find("quill #211", withRow("quill #211", { attention: [reason({ reviewers: ["mira-l"] }), rerequest], yourTurn: null })), "nudge"))
       .toMatchObject({ label: "Nudge", reviewers: ["mira-l", "otto-v", "ines-v"] });
   });
@@ -429,25 +429,11 @@ describe("the PR inventory screen view model", () => {
     const threads = { why: "1 open thread", since: null, latest: null };
     const answered = find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: threads }));
     expect(answered).toMatchObject({ primary: "thread", steps: [{ text: "Address the review feedback" }, { text: "Re-request review from @otto-v" }] });
-    expect(askKind(answered)).toBe("fix");
     // An approval's notes are yours to confirm, even behind an overdue review; with no feedback waiting, attention keeps its own order.
     const overdue = [reason({}), ...rowOf("folio #301").attention];
     expect(find("folio #301", withRow("folio #301", { attention: overdue }))).toMatchObject({ primary: "confirm-handled",
       steps: [{ text: "Answer the approval's comment" }, { text: "Nudge @mira-l" }] });
     expect(find("folio #301", withRow("folio #301", { attention: overdue, yourTurn: null })).primary).toBe("nudge");
-  });
-
-  // Ask plans the deck's own batch, so it's offered only where that batch takes the row: never where a thread is working now, or on a
-  // held, done, or archived effort's PR, which the server refuses. It reuses the PR's thread, so a PR with none has no Ask to start one.
-  it("asks a Your turn row's own thread for the approval's notes or its fixes, only where the deck's listing takes it", () => {
-    const origin = { id: "thr_folio_301", title: "Spine labels", active: false };
-    expect(askKind(find("folio #301", withRow("folio #301", { threads: { origin, executor: null } })))).toBe("ask");
-    expect(askKind(find("folio #301"))).toBeNull();
-    expect(askKind(find("quill #211"))).toBe("fix");
-    expect(askKind(find("folio #305"))).toBeNull();
-    const working = rowOf("quill #211");
-    expect(askKind(find("quill #211", withRow("quill #211", { threads: { ...working.threads, executor: { ...working.threads.executor!, active: true } } })))).toBeNull();
-    for (const pile of ["held", "done", "archived"] as const) expect(askKind({ ...find("quill #211"), effortPile: pile })).toBeNull();
   });
 
   // Address takes exactly the rows you picked: a click toggles one, Shift takes the run from the last one you clicked, in the order drawn.
@@ -462,14 +448,13 @@ describe("the PR inventory screen view model", () => {
     expect([...pickRows(order, new Set(["z"]), "c", true, null)]).toEqual(["c"]);
   });
 
-  // A batch thread holding the PR is working on its feedback: the row isn't your turn, and offers no ask of its own.
   // A sent PR stays on Your turn only while the rule says so, and Address takes it again only once nothing it sent is under way, which the
   // server's claim enforces too.
   it("keeps a sent PR on Your turn only while its feedback waits, and Address takes it again only once its thread is idle", () => {
     const sent = (state: Sent["state"], patch: Partial<InventoryRow> = {}) => find("quill #211", withRow("quill #211", { sent: { state, threadId: "thr-batch",
       title: "Address feedback on 2 PRs", detail: null, batchId: null }, ...patch }));
     const held = sent("working", { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } });
-    expect([held.addressing, onYourTurn(held), sendable(held), askKind(held)]).toEqual([{ threadId: "thr-batch" }, true, false, null]);
+    expect([held.addressing, onYourTurn(held), sendable(held)]).toEqual([{ threadId: "thr-batch" }, true, false]);
     for (const state of ["sending", "needs-you"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, false]);
     for (const state of ["idle", "refused"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, true]);
     expect(onYourTurn(sent("idle", { yourTurn: null }))).toBe(false);
@@ -483,13 +468,15 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Your turn")).toContain("Bots never put a PR here");
     expect(words.get("Your turn")).toContain("Held PRs stay out");
     expect(words.has("Back to me")).toBe(false);
-    expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
+    // Your turn's moves are Address, Refresh, and Dismiss: no Ask its thread, and no Nudge until you've answered.
+    expect(words.has("Ask its thread")).toBe(false);
     // Address has no listing and no choice of thread: one thread starts, with Undo, and each sent PR links it while the PR is open.
     expect(words.get("Address")).toContain("One thread starts for all of them at once, with 8 s to Undo");
     expect(words.get("Address")).not.toMatch(/confirm|each PR's own/u);
     expect(words.get("Sent")).toContain("Working, Needs you, or Idle");
     expect(words.get("Dismiss")).toContain("until its head moves");
     expect(words.get("Nudge")).toContain("server checks again");
+    expect(words.get("Nudge")).toContain("Your turn offers none");
   });
 
   it("names the roster a v2 effort runs a row from, and each effort's group, with No effort last", () => {

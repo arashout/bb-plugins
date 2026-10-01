@@ -1,19 +1,18 @@
 // All PRs: Your turn, your PRs where a person's feedback waits on you (onYourTurn), by effort, above every other open PR you author or an
-// effort names. Its direct writes are Nudge, one click on a row where the server says it's due (a Your turn row offers none for a reviewer
-// who hasn't answered yet, and any row reads Re-request @login where you've answered), and Dismiss, which hides a Your turn row until its
-// head moves or someone says something new. Your turn rows select (x, a click, Shift for a range; ⇧X or the list's box for all), and
-// Address, or b, starts one batch thread for them at once, with 8 s to Undo. A sent PR links its thread with BB's status for it while the
-// PR is open, on Other open PRs once it leaves Your turn; why one wasn't sent shows on its row. f on a row opens the deck's listing confirm for the PR's own thread. It
-// shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the
-// focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the selection reads those PRs from GitHub again, four at a time;
-// a click on Last read reads every open PR again.
+// effort names. Its direct writes are Nudge, one click on an Other open PRs row where the server says it's due (Re-request @login where
+// you've answered), and Dismiss, which hides a Your turn row until its head moves or someone says something new. Your turn rows offer no
+// other move: they select (x, a click, Shift for a range; ⇧X or the list's box for all), and Address, or b, starts one batch thread for
+// them at once, with 8 s to Undo. A sent PR links its thread with BB's status for it while the PR is open, on Other open PRs once it
+// leaves Your turn; why one wasn't sent shows on its row. It shares the deck's key registry, hint bar, palette, and ? sheet: j and k move
+// between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the
+// selection reads those PRs from GitHub again, four at a time; a click on Last read reads every open PR again.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
+import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
   type Outcome } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
@@ -242,7 +241,6 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
   const readable = !!focused?.actions.some((action) => action.id === "refresh" && action.enabled);
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
-  const fix = focused && askKind(focused) === "fix";
   // Your turn in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row that leaves it is no
   // longer selected.
   const split = screen ? splitInventory(screen) : null;
@@ -254,7 +252,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     anchor.current = line.prUrl;
   };
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : [], ...readable ? ["refresh" as const] : []]),
+    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...readable ? ["refresh" as const] : []]),
       selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
   /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
@@ -270,8 +268,6 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   };
   /** Refresh the selection, else the focused row: four at a time, each row saying what its read got. */
   const reread = () => { void refresh.read(selected.length ? selected.map((line) => line.prUrl) : focused && readable ? [focused.prUrl] : []); };
-  /** Ask a Your turn row's thread to address its feedback: the deck's listing confirm, with the PR's own thread named, then its Undo window. */
-  const ask = (line: InventoryLine) => { const kind = askKind(line); if (kind) void batch.plan(kind, null, [line.prUrl]); };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
@@ -290,7 +286,6 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       }
       // The key opens the deck's listing confirm, which waits out its Undo window; only the row's own Nudge button is one click.
       case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
-      case "fix": if (focused && fix) ask(focused); return;
       // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
       case "refresh": reread(); return;

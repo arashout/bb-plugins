@@ -27,9 +27,8 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
     ["Address", "Select rows with x, a click, or Shift for a range, then Address or b. One thread starts for all of them at once, with 8 s to Undo, and never merges."],
     ["Sent", "A sent row links its thread with BB's status for it: Working, Needs you, or Idle. The link stays while the PR is open, on Other open PRs once it leaves Your turn."],
     ["Dismiss", "Hides a row from Your turn until its head moves or someone says something new."],
-    ["Ask its thread", "f on a row lists what the PR's own thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
-    ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],
+    ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none: you answer first. After a change request you answered, it reads Re-request @login."],
     ["Refresh", "↻ on a row, g, or Refresh on a selection reads those PRs from GitHub again, review threads included. The row says Read just now, or why the read failed."],
     ["Last read", "When the inventory last finished reading GitHub; click it to read every open PR again. A failed read keeps the last available rows visible."],
   ],
@@ -142,12 +141,9 @@ const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handle
 
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 const keyOf = (row: Pick<InventoryRow, "repo" | "number">) => `${row.repo.toLowerCase()}#${row.number}`;
-/**
- * Whom a nudge asks again: every reviewer an overdue request or an answered change request names, as the server's nudge checks them. On
- * Your turn, none while any reviewer who hasn't answered is due too: you answer first, and the server asks everyone due or no one.
- */
-export const nudgees = (row: Pick<InventoryRow, "attention">, turn = false) => turn && row.attention.some((reason) => reason.action === "nudge") ? []
-  : [...new Set(row.attention.filter((reason) => reason.action === "nudge" || reason.action === "rerequest").flatMap((reason) => reason.reviewers))];
+/** Whom a nudge asks again: every reviewer an overdue request or an answered change request names, as the server's nudge checks them. */
+export const nudgees = (row: Pick<InventoryRow, "attention">) =>
+  [...new Set(row.attention.filter((reason) => reason.action === "nudge" || reason.action === "rerequest").flatMap((reason) => reason.reviewers))];
 
 /** The server calls it mergeable now: a merge reason, or "Clear" on an approved PR stacked on nothing; never with feedback to address. */
 function mergeable(row: InventoryRow): boolean {
@@ -236,8 +232,8 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
     blocked ?? (row.head === null ? "No head commit read yet; Refresh first" : null)));
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
   // Asking again after your answer, a change request's move once you pushed or replied, reads Re-request: the same write re-adds the
-  // reviewer.
-  const nudged = nudgees(row, context.turn);
+  // reviewer. While feedback waits on you, nobody is asked again: you answer first.
+  const nudged = context.turn ? [] : nudgees(row);
   const again = !asks("nudge");
   if (nudged.length) actions.push(action("nudge", again ? `Re-request review from ${mentions(nudged)} on ${target}` : `Ask ${mentions(nudged)} again to review ${target}`,
     blocked, { reviewers: nudged, ...again ? { label: context.running === "nudge" ? "Re-requesting…" : `Re-request ${mentions(nudged)}` } : {} }));
@@ -335,17 +331,6 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     yourTurn, dismissed: row.dismissed, addressing, sent,
     depth: 0, branch: null,
   };
-}
-
-/**
- * How a Your turn row asks its PR's thread to address the feedback, through the deck's listing confirm: the approval's notes while they're
- * its next move, else its fixes while its next move is a thread's work that no thread is doing now. Only a PR with a thread already, which
- * the ask reuses: All PRs never starts one. Null where the deck would refuse it.
- */
-export function askKind(line: Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "addressing" | "sent">): "ask" | "fix" | null {
-  if (!waitsOnYou(line) || line.addressing || line.effortPile || !line.threads.length) return null;
-  if (line.primary === "confirm-handled") return "ask";
-  return line.primary === "thread" ? "fix" : null;
 }
 
 type TurnFacts = Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "sent">;

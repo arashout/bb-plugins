@@ -69,16 +69,15 @@ describe("the deck's write safety", () => {
     expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.address\(card\.card\.id, selected\.filter\(\(item\) => !item\.dim && item\.row\?\.yourTurn\)/u);
     expect(source("deck-screen.tsx")).toContain('onClick={() => run({ kind: "action", id: "address" })}');
     // All PRs exposes only Address selected, eligible Nudge buttons, a sent PR's chip, which opens its thread, and a batch's Undo. Its keys
-    // move focus or select; n and f open the same listing confirm as the deck's, and b starts Address selected. Its Nudge button stays one
-    // click, its only direct write besides Address.
+    // move focus or select; n opens the same listing confirm as the deck's, and b starts Address selected. Its Nudge button stays one
+    // click, its only direct write besides Address. Your turn rows ask no thread of their own: f is the deck's alone.
     const inventory = source("inventory-screen.tsx");
     expect(inventory).toMatch(/case "nudge": if \(focused && due\) void batch\.plan\("nudge", null, \[focused\.prUrl\]\); return;/u);
-    expect(inventory).toMatch(/const ask = \(line: InventoryLine\) => \{ const kind = askKind\(line\); if \(kind\) void batch\.plan\(kind, null, \[line\.prUrl\]\); \};/u);
-    expect(inventory).toMatch(/case "fix": if \(focused && fix\) ask\(focused\); return;/u);
     expect(inventory).toMatch(/const address = \(\) => \{ if \(selected\.length\) void batch\.address\(null, selected\.map\(\(line\) => line\.prUrl\)\); \};/u);
     expect(inventory).toMatch(/case "address": address\(\); return;/u);
     expect(inventory).toContain("onClick={onAddress}");
-    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(2);
+    expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(1);
+    expect(inventory).not.toMatch(/case "fix"/u);
     expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge", "inventory_dismiss", "deck_batch_undo"]);
     // Review notes and merges are the deck's alone: no key or button here confirms or merges.
     expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);

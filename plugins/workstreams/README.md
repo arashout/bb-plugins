@@ -202,14 +202,13 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   or Idle. The link stays while the PR is open, on Other open PRs once it
   leaves Your turn. A PR it didn't send says why in one line. The deck's
   selection offers the same.
-  On a PR that has a thread, f lists what that thread gets for you to confirm.
   **Other open PRs** follows, by effort; each row shows the PR's state
   and next step. A change request you answered with a push or a reply waits
   here with **Re-request @login**, and approval notes you answered wait here
   on your Confirm; both still hold the merge, and Address leaves them out.
   **Nudge** appears only where a reviewer has waited long
-  enough, and the server checks again before it sends. A Your turn row offers
-  none for a reviewer who hasn't answered yet. All PRs never confirms
+  enough, and the server checks again before it sends. Your turn rows offer
+  none. All PRs never confirms
   review notes or merges; those run from the effort's card. Each effort's name
   opens its roster.
 - **Efforts admin:** Administer explicitly saved efforts from one list.
