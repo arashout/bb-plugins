@@ -156,13 +156,13 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
-  // Why the last Address left it out; else what Address made of it, its thread linked however it ended, until its feedback clears.
+  // Why the last Address left it out; else what Address made of it, its thread linked however it ended, until a newer batch replaces it,
+  // even once nothing waits on you.
   const left = acted ? null : context.details?.get(item.prUrl) ?? null;
-  const sent = row?.sent && row.sent.state !== "sending" && row.sent.state !== "refused" && (row.addressing || row.yourTurn) && (!acted || acted.kind === "address")
-    ? row.sent : null;
+  const sent = row?.sent && row.sent.state !== "sending" && row.sent.state !== "refused" && (!acted || acted.kind === "address") ? row.sent : null;
+  const chip = sent && sentChip(sent, row!.yourTurn !== null && pile !== "held").text;
   if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Left out: ${left}` };
-  else if (sent) trail = sent.threadId ? { kind: "thread", text: sentChip(sent).text, threadId: sent.threadId }
-    : { kind: "acted", failed: false, undo: null, title: null, text: sentChip(sent).text };
+  else if (sent) trail = sent.threadId ? { kind: "thread", text: chip!, threadId: sent.threadId } : { kind: "acted", failed: false, undo: null, title: null, text: chip! };
   else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
     busy: live.state === "sending", text: live.state === "pending" ? "Queued" : live.state === "refused" ? "Not sent" : live.state === "unknown" ? "May not have sent"
       : ACTED[live.kind][live.state === "sent" ? 1 : 0] };

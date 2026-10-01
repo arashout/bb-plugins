@@ -334,11 +334,31 @@ describe("selecting Your turn PRs to address together", () => {
     // Each ended chip is a button to its thread; Sending's Undo takes the batch back.
     for (const ref of ["inkwell/quill#210", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) expect(rowOf(html, ref)).toMatch(/<button type="button" data-inventory-sent="[\w-]+" title="[^"]+ · open “Address feedback on 5 PRs”"/u);
     expect(rowOf(html, "inkwell/quill#211")).toMatch(/data-inventory-sent="sending"[^>]*>Sending<button type="button"[^>]*>Undo<\/button>/u);
-    // A dispatch refusal says why on its row; feedback cleared takes the row off Your turn, chip and all.
+    // A dispatch refusal says why on its row; feedback cleared takes the row off Your turn, to Other open PRs.
     expect(text(rowOf(selectedPane(new Set(), patched((row) => row.number === 210 ? { sent: sent("refused", "Its effort is on hold. Nothing was started.", null) } : null)),
       "inkwell/quill#210"))).toContain("Not sent: Its effort is on hold. Nothing was started.");
     expect(refs(splitInventory(inventoryScreen(patched((row) => row.number === 155 ? { sent: sent("no-report"), yourTurn: null } : null), { now: NOW, filter: null })).turn)
       .flatMap(([, lines]) => lines)).not.toContain("inkwell/spine#155");
+  });
+
+  // A sent PR whose feedback cleared is the reviewer's turn, not lost: in Other open PRs it keeps its chip and its thread's link, in grey,
+  // with no box to pick it again, and a kindless Blocked from an older build says only that its thread ended.
+  it("keeps a grey chip linking its thread on a sent PR that no longer waits on you, in Other open PRs", () => {
+    const sent = (state: Sent["state"], detail: string | null): Sent => ({ state, threadId: "thr-batch", title: "Address feedback on 5 PRs", detail, batchId: null });
+    const view = patched((row) => row.number === 155 ? { sent: sent("waiting", "@mira-l"), yourTurn: null }
+      : row.number === 318 ? { sent: sent("ended", "The reviewer has not accepted the closed checks"), yourTurn: null } : null);
+    const html = selectedPane(new Set(), view);
+    const other = html.slice(html.indexOf('aria-label="Other open PRs"'));
+    for (const [ref, words] of [["inkwell/spine#155", "Replied · waiting on @mira-l ↗"], ["inkwell/folio#318", "Thread ended · The reviewer has not accepted the closed checks ↗"]]) {
+      const row = rowOf(other, ref);
+      expect(text(row)).toContain(words);
+      expect(row).toMatch(/<button type="button" data-inventory-sent="[\w-]+" title="[^"]+ · open “Address feedback on 5 PRs”" class="[^"]*bg-foreground\/\[0\.05\] text-muted-foreground/u);
+      expect(row).not.toContain("aria-label=\"Select");
+    }
+    expect(boxes(html)).not.toContain("inkwell/spine#155");
+    // While it waits on you, the same kindless block reads red, on Your turn.
+    const waiting = selectedPane(new Set(), patched((row) => row.number === 318 ? { sent: sent("ended", "The reviewer has not accepted the closed checks") } : null));
+    expect(rowOf(waiting.slice(0, waiting.indexOf('aria-label="Other open PRs"')), "inkwell/folio#318")).toMatch(/data-inventory-sent="ended"[^>]*class="[^"]*bg-rose-500\/10[^"]*"[^>]*><span class="truncate">Blocked: The reviewer/u);
   });
 
   // Nothing fails quietly: why nothing started shows on the selection bar, and why each PR was left out shows on its own row.

@@ -191,10 +191,23 @@ describe("a batch thread's result lines", () => {
       { attemptId: "address-4", target: PR_URL }, { attemptId: "address-5", target: PR_URL }, { attemptId: "address-6", target: PR_URL }]);
     expect([...read].map(([id, result]) => [id, result.ok, result.ok && result.changed, result.text])).toEqual([
       ["address-1", true, true, `Reported changed at ${HEAD.slice(0, 7)}`],
-      ["address-2", true, false, "Blocked: The sort order needs a call"],
+      ["address-2", true, false, "Blocked: [product-decision] The sort order needs a call"],
       ["address-3", false, false, `Its result line is for ${other}.`],
       ["address-4", false, false, "2 result lines for this PR; a report has one."],
       ["address-5", false, false, expect.stringContaining("Its result line doesn't read:")],
       ["address-6", false, false, "No result line for this PR."]]);
+  });
+
+  // awaiting and notes came later: a report without them reads as before, one with them keeps them, and the rest stays strict.
+  it("reads awaiting and notes when given and an older report without them, and still refuses an unknown field", () => {
+    const old = batchResults(line({ attemptId: "address-1", outcome: "no-change" }), [{ attemptId: "address-1", target: PR_URL }]).get("address-1")!;
+    expect(old).toMatchObject({ ok: true, changed: true, text: `Reported no-change at ${HEAD.slice(0, 7)}`, envelope: { awaiting: [], notes: [] } });
+    expect(parseCompletion(v1(envelope()), expected())).toMatchObject({ rejection: null, envelope: { awaiting: [], notes: [] } });
+    const now = batchResults(line({ attemptId: "address-1", awaiting: [{ login: "@mira-l", summary: "Has to accept the closed checks" }],
+      notes: ["  A pre-existing\nunpublished commit  "] }), [{ attemptId: "address-1", target: PR_URL }]).get("address-1")!;
+    expect(now).toMatchObject({ ok: true, changed: true, envelope: { awaiting: [{ login: "mira-l", summary: "Has to accept the closed checks" }] },
+      text: `Reported changed at ${HEAD.slice(0, 7)} · waiting on @mira-l · note: A pre-existing unpublished commit` });
+    expect(batchResults(line({ attemptId: "address-1", awaiting: [{ login: "mira-l", mood: "unsure" }] }), [{ attemptId: "address-1", target: PR_URL }]).get("address-1"))
+      .toMatchObject({ ok: false, text: expect.stringContaining("Unrecognized key") });
   });
 });

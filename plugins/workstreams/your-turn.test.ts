@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
+import { batchResults } from "./completion-envelope.js";
+import { RESULT_PREFIX } from "./effort-recipes.js";
 import { sentChip, sentState, turnSummary, yourTurn, type Sent, type SentItem, type SentRun } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
@@ -187,7 +189,7 @@ describe("a sent PR's state", () => {
   const item = (state: SentItem["state"], detail: string | null = null): SentItem => ({ state, detail, batchId: "b-2", confirmedAt: T });
   const run = (status: SentRun["status"], text: string | null = null, startedAt = T + 8_000): SentRun => ({ threadId: "thr-1", status, startedAt,
     finishedAt: status === "running" || status === "needs-you" ? null : startedAt + 60_000, result: status === "done" ? text : null, error: status === "failed" ? text : null });
-  const chip = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentChip(sent).text];
+  const chip = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentChip(sent, true).text];
 
   it("follows the thread through its run, and keeps its link after it ends with a report, a blocker, or none", () => {
     expect(chip(sentState(item("queued"), null, null, null))).toEqual(["sending", null, "Sending"]);
@@ -196,7 +198,7 @@ describe("a sent PR's state", () => {
     expect(chip(sentState(item("sent"), run("needs-you"), null, null))).toEqual(["needs-you", "thr-1", "Needs you"]);
     expect(chip(sentState(item("sent"), run("done", "Reported changed at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · pushed"]);
     expect(chip(sentState(item("sent"), run("done", "Reported no-change at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · replied"]);
-    expect(chip(sentState(item("sent"), run("failed", "Blocked: mira-l asks for a new order"), null, null))).toEqual(["blocked", "thr-1", "Blocked: mira-l asks for a new order"]);
+    expect(chip(sentState(item("sent"), run("failed", "Blocked: mira-l asks for a new order"), null, null))).toEqual(["ended", "thr-1", "Blocked: mira-l asks for a new order"]);
     // Stopped or failed with nothing in its output, or archived or deleted before its output was read: no report, and the link stays.
     for (const text of ["No result line for this PR.", "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read."]) {
       expect(chip(sentState(item("sent"), run("failed", text), null, null))).toEqual(["no-report", "thr-1", "Ended without a report"]);
@@ -215,5 +217,43 @@ describe("a sent PR's state", () => {
     // Feedback that arrived after the thread ended isn't what it answered; feedback from before keeps the link.
     expect(sentState(null, old, null, old.finishedAt! + 1)).toBeNull();
     expect(chip(sentState(null, old, null, old.startedAt - 1))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+  });
+
+  // What a batch thread's report reads as, from its result line through the text its claim keeps to the chip. Red means something stops
+  // the work: a thread that only its reviewer can settle is their turn, and local state the thread didn't make is a note, never a block.
+  const URL = "https://github.com/inkwell/quill/pull/210";
+  const reported = (patch: Record<string, unknown>, waiting = true) => {
+    const line = `${RESULT_PREFIX}${JSON.stringify({ attemptId: "address-1", target: URL, actions: ["address_review_feedback"], outcome: "no-change",
+      headOid: "b".repeat(40), baseOid: "c".repeat(40), ...patch })}`;
+    const report = batchResults(line, [{ attemptId: "address-1", target: URL }]).get("address-1")!;
+    // The server settles the claim done when the report succeeded, failed otherwise, keeping its text either way.
+    const sent = sentState(item("sent"), run(report.ok && report.changed ? "done" : "failed", report.text), null, null)!;
+    return [sent.state, sentChip(sent, waiting).text, sentChip(sent, waiting).tone];
+  };
+
+  it("reads a reply waiting on its reviewer grey, a local-state note grey, a product call amber, and only a real block red", () => {
+    expect(reported({ awaiting: [{ login: "@mira-l", summary: "Hasn't accepted the contract-specific closed checks" }] }))
+      .toEqual(["waiting", "Replied · waiting on @mira-l", "gray"]);
+    expect(reported({ outcome: "changed", notes: ["The checkout had an unpublished commit that diverges from the remote head"] }))
+      .toEqual(["noted", "Done · note: The checkout had an unpublished commit that diverges from the remote head", "gray"]);
+    // Whom it waits on leads when both are there; a block outranks both.
+    expect(reported({ awaiting: [{ login: "mira-l" }, { login: "otto-v" }], notes: ["A stale local commit"] })).toEqual(["waiting", "Replied · waiting on @mira-l, @otto-v", "gray"]);
+    expect(reported({ outcome: "blocked", awaiting: [{ login: "mira-l" }], blockers: [{ kind: "product-decision", summary: "Keep the old sort order?" }] }))
+      .toEqual(["decision", "Needs your call: Keep the old sort order?", "amber"]);
+    for (const kind of ["validation-failed", "access", "environment", "dependency", "scope", "other"]) {
+      expect(reported({ outcome: "blocked", blockers: [{ kind, summary: "npm test fails on main" }] })).toEqual(["blocked", "Blocked: npm test fails on main", "red"]);
+    }
+    // A report from before awaiting and notes reads as it did.
+    expect(reported({})).toEqual(["done", "Done · replied", "green"]);
+  });
+
+  // An older build reported a reviewer's turn and local state blocked, with no kind. Its chip stays red while the PR waits on you, and once
+  // it doesn't, says only that the thread ended, in grey; every chip on a PR that no longer waits on you is grey, its thread linked still.
+  it("greys a kindless Blocked once the PR no longer waits on you, and keeps it red while it does", () => {
+    const legacy = sentState(item("sent"), run("failed", "Blocked: The reviewer has not accepted the closed checks; one thread remains open"), null, null)!;
+    expect(sentChip(legacy, true)).toEqual({ text: "Blocked: The reviewer has not accepted the closed checks; one thread remains open", tone: "red" });
+    expect(sentChip(legacy, false)).toEqual({ text: "Thread ended · The reviewer has not accepted the closed checks; one thread remains open", tone: "gray" });
+    expect(reported({ outcome: "blocked", blockers: [{ kind: "validation-failed", summary: "npm test fails" }] }, false)).toEqual(["blocked", "Blocked: npm test fails", "gray"]);
+    expect(reported({ outcome: "changed" }, false)).toEqual(["done", "Done · pushed", "gray"]);
   });
 });

@@ -28,9 +28,9 @@ export type SimpleRowsProps = {
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
 
-/** A sent PR's one state chip, which opens its thread however it ended; Sending's is Undo instead. */
-function SentChip({ sent, onOpenThread, onUndo }: { sent: Sent; onOpenThread(id: string): void; onUndo?(batchId: string): void }) {
-  const chip = sentChip(sent);
+/** A sent PR's one state chip, which opens its thread however it ended; Sending's is Undo instead. Grey once nothing waits on you. */
+function SentChip({ sent, waiting, onOpenThread, onUndo }: { sent: Sent; waiting: boolean; onOpenThread(id: string): void; onUndo?(batchId: string): void }) {
+  const chip = sentChip(sent, waiting);
   const tone = TONE[chip.tone].chip;
   if (sent.state === "sending") return <span data-inventory-sent="sending" className={cn(CHIP, tone)}>Sending
     {sent.batchId && onUndo ? <button type="button" onClick={() => onUndo(sent.batchId!)} className={cn("rounded-sm font-medium underline", FOCUS)}>Undo</button> : null}</span>;
@@ -58,8 +58,9 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const info = turn ? `${turn.text}${age}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
           const picked = !!turn && !!props.selected?.has(line.prUrl);
           // A Your turn or Comments only row: its feedback, and one thing beside it: why the last Address left it out, what Address made of it, or its re-request.
+          // Any other row Address sent keeps its chip and thread link, grey, beside its Nudge: the PR moved to its reviewer's turn.
           const note = turn ? props.notes?.get(line.prUrl) ?? null : null;
-          const sent = turn && !note ? line.sent : null;
+          const sent = note ? null : line.sent;
           const live = turn ? props.live?.get(line.prUrl) ?? null : null;
           const working = !!turn && !!props.working?.has(line.prUrl);
           const refresh = props.onRefresh ? line.actions.find((action) => action.id === "refresh") : undefined;
@@ -90,8 +91,8 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
               <span aria-hidden className={cn("inline-block leading-none", reading && "motion-safe:animate-spin")}>↻</span></button> : null}
             {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
               : note ? <span role="alert" data-inventory-left title={note} className={cn(CHIP, TONE.red.chip)}><span className="truncate">Left out: {note}</span></span>
-              : sent ? <SentChip sent={sent} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />
-              : nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
+              : sent ? <SentChip sent={sent} waiting={!!turn} onOpenThread={props.onOpenThread} onUndo={props.onUndo} /> : null}
+            {nudge && !(turn && (live || note || sent)) ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
               title={nudge.title} className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", FOCUS)}>{nudge.label}</button> : null}
           </li>;
         })}

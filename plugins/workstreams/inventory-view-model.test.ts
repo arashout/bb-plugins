@@ -488,7 +488,7 @@ describe("the PR inventory screen view model", () => {
     // Address has no listing and no choice of thread: one thread starts, with Undo, and each sent PR keeps its state on Your turn.
     expect(words.get("Address selected")).toContain("One thread starts for all of them 8 s later unless you Undo");
     expect(words.get("Address selected")).not.toMatch(/confirm|each PR's own/u);
-    expect(words.get("State")).toContain("It leaves once GitHub shows the feedback cleared");
+    expect(words.get("State")).toContain("it moves to Other open PRs with its chip in grey");
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EFFECTS, VERBS, WORK_RECIPES, type Effect } from "./effort-command.js";
-import { ADDRESS_ALL_RULE, addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, PR_THREADS_RULE, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
+import { ADDRESS_ALL_RULE, addressBatchPrompt, AWAITING_RULE, LOCAL_STATE_RULE, addressBatchTitle, approvalFeedbackAsk, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, PR_THREADS_RULE, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
   type WorkOrderInput }
   from "./effort-recipes.js";
 import { GATE_IDS } from "./pr-gates.js";
@@ -260,6 +260,22 @@ describe("one batch thread for Your turn feedback", () => {
     expect(text).toContain("Do not merge, deploy, mark ready, request review, or start another thread.");
     expect(text).toContain("for each PR: feedback addressed, feedback unresolved or deferred and why, files changed, and test results");
     expect(text).toContain(`one line per PR, each beginning ${RESULT_PREFIX}`);
+  });
+
+  // A batch thread reported a reviewer's turn and an unpublished commit it found as blocked, and every such PR read red. A thread only its
+  // reviewer can settle is reported under awaiting, local state it didn't make under notes, and only its own unpushed work blocks.
+  it("tells the batch thread a reviewer's turn and local state it didn't make are not blocked, and where to report them", () => {
+    const text = addressBatchPrompt(prs);
+    expect(text).toContain(AWAITING_RULE);
+    expect(text).toContain(LOCAL_STATE_RULE);
+    for (const words of ["only its reviewer can settle", "is not blocked", "list it under awaiting"]) expect(AWAITING_RULE).toContain(words);
+    for (const words of ["pre-existing unpublished commit", "diverged from the remote", "is not a blocker", "under notes", "Only changes you made and couldn't push block."]) {
+      expect(LOCAL_STATE_RULE).toContain(words);
+    }
+    expect(text).toContain("awaiting, [{login, summary}]");
+    expect(text).toContain("notes, [string]");
+    expect(text).toContain("Name a blocker only for validation-failed, access, environment, dependency, scope, or product-decision, a call only I can make.");
+    expect(text).not.toContain("local changes are unpushed");
   });
 
   // The thread opens on its PRs: links first, from the PRs themselves rather than the model, so a reader of the thread list or the
