@@ -195,14 +195,17 @@ export function createInventoryStore(db: InventoryDb, now: () => number = Date.n
       })();
     },
     /**
-     * What a checkout scan saw of PRs: that it read each, and which merged or closed, which leaves the inventory. It never rewrites an open
-     * one: the inventory's poll and Refresh own that row, and its review read, which a scan's PR without one would erase.
+     * What a checkout scan saw of PRs: that it read each the inventory doesn't keep, and which merged or closed, which leaves the inventory.
+     * It neither rewrites an open authored PR nor marks it read: the inventory's poll and Refresh own that row and its read, and a scan's
+     * PR without a review read would erase it.
      */
     observe(prs: readonly Pr[]): void {
       const at = new Date(now()).toISOString();
+      const authored = db.prepare(`SELECT 1 FROM authored_prs WHERE url = ?`);
       db.transaction(() => {
         for (const pr of prs) {
-          (pr.state === "OPEN" ? recordSuccess : recordClosed)(pr.url, at);
+          if (pr.state !== "OPEN") recordClosed(pr.url, at);
+          else if (authored.get(pr.url.toLowerCase()) === undefined) recordSuccess(pr.url, at);
           if (pr.state === "MERGED" && pr.mergedAt) recordMerge({ url: pr.url, at: pr.mergedAt, title: pr.title, headRefName: pr.headRefName });
           if (pr.state !== "OPEN") remove.run(pr.url.toLowerCase());
         }

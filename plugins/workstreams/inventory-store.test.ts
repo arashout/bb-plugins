@@ -178,9 +178,10 @@ describe("authored PR cache coverage", () => {
   });
 
   // The inventory's poll and Refresh own an authored PR's facts. A scan's PR carries no review read of a comment-only PR or a draft, and a
-  // PR with none says nothing waits on you: written over the inventory's, it took the PR off Your turn until the next read.
-  it("records that a checkout scan read an authored PR, and never rewrites it", () => {
-    const { store } = setup(true);
+  // PR with none says nothing waits on you: written over the inventory's, it took the PR off Your turn until the next read. Nor does the
+  // scan mark the row read: the row would say "checked just now" over facts it didn't write, and Refresh would take it for its own read.
+  it("neither rewrites an authored PR a checkout scan read nor marks it read", () => {
+    const { store, tick } = setup(true, true);
     const at = "2026-09-28T10:00:00Z";
     const comment: InventoryEntry = { ...entry(1), pr: { ...entry(1).pr, latestReviews: [{ login: "ines", state: "COMMENTED", submittedAt: at }],
       reviewFeedback: { openThreads: 2, comment: { login: "ines", at }, repliedAt: null, noteAt: null, followUpAt: null } } };
@@ -188,10 +189,15 @@ describe("authored PR cache coverage", () => {
       latestReviews: [{ login: "otto", state: "CHANGES_REQUESTED", submittedAt: at }], approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
       reviewFeedback: { openThreads: 1, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
     store.apply(result([comment, draft]));
+    tick();
+    store.inspect({ entries: [], closed: [], failed: [comment.pr.url], warnings: ["inkwell/folio #1: rate limited"] });
+    tick();
     const scanned = [comment, draft].map(({ pr: { reviewFeedback: _read, approvalFeedback: _approval, ...pr } }): Pr => ({ ...pr, checkConclusions: ["FAILURE"] }));
     store.observe(scanned);
     expect(store.read().entries.map((row) => row.pr)).toEqual([comment.pr, draft.pr]);
-    expect(store.observation(comment.pr.url)?.checkedAt).toBe(new Date(1_000).toISOString());
+    expect([store.observation(comment.pr.url), store.observation(draft.pr.url)]).toEqual([
+      { checkedAt: new Date(1_000).toISOString(), failedAt: new Date(2_000).toISOString(), error: "inkwell/folio #1: rate limited" },
+      { checkedAt: new Date(1_000).toISOString(), failedAt: null, error: null }]);
     // Nor does it date a state the row it left alone doesn't show.
     expect(store.statesSince()).toEqual(new Map());
   });
