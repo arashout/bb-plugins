@@ -1,6 +1,6 @@
 // Three live PRs read as ready, as only red CI, or as off Your turn, while a reviewer's words waited on an answer. Here they are with
-// Inkwell names, run through every view the server and the deck compose: attention, All PRs' state and Your turn, the deck's sections, the
-// legacy board, and the fresh merge preview. While the feedback waits, nothing reads ready and nothing offers or accepts a merge; only your
+// Inkwell names, run through every view the server and the deck compose: attention, All PRs' state and Your turn, the deck's sections,
+// and the fresh merge preview. While the feedback waits, nothing reads ready and nothing offers or accepts a merge; only your
 // reply on the PR clears it; a push never does, a PR that mentions it never does, and a bot's comment neither holds nor answers anything.
 import { describe, expect, it } from "vitest";
 import { mergeVerdict, type LiveMergeFacts } from "./actions.js";
@@ -11,7 +11,6 @@ import { parsePrList } from "./gh.js";
 import { reviewFeedbackOf } from "./ghactions.js";
 import { inventoryRow } from "./inventory-view.js";
 import { inventoryLine } from "./inventory-view-model.js";
-import { pipelineCards } from "./pipeline.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, prAttention, type StateSince } from "./pr-attention.js";
 import { prLifecycle } from "./workstreams.js";
 
@@ -71,12 +70,11 @@ function views({ pr, record, since }: Shape) {
     links: [], attemptThread: null, threads: new Map(), suggestedReviewers: [], lastAction: null, confirmation: null });
   const line = inventoryLine(row, new Map(), { now: NOW, limitedUntil: null });
   const [deck] = deckRows({ now: NOW, efforts: [], rows: [{ ...row, effort: null, pr, tickets: [], decision: null, acted: null }] });
-  const [card] = pipelineCards([{ repo: "inkwell/folio", pr, stale: false }], [], NOW);
   const live: LiveMergeFacts = { state: "OPEN", isDraft: false, reviewDecision: pr.reviewDecision, mergeStateStatus: pr.mergeStateStatus as LiveMergeFacts["mergeStateStatus"],
     headRefOid: pr.headRefOid ?? null, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0,
     approvalNotesComplete: true, approvalFeedback: pr.approvalFeedback!, reviewFeedback: pr.reviewFeedback };
   return { reasons: reasons.map((reason) => reason.kind), status: line.status, primary: line.primary, lineMerge: line.actions.some((action) => action.id === "merge"),
-    yourTurn: row.yourTurn?.why ?? null, section: deck!.row.section, lifecycle: prLifecycle(pr), board: card!.blocker.label, boardAction: card!.action?.kind ?? null,
+    yourTurn: row.yourTurn?.why ?? null, section: deck!.row.section, lifecycle: prLifecycle(pr),
     preview: mergeVerdict(live, record).refusals };
 }
 const WAITS = "An approval comment waits on your answer: reply on the PR or confirm it.";
@@ -84,19 +82,19 @@ const WAITS = "An approval comment waits on your answer: reply on the PR or conf
 describe("feedback to address holds a PR from ready and from merge", () => {
   it("holds an approval whose body asks for more, with no reply, over a worker's evidence, in every view", () => {
     expect(views(bodyComment())).toEqual({ reasons: ["approval-note"], status: "Approval comment to address", primary: "confirm-handled", lineMerge: false,
-      yourTurn: "Approval comment from @mira-l", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
+      yourTurn: "Approval comment from @mira-l", section: "confirm", lifecycle: "approved-with-note",
       preview: [WAITS] });
   });
 
   it("names a conditional approval beside red CI after a push, and keeps it on Your turn", () => {
     expect(views(conditional())).toEqual({ reasons: ["approval-note", "ci-red"], status: "CI failing · approval comment to address", primary: "confirm-handled",
-      lineMerge: false, yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "blocked", board: "CI failing · approval comment to address",
-      boardAction: "advance", preview: ["Approval feedback needs verified follow-up on the current head.", WAITS] });
+      lineMerge: false, yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "blocked",
+      preview: ["Approval feedback needs verified follow-up on the current head.", WAITS] });
     // Green again on that head, with the worker's evidence carried to it, it still waits on the condition: nothing offers the merge.
     const green = conditional({ checkConclusions: ["SUCCESS"], mergeStateStatus: "CLEAN" });
     const carried = { ...green, record: worker(361, PUSHED), pr: verified(green.pr, worker(361, PUSHED)), since: {} };
     expect(views(carried)).toMatchObject({ status: "Approval comment to address", section: "confirm", lifecycle: "approved-with-note", lineMerge: false,
-      boardAction: "advance", preview: [WAITS] });
+      preview: [WAITS] });
   });
 
   // Commits say nothing to a reviewer: a push, even one that fixes the code, leaves the note waiting.
@@ -110,7 +108,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const { pr, record } = bodyComment();
     const replied = { pr: { ...pr, reviewFeedback: { ...pr.reviewFeedback!, repliedAt: iso(NOW - 2 * HOUR) } }, record, since: {} };
     expect(views(replied)).toMatchObject({ reasons: ["merge-waiting"], status: "Ready to merge", primary: "merge", lineMerge: true, yourTurn: null, section: "merge",
-      lifecycle: "awaiting-merge", board: "Clear", boardAction: "merge", preview: [] });
+      lifecycle: "awaiting-merge", preview: [] });
   });
 
   /**
@@ -133,7 +131,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const mentioned = read();
     expect(mentioned).toMatchObject({ repliedAt: null, noteAt: iso(NOW - 30 * HOUR), followUpAt: iso(NOW - 5 * HOUR) });
     expect(shown(mentioned)).toEqual({ reasons: ["approval-note"], status: "Approval comment to address", primary: "confirm-handled", lineMerge: false,
-      yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
+      yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "approved-with-note",
       preview: [WAITS] });
     // ana-w's reply after the note, in the conversation or as a review, answers it.
     const ready = { status: "Ready to merge", yourTurn: null, section: "merge", lineMerge: true, preview: [] };
@@ -161,7 +159,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const { pr, record } = bodyComment();
     const asked = { ...pr.reviewFeedback!, repliedAt: iso(NOW - 20 * HOUR), comment: { login: "pia-r", at: iso(NOW - 5 * HOUR) } };
     expect(views({ pr: { ...pr, reviewFeedback: asked }, record, since: {} })).toMatchObject({ reasons: ["review-comments"], status: "Comment to address",
-      primary: "thread", section: "work", lineMerge: false, lifecycle: "approved-with-comments", boardAction: "advance",
+      primary: "thread", section: "work", lineMerge: false, lifecycle: "approved-with-comments",
       preview: ["A comment from @pia-r waits on your answer."] });
     expect(views({ pr: { ...pr, reviewFeedback: { ...asked, repliedAt: iso(NOW - HOUR) } }, record, since: {} }))
       .toMatchObject({ status: "Ready to merge", section: "merge", preview: [] });

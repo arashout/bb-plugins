@@ -447,37 +447,6 @@ Zoom bands span depth ranges and adapt to the depth the board actually
 collapsed to, so every band boundary reveals something. On a two-level board
 the thresholds are exactly what they were before the hierarchy existed.
 
-## Scoped PR conversations
-
-A scoped PR conversation is one visible BB conversation for an exact selection of
-up to 100 known PR URLs. The immutable scope includes held and remote-only PRs.
-The conversation thread plans and reports; it does not start workers or alter
-the selected PRs. Use the current Pipeline stage, blocker, observation time,
-linked threads, and saved Advance jobs to assess each PR. Legacy Board lifecycle
-names do not replace Pipeline feedback or verified readiness.
-
-To read a conversation, write `{"conversationId":"<id>"}` to a JSON file and
-run `bb plugin rpc call workstreams conversation_get --input-file <path> --json`.
-The result includes the full scope, current cached PR facts, the proposal, and
-saved batch results. Read its `revision` before proposing a change.
-
-List saved conversations with `conversation_list` using
-`{"offset":0,"limit":50}`. The read-only result contains `items` and `total`;
-increase the offset to read later pages. A page accepts at most 100 records.
-Older conversations without a saved initial instruction return an empty
-instruction; their thread and scope remain unchanged.
-
-To propose a later preparation batch, write a JSON file with `conversationId`,
-`expectedRevision`, an ordered `selectedPrUrls` subset, an `instruction` of at
-most 4,000 characters, and `exclusions`. Each excluded scope PR needs one
-`{"prUrl":"<url>","reason":"<reason>"}` entry. An empty subset is valid when
-no preparation is needed. Run
-`bb plugin rpc call workstreams conversation_propose --input-file <path> --json`.
-The server rejects PRs outside the original scope, missing exclusion reasons,
-held PRs in the subset, and stale revisions. Do not invoke `advance_start` or
-`conversation_start` from the conversation thread; no view starts a proposal's
-batch. A new proposal does not cancel queued or running jobs.
-
 ## PR inventory
 
 The inventory lists every open PR you author, and every open PR an unarchived

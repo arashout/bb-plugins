@@ -14,8 +14,6 @@ import { createEffortStore } from "./effort-store.js";
 import type { createEffortV2, EffortCommandResult } from "./effort-v2-server.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
-import { inboxRows } from "./inbox-rows.js";
-import { pipelineCards } from "./pipeline.js";
 import { createPrHoldStore } from "./pr-hold-store.js";
 import type { RunDb } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
@@ -661,22 +659,6 @@ describe("the v2 reconciler's reads beside the board's", () => {
     env.at(MINUTE);
     expect(await env.harness.callRpc("pr_refresh", { prUrl: url(348) })).toMatchObject({ status: "checked" });
     expect(env.row(348)?.dueAt).toBe(START + MINUTE);
-  });
-
-  it("labels the board's card of a PR its roster runs with the roster's state and no legacy action, and leaves an unowned PR's card as it was", async () => {
-    const env = await setup([349], { live: (n) => n === 349 ? { checks: "pending", mergeStateStatus: "BLOCKED" } : conflicting, others: [350] });
-    await env.reconciler.recoverAll();
-    await env.reconciler.tick();
-    expect(env.row(349)).toMatchObject({ phase: "waiting", body: { cause: "ci" } });
-    const board = await env.harness.callRpc("board_get", null) as Board;
-    expect(board.v2Managed).toEqual({ [url(349)]: { effortId: env.effort.id, effortName: "Shelving entry", n: 1, state: "waiting", owner: "ci", modifiers: [] } });
-    const cards = pipelineCards(board.prInventory.entries, [...inboxRows(board, Date.now()).values()].flat(), Date.now(), { holds: board.prHolds, dispatch: board.dispatch,
-      runs: board.runs, observations: board.prObservations, v2: board.v2Managed });
-    const card = (n: number) => cards.find((item) => item.pr?.number === n)!;
-    expect(card(349)).toMatchObject({ blocker: { label: "Managed by Shelving entry roster: Waiting on CI" }, action: null,
-      managed: { effortId: env.effort.id, effortName: "Shelving entry", n: 1, state: "waiting", label: "Waiting on CI" } });
-    // 350 conflicts and belongs to no effort: its card offers Advance, as it always has.
-    expect(card(350)).toMatchObject({ managed: null, blocker: { label: "Conflicts" }, action: { kind: "advance" } });
   });
 
   it("labels a member its instruction let go, and one whose row another effort holds, as not in the instruction, and no card once the effort leaves v2", async () => {

@@ -239,10 +239,9 @@ changing GitHub.
 The scanner and Anthropic naming call live in `host.ts`. `server.ts` handles
 settings, local storage, refresh, enrichment, actions, and the CLI. The grouping
 and lifecycle rules live in `workstreams.ts`; `app.tsx` mounts the effort deck, the PR
-inventory (All PRs), the Map, and Efforts admin. `pipeline.ts` derives PR stages and blockers from
+inventory (All PRs), the Map, and Efforts admin. `pr-stage.ts` derives PR stages and blockers from
 scanned facts.
-`contract.ts` defines the host RPC schema, `work-conversation.ts` stores exact
-conversation scopes, and `skills/workstreams/SKILL.md`
+`contract.ts` defines the host RPC schema, and `skills/workstreams/SKILL.md`
 documents the CLI for agents.
 
 ```sh

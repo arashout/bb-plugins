@@ -7,7 +7,6 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
 import type { AdvanceBatch, AdvancePreview } from "./bulk-advance.js";
-import { cardEffortMoveScope, type CardEffortReady } from "./card-effort.js";
 import type { RawUnit } from "./contract.js";
 import { createDispatchStore } from "./dispatch.js";
 import { createEffortStore, type EstablishedEffort } from "./effort-store.js";
@@ -21,7 +20,6 @@ import { parsePrList } from "./gh.js";
 import { createRunStore, type RunDb } from "./runstore.js";
 import plugin, { type Board } from "./server.js";
 import type { ThreadEffortReady } from "./thread-effort.js";
-import type { WorkConversation } from "./work-conversation.js";
 
 const HOST = "host-inkwell";
 const PROJECT = "proj-inkwell";
@@ -258,17 +256,6 @@ describe("v2 execution fence", () => {
     expect(env.spawn).not.toHaveBeenCalled();
   });
 
-  it("refuses to start a conversation's Advance batch for a v2 PR previewed before opt-in", async () => {
-    const env = await setup();
-    const { conversation } = await env.rpc("conversation_open", { prUrls: [RETURNS], instruction: "Prepare the returns shelf PR." });
-    const proposed = await env.rpc("conversation_propose", { conversationId: conversation.id, expectedRevision: conversation.revision,
-      selectedPrUrls: [RETURNS], exclusions: [], instruction: "Resolve the conflict." }) as WorkConversation;
-    const { preview } = await env.rpc("conversation_preview", { conversationId: proposed.id }) as { preview: AdvancePreview };
-    await env.optIn();
-    await expect(env.rpc("conversation_start", { conversationId: proposed.id, previewToken: preview.token })).rejects.toThrow(`${RETURNS}: ${POINTER}`);
-    expect(await env.rpc("advance_get", null)).toEqual([]);
-  });
-
   it("refuses Auto for a v2 effort and never dispatches its PR under any key, while Auto still repairs a legacy effort's PR", async () => {
     const env = await setup();
     await env.optIn();
@@ -297,14 +284,11 @@ describe("v2 execution fence", () => {
     expect(env.workedOn(RETURNS)).toEqual([]);
   });
 
-  it("places nothing under a v2 effort: no coordinator or controller, a checkout thread refuses, and a card agent starts unplaced with the pointer", async () => {
+  it("places nothing under a v2 effort: no coordinator or controller, and a checkout thread refuses", async () => {
     const env = await setup();
     await env.optIn();
     await expect(env.rpc("thread_start", { path: "/p/folio-12", prompt: "Look at the shelf conflict." })).rejects.toThrow(POINTER);
-    const card = await env.rpc("card_thread_message", { target: { prUrl: RETURNS }, threadId: null, message: "What blocks this PR?" });
-    expect(card).toMatchObject({ ok: true, created: true, warning: expect.stringContaining(POINTER) });
-    expect(env.threads.get(card.threadId)?.parentThreadId).toBeNull();
-    expect(env.spawn.mock.calls.map(([args]) => args.pluginMetadata.role)).toEqual(["context"]);
+    expect(env.spawn).not.toHaveBeenCalled();
     expect(env.store.get(env.returns.id)).toMatchObject({ coordinatorThreadId: null });
     expect(env.store.repoControllers(env.returns.id)).toEqual([]);
   });
@@ -384,9 +368,8 @@ describe("v2 execution fence", () => {
     const env = await setup();
     await env.optIn();
     const move = async (destination: EstablishedEffort) => {
-      const context = await env.rpc("card_effort_context", { prUrl: USED }) as CardEffortReady;
-      expect(await env.rpc("card_effort_move", { target: { prUrl: USED }, destinationKey: destination.key,
-        expectedScope: cardEffortMoveScope(context, destination.key) })).toMatchObject({ ok: true });
+      env.store.transfer(destination.key, { tickets: ["ABC-14"], prUrls: [USED] });
+      expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     };
     await move(env.returns);
     expect(env.work.managedBy(USED)).toBe(env.returns.id);
@@ -724,11 +707,10 @@ describe("v2 claims", () => {
       preview: async () => (await env.preview([RETURNS]))[0],
       agent: () => env.rpc("agent_run", { path: "/p/folio-12", action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Resolve the conflict." }),
       message: () => env.rpc("thread_message", { prUrl: RETURNS, threadId: "thr-author", message: "Also rerun the shelf tests." }),
-      card: () => env.rpc("card_thread_message", { target: { prUrl: RETURNS }, threadId: null, message: "What blocks this PR?" }),
       merge: () => env.rpc("action_merge", { prUrl: RETURNS, sha: HEAD, acknowledgeUnresolved: false }),
     };
     expect(await writes.preview()).toMatchObject({ eligible: false, detail: "Another action or batch already owns this PR" });
-    for (const write of [writes.agent, writes.message, writes.card, writes.merge]) expect(await write()).toEqual({ ok: false, error: CLAIM });
+    for (const write of [writes.agent, writes.message, writes.merge]) expect(await write()).toEqual({ ok: false, error: CLAIM });
     expect([env.spawn.mock.calls, env.send.mock.calls, env.hostCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))]).toEqual([[], [], []]);
     end(env, "A-12");
     expect(await writes.preview()).toMatchObject({ eligible: true });

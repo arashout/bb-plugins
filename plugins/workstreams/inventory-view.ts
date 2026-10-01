@@ -10,7 +10,7 @@ import type { PrObservation } from "./inventory-store.js";
 import { attentionReasonSchema, type AttentionReason } from "./pr-attention.js";
 import { EFFORT_PILES } from "./effort-piles.js";
 import { prHoldSchema, type PrHold } from "./pr-holds.js";
-import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } from "./pipeline.js";
+import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } from "./pr-stage.js";
 import type { ResolvedThreadLink } from "./work-context.js";
 import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
 import { prTarget } from "./ghactions.js";
