@@ -1,9 +1,8 @@
 // review-watch — the Reviews page.
 //
-// Start and Review selected ask the server to spawn threads; Dismiss drops a
-// row. The page never talks to GitHub; the server's poller owns that.
+// Start and Review N ask the server to spawn threads; Dismiss drops a row. The
+// page never talks to GitHub; the server's poller owns that.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import * as HoverCard from "@radix-ui/react-hover-card";
 import {
   definePluginApp,
@@ -14,9 +13,9 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
+import { groupByArea } from "./src/areas";
 import type { QueueItem, Rule } from "./src/types";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -41,12 +40,60 @@ function ruleLabel(rule: Rule): string {
   return SECTIONS.find((section) => section.rule === rule)?.title ?? rule;
 }
 
-function relativeAge(iso: string): string {
-  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
-  return `${Math.round(minutes / (60 * 24))}d ago`;
+// Workstreams' visual vocabulary, copied so the two lists read alike.
+/** The 2px accent ring every control shows on keyboard focus. */
+const RING = "outline-none focus-visible:ring-2 focus-visible:ring-sky-500";
+const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
+const TONE = {
+  blue: "bg-sky-500/10 text-sky-800 dark:text-sky-200",
+  amber: "bg-amber-500/10 text-amber-800 dark:text-amber-200",
+  gray: "bg-foreground/[0.05] text-muted-foreground",
+} as const;
+const CHECKBOX = "size-3.5 shrink-0 accent-sky-600";
+/** Preflight leaves native controls on the arrow cursor; this scopes the pointer to the page. */
+const POINTER_CURSORS = "[&_button:not(:disabled)]:cursor-pointer [&_summary]:cursor-pointer [&_a[href]]:cursor-pointer [&_input[type=checkbox]:not(:disabled)]:cursor-pointer";
+
+/** Each rule as a chip on its row. */
+const RULE_CHIP: Record<Rule, { text: string; tone: keyof typeof TONE }> = {
+  "review-requested": { text: "Review", tone: "blue" },
+  "review-followup": { text: "Follow-up", tone: "amber" },
+};
+
+/** The spinner a control shows while it works; still under reduced motion. */
+const Spin = () => <span aria-hidden className="inline-block leading-none motion-safe:animate-spin">↻</span>;
+
+/** A key badge; on the inverted primary button it takes the button's text color. */
+function Kbd({ children, inverted }: { children: string; inverted?: boolean }) {
+  return <kbd className={cn("inline-block min-w-4 rounded border px-1 text-center font-mono text-[10.5px] leading-[14px]",
+    inverted ? "border-transparent bg-background/20 text-background" : "border-border text-muted-foreground")}>{children}</kbd>;
+}
+
+/** An age: 25s, 52m, 5h, 2d. */
+function age(at: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - at) / 1_000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : seconds < 86_400 ? `${Math.floor(seconds / 3_600)}h` : `${Math.floor(seconds / 86_400)}d`;
+}
+
+/**
+ * The selection after a click on one of `order`'s rows: Shift adds every row
+ * from the last one clicked through this one, in drawn order; otherwise the
+ * click toggles this row. Rows no longer in `order` drop out.
+ */
+function pickRows(order: readonly string[], picked: ReadonlySet<string>, key: string, shift: boolean, anchor: string | null): Set<string> {
+  const next = new Set(order.filter((item) => picked.has(item)));
+  const from = anchor === null ? -1 : order.indexOf(anchor);
+  if (shift && from >= 0) {
+    const [a, b] = [from, order.indexOf(key)].sort((x, y) => x - y);
+    for (const item of order.slice(a, b + 1)) next.add(item);
+  } else if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
+/** Typing in a field is never a shortcut. A checkbox takes no text, so b and esc still act from one. */
+function typingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.isContentEditable ||
+    target.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable]") !== null);
 }
 
 type LastPoll = { at: string; ok: boolean; error?: string } | null;
@@ -152,96 +199,118 @@ function useQueue() {
 
 function ReviewRow({
   item,
+  now,
+  busy,
+  picked = false,
+  onPick,
   onStart,
   onDismiss,
-  selected,
-  onSelect,
-  busy,
 }: {
   item: QueueItem;
+  now: number;
+  busy: boolean;
+  picked?: boolean;
+  /** Absent on archived rows, which never select. */
+  onPick?: (shift: boolean) => void;
   onStart: () => void;
   onDismiss: () => void;
-  selected: boolean;
-  onSelect: (selected: boolean) => void;
-  busy: boolean;
 }) {
   const navigate = useBbNavigate();
   const threadId = item.threadId;
+  const rule = RULE_CHIP[item.rule];
+  const info = `${item.author} · ${item.reason} · ${age(Date.parse(item.updatedAt), now)} ago`;
   return (
-    <li className="flex items-start gap-3 py-3 text-sm transition-colors hover:bg-foreground/[0.025]">
-      {canBatchReview(item) ? (
-        <Checkbox
-          className="mt-0.5"
-          checked={selected}
-          onCheckedChange={(checked) => onSelect(checked === true)}
+    <li className={cn("group flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]")}>
+      {onPick === undefined ? null : canBatchReview(item) ? (
+        <input
+          type="checkbox"
+          checked={picked}
           disabled={busy}
-          aria-label={
-            `Select ${item.repo}#${item.number} for batch review`
-          }
+          aria-label={`Select ${item.repo}#${item.number}`}
+          onChange={() => undefined}
+          onClick={(event) => onPick(event.shiftKey)}
+          className={CHECKBOX}
         />
-      ) : null}
+      ) : <span aria-hidden className="size-3.5 shrink-0" />}
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          {/* UrlLink opens through the client's own BB browser preference. */}
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+          {/* UrlLink opens through the client's own BB browser preference. A
+              long repo name truncates first; the number never does. */}
           <UrlLink
             href={item.url}
-            className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline"
+            title={`${item.repo}#${item.number}`}
+            className={cn("flex min-w-0 max-w-full rounded-sm font-mono text-[11px] text-muted-foreground hover:underline", RING)}
           >
-            {item.repo}#{item.number}
+            <span className="min-w-0 truncate">{item.repo}</span>
+            <span className="shrink-0">#{item.number}</span>
           </UrlLink>
-          <span className="min-w-0 flex-1 truncate font-medium">{item.title}</span>
+          <span className="min-w-0 truncate font-medium" title={item.title}>{item.title}</span>
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {item.author} · {item.reason} · {relativeAge(item.updatedAt)}
-        </p>
-        {item.state === "started" ? (
-          <p className="mt-1 text-xs font-medium text-amber-800 dark:text-amber-200">
-            Review not sent
-          </p>
-        ) : null}
+        <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>
       </div>
+      <span className={cn(CHIP, TONE[rule.tone])}>{rule.text}</span>
+      {item.state === "started" ? <span className={cn(CHIP, TONE.amber)}>Review not sent</span> : null}
       {threadId !== undefined ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn("shrink-0 text-muted-foreground hover:text-foreground")}
+        <button
+          type="button"
           onClick={() => navigate.toThread(threadId)}
+          title="Open its review thread"
+          className={cn(CHIP, TONE.gray, "hover:underline", RING)}
         >
-          <Icon name="ExternalLink" className="size-3.5" />
-          Open thread
-        </Button>
-      ) : item.state !== "queued" ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          Thread unavailable
-        </span>
-      ) : (
-        <Button size="sm" disabled={busy} onClick={onStart}>
+          Open<span aria-hidden>↗</span>
+        </button>
+      ) : item.state === "queued" ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onStart}
+          className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", RING)}
+        >
           Start
-        </Button>
+        </button>
+      ) : (
+        <span className={cn(CHIP, TONE.gray)}>Thread unavailable</span>
       )}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-7 shrink-0 text-muted-foreground hover:text-foreground"
-        aria-label={`Dismiss ${item.repo}#${item.number}`}
+      <button
+        type="button"
         disabled={busy}
         onClick={onDismiss}
+        aria-label={`Dismiss ${item.repo}#${item.number}`}
+        className={cn("shrink-0 rounded px-1 text-[11px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
       >
-        <Icon name="X" className="size-4" />
-      </Button>
+        Dismiss
+      </button>
     </li>
   );
 }
 
-/** The dashed box BB's own list pages use for loading and empty states. */
-function EmptyState({ children }: { children: ReactNode }) {
+/**
+ * A tri-state box over `keys`, as on Workstreams' lists: partial or empty
+ * selects them all, full clears them. No selectable rows keeps its space.
+ */
+function ScopeCheckbox({
+  keys,
+  picked,
+  label,
+  onPick,
+}: {
+  keys: readonly string[];
+  picked: ReadonlySet<string>;
+  label: string;
+  onPick: (keys: readonly string[], select: boolean) => void;
+}) {
+  if (keys.length === 0) return <span aria-hidden className="size-3.5 shrink-0" />;
+  const count = keys.filter((key) => picked.has(key)).length;
+  const full = count === keys.length;
   return (
-    <div
-      role="status"
-      className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground"
-    >
-      {children}
-    </div>
+    <input
+      type="checkbox"
+      checked={full}
+      ref={(element) => { if (element) element.indeterminate = count > 0 && !full; }}
+      aria-label={full ? `Clear ${label}` : `Select ${label}`}
+      onChange={() => onPick(keys, !full)}
+      className={CHECKBOX}
+    />
   );
 }
 
@@ -249,34 +318,38 @@ function ReviewsPage() {
   const { rpc, items, lastPoll, error, report, refetch } = useQueue();
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [batchBusy, setBatchBusy] = useState(false);
-  const [selectedReviewKeys, setSelectedReviewKeys] = useState<string[]>([]);
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
+  const anchor = useRef<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const navigate = useBbNavigate();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const now = Date.now();
   const activeItems = items?.filter(isActiveItem) ?? [];
   const archivedItems = items?.filter((item) => item.state === "archived") ?? [];
-  const eligibleReviewKeys = new Set(
-    items?.filter(canBatchReview).map((item) => item.key),
-  );
-  const activeReviewSelection = selectedReviewKeys.filter((key) =>
-    eligibleReviewKeys.has(key),
-  );
+  const areas = groupByArea(activeItems);
+  // Selectable rows in drawn order: Shift ranges and the section's box use it.
+  const selectable = areas.flatMap((area) => area.items.filter(canBatchReview).map((item) => item.key));
+  const selection = selectable.filter((key) => picked.has(key));
 
   useEffect(() => {
     if (items === null) return;
     const reviewKeys = new Set(
       items.filter(canBatchReview).map((item) => item.key),
     );
-    setSelectedReviewKeys((keys) => keys.filter((key) => reviewKeys.has(key)));
+    setPicked((keys) => new Set([...keys].filter((key) => reviewKeys.has(key))));
   }, [items]);
 
-  const selectReview = (key: string, selected: boolean) => {
-    setSelectedReviewKeys((keys) =>
-      selected
-        ? [...new Set([...keys, key])]
-        : keys.filter((current) => current !== key),
-    );
+  const pick = (key: string, shift: boolean) => {
+    setPicked((keys) => pickRows(selectable, keys, key, shift, anchor.current));
+    anchor.current = key;
   };
+  const pickScope = (keys: readonly string[], select: boolean) => {
+    setPicked((current) => select
+      ? new Set([...current, ...keys])
+      : new Set([...current].filter((key) => !keys.includes(key))));
+  };
+  const clear = () => setPicked(new Set());
 
   const startBatch = (keys: string[]) => {
     if (keys.length < 2) return;
@@ -285,7 +358,7 @@ function ReviewsPage() {
       .call("item_batch_start", { keys })
       .then(
         ({ threadId }) => {
-          setSelectedReviewKeys([]);
+          clear();
           refetch();
           navigate.toThread(threadId);
         },
@@ -299,7 +372,7 @@ function ReviewsPage() {
     rpc
       .call(method, { key })
       .then(({ item }) => {
-        setSelectedReviewKeys((keys) => keys.filter((current) => current !== key));
+        setPicked((keys) => new Set([...keys].filter((current) => current !== key)));
         const threadId = item.threadId;
         if (method === "item_start") {
           if (threadId === undefined) {
@@ -311,6 +384,14 @@ function ReviewsPage() {
         refetch();
       }, report)
       .finally(() => setBusyKey(null));
+  };
+
+  const starting = batchBusy || (busyKey !== null && picked.has(busyKey));
+  // One selected opens its own thread; two or more share one batch thread.
+  const review = () => {
+    if (starting || busyKey !== null) return;
+    if (selection.length === 1) act(selection[0]!, "item_start");
+    else startBatch(selection);
   };
 
   const poll = () => {
@@ -327,108 +408,142 @@ function ReviewsPage() {
       .finally(() => setPolling(false));
   };
 
+  // b reviews the selection and esc clears it, while focus is on this page
+  // (or nowhere) and not in a text field.
+  const shortcut = useRef({ review, clear, count: selection.length });
+  shortcut.current = { review, clear, count: selection.length };
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const root = rootRef.current;
+      const active = document.activeElement;
+      if (!root || (active && active !== document.body && !root.contains(active))) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target)) return;
+      if (shortcut.current.count === 0) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        shortcut.current.clear();
+      } else if (event.key === "b" && !event.repeat) {
+        event.preventDefault();
+        shortcut.current.review();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const rowProps = (item: QueueItem) => ({
+    item,
+    now,
+    busy: batchBusy || busyKey === item.key,
+    onStart: () => act(item.key, "item_start"),
+    onDismiss: () => act(item.key, "item_dismiss"),
+  });
+
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto box-border w-full max-w-3xl px-4 pb-4 pt-3 md:px-5 md:pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">
-            Review requests and follow-ups waiting for you on GitHub. Start
-            opens a thread; nothing is posted to GitHub for you.
-          </p>
-          <div className="flex shrink-0 items-center gap-2">
-            {activeReviewSelection.length > 1 ? (
-              <Button
-                size="sm"
-                disabled={batchBusy || busyKey !== null}
-                onClick={() => startBatch(activeReviewSelection)}
-              >
-                Review selected ({activeReviewSelection.length})
-              </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={polling}
-              onClick={poll}
-              aria-label="Poll GitHub now"
-            >
-              <Icon
-                name={polling ? "Spinner" : "ArrowReloadHorizontal"}
-                className="size-4"
-              />
-              Refresh
-            </Button>
+    <div ref={rootRef} className={cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS)}>
+      <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/70 px-3 py-1">
+        <h1 className="text-[13px] font-semibold">Reviews</h1>
+        <button
+          type="button"
+          disabled={polling}
+          onClick={poll}
+          title={lastPoll === null ? "Check GitHub now" : `Last read ${new Date(lastPoll.at).toLocaleString()} · check GitHub now`}
+          className={cn("ml-auto inline-flex min-w-0 items-center gap-1 rounded text-[11.5px] text-muted-foreground hover:text-foreground disabled:hover:text-inherit", RING)}
+        >
+          {polling ? <Spin /> : <span aria-hidden>↻</span>}
+          <span className="truncate">
+            {lastPoll === null ? "Not read yet" : `Last read ${age(Date.parse(lastPoll.at), now)} ago`}
+          </span>
+        </button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
+        {pollError === null && error === null && (lastPoll === null || lastPoll.ok) ? null : (
+          <div className="grid gap-1 px-4 pt-3 text-[12px]">
+            {pollError === null && error === null ? null : (
+              <p role="alert" className="text-destructive">{pollError ?? error}</p>
+            )}
+            <SyncFailureNotice lastPoll={lastPoll} />
           </div>
-        </div>
-
-        {pollError === null && error === null ? null : (
-          <p role="alert" className="mt-3 text-sm text-destructive">
-            {pollError ?? error}
-          </p>
         )}
-        <SyncFailureNotice lastPoll={lastPoll} />
-
-        <div className="mt-4">
-          {items === null ? (
-            <EmptyState>Loading the queue…</EmptyState>
-          ) : (
-            <>
-              {activeItems.length === 0 ? (
-                <EmptyState>
-                  No review requests or follow-ups need attention. Select
-                  Refresh to check GitHub again.
-                </EmptyState>
-              ) : null}
-              {SECTIONS.map(({ rule, title }) => {
-                const group = activeItems.filter((item) => item.rule === rule);
-                if (group.length === 0) return null;
-                return (
-                  <section key={rule} className="mt-6">
-                    <div className="flex flex-wrap items-center justify-between gap-2 px-4">
-                      <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        {title} <span className="font-normal">{group.length}</span>
-                      </h2>
-                    </div>
-                    <ul className="mt-2 divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-card px-4">
-                      {group.map((item) => (
+        {items === null ? (
+          <p role="status" className="px-4 pt-4 text-[12px] text-muted-foreground">Reading the queue…</p>
+        ) : (
+          <section className="mt-4" aria-label="Waiting on you">
+            <h2 className="mb-2 flex items-center gap-3 px-4 text-[14px] font-semibold">
+              <ScopeCheckbox keys={selectable} picked={picked} label="every review waiting on you" onPick={pickScope} />
+              <span>Waiting on you <span className="font-normal tabular-nums text-muted-foreground">{activeItems.length}</span></span>
+            </h2>
+            {areas.length === 0 ? (
+              <p className="px-4 text-[12px] text-muted-foreground">Nothing waiting on you.</p>
+            ) : (
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
+                {areas.map((area) => (
+                  <section key={area.key} className="min-w-0" aria-label={area.label}>
+                    <h3 className="mb-1 flex min-w-0 items-center gap-3 px-4 text-[11px] font-medium text-muted-foreground">
+                      <ScopeCheckbox
+                        keys={area.items.filter(canBatchReview).map((item) => item.key)}
+                        picked={picked}
+                        label={area.label}
+                        onPick={pickScope}
+                      />
+                      <span className="min-w-0 truncate">
+                        {area.label}
+                        {area.repos.join(", ") === area.label ? null : (
+                          <span className="font-normal text-muted-foreground/70"> · {area.repos.join(", ")}</span>
+                        )}
+                      </span>
+                      <span className="font-normal tabular-nums">{area.items.length}</span>
+                    </h3>
+                    <ul className="min-w-0 divide-y divide-border/50 border-y border-border/50">
+                      {area.items.map((item) => (
                         <ReviewRow
                           key={item.key}
-                          item={item}
-                          busy={batchBusy || busyKey === item.key}
-                          selected={selectedReviewKeys.includes(item.key)}
-                          onSelect={(selected) => selectReview(item.key, selected)}
-                          onStart={() => act(item.key, "item_start")}
-                          onDismiss={() => act(item.key, "item_dismiss")}
+                          {...rowProps(item)}
+                          picked={picked.has(item.key)}
+                          onPick={(shift) => pick(item.key, shift)}
                         />
                       ))}
                     </ul>
                   </section>
-                );
-              })}
-              {archivedItems.length > 0 ? (
-                <section className="mt-8 border-t border-border/60 pt-5">
-                  <h2 className="px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Archived threads <span className="font-normal">{archivedItems.length}</span>
-                  </h2>
-                  <ul className="mt-2 divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-muted/30 px-4">
-                    {archivedItems.map((item) => (
-                      <ReviewRow
-                        key={item.key}
-                        item={item}
-                        busy={batchBusy || busyKey === item.key}
-                        selected={false}
-                        onSelect={() => {}}
-                        onStart={() => act(item.key, "item_start")}
-                        onDismiss={() => act(item.key, "item_dismiss")}
-                      />
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
-            </>
-          )}
-        </div>
+                ))}
+              </div>
+            )}
+            {archivedItems.length > 0 ? (
+              <details className="mt-4">
+                <summary className={cn("mx-4 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>
+                  {archivedItems.length} archived · show
+                </summary>
+                <ul className="mt-2 min-w-0 divide-y divide-border/50 border-y border-border/50 opacity-70">
+                  {archivedItems.map((item) => <ReviewRow key={item.key} {...rowProps(item)} />)}
+                </ul>
+              </details>
+            ) : null}
+          </section>
+        )}
       </div>
+      {selection.length === 0 ? null : (
+        <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
+          <b className="mr-1 font-semibold">{selection.length} selected</b>
+          <button
+            type="button"
+            disabled={starting || busyKey !== null}
+            aria-busy={starting || undefined}
+            onClick={review}
+            title={selection.length === 1 ? "Start a review thread for it" : "Start one thread that reviews them together"}
+            className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background disabled:opacity-45", RING)}
+          >
+            {starting ? <><Spin />Starting…</> : <>Review {selection.length}<Kbd inverted>b</Kbd></>}
+          </button>
+          <span className="flex-1" />
+          <button
+            type="button"
+            onClick={clear}
+            className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", RING)}
+          >
+            Clear<Kbd>esc</Kbd>
+          </button>
+        </div>
+      )}
     </div>
   );
 }
