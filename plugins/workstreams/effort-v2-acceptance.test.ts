@@ -381,7 +381,7 @@ describe("the 22-PR acceptance case", () => {
     expect(final.reduce((sum, item) => sum + item.rows.length, 0)).toBe(22);
     expect(final.map((item) => item.history)).toEqual([{ legacyJobs: 30, legacyPrs: 18, v2Attempts: 2 }, { legacyJobs: 1, legacyPrs: 1, v2Attempts: 0 },
       { legacyJobs: 6, legacyPrs: 3, v2Attempts: 1 }]);
-    const batches = await env.rpc("advance_get", null) as AdvanceBatch[];
+    const batches = (env.db.prepare(`SELECT body FROM advance_batches`).all() as { body: string }[]).map(({ body }) => JSON.parse(body) as { jobs: unknown[] });
     expect([batches.length, batches.reduce((sum, batch) => sum + batch.jobs.length, 0)]).toEqual([15, 37]);
     expect(env.db.prepare(`SELECT count(*) AS count FROM effort_attempts`).get()).toEqual({ count: 3 });
     const board = await env.rpc("board_get", null) as Board;

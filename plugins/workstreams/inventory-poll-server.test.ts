@@ -1,7 +1,6 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
-import { advancePreviewJobSchema } from "./bulk-advance.js";
 import type { Pr, RawUnit } from "./contract.js";
 import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
@@ -13,7 +12,6 @@ import plugin, { type Board } from "./server.js";
 const HOST = "host-inkwell";
 const url = (number: number) => `https://github.com/inkwell/folio/pull/${number}`;
 const HEAD = "a".repeat(40), NEXT = "b".repeat(40);
-const BATCH = "00000000-0000-4000-8000-000000000071", JOB = "00000000-0000-4000-8000-000000000072";
 const pr = (number: number, extra: Record<string, unknown> = {}): Pr => parsePrList(JSON.stringify([{ number, url: url(number), state: "OPEN",
   title: `ABC-${number} Keep shelf order on reload`, isDraft: false, reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
   headRefName: `abc-${number}-shelves`, baseRefName: "main", headRefOid: HEAD, latestReviews: [], reviewRequests: [], statusCheckRollup: [{ conclusion: "SUCCESS" }],
@@ -22,7 +20,7 @@ const listing = (prs: Pr[], extra: Partial<InventoryResult> = {}): InventoryResu
   discoveryComplete: true, repositories: prs.length ? [{ repo: "inkwell/folio", complete: true }] : [], complete: true, warnings: [], ...extra });
 const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githubRepo: "inkwell/folio", branch: "abc-42-shelves", dirty: false,
   ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
-/** A full read of an open PR, as Advance and the roster keep it. */
+/** A full read of an open PR, as the roster keeps it. */
 const advanceFacts = (number: number): AdvanceFacts => ({ prUrl: url(number), number, title: pr(number).title, repo: "inkwell/folio",
   headRefName: `abc-${number}-shelves`, baseRefName: "main", headOid: HEAD, baseOid: "d".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false,
   reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention",
@@ -32,10 +30,9 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
 /**
- * PR #42 is checked out and authored; #43 is authored only. #42 carries a legacy Advance job that never launched, which the legacy
- * refresh rechecks whenever the PR's facts change.
+ * PR #42 is checked out and authored; #43 is authored only.
  */
-async function setup(options: { advanceJob?: boolean } = {}) {
+async function setup() {
   const calls: { method: string; input: unknown }[] = [];
   const state = {
     scanned: pr(42), authored: [pr(42), pr(43)],
@@ -61,17 +58,6 @@ async function setup(options: { advanceJob?: boolean } = {}) {
     if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host method ${method}`);
   } });
-  if (options.advanceJob) {
-    const facts = advanceFacts(42);
-    const db = bb.storage.database();
-    db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
-    const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: JOB, hiddenFromProgress: false, status: "needs-attention",
-      attemptId: null, dedicated: false, previousAttempts: [], threadId: null, path: UNIT.path, checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
-    db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(BATCH, JSON.stringify({ id: BATCH, token: "00000000-0000-4000-8000-000000000073",
-      createdAt: Date.now(), cancelled: false, jobs: [job], facts: { [JOB]: { ...facts, eligible: true, workspace: "create", projectId: "project-folio", hostId: HOST,
-        sourcePath: UNIT.path, path: UNIT.path, effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null } },
-      pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
-  }
   await plugin(bb);
   cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
@@ -88,15 +74,15 @@ async function setup(options: { advanceJob?: boolean } = {}) {
 }
 
 describe("the inventory poll", () => {
-  it("writes one batched read through the board's stores, so the inventory, checkouts, and roster agree, and never rechecks Advance or writes", async () => {
-    const env = await setup({ advanceJob: true });
+  it("writes one batched read through the board's stores, so the inventory, checkouts, and roster agree, and never writes", async () => {
+    const env = await setup();
     const effort = createEffortStore(env.db).establish({ sourceKey: "pr:42", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
       coordinatorState: "none", members: { tickets: [], prUrls: [url(42)] } });
     const checkedAt = (await env.board()).prObservations[url(42)]?.checkedAt;
     const failing = pr(42, { headRefOid: NEXT, statusCheckRollup: [{ conclusion: "FAILURE" }] });
     env.state.polled = listing([failing, pr(43)]);
     await new Promise((resolve) => setTimeout(resolve, 2));
-    // Nothing else: no discovery, no listing per repository, no Advance recheck (which ends by pumping queued legacy work), no write.
+    // Nothing else: no discovery, no listing per repository, no write.
     expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
     const board = await env.board();
     expect(board.prInventory.entries.find((entry) => entry.pr.number === 42)?.pr).toMatchObject({ headRefOid: NEXT, checkConclusions: ["FAILURE"] });
@@ -107,15 +93,6 @@ describe("the inventory poll", () => {
     expect(roster.rows).toMatchObject([{ number: 42, checks: "failed", head: NEXT }]);
     expect(env.spawn).not.toHaveBeenCalled();
     expect(env.send).not.toHaveBeenCalled();
-    // The next legacy refresh sees the facts the poll already stored, yet rechecks the job on the change the poll saw first: the poll
-    // leaves that recheck to it rather than dropping it, and the one after has nothing new to recheck.
-    env.state.scanned = failing;
-    env.state.authored = [failing, pr(43)];
-    for (const expected of [true, false]) {
-      const before = env.calls.length;
-      expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-      expect(env.calls.slice(before).map((call) => call.method).includes("advanceInspect")).toBe(expected);
-    }
   });
 
   it("tells a roster when a poll reads a change to one of its PRs, so its pane needn't refetch on every board signal, and says nothing when a poll finds none", async () => {

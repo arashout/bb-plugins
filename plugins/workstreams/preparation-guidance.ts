@@ -1,6 +1,6 @@
-// Guidance a preparation worker follows, shared by legacy Advance prompts and
-// v2 work orders. Moved byte-for-byte out of preparationPrompt; its test pins
-// the legacy prompts, so an edit here changes both on purpose or not at all.
+// Guidance a v2 preparation worker follows. Moved byte-for-byte out of legacy
+// Advance's preparationPrompt; its test pins each segment to the captured
+// legacy prompts, so an edit here is on purpose or not at all.
 
 /** Branch work: integrate the base, or only verify the checkout when integration wasn't authorized. */
 export const BRANCH_WORK = {

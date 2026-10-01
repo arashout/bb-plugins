@@ -83,7 +83,7 @@ before grouping, even when their checkouts are dirty or ahead of upstream.
 | Waiting | `awaiting-followup` | CHANGES_REQUESTED — the reviewer acted, the ball is with you |
 | Waiting | `awaiting-rereview` | CHANGES_REQUESTED remains in effect, but the author has pushed a newer head, resolved the inline threads, and posted PTAL to the reviewer; wait for another review |
 | Waiting | `approved-with-comments` | APPROVED, with unresolved review threads |
-| Waiting | `approved-with-note` | APPROVED with feedback in the current review that lacks verified resolution for this head; run Advance before merging |
+| Waiting | `approved-with-note` | APPROVED with feedback in the current review that lacks verified resolution for this head; confirm it handled before merging |
 | Waiting | `awaiting-merge` | APPROVED, checks green, nothing outstanding |
 | Waiting | `awaiting-review` | Open PR with no review decision yet |
 | Waiting | `unverified` | Local or GitHub status could not be checked; rescan to verify it |
@@ -113,9 +113,10 @@ Precedence runs top to bottom in that table. Key distinctions:
   genuinely stuck.
 - `approved-with-note` means a reviewer wrote a note with approval. It is
   distinct from `approved-with-comments`, which has unresolved inline comments.
-  Advance checks each current review point against the code and records its
-  worker's evidence, including justified decisions that need no code change.
-  The record applies only to the matching review and head commit. The row reads
+  A v2 worker checks each current review point against the code and records
+  its evidence, including justified decisions that need no code change; your
+  confirmation records yours. The record applies only to the matching review
+  and head commit. The row reads
   ready when that evidence is verified, GitHub still reports approval, checks
   pass, no review threads remain open, and the merge state permits it. The
   approval gate requires no additional reviewer approval or formulaic PR reply.
@@ -763,11 +764,9 @@ bb workstreams v2 set <effort> --mode v2|legacy --revision <n> (--parent <thread
 ```
 
 Moving an effort to its roster never changes membership or reparents a thread.
-From then on, Advance, dispatch, repairs, and agent runs refuse its PRs with
+From then on, dispatch, repairs, and agent runs refuse its PRs with
 "Managed by the <effort> roster; instruct there." `board_get` lists those PRs
-under `v2Managed` with their roster state. The board's cards don't show that
-state yet: they still offer Advance and Fix, and the server refuses both with
-the same message.
+under `v2Managed` with their roster state.
 
 Each row is one of:
 

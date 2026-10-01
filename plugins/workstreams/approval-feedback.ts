@@ -63,17 +63,6 @@ export const APPROVAL_CONFIRMATION_AUDIT_MIGRATION =
   "CREATE TABLE IF NOT EXISTS approval_confirmation_audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, pr_url TEXT NOT NULL, at INTEGER NOT NULL, action TEXT NOT NULL, body TEXT NOT NULL)";
 export const FEEDBACK_REPORT_PREFIX = "Workstreams approval feedback evidence: ";
 
-/** A worker's final report is evidence to check, never a clearance by itself. */
-export function parseFeedbackReport(output: string, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): z.infer<typeof feedbackReportSchema> | null {
-  if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) return null;
-  const lines = output.split(/\r?\n/u).filter((line) => line.startsWith(FEEDBACK_REPORT_PREFIX));
-  if (lines.length !== 1 || lines[0]!.length > 50_000) return null;
-  let raw: unknown;
-  try { raw = JSON.parse(lines[0]!.slice(FEEDBACK_REPORT_PREFIX.length)); } catch { return null; }
-  const parsed = feedbackReportSchema.safeParse(raw);
-  return parsed.success ? validateFeedbackReport(parsed.data, attemptId, snapshot, headOid) : null;
-}
-
 /** Evidence for exactly the feedback on this head: this attempt, head, and fingerprint, one passing finding per source, and no blocker. */
 export function validateFeedbackReport(report: FeedbackReport, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): FeedbackReport | null {
   if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) return null;

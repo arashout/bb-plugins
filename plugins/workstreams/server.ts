@@ -25,7 +25,7 @@ import {
   type RawUnit,
   type Pr,
 } from "./contract.js";
-import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, sameMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
+import { createEffortStore, EFFORT_MIGRATIONS, REPO_CONTROLLER_MIGRATION, establishedEffortSchema, normalizeMembers, type EffortMembers, type EstablishedEffort } from "./effort-store.js";
 import { createEffortPileStore, EFFORT_PILE_MIGRATION, effortPilesContract, type PileMove } from "./effort-piles.js";
 import { createEffortNotesStore, EFFORT_NOTES_MIGRATION, effortNotesContract } from "./effort-notes.js";
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
@@ -151,7 +151,7 @@ import {
 import { startThread } from "./spawn.js";
 import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
 import { dismissalSchema, sentState, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
-import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
+import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
 import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
@@ -170,11 +170,10 @@ import { AGENT_FETCH_MAX, parseAgentAnswer, startLinearFetch } from "./linearage
 import { PIN_AFTER, planClusterAsks, type AskMemory } from "./asks.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
-import { ADVANCE_MIGRATIONS, createAdvanceService, advancePreviewSchema, advanceBatchSchema, advanceRepairPlanSchema, advanceRepairRunSchema, advanceRepairResultSchema, type AdvanceFacts, type AdvanceJob } from "./bulk-advance.js";
+import { ADVANCE_MIGRATIONS, createAdvanceHistory } from "./bulk-advance.js";
 import { APPROVAL_CONFIRMATION_AUDIT_MIGRATION, APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore, feedbackVerificationState,
   feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { confirmReadSchema, type ApprovalHandling, type ConfirmRead } from "./approval-evidence.js";
-import { unansweredFeedback } from "./pr-gates.js";
 import { projectForPath } from "./spawn.js";
 import { DISPATCH_MIGRATIONS, createDispatchStore, selectCandidate, gateStillOpen, type DispatchState } from "./dispatch.js";
 
@@ -414,14 +413,6 @@ export const rpcContract = defineRpcContract({
    * changing nothing, once anything it touched changed since.
    */
   thread_effort_undo: { input: z.object({ threadId: z.string().min(1).max(200), undoId: z.string().uuid() }).strict(), output: threadEffortContextSchema },
-  advance_preview: { input: z.object({ prUrls: z.array(z.string().max(500)).min(1).max(100) }).strict(), output: advancePreviewSchema },
-  advance_start: { input: z.object({ token: z.string().uuid() }).strict(), output: advanceBatchSchema },
-  advance_get: { input: z.null(), output: z.array(advanceBatchSchema) },
-  advance_cancel: { input: z.object({ batchId: z.string().uuid() }).strict(), output: advanceBatchSchema },
-  advance_recheck: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid().optional() }).strict(), output: advanceBatchSchema },
-  advance_progress_visibility: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid(), hidden: z.boolean() }).strict(), output: advanceBatchSchema },
-  advance_repair_plan: { input: z.object({ batchId: z.string().uuid(), jobId: z.string().uuid() }).strict(), output: advanceRepairPlanSchema },
-  advance_repair_run: { input: advanceRepairRunSchema, output: advanceRepairResultSchema },
   /** A full read of every open PR, bypassing the poll's only-if-moved shortcut; not while one runs, or while GitHub's rate limit holds reads (`limitedUntil`). */
   inventory_refresh: { input: z.null(), output: z.object({ started: z.boolean(), limitedUntil: z.number().optional() }) },
   /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
@@ -855,6 +846,8 @@ export default async function plugin(bb: BbPluginApi) {
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);
   const dispatch = createDispatchStore(db);
+  /** Legacy Advance's saved jobs: history, and a fence while any never settled. */
+  const advance = createAdvanceHistory(db);
   const inventory = createInventoryStore(db);
   const prHolds = createPrHoldStore(db);
   const holdMessage = (prUrl: string): string | null => {
@@ -1051,10 +1044,6 @@ export default async function plugin(bb: BbPluginApi) {
       return repo !== null && repo.split("/").length === 2 ? [repo.split("/")[0]!.toLowerCase()] : [];
     }))].sort();
   }
-  function pendingAdvanceJobs() {
-    return advance.list().flatMap((batch) => batch.jobs.filter((job) => !["merged", "closed", "cancelled"].includes(job.status))
-      .map((job) => ({ batchId: batch.id, job })));
-  }
   async function carryEquivalentFeedback(pr: Pick<Pr, "url" | "headRefOid" | "approvalFeedback">, hostId: string): Promise<boolean> {
     const record = approvalFeedback.get(pr.url);
     const head = pr.headRefOid;
@@ -1067,68 +1056,8 @@ export default async function plugin(bb: BbPluginApi) {
         head, proof.priorTreeOid, proof.currentTreeOid, Date.now()) !== null;
     } catch { return false; }
   }
-  const firstAdvanceObservation = new Set<string>();
-  function advanceObservationKey(pr: Pr | null): string {
-    if (!pr) return "";
-    return JSON.stringify([pr.state, pr.isDraft, pr.headRefOid, pr.baseRefOid, pr.reviewDecision, pr.reviewFollowupPosted,
-      pr.mergeable, pr.mergeStateStatus, pr.checkConclusions, pr.unresolvedReviewThreads, pr.reviewRequests,
-      pr.approvalFeedback, pr.approvalFeedbackVerified]);
-  }
-  function previousAdvanceObservations(prs: readonly Pr[]): Map<string, string> {
-    return new Map(prs.map((pr) => {
-      const cached = inventory.get(pr.url)?.pr;
-      return [canonicalPrUrl(pr.url)!, advanceObservationKey(cached ? withApprovalFeedback(cached) : null)] as const;
-    }));
-  }
-  /**
-   * PRs a read that rechecks nothing (the inventory poll) saw change, by PR key, owed to the next pass that rechecks, which would otherwise
-   * compare against facts that read already stored and recheck nothing; true when approval evidence carried across an equal tree.
-   */
-  const owedAdvanceRechecks = new Map<string, boolean>();
-  function oweAdvanceRechecks(prs: readonly Pr[], previous: ReadonlyMap<string, string>, carried: readonly string[]): void {
-    const carriedKeys = new Set(carried.map((url) => canonicalPrUrl(url)));
-    for (const pr of prs) {
-      const key = canonicalPrUrl(pr.url);
-      if (key !== null && (carriedKeys.has(key) || previous.get(key) !== advanceObservationKey(withApprovalFeedback(pr)))) {
-        owedAdvanceRechecks.set(key, owedAdvanceRechecks.get(key) === true || carriedKeys.has(key));
-      }
-    }
-  }
-  async function recheckObservedAdvanceJobs(prs: readonly Pr[], previous: ReadonlyMap<string, string>, carried: readonly string[]): Promise<void> {
-    const carriedKeys = new Set(carried.map((url) => canonicalPrUrl(url)));
-    const jobs = pendingAdvanceJobs();
-    const selected: { batchId: string; jobId: string }[] = [];
-    const selectedIds = new Set<string>();
-    for (const raw of prs) {
-      const pr = withApprovalFeedback(raw);
-      const key = canonicalPrUrl(pr.url);
-      if (key === null) continue;
-      const owed = owedAdvanceRechecks.get(key);
-      owedAdvanceRechecks.delete(key);
-      if (owed) carriedKeys.add(key);
-      const changed = owed !== undefined || previous.get(key) !== advanceObservationKey(pr);
-      for (const { batchId, job } of jobs) {
-        if (canonicalPrUrl(job.prUrl) !== key || ["queued", "launching", "running", "verifying"].includes(job.status) || job.uncertain) continue;
-        const neverLaunched = job.threadId === null && job.attemptId === null && !job.dedicated && job.previousAttempts.length === 0;
-        const first = neverLaunched && job.status === "needs-attention" && !firstAdvanceObservation.has(job.id);
-        if (first) firstAdvanceObservation.add(job.id);
-        const recheckable = job.status !== "needs-attention" || neverLaunched ||
-          job.detail === "PR state changed since verification. Recheck its current state." || carriedKeys.has(key);
-        if (recheckable && (changed || first || carriedKeys.has(key)) && !selectedIds.has(job.id)) {
-          selected.push({ batchId, jobId: job.id });
-          selectedIds.add(job.id);
-        }
-      }
-    }
-    for (let offset = 0; offset < selected.length; offset += 4) {
-      await Promise.all(selected.slice(offset, offset + 4).map(async ({ batchId, jobId }) => {
-        try { await advance.recheck(batchId, jobId, false); }
-        catch (error) { bb.log.warn(`Advance observation recheck: ${String(error).slice(0, 300)}`); }
-      }));
-    }
-  }
   async function refreshInventory(signal = disposal.signal): Promise<boolean> {
-    // A poll holds the inventory for a few seconds; a scan's full refresh, with its Advance rechecks, runs after it rather than not at all.
+    // A poll holds the inventory for a few seconds; a scan's full refresh runs after it rather than not at all.
     await polling;
     if (inventoryRefreshing || inventoryTargeting || signal.aborted) return false;
     inventoryRefreshing = true;
@@ -1148,18 +1077,10 @@ export default async function plugin(bb: BbPluginApi) {
         const pr = refreshedAfter(entry.pr.url, began);
         return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
       }) };
-      const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
-      const carried = await writeAuthored(result, hostId);
+      await writeAuthored(result, hostId);
       effortV2.reconciler.observed(result.entries.map((entry) => entry.pr.url));
       // The whole list: a PR it no longer lists changed too.
       rosterObserved();
-      await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
-      const coverage = new Map(result.repositories.map((repo) => [repo.repo.toLowerCase(), repo.complete]));
-      scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => {
-        const repo = prTarget(job.prUrl)?.slug.toLowerCase();
-        return repo !== undefined && inventory.get(job.prUrl) === undefined &&
-          (coverage.get(repo) === true || (result.discoveryComplete && result.owners.includes(repo.split("/")[0]!) && !coverage.has(repo)));
-      }).map(({ job }) => job.prUrl));
       return result.complete;
     } catch (error) {
       if (!signal.aborted) {
@@ -1176,14 +1097,11 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Write an authored-PR read through the inventory, the approval evidence an equal tree carries, and Advance's view of each PR; returns the PRs whose evidence carried. */
-  async function writeAuthored(result: InventoryResult, hostId: string): Promise<string[]> {
-    const carried: string[] = [];
-    for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
+  /** Write an authored-PR read through the inventory and the approval evidence an equal tree carries. */
+  async function writeAuthored(result: InventoryResult, hostId: string): Promise<void> {
+    for (const entry of result.entries) await carryEquivalentFeedback(entry.pr, hostId);
     inventory.apply(result);
     intentEvidenceVersion++;
-    advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
-    return carried;
   }
 
   /** Checkouts of these PRs show what GitHub just said. */
@@ -1195,38 +1113,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /**
-   * Write one targeted GitHub read through the board's stores: inventory, checkout PRs, and Advance jobs. `legacy` false only writes: it
-   * rechecks no Advance job and rescans no closed PR's checkout, since both end by pumping queued legacy work, and leaves what it saw
-   * change to the next pass that rechecks.
-   */
-  async function applyInspection(result: InventoryInspection, hostId: string, legacy = true): Promise<void> {
-    const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
-    const carried: string[] = [];
-    for (const entry of result.entries) if (await carryEquivalentFeedback(entry.pr, hostId)) carried.push(entry.pr.url);
+  /** Write one targeted GitHub read through the board's stores: inventory and checkout PRs. */
+  async function applyInspection(result: InventoryInspection, hostId: string): Promise<void> {
+    for (const entry of result.entries) await carryEquivalentFeedback(entry.pr, hostId);
     inventory.inspect(result);
     intentEvidenceVersion++;
-    advance.invalidate(result.entries.map((entry) => withApprovalFeedback(entry.pr)));
     effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...result.closed]);
     rosterObserved([...result.entries.map((entry) => entry.pr.url), ...result.closed, ...result.failed]);
-    if (!legacy) {
-      oweAdvanceRechecks(result.entries.map((entry) => entry.pr), previous, carried);
-      return writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
-    }
-    await recheckObservedAdvanceJobs(result.entries.map((entry) => entry.pr), previous, carried);
-    const fresh = new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr]));
-    const closed = new Set(result.closed.map((url) => url.toLowerCase()));
-    // The inventory reports closed URLs without distinguishing merged from
-    // closed. Re-read only those saved jobs; never infer state from absence.
-    const completed = pendingAdvanceJobs().filter(({ job }) => closed.has(job.prUrl.toLowerCase()));
-    for (let index = 0; index < completed.length; index += 4) {
-      await Promise.all(completed.slice(index, index + 4).map(async ({ batchId, job }) => {
-        try { await advance.recheck(batchId, job.id); }
-        catch (error) { bb.log.warn(`Advance terminal refresh: ${String(error).slice(0, 300)}`); }
-      }));
-    }
-    writeCheckoutPrs(fresh);
+    writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
     // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
+    const closed = new Set(result.closed.map((url) => url.toLowerCase()));
     for (const unit of readUnits()) if (unit.pr && closed.has(unit.pr.url.toLowerCase())) rescans.add(unit.path);
   }
 
@@ -1239,8 +1135,7 @@ export default async function plugin(bb: BbPluginApi) {
    * The inventory poll, every `inventoryPollSeconds`: one batched GitHub read of every open PR you author, written through the stores a
    * full refresh writes, so the board, roster, and inventory agree. A PR the search stopped listing is read on its own before it leaves, since
    * the search index can lag a close or an open; so is a PR whose reviews moved since its review threads were read. It only reads: it
-   * rechecks no Advance job, since a recheck ends by pumping queued legacy work, and leaves what it saw change to the next pass that
-   * rechecks; it rescans no checkout, and writes nothing to GitHub or BB. Like every board write, it lets thread intents catch up afterward. A rate limit holds it until GitHub's reset, which each PR's failure names.
+   * rescans no checkout, and writes nothing to GitHub or BB. Like every board write, it lets thread intents catch up afterward. A rate limit holds it until GitHub's reset, which each PR's failure names.
    */
   function pollInventory(signal: AbortSignal): Promise<void> {
     if (inventoryRefreshing || inventoryTargeting || scanning || signal.aborted || Date.now() < (pollLimitedUntil ?? 0)) return polling;
@@ -1285,8 +1180,7 @@ export default async function plugin(bb: BbPluginApi) {
             const pr = refreshedAfter(entry.pr.url, began);
             return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
           }) };
-        const previous = previousAdvanceObservations(result.entries.map((entry) => entry.pr));
-        oweAdvanceRechecks(result.entries.map((entry) => entry.pr), previous, await writeAuthored(result, hostId));
+        await writeAuthored(result, hostId);
         // A closed PR leaves even a repository whose membership this read left partial.
         if (read?.closed.length) inventory.inspect({ entries: [], closed: read.closed, failed: [], warnings: [], merged: read.merged });
         writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
@@ -1312,8 +1206,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** Native BB events invalidate these URLs; GitHub remains the facts source. */
   async function refreshInventoryUrls(prUrls: string[]): Promise<boolean> {
     if (inventoryRefreshing || inventoryTargeting || disposal.signal.aborted) return false;
-    const savedUrls = new Set(pendingAdvanceJobs().map(({ job }) => canonicalPrUrl(job.prUrl)));
-    const urls = [...new Set(prUrls)].filter((url) => inventory.get(url) !== undefined || readUnits().some((unit) => unit.pr?.url === url) || savedUrls.has(canonicalPrUrl(url)));
+    const urls = [...new Set(prUrls)].filter((url) => inventory.get(url) !== undefined || readUnits().some((unit) => unit.pr?.url === url));
     if (urls.length === 0) return true;
     inventoryTargeting = true;
     try {
@@ -1347,15 +1240,12 @@ export default async function plugin(bb: BbPluginApi) {
   function knownPrUrl(raw: string): string | null {
     const url = canonicalPrUrl(raw);
     if (url === null) return null;
-    return inventory.get(url) || readUnits().some((unit) => canonicalPrUrl(unit.pr?.url ?? "") === url) ||
-      pendingAdvanceJobs().some(({ job }) => canonicalPrUrl(job.prUrl) === url) ? url : null;
+    return inventory.get(url) || readUnits().some((unit) => canonicalPrUrl(unit.pr?.url ?? "") === url) ? url : null;
   }
   function pollKnownPrs(): number {
     const urls = [...inventory.read().entries.map((entry) => entry.pr.url),
-      ...readUnits().flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : []),
-      ...pendingAdvanceJobs().map(({ job }) => job.prUrl)].map((url) => canonicalPrUrl(url)).filter((url): url is string => url !== null);
-    const priority = pendingAdvanceJobs().map(({ job }) => canonicalPrUrl(job.prUrl)).filter((url): url is string => url !== null);
-    const selected = prPoll.select(urls, priority);
+      ...readUnits().flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : [])].map((url) => canonicalPrUrl(url)).filter((url): url is string => url !== null);
+    const selected = prPoll.select(urls);
     scheduleInventoryUrls(selected);
     return selected.length;
   }
@@ -1482,11 +1372,8 @@ export default async function plugin(bb: BbPluginApi) {
       writeUnits(result.units);
       recordTransitions(result.units);
       const observedPrs = result.units.flatMap((unit) => unit.pr === null || refreshedAfter(unit.pr.url, began) !== undefined ? [] : [unit.pr]);
-      const previous = previousAdvanceObservations(observedPrs);
       inventory.observe(observedPrs);
-      advance.invalidate(observedPrs.map(withApprovalFeedback));
       rosterObserved(observedPrs.map((pr) => pr.url));
-      await recheckObservedAdvanceJobs(observedPrs, previous, []);
       await refreshInventory(signal);
       warnings.push(...result.warnings);
 
@@ -2274,7 +2161,6 @@ export default async function plugin(bb: BbPluginApi) {
       const links = threadLinks(clusters, pattern);
       const urlsByCluster = new Map(clusters.map((cluster) => [cluster.ticket,
         cluster.units.flatMap((unit) => unit.pr?.state === "OPEN" ? [unit.pr.url] : [])]));
-      const savedJobs = pendingAdvanceJobs().map(({ job }) => job);
       const recentRuns = runs.recent(0, 1_000);
       const attempts = dispatch.attempts();
       const controllers = effortStore.list().flatMap((effort) => [...new Set(effort.members.prUrls.map((url) => prTarget(url)?.slug).filter((repo): repo is string => !!repo))]
@@ -2282,12 +2168,10 @@ export default async function plugin(bb: BbPluginApi) {
           const controller = effortStore.repoController(effort.id, repo);
           return controller?.threadId ? [{ threadId: controller.threadId, urls: effort.members.prUrls.filter((url) => prTarget(url)?.slug === repo) }] : [];
         }));
-      const linkedIds = new Set([...threadFacts.keys(), ...savedJobs.flatMap((job) => job.threadId ? [job.threadId] : []),
-        ...controllers.map((controller) => controller.threadId)]);
+      const linkedIds = new Set([...threadFacts.keys(), ...controllers.map((controller) => controller.threadId)]);
       prFreshness.setLinks([...linkedIds].map((threadId) => ({
         threadId, environmentId: threadEnvironments.get(threadId) ?? null,
         urls: [...new Set([...[...(links.get(threadId)?.keys() ?? [])].flatMap((ticket) => urlsByCluster.get(ticket) ?? []),
-          ...savedJobs.filter((job) => job.threadId === threadId).map((job) => job.prUrl),
           ...recentRuns.filter((run) => run.threadId === threadId && run.prUrl).map((run) => run.prUrl!),
           ...attempts.filter((attempt) => attempt.threadId === threadId).map((attempt) => attempt.prUrl),
           ...controllers.filter((controller) => controller.threadId === threadId).flatMap((controller) => controller.urls),
@@ -2592,7 +2476,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
     v2Signal(thread.id, { kind: "idle" }, true);
-    void advance.signal(thread.id, "idle", lastAssistantText).catch(onThreadError);
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
       if (hasIntent(thread.id)) void reconcileThreadIntent(thread.id).catch(onThreadError);
@@ -2601,7 +2484,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.failed", ({ thread, error }) => {
     signalRuns(thread.id, { kind: "failed", text: null, error });
     v2Signal(thread.id, null, true);
-    void advance.signal(thread.id, "failed").catch(onThreadError);
     onThreadChanged(thread, true).catch(onThreadError);
   });
   bb.events.on("thread.unarchived", ({ thread }) => {
@@ -2609,7 +2491,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.archived", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
-    void advance.signal(thread.id, "gone").catch(onThreadError);
     v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
@@ -2618,7 +2499,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.deleted", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
-    void advance.signal(thread.id, "gone").catch(onThreadError);
     v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
@@ -2628,7 +2508,6 @@ export default async function plugin(bb: BbPluginApi) {
   // A pending interaction IS an event: the agent is waiting on the user.
   bb.events.on("interaction.pending", ({ thread }) => {
     signalRuns(thread.id, { kind: "pending" });
-    void advance.signal(thread.id, "pending").catch(onThreadError);
     v2Signal(thread.id, { kind: "interaction" });
   });
   // A failed turn: v2 asks BB to retry its worker's turn, within a bound. Core's own retries are left to run.
@@ -2677,11 +2556,8 @@ export default async function plugin(bb: BbPluginApi) {
       intentEvidenceVersion++;
       recordTransitions(readUnits());
       const observedPrs = result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]);
-      const previous = previousAdvanceObservations(observedPrs);
       inventory.observe(observedPrs);
-      advance.invalidate(observedPrs.map(withApprovalFeedback));
       rosterObserved(observedPrs.map((pr) => pr.url));
-      await recheckObservedAdvanceJobs(observedPrs, previous, []);
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
       bb.log.info(`rescanned ${paths.length} checkout(s) after row actions finished`);
@@ -4398,213 +4274,6 @@ export default async function plugin(bb: BbPluginApi) {
       return result;
     } finally { if (key) manualPrWrites.delete(key); }
   }
-  async function advanceInspect(prUrl: string, repair = false): Promise<AdvanceFacts> {
-    const units = readUnits();
-    const tracked = units.find((unit) => unit.pr?.url.toLowerCase() === prUrl.toLowerCase())?.pr ?? inventory.get(prUrl)?.pr
-      ?? advance.list().flatMap((batch) => batch.jobs).find((job) => canonicalPrUrl(job.prUrl) === canonicalPrUrl(prUrl));
-    if (!tracked) throw new Error("That PR is no longer tracked. Refresh the backlog.");
-    const target = prTarget(prUrl);
-    if (!target) throw new Error("Invalid tracked PR URL");
-    const hostId = (await bb.sdk.system.config()).primaryHostId;
-    if (!hostId) throw new Error("No primary host is available");
-    const projects = await bb.sdk.projects.list();
-    const candidates = units.filter((unit) => unit.githubRepo?.toLowerCase() === target.slug.toLowerCase())
-      .sort((a, b) => Number(b.pr?.url === prUrl) - Number(a.pr?.url === prUrl) || a.path.localeCompare(b.path));
-    const source = candidates.map((unit) => ({ unit, project: projectForPath(projects, unit.path) }))
-      .find((entry) => entry.project?.hostId === hostId);
-    const localPath = units.find((unit) => unit.pr && canonicalPrUrl(unit.pr.url) === canonicalPrUrl(prUrl))?.path ?? null;
-    const scope = await effortScope(prUrl);
-    const fallback: AdvanceFacts = { prUrl, repo: target.slug, number: tracked.number, title: tracked.title,
-      headOid: "", baseOid: "", baseRefName: tracked.baseRefName ?? "", headRefName: tracked.headRefName ?? "",
-      needsPreparation: false, needsFeedback: false, needsChecks: false, eligible: false, detail: "GitHub inspection failed", workspace: source ? "create" : "unavailable",
-      projectId: source?.project?.projectId ?? null, hostId, sourcePath: source?.unit.path ?? null,
-      path: localPath, effortId: scope?.establishedId ?? null, effortKey: scope?.key ?? null,
-      effortMembers: scope?.members ?? null,
-      reviewDecision: "reviewDecision" in tracked ? tracked.reviewDecision : null,
-      isDraft: "isDraft" in tracked ? tracked.isDraft : false,
-      readiness: "needs-attention", blockedBy: null };
-    try {
-      const result = await host.call("advanceInspect", { prUrl }, { hostId, timeoutMs: 60_000, signal: disposal.signal });
-      if (!result.ok) return { ...fallback, detail: result.error };
-      const facts = result.facts;
-      if (facts.approvalFeedback.status === "present" && facts.headOid) {
-        await carryEquivalentFeedback({ url: prUrl, headRefOid: facts.headOid,
-          approvalFeedback: facts.approvalFeedback }, hostId);
-      }
-      const feedbackClear = feedbackVerified(facts.approvalFeedback, facts.headOid, approvalFeedback.get(prUrl));
-      const needsFeedback = facts.unresolvedThreads > 0 || facts.approvalFeedback.status === "present" && !feedbackClear ||
-        (facts.reviewDecision === "CHANGES_REQUESTED" && facts.reviewFollowupPosted === false);
-      const needsChecks = facts.checks === "failed";
-      const needsWriter = repair || facts.needsPreparation || needsFeedback || needsChecks;
-      // A v2 roster owns the PR by its targets, or by fresh ownership its targets have not caught up with yet.
-      const held = holdMessage(prUrl) ?? v2Managed(prUrl) ?? v2Pointer(scope?.establishedId);
-      const eligible = held === null && facts.state === "OPEN" && facts.approvalFeedback.status !== "unknown" && (!needsWriter || (!facts.isCrossRepository && !!source));
-      // Feedback to address waits on you, not on a worker: it holds Ready without asking for one.
-      const unanswered = unansweredFeedback(facts, approvalFeedback.get(prUrl));
-      const feedbackDetail = facts.approvalFeedback.status === "unknown" ? "Approval feedback history is incomplete; refresh and verify the current review." :
-        facts.approvalFeedback.status === "present" && !feedbackClear ? "Approval feedback needs code and validation evidence for the current head." :
-        unanswered?.length ? "Review feedback waits on your answer: reply on the PR or confirm it." : facts.detail;
-      const detail = held ?? (facts.state !== "OPEN" ? facts.detail : facts.isCrossRepository && needsWriter ? "Fork PRs need manual preparation and review follow-up in this version" : needsWriter && !source ? "No matching scanned repository in a BB project; add it and rescan" : feedbackDetail);
-      return { ...fallback, ...facts, needsFeedback, needsChecks, eligible, detail,
-        readiness: facts.readiness === "ready" && (!feedbackClear || unanswered?.length !== 0) ? "needs-attention" : facts.readiness,
-        blockedBy: facts.basePrNumber === null ? null : `${target.slug}#${facts.basePrNumber}` };
-    } catch (error) { return { ...fallback, detail: `Inspection failed: ${String(error).slice(0, 300)}` }; }
-  }
-  async function advanceRepairLinks(facts: AdvanceFacts, previousThreadId?: string | null) {
-    const links = new Map<string, { id: string; title: string; tier: ThreadTier }>();
-    const offer = (id: string | null, title: string, tier: ThreadTier) => { if (id && !links.has(id)) links.set(id, { id, title, tier }); };
-    const effort = effortStore.owner("prUrl", facts.prUrl);
-    if (effort) for (const worker of effortStore.workers(effort.id, facts.prUrl)) offer(worker.threadId, "PR author or follow-up", "started");
-    for (const run of runs.recent(0, 1_000)) if (run.prUrl?.toLowerCase() === facts.prUrl.toLowerCase()) offer(run.threadId, "Previous PR action", "started");
-    if (facts.path) for (const link of await linkedThreads(facts.path)) offer(link.id, link.title, link.tier);
-    for (const batch of advance.list()) for (const job of batch.jobs) if (job.prUrl.toLowerCase() === facts.prUrl.toLowerCase()) {
-      offer(job.threadId, "Previous Advance worker", "started");
-      for (const attempt of job.previousAttempts) offer(attempt.threadId, "Previous repair worker", "started");
-    }
-    offer(previousThreadId ?? null, "Previous Advance worker", "started");
-    return [...links.values()];
-  }
-  async function advanceRepairCandidates(facts: AdvanceFacts, job: AdvanceJob) {
-    const controller = facts.effortKey ? effortStore.source(facts.effortKey) : null;
-    const repo = controller ? effortStore.repoController(controller.id, facts.repo) : null;
-    const unassigned = facts.effortKey ? null : unassignedPlacement.repo(facts.repo);
-    const parentLinks = repo?.threadId && repo.state === "ready"
-      ? [{ id: repo.threadId, title: "Repository controller", tier: "started" as const }]
-      : unassigned?.threadId && unassigned.state === "ready"
-        ? [{ id: unassigned.threadId, title: "Repository parent", tier: "started" as const }] : [];
-    const links = facts.effortKey ? parentLinks : [...parentLinks, ...await advanceRepairLinks(facts, job.threadId)];
-    const selected = links.filter((link) => link.id !== job.threadId).slice(0, 7);
-    const previous = links.find((link) => link.id === job.threadId);
-    if (previous) selected.push(previous);
-    const candidates = (await Promise.all(selected.map(async (link): Promise<ThreadCandidate | null> => {
-      try {
-        const thread = await bb.sdk.threads.get({ threadId: link.id, include: "environment" });
-        const anchor = link.id === repo?.threadId || link.id === unassigned?.threadId;
-        if (thread.archivedAt !== null || thread.deletedAt !== null || (anchor ? thread.projectId !== (repo?.projectId ?? unassigned?.projectId) : thread.projectId !== facts.projectId)) return null;
-        if (facts.effortKey && (!controller || !repo || repo.state !== "ready" ||
-          thread.parentThreadId !== controller.coordinatorThreadId ||
-          !("environment" in thread) || thread.environment?.hostId !== repo.hostId)) return null;
-        if (!facts.effortKey && anchor && (!unassigned || thread.parentThreadId !== unassigned.parentThreadId ||
-          !("environment" in thread) || (unassigned.hostId !== null && thread.environment?.hostId !== unassigned.hostId))) return null;
-        return { ...link, title: (thread.title ?? thread.titleFallback ?? link.title).slice(0, 200), updatedAt: thread.updatedAt,
-          running: thread.status !== "idle" && thread.status !== "error", contextUsed: null,
-          canSpawnChild: anchor && thread.canSpawnChild };
-      } catch { return null; }
-    }))).filter((candidate): candidate is ThreadCandidate => candidate !== null);
-    return { candidates, recommendation: candidates.length === 0
-      ? { mode: "new" as const, threadId: null, reason: "Create the repository parent, then start a bounded PR repair beneath it." }
-      : recommendThread(facts.needsFeedback ? "address-review" : "resolve-conflicts", candidates, { send: false, subthread: true, contextUsage: false }) };
-  }
-  async function resolveRepoController(facts: AdvanceFacts): Promise<string | null> {
-      if (!facts.effortKey || !facts.effortMembers) return null;
-      if (!facts.projectId) throw new Error("The repository project changed. Preview this PR again.");
-      const current = await effortScope(facts.prUrl);
-      if (!current || current.key !== facts.effortKey || !sameMembers(current.members, facts.effortMembers)) {
-        throw new Error("This PR's effort or cohort changed. Preview it again before launching.");
-      }
-      const placed = await resolvePlacement(facts.repo, facts.projectId, facts.hostId, current);
-      if (facts.effortId && facts.effortId !== placed.effort?.id) throw new Error("This PR moved to another effort. Preview it again.");
-      return placed.parentThreadId;
-  }
-  const advance = createAdvanceService(db, {
-    inspect: advanceInspect,
-    recordFeedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
-    controller: resolveRepoController,
-    assertAdvanceAllowed: (prUrl) => {
-      const held = holdMessage(prUrl) ?? v2Managed(prUrl);
-      if (held) throw new Error(held);
-    },
-    repairCandidates: advanceRepairCandidates,
-    repairSpawn: async (facts, workerPath, prompt, attemptId, mode, parentThreadId) => {
-      if (!facts.projectId) throw new Error("No project is available for this PR repair");
-      if (mode === "subthread" && parentThreadId === null) throw new Error("A repair subthread needs its validated parent.");
-      if (mode === "new" && parentThreadId !== null) throw new Error("A new repair thread cannot specify a parent.");
-      const controllerId = await resolveRepoController(facts);
-      if (facts.effortKey && !controllerId) throw new Error("The repository controller could not be resolved for this effort.");
-      if (!facts.effortKey && await effortScope(facts.prUrl)) throw new Error("This PR was assigned to an effort. Reopen the repair preview before launching.");
-      if (controllerId && parentThreadId && parentThreadId !== controllerId) {
-        throw new Error("The selected repair parent is not this effort's repository controller. Reopen the repair preview.");
-      }
-      const actualParentId = controllerId ?? (await resolvePlacement(facts.repo, facts.projectId, facts.hostId, null)).parentThreadId;
-      if (parentThreadId && parentThreadId !== actualParentId) throw new Error("The selected repair parent is not this repository parent. Reopen the repair preview.");
-      const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: facts.projectId,
-        title: `${facts.repo.split("/").at(-1)} #${facts.number}: repair ${facts.needsFeedback ? "review feedback" : facts.needsPreparation ? "branch preparation" : "validation"}`,
-        prompt: actualParentId ? `${prompt}\nParent context reference: @thread:${actualParentId}. Consult its relevant PR decisions only if the live PR description, review discussion, and code do not establish the intended behavior.` : prompt,
-        environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
-        ...(actualParentId ? { parentThreadId: actualParentId } : {}),
-        pluginMetadata: { advanceJobId: attemptId, role: "advance-repair", prUrl: facts.prUrl } });
-      await placedThread(thread.id, actualParentId);
-      return thread.id;
-    },
-    workspace: async (facts, batchId, jobId) => {
-      if (!facts.sourcePath) throw new Error("No matching repository source is available");
-      const result = await host.call("advanceWorkspace", { sourcePath: facts.sourcePath, prUrl: facts.prUrl,
-        expectedHeadOid: facts.headOid, expectedBaseOid: facts.baseOid, batchId, jobId }, { hostId: facts.hostId, timeoutMs: SCAN_TIMEOUT_MS, signal: disposal.signal });
-      if (!result.ok) throw new Error(result.error);
-      return result;
-    },
-    busyNow: (prUrl, path) => v2Claimed(prUrl, path) !== null || manualPrWrites.has(prUrl.toLowerCase()) || pendingPrThreads.has(prUrl.toLowerCase()) || (path !== null && launchingCheckouts.has(path)) || dispatch.activeFor(path ?? "", prUrl) ||
-      runs.recent(Number.MAX_SAFE_INTEGER).some((run) => (run.prUrl === prUrl || (path !== null && run.path === path)) && ["running", "needs-you"].includes(run.status)),
-    busy: async (prUrl, path, ownThreadId) => {
-      if (v2Claimed(prUrl, path)) return true;
-      const key = prUrl.toLowerCase();
-      const pending = pendingPrThreads.get(key);
-      if (pending && pending.id !== ownThreadId) {
-        try {
-          const thread = await bb.sdk.threads.get({ threadId: pending.id });
-          if ((thread.status !== "idle" && thread.status !== "error") || Date.now() - pending.startedAt < 120_000) return true;
-          pendingPrThreads.delete(key);
-        } catch { return true; }
-      }
-      if (manualPrWrites.has(prUrl.toLowerCase()) || (path !== null && launchingCheckouts.has(path)) || dispatch.activeFor(path ?? "", prUrl) ||
-        runs.recent(Number.MAX_SAFE_INTEGER).some((run) => (run.prUrl === prUrl || (path !== null && run.path === path)) && ["running", "needs-you"].includes(run.status))) return true;
-      if (path === null) return false;
-      const linked = await linkedThreads(path);
-      const live = await Promise.all(linked.filter((thread) => thread.id !== ownThreadId).map(async (thread) => {
-        try { const state = await bb.sdk.threads.get({ threadId: thread.id }); return state.status !== "idle" && state.status !== "error"; }
-        catch { return true; }
-      }));
-      return live.some(Boolean);
-    },
-    spawn: async (facts, workerPath, prompt, jobId) => {
-      if (!facts.projectId) throw new Error("No project is available for the repository worker");
-      if (await effortScope(facts.prUrl)) throw new Error("This PR was assigned to an effort. Preview it again before launching.");
-      const parentThreadId = (await resolvePlacement(facts.repo, facts.projectId, facts.hostId, null)).parentThreadId;
-      const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: facts.projectId, parentThreadId,
-        title: `${facts.repo} PR #${facts.number}`, prompt,
-        environment: { type: "host", hostId: facts.hostId, workspace: { type: "unmanaged", path: workerPath } },
-        pluginMetadata: { advanceJobId: jobId, role: "rebase-worker", prUrl: facts.prUrl } });
-      await placedThread(thread.id, parentThreadId);
-      return thread.id;
-    },
-    send: async (threadId, prompt) => { await sendForRole({ threadId, mode: "queue-if-active", input: [{ type: "text", text: prompt, mentions: [] }] }, "code"); },
-    thread: async (threadId) => {
-      const thread = await bb.sdk.threads.get({ threadId });
-      return { ...thread, reusable: configuredProviderError(thread, await modelFor("code")) === null,
-        output: thread.status === "idle" ? (await bb.sdk.threads.output({ threadId })).output ?? "" : "" };
-    },
-    recover: async (jobId, projectId) => {
-      const matches: string[] = [];
-      for (let offset = 0; ; offset += 100) {
-        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
-        for (const thread of rows) {
-          const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
-          if (metadata.advanceJobId === jobId) matches.push(thread.id);
-        }
-        if (rows.length < 100) return matches;
-      }
-    },
-    changed: () => { bb.realtime.publish(BOARD_CHANGED, { scanning }); effortV2.reconciler.legacyChanged(); },
-    verified: (url, path) => { scheduleInventoryUrls([url]); if (path) rescans.add(path); },
-  });
-  const advanceTimer = setInterval(() => { void advance.tick().catch(onThreadError); }, 30_000);
-  bb.onDispose(() => { clearInterval(advanceTimer); advance.dispose(); });
-
-  queueMicrotask(() => {
-    void advance.tick(true).catch(onThreadError);
-    const scanned = new Set(readUnits().flatMap((unit) => unit.pr ? [canonicalPrUrl(unit.pr.url)] : []));
-    scheduleInventoryUrls(pendingAdvanceJobs().filter(({ job }) => inventory.get(job.prUrl) === undefined && !scanned.has(canonicalPrUrl(job.prUrl))).map(({ job }) => job.prUrl));
-  });
 
   const launchingCheckouts = new Set<string>();
   /** The effort, placement scope, and repository a thread started in this checkout is placed by, as the spawn below reads them. */
@@ -5118,7 +4787,8 @@ export default async function plugin(bb: BbPluginApi) {
         catch { return null; }
       },
       resources: v2Resources,
-      recheckLegacy: async (batchId, jobId) => { await advance.recheck(batchId, jobId, false); },
+      // Advance no longer runs, so an uncertain legacy job never settles; after its rechecks the roster names it a system issue.
+      recheckLegacy: async () => {},
       warn: (message) => bb.log.warn(message),
     },
     execution: {
@@ -5136,11 +4806,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     legacy: {
       jobs: () => advance.list().flatMap((batch) => batch.jobs.map((job) => ({ batchId: batch.id, job }))),
-      cancelQueued: (batchId, jobId) => {
-        const job = advance.get(batchId)?.jobs.find((entry) => entry.id === jobId);
-        if (job?.status !== "queued" || job.uncertain) return false;
-        return advance.progressVisibility(batchId, jobId, true).jobs.find((entry) => entry.id === jobId)?.status === "cancelled";
-      },
+      // Legacy batches are read-only history now.
+      cancelQueued: () => false,
     },
     autoDispatches: (effortId) => dispatch.policy().mode === "auto" && effortStore.source(dispatch.policy().effort_key ?? "")?.id === effortId,
     async sources() {
@@ -5733,10 +5400,7 @@ export default async function plugin(bb: BbPluginApi) {
     recording = next.catch(() => undefined);
     return next;
   };
-  /**
-   * Read one PR from GitHub now, through the board's stores, as they keep it: null once it isn't open. A read-only write-through: it rechecks
-   * no Advance job, since a recheck ends by pumping queued legacy work.
-   */
+  /** Read one PR from GitHub now, through the board's stores, as they keep it: null once it isn't open. */
   async function readPrNow(prUrl: string): Promise<{ ok: true; pr: Pr | null } | { ok: false; error: string }> {
     const hostId = (await bb.sdk.system.config()).primaryHostId;
     if (hostId === null) return { ok: false, error: "No primary BB host is available to read GitHub." };
@@ -5746,7 +5410,7 @@ export default async function plugin(bb: BbPluginApi) {
     catch (error) { return { ok: false, error: String(error).slice(0, 300) }; }
     const pr = result.entries[0]?.pr ?? (result.closed.length ? null : undefined);
     if (pr !== undefined) refreshes.set(prUrl, { began, pr });
-    await applyInspection(result, hostId, false);
+    await applyInspection(result, hostId);
     recordTransitions(readUnits());
     bb.realtime.publish(BOARD_CHANGED, { scanning });
     inventoryChanged();
@@ -5865,14 +5529,6 @@ export default async function plugin(bb: BbPluginApi) {
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
     pr_refresh_many: async ({ prUrls }) => ({ reads: await refreshPrsNow(prUrls) }),
     pr_hold_set: ({ prUrl, held, reason }) => setHold(prUrl, held, reason),
-    advance_preview: ({ prUrls }) => advance.preview(prUrls),
-    advance_start: ({ token }) => advance.start(token),
-    advance_get: () => advance.list(),
-    advance_cancel: ({ batchId }) => advance.cancel(batchId),
-    advance_recheck: ({ batchId, jobId }) => advance.recheck(batchId, jobId),
-    advance_progress_visibility: ({ batchId, jobId, hidden }) => advance.progressVisibility(batchId, jobId, hidden),
-    advance_repair_plan: ({ batchId, jobId }) => advance.repairPlan(batchId, jobId),
-    advance_repair_run: (input) => advance.repairRun(input),
     effort_plan: ({ groupKey }) => effortPlan(groupKey),
     effort_coordinate: async (input) => {
       if (effortStore.source(input.groupKey)?.archivedAt) return { ok: false as const, error: "Restore this effort before coordinating it." };

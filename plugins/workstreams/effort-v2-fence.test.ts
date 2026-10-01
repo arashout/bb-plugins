@@ -1,12 +1,11 @@
 // Once an effort runs on its v2 roster, no legacy launcher may start work on a
 // PR that roster owns, including a PR it owns only through a ticket. Each test
 // pairs the v2 PR with a legacy effort's PR, which must behave exactly as before.
-// Opting in links or starts one parent thread and cancels queued legacy jobs; it
-// never changes membership or reparents a thread.
+// Opting in links or starts one parent thread; it never changes membership or
+// reparents a thread.
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
-import type { AdvanceBatch, AdvancePreview } from "./bulk-advance.js";
 import type { RawUnit } from "./contract.js";
 import { createDispatchStore } from "./dispatch.js";
 import { createEffortStore, type EstablishedEffort } from "./effort-store.js";
@@ -87,7 +86,6 @@ async function setup() {
   /** Each thread's queued messages, waiting behind its active turn. */
   const queued = new Map<string, unknown[]>();
   const hostCalls: { method: string; input: any }[] = [];
-  let failWorkspace = false;
   /** GitHub's live facts for a PR, over the default conflicting ones, and full reads that fail next. */
   const live = new Map<number, Partial<AdvanceFacts>>();
   let failedReads = 0;
@@ -96,7 +94,6 @@ async function setup() {
   /** The interactions waiting on you in each thread. */
   const pending = new Map<string, unknown[]>();
   const retry = vi.fn(async () => ({ ok: true, delivery: "queued", attempt: 2, queuedMessageId: "qm-retry", sendAt: null, turnRequestId: "req-retry" }) as never);
-  const beforeWorkspace = vi.fn(async () => {});
   const beforeGet = vi.fn(async (_threadId: string) => {});
   let spawned = 0;
   const spawn = vi.fn(async (args: Record<string, any>) => {
@@ -153,8 +150,6 @@ async function setup() {
       return { ok: true, facts: { ...facts(n), ...live.get(n) } };
     }
     if (method === "advanceWorkspace") {
-      await beforeWorkspace();
-      if (failWorkspace) return { ok: false, error: "The fetched PR base changed. No checkout was created." };
       const { prUrl, jobId } = input as { prUrl: string; jobId: string };
       return { ok: true, path: `/synthetic/workstreams/folio-${number(prUrl)}/${jobId}`, workerPath: "/synthetic/workstreams/folio",
         sourcePath: `/p/folio-${number(prUrl)}`, created: true };
@@ -180,14 +175,13 @@ async function setup() {
     expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
     await vi.waitFor(() => expect(work.managedBy(RETURNS)).toBe(returns.id));
   };
-  const preview = async (prUrls: string[]) => (await rpc("advance_preview", { prUrls }) as AdvancePreview).jobs;
-  const job = async (prUrl: string) => (await rpc("advance_get", null) as AdvanceBatch[]).flatMap((batch) => batch.jobs)
-    .find((entry) => entry.prUrl === prUrl);
+  /** The roster that fences this PR from every launcher outside v2, as the board reports it; null when none does. */
+  const managed = async (prUrl: string) => (await rpc("board_get", null) as Board).v2Managed[prUrl]?.effortName ?? null;
   const workedOn = (prUrl: string) => [
     ...spawn.mock.calls.filter(([args]) => args.pluginMetadata?.prUrl === prUrl || args.environment?.workspace?.path?.includes(`folio-${prUrl.split("/").at(-1)}`)),
     ...hostCalls.filter((call) => call.method === "advanceWorkspace" && call.input.prUrl === prUrl)];
-  return { bb, harness, db, store, work, returns, used, rpc, optIn, preview, job, workedOn, spawn, send, threads, metadata, turnRequests, queued, hostCalls, beforeWorkspace, beforeGet,
-    runner, reconciler, live, outputs, pending, retry, failWorkspace: (value: boolean) => { failWorkspace = value; }, failReads: (count: number) => { failedReads = count; } };
+  return { bb, harness, db, store, work, returns, used, rpc, optIn, managed, workedOn, spawn, send, threads, metadata, turnRequests, queued, hostCalls, beforeGet,
+    runner, reconciler, live, outputs, pending, retry, failReads: (count: number) => { failedReads = count; } };
 }
 
 describe("v2 execution fence", () => {
@@ -199,62 +193,9 @@ describe("v2 execution fence", () => {
     expect([USED, WRAP].map((prUrl) => env.work.managedBy(prUrl))).toEqual([null, null]);
   });
 
-  it("shows a v2 PR ineligible in Advance with a pointer, starts no work on it, and advances a legacy effort's PR", async () => {
-    const env = await setup();
-    await env.optIn();
-    const jobs = await env.preview([RETURNS, USED]);
-    expect(jobs.map(({ prUrl, eligible, detail }) => ({ prUrl, eligible, detail }))).toEqual([
-      { prUrl: RETURNS, eligible: false, detail: POINTER }, { prUrl: USED, eligible: true, detail: "Resolve branch conflicts" }]);
-    const plan = await env.rpc("advance_preview", { prUrls: [RETURNS, USED] }) as AdvancePreview;
-    const batch = await env.rpc("advance_start", { token: plan.token }) as AdvanceBatch;
-    expect(batch.jobs.find((entry) => entry.prUrl === RETURNS)).toMatchObject({ status: "needs-attention", detail: POINTER });
-    await vi.waitFor(async () => expect(await env.job(USED)).toMatchObject({ status: "running" }));
-    expect(env.workedOn(RETURNS)).toEqual([]);
-    expect(env.workedOn(USED).length).toBeGreaterThan(0);
-  });
 
-  it("stops a legacy job at its last check when opt-in lands while its checkout is being prepared", async () => {
-    const env = await setup();
-    env.beforeWorkspace.mockImplementationOnce(async () => {
-      env.work.setMode(env.returns.id, "v2", 0, (effortId) => effortId === env.returns.id ? [{ target: RETURNS, source: "ticket" }] : []);
-    });
-    const plan = await env.rpc("advance_preview", { prUrls: [RETURNS] }) as AdvancePreview;
-    expect(plan.jobs[0]).toMatchObject({ eligible: true });
-    await env.rpc("advance_start", { token: plan.token });
-    await vi.waitFor(async () => expect(await env.job(RETURNS)).toMatchObject({ status: "needs-attention", uncertain: false,
-      detail: expect.stringContaining(POINTER) }));
-    expect(env.spawn).not.toHaveBeenCalled();
-    expect(env.send).not.toHaveBeenCalled();
-  });
 
-  it("never launches a v2 PR's queued Advance job when the plugin restarts and ticks", async () => {
-    const env = await setup();
-    await env.optIn();
-    saveBatch(env.db, 12, "queued");
-    const restarted = await env.harness.lifecycle.reload(plugin);
-    cleanups.push(() => restarted.harness.lifecycle.dispose());
-    await vi.waitFor(async () => expect((await restarted.harness.callRpc("advance_get", null) as AdvanceBatch[])[0]!.jobs[0])
-      .toMatchObject({ status: "needs-attention", uncertain: false, detail: expect.stringContaining(POINTER) }));
-    expect(env.workedOn(RETURNS)).toEqual([]);
-  });
 
-  it("refuses to plan or run an Advance repair for a v2 PR, even from a repair previewed before opt-in", async () => {
-    const env = await setup();
-    env.failWorkspace(true);
-    const plan = await env.rpc("advance_preview", { prUrls: [RETURNS] }) as AdvancePreview;
-    const batch = await env.rpc("advance_start", { token: plan.token }) as AdvanceBatch;
-    await vi.waitFor(async () => expect(await env.job(RETURNS)).toMatchObject({ status: "needs-attention" }));
-    env.failWorkspace(false);
-    const ids = { batchId: batch.id, jobId: batch.jobs[0]!.id };
-    const repair = await env.rpc("advance_repair_plan", ids) as { token: string };
-    await env.optIn();
-    const before = await env.job(RETURNS);
-    await expect(env.rpc("advance_repair_plan", ids)).rejects.toThrow(POINTER);
-    await expect(env.rpc("advance_repair_run", { token: repair.token, mode: "new", threadId: null, instruction: "Resolve the conflict." }))
-      .rejects.toThrow(POINTER);
-    expect(await env.job(RETURNS)).toEqual(before);
-    expect(env.spawn).not.toHaveBeenCalled();
-  });
 
   it("refuses Auto for a v2 effort and never dispatches its PR under any key, while Auto still repairs a legacy effort's PR", async () => {
     const env = await setup();
@@ -351,7 +292,7 @@ describe("v2 execution fence", () => {
     expect(preview).toMatchObject({ ok: true, preview: { blockers: [blocker] } });
     expect(await env.rpc("effort_admin_merge", { ...keys, expectedScope: preview.preview.scope })).toEqual({ ok: false, error: blocker });
     expect(env.store.get(env.returns.id)?.id).toBe(env.returns.id);
-    expect(await env.preview([RETURNS])).toMatchObject([{ eligible: false, detail: POINTER }]);
+    expect(await env.managed(RETURNS)).toBe("Returns desk");
   });
 
   it("archives a v2 effort without refusal and keeps its PRs fenced", async () => {
@@ -360,7 +301,7 @@ describe("v2 execution fence", () => {
     const scope = (await env.rpc("effort_admin_list", null)).scopes[env.returns.key];
     expect(await env.rpc("effort_admin_archive", { effortKey: env.returns.key, archived: true, expectedScope: scope }))
       .toMatchObject({ ok: true, effort: { archivedAt: expect.any(Number) } });
-    expect(await env.preview([RETURNS])).toMatchObject([{ eligible: false, detail: POINTER }]);
+    expect(await env.managed(RETURNS)).toBe("Returns desk");
     expect(env.work.managedBy(RETURNS)).toBe(env.returns.id);
   });
 
@@ -373,19 +314,12 @@ describe("v2 execution fence", () => {
     };
     await move(env.returns);
     expect(env.work.managedBy(USED)).toBe(env.returns.id);
-    expect(await env.preview([USED])).toMatchObject([{ eligible: false, detail: POINTER }]);
+    expect(await env.managed(USED)).toBe("Returns desk");
     await move(env.used);
     expect(env.work.managedBy(USED)).toBeNull();
-    expect(await env.preview([USED])).toMatchObject([{ eligible: true }]);
+    expect(await env.managed(USED)).toBeNull();
   });
 
-  it("fences Advance by fresh ownership before the targets catch up", async () => {
-    const env = await setup();
-    // The mode is v2 but no rewrite has run yet: Advance reads the PR's current owner itself.
-    env.work.setMode(env.returns.id, "v2", 0, () => []);
-    expect(env.work.managedBy(RETURNS)).toBeNull();
-    expect(await env.preview([RETURNS, USED])).toMatchObject([{ eligible: false, detail: POINTER }, { eligible: true }]);
-  });
 
   it("fences a v2 PR the board stopped listing, through the targets its kept full read resolved", async () => {
     const env = await setup();
@@ -400,8 +334,7 @@ describe("v2 execution fence", () => {
     expect((await restarted.harness.runCli(["refresh"])).exitCode).toBe(0);
     const work = createEffortWorkStore(restarted.bb.storage.database());
     await vi.waitFor(() => expect(work.managedBy(LISTED_ONCE)).toBe(env.returns.id));
-    expect((await restarted.harness.callRpc("advance_preview", { prUrls: [LISTED_ONCE] }) as AdvancePreview).jobs)
-      .toMatchObject([{ eligible: false, detail: POINTER }]);
+    expect((await restarted.harness.callRpc("board_get", null) as Board).v2Managed[LISTED_ONCE]).toMatchObject({ effortName: "Returns desk" });
   });
 
   it("lets you steer an idle thread already linked to a v2 PR, because v2 holds no claim on it yet", async () => {
@@ -544,13 +477,12 @@ describe("v2 opt-in", () => {
     expect(env.work.managedBy(RETURNS)).toBe(env.returns.id);
   });
 
-  it("cancels each queued legacy job at opt-in and lists running or uncertain ones as draining", async () => {
+  it("lists legacy jobs on the roster at opt-in, running or uncertain ones as draining, and cancels none, since their batches are history", async () => {
     const env = await setup();
     // Used books' PR and the gift-wrap ticket join Returns desk, so its roster is 12, 14, and 16.
     env.store.transfer(env.returns.key, { tickets: ["ABC-14", "ABC-16"], prUrls: [USED] });
     thread(env, "thr-folio-16", { status: "active" });
     saveBatch(env.db, 12, "queued");
-    // A running and an uncertain worker fill Advance's two slots, so the queued job is still waiting at opt-in.
     saveBatch(env.db, 14, "needs-attention", { uncertain: true });
     saveBatch(env.db, 16, "running", { threadId: "thr-folio-16" });
     const restarted = await env.harness.lifecycle.reload(plugin);
@@ -562,34 +494,14 @@ describe("v2 opt-in", () => {
       members: { tickets: 3, prUrls: 1, prs: 3, open: 3 } });
     expect(preview.legacy.queued.map((job) => [job.number, job.status])).toEqual([[12, "queued"]]);
     expect(preview.legacy.draining.map((job) => [job.number, job.status, job.uncertain]).sort()).toEqual([[14, "needs-attention", true], [16, "running", false]]);
+    const saved = () => restarted.bb.storage.database().prepare("SELECT body FROM advance_batches ORDER BY id").all();
+    const before = saved();
     const result = await rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: null });
-    expect(result).toMatchObject({ cancelled: preview.legacy.queued, draining: preview.legacy.draining });
-    const jobs = (await rpc("advance_get", null) as AdvanceBatch[]).flatMap((batch) => batch.jobs);
-    expect(jobs.map((job) => [job.number, job.status, job.uncertain]).sort())
-      .toEqual([[12, "cancelled", false], [14, "needs-attention", true], [16, "running", false]]);
+    expect(result).toMatchObject({ cancelled: [], draining: preview.legacy.draining });
+    expect(saved()).toEqual(before);
     expect(env.workedOn(RETURNS)).toEqual([]);
   });
 
-  it("reports a queued job that launched while the parent was being linked as draining, not cancelled", async () => {
-    const env = await setup();
-    thread(env, "thr-coordinator");
-    env.store.save({ ...env.returns, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
-    thread(env, "thr-linked", {}, 12);
-    let prepared!: () => void;
-    env.beforeWorkspace.mockImplementationOnce(() => new Promise<void>((resolve) => { prepared = resolve; }));
-    await env.rpc("advance_start", { token: (await env.rpc("advance_preview", { prUrls: [RETURNS] }) as AdvancePreview).token });
-    await vi.waitFor(() => expect(prepared).toBeDefined());
-    expect((await env.rpc("effort_v2_preview", { effortId: env.returns.id }) as Preview).legacy.queued).toMatchObject([{ prUrl: RETURNS }]);
-    // Its checkout is ready as opt-in reads the chosen parent a second time, to link it, so the job launches before the fence lands.
-    let reads = 0;
-    env.beforeGet.mockImplementation(async (threadId) => {
-      if (threadId !== "thr-linked" || ++reads !== 2) return;
-      prepared();
-      await vi.waitFor(async () => expect(await env.job(RETURNS)).toMatchObject({ status: "running" }));
-    });
-    expect(await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 0, parentThreadId: "thr-linked" }))
-      .toMatchObject({ cancelled: [], draining: [{ prUrl: RETURNS, status: "running" }] });
-  });
 
   it("refuses opt-in for an archived or merged effort, or while Auto dispatch targets it, and changes nothing", async () => {
     const env = await setup();
@@ -625,7 +537,7 @@ describe("v2 opt-in", () => {
     expect(env.work.instruction(env.returns.id)).toMatchObject({ revision: 1 });
     expect(env.work.row(RETURNS)).toMatchObject({ phase: "paused", body: { cause: "v2-off" } });
     expect(env.work.managedBy(RETURNS)).toBeNull();
-    expect(await env.preview([RETURNS])).toMatchObject([{ eligible: true }]);
+    expect(await env.managed(RETURNS)).toBeNull();
     // Opting in again with the same parent resumes the row where the instruction left it.
     await env.rpc("effort_v2_set", { effortId: env.returns.id, mode: "v2", expectedRevision: 2, parentThreadId: joined.parentThreadId });
     expect(env.work.row(RETURNS)).toMatchObject({ phase: "verifying", body: { cause: "observe" } });
@@ -704,16 +616,13 @@ describe("v2 claims", () => {
     env.work.setMode(env.returns.id, "legacy", 1, () => []);
     expect(env.work.managedBy(RETURNS)).toBeNull();
     const writes = {
-      preview: async () => (await env.preview([RETURNS]))[0],
       agent: () => env.rpc("agent_run", { path: "/p/folio-12", action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Resolve the conflict." }),
       message: () => env.rpc("thread_message", { prUrl: RETURNS, threadId: "thr-author", message: "Also rerun the shelf tests." }),
       merge: () => env.rpc("action_merge", { prUrl: RETURNS, sha: HEAD, acknowledgeUnresolved: false }),
     };
-    expect(await writes.preview()).toMatchObject({ eligible: false, detail: "Another action or batch already owns this PR" });
     for (const write of [writes.agent, writes.message, writes.merge]) expect(await write()).toEqual({ ok: false, error: CLAIM });
     expect([env.spawn.mock.calls, env.send.mock.calls, env.hostCalls.filter((call) => ["prWrite", "advanceWorkspace"].includes(call.method))]).toEqual([[], [], []]);
     end(env, "A-12");
-    expect(await writes.preview()).toMatchObject({ eligible: true });
     expect(await writes.message()).toMatchObject({ ok: true });
     expect(await writes.agent()).toMatchObject({ ok: true });
   });
@@ -725,7 +634,6 @@ describe("v2 claims", () => {
     seed(env, "A-12", RETURNS, "uncertain", { path: "/p/folio-14" });
     const agent = (path: string) => env.rpc("agent_run", { path, action: "resolve-conflicts", mode: "new", threadId: null, prompt: "Resolve the conflict." });
     expect(await agent("/p/folio-14")).toEqual({ ok: false, error: CLAIM });
-    expect(await env.preview([USED])).toMatchObject([{ eligible: false, detail: "Another action or batch already owns this PR" }]);
     // Auto dispatch for Used books reaches the same checkout, and holds off until the claim ends.
     const group = (await env.rpc("board_get", null) as Board).groups.find((entry) => entry.clusters.some((cluster) => cluster.ticket === "ABC-14"))!.key;
     await env.rpc("dispatch_set", { mode: "auto", effortKey: group });
@@ -738,19 +646,6 @@ describe("v2 claims", () => {
     await vi.waitFor(() => expect(dispatch.attempts()).toMatchObject([{ prUrl: USED, action: "resolve-conflicts" }]));
   });
 
-  it("stops a legacy Advance start at its last synchronous check when a v2 claim lands after its async one", async () => {
-    const env = await setup();
-    await env.optIn();
-    env.threads.set("thr-used", { ...makeThreadResponse({ id: "thr-used", projectId: PROJECT, status: "idle", providerId: "codex" }), environment: { hostId: HOST, path: "/p/folio-14" } });
-    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-    const plan = await env.rpc("advance_preview", { prUrls: [USED] }) as AdvancePreview;
-    expect(plan.jobs[0]).toMatchObject({ eligible: true });
-    // The start's async writer check reads the checkout's threads; the claim lands while it waits on BB.
-    env.beforeGet.mockImplementationOnce(async (threadId) => { if (threadId === "thr-used") seed(env, "A-12", RETURNS, "launching", { path: "/p/folio-14" }); });
-    await expect(env.rpc("advance_start", { token: plan.token })).rejects.toThrow("Another action started on this selection. Preview again.");
-    expect(env.work.attempt("A-12")?.status).toBe("launching");
-    expect(await env.rpc("advance_get", null)).toEqual([]);
-  });
 
   it("blocks merging efforts while either has a v2 worker claim, including one that lands just before the merge commits", async () => {
     const env = await setup();
@@ -816,62 +711,26 @@ describe("v2 claims", () => {
     expect(env.spawn).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    ["before a legacy Advance start on it runs", "v2"], ["while that start prepares its checkout", "v2"], ["while that start spawns its worker", "legacy"],
-    ["after that start's worker runs", "legacy"],
-  ] as const)("keeps one writer on an unowned PR a v2 command names %s", async (when, winner) => {
-    const env = await setup();
-    await env.optIn();
-    await env.harness.setSettings({ v2Execution: "on" });
-    // Returns desk's command names 16 from outside membership, and its reconciler acts at once.
-    let answer: unknown = null;
-    const v2 = async () => {
-      answer = await command(env, `move ${WRAP} forward`, "wrap-1");
-      await env.reconciler.recoverAll();
-      await env.reconciler.tick();
-    };
-    const plan = await env.rpc("advance_preview", { prUrls: [WRAP] }) as AdvancePreview;
-    expect(plan.jobs[0]).toMatchObject({ eligible: true });
-    if (when === "before a legacy Advance start on it runs") await v2();
-    if (when === "while that start prepares its checkout") env.beforeWorkspace.mockImplementationOnce(v2);
-    if (when === "while that start spawns its worker") {
-      const spawn = env.spawn.getMockImplementation()!;
-      env.spawn.mockImplementationOnce(async (args) => { await v2(); return spawn(args); });
-    }
-    const started = await env.rpc("advance_start", { token: plan.token }).then(() => true, () => false);
-    if (started) await vi.waitFor(async () => expect(["running", "needs-attention"]).toContain((await env.job(WRAP))?.status));
-    if (when === "after that start's worker runs") await v2();
-    // Whichever started first holds the PR; the other stays off it through every later pass. Exactly one writer: a v2 worker, or legacy Advance's.
-    for (let pass = 0; pass < 3; pass++) await env.reconciler.tick();
-    const legacy = await env.job(WRAP);
-    const v2Spawns = env.spawn.mock.calls.filter(([args]) => args.pluginMetadata?.role === "v2-worker" && args.pluginMetadata.prUrl === WRAP).length;
-    expect([v2Spawns, env.work.attempts(WRAP).length, legacy?.threadId ? 1 : 0]).toEqual(winner === "v2" ? [1, 1, 0] : [0, 0, 1]);
-    if (winner === "v2") {
-      expect(answer).toMatchObject({ kind: "admit" });
-      expect(env.work.attempts(WRAP)).toMatchObject([{ status: "running", threadId: expect.stringMatching(/^thr-v2-worker-/u) }]);
-      // The start is refused outright, or its job stops at a fence before any worker.
-      expect(legacy === undefined || (legacy.status === "needs-attention" && legacy.threadId === null)).toBe(true);
-    } else {
-      // Legacy Advance placed 16 under an effort of its own before its worker started, so the command admits nothing and names that effort.
-      expect(answer).toMatchObject({ kind: "clarify", message: expect.stringContaining(`${WRAP} belongs to other efforts`) });
-      expect(legacy).toMatchObject({ status: "running" });
-      expect([env.work.claims(), env.work.row(WRAP)]).toEqual([[], null]);
-    }
-  });
 
   it("waits for a legacy Advance job the server finds inside the claim's transaction, and claims and starts nothing", async () => {
-    const env = await setup();
-    // A legacy job took 12 before its roster opted in, and drains.
-    const batch = await env.rpc("advance_start", { token: (await env.rpc("advance_preview", { prUrls: [RETURNS] }) as AdvancePreview).token }) as AdvanceBatch;
-    await vi.waitFor(async () => expect(await env.job(RETURNS)).toMatchObject({ status: "running" }));
-    await env.optIn();
+    const first = await setup();
+    // A legacy job took 12 before its roster opted in, and never settled.
+    saveBatch(first.db, 12, "running", { threadId: "thr-legacy" });
+    const reloaded = await first.harness.lifecycle.reload(plugin);
+    cleanups.push(() => reloaded.harness.lifecycle.dispose());
+    const db = reloaded.bb.storage.database();
+    const env = { ...first, harness: reloaded.harness, db, work: createEffortWorkStore(db), runner: runners.at(-1)!,
+      rpc: (method: string, input: unknown) => reloaded.harness.callRpc(method as never, input as never) as Promise<any> };
+    env.work.setMode(env.returns.id, "v2", 0, () => []);
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    await vi.waitFor(() => expect(env.work.managedBy(RETURNS)).toBe(env.returns.id));
     await command(env, `move ${RETURNS} forward`, "returns-1");
     await command(env, `refresh ${RETURNS}`, "returns-2");
     await env.harness.setSettings({ v2Execution: "on" });
-    const legacy = env.spawn.mock.calls.length;
     expect(await launch(env)).toBe("waiting");
-    expect([env.work.attempts(RETURNS), env.spawn.mock.calls.length]).toEqual([[], legacy]);
-    expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "legacy-drain", owner: { kind: "legacy-job", ref: `${batch.id}/${batch.jobs[0]!.id}` } } });
+    expect([env.work.attempts(RETURNS), env.spawn.mock.calls]).toEqual([[], []]);
+    expect(env.work.row(RETURNS)).toMatchObject({ phase: "waiting", body: { cause: "legacy-drain", owner: { kind: "legacy-job",
+      ref: "00000000-0000-4000-8000-000000000012/00000000-0000-4000-8000-000000000112" } } });
   });
 
   it("keeps a dry run's plan through a re-plan that changes nothing else, so no pass churns the journal", async () => {

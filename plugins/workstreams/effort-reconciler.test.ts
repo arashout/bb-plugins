@@ -6,7 +6,6 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceFacts } from "./advance-contract.js";
-import type { AdvanceBatch } from "./bulk-advance.js";
 import type { RawUnit } from "./contract.js";
 import type { EffortRoster } from "./effort-roster.js";
 import type { createEffortRunner } from "./effort-runner.js";
@@ -486,16 +485,10 @@ describe("the v2 reconciler", () => {
     expect(numbers.every((n) => env.row(n)?.phase === "prepared")).toBe(true);
   });
 
-  it("rechecks an uncertain legacy Advance job holding a PR every ten minutes, at most six times, then names it a system issue", async () => {
-    // 311 needs its base integrated, which the legacy job may still be doing.
+  it("looks at an uncertain legacy Advance job holding a PR every ten minutes, at most six times, then names it a system issue", async () => {
+    // 311 needs its base integrated, which the legacy job may still be doing. Advance no longer runs, so nothing settles it.
     const env = await setup([311], { live: () => conflicting });
-    const jobId = saveLegacyJob(env.db, 311);
-    // Two threads answer to that job's launch, so no recheck can settle it.
-    for (const id of ["thr-legacy-a", "thr-legacy-b"]) {
-      env.threads.set(id, { ...makeThreadResponse({ id, projectId: PROJECT, providerId: "codex", status: "idle", originPluginId: "workstreams" }),
-        environment: { hostId: HOST, path: "/p/folio-311", branchName: null } });
-      env.metadata.set(id, { advanceJobId: jobId });
-    }
+    saveLegacyJob(env.db, 311);
     const restarted = await env.harness.lifecycle.reload(plugin);
     cleanups.push(() => restarted.harness.lifecycle.dispose());
     const db = restarted.bb.storage.database();
@@ -506,22 +499,17 @@ describe("the v2 reconciler", () => {
     await reconciler.tick();
     expect(work.row(url(311))).toMatchObject({ phase: "waiting", body: { cause: "legacy-drain", owner: { kind: "legacy-job" } } });
     expect(rechecks()).toBe(1);
-    // It isn't rechecked again inside ten minutes, and looks again at its poll...
+    // It isn't looked at again inside ten minutes: it waits for its poll.
     env.at(MINUTE);
     await reconciler.tick();
     expect(rechecks()).toBe(1);
-    expect(work.row(url(311))?.dueAt).toBe(START + 11 * MINUTE);
-    // ...or at once when Advance says the job changed.
-    env.at(2 * MINUTE);
-    await restarted.harness.callRpc("advance_progress_visibility", { batchId: "00000000-0000-4000-8000-000000000311", jobId, hidden: false });
-    expect(work.row(url(311))?.dueAt).toBe(START + 2 * MINUTE);
+    expect(work.row(url(311))?.dueAt).toBe(START + 10 * MINUTE);
     for (let tick = 1; tick <= 6; tick++) {
       env.at(MINUTE + tick * 11 * MINUTE);
       await reconciler.tick();
       expect(rechecks()).toBe(Math.min(tick + 1, 6));
     }
     expect(work.row(url(311))).toMatchObject({ phase: "repair-needed", body: { cause: "legacy-uncertain", userState: "issue", recovery: ["retry N"] } });
-    expect((await restarted.harness.callRpc("advance_get", null) as AdvanceBatch[]).flatMap((batch) => batch.jobs)).toMatchObject([{ uncertain: true }]);
   });
 
   it("in a dry run plans each launch where it would run, and claims, starts, sends, and writes nothing", async () => {

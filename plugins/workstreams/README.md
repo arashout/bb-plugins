@@ -142,9 +142,9 @@ Work without an effort uses one shared **Unassigned work** parent and a plain
 repository child. This placement organizes threads without assigning the PR or
 checkout to an effort. A personal workspace keeps the same hierarchy when no
 matching BB project is available.
-Advance keeps each PR's isolated worktree for inspection after the result
-finishes. Workstreams retains merged PR worktrees; automatic cleanup is not
-implemented.
+Legacy bulk Advance no longer runs. Its saved jobs stay readable as history,
+and the isolated worktrees it created stay on disk for inspection; automatic
+cleanup is not implemented.
 
 ## Use the views
 

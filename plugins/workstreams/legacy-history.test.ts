@@ -6,22 +6,22 @@ import { currentLegacyAttempts, legacyCause, type LegacyCause } from "./legacy-h
 
 const count = <T,>(values: readonly T[]) => values.reduce((totals, value) => totals.set(value, (totals.get(value) ?? 0) + 1), new Map<T, number>());
 const continuation = batches.find((batch) => batch.jobs.length === 15)!;
-// The fixed text of each needs-attention detail legacy Advance writes, with the module that
-// writes it. Stored batches keep old wording, so a producer that rewords a detail fails here
-// until the classifier types the new wording as well.
-const WRITTEN: [module: string, detail: string, cause: LegacyCause][] = [
-  ["bulk-advance.ts", "No worker exists for this launch. Requested work did not start; fix this item with an agent.", "not-started"],
+// The fixed text of each needs-attention detail legacy Advance wrote, with the module that
+// still writes it. Stored batches keep old wording, so a producer that rewords a detail fails
+// here until the classifier types the new wording as well. Null: the removed engine wrote it.
+const WRITTEN: [module: string | null, detail: string, cause: LegacyCause][] = [
+  [null, "No worker exists for this launch. Requested work did not start; fix this item with an agent.", "not-started"],
   ["server.ts", "On hold", "hold"],
   ["advance-host.ts", "The base branch belongs to another open PR; advance that dependency first.", "parent"],
-  ["bulk-advance.ts", "The PR below this one needs attention first", "parent"],
-  ["bulk-advance.ts", "Stack dependency cycle; prepare this stack manually", "parent"],
+  [null, "The PR below this one needs attention first", "parent"],
+  [null, "Stack dependency cycle; prepare this stack manually", "parent"],
   ["advance-host.ts", "Waiting for approval on the current PR.", "review"],
   ["advance-host.ts", "Review still requests changes; wait for a new approval after follow-up.", "review"],
   ["advance-host.ts", "Waiting for checks on the current head commit.", "ci"],
   ["advance-host.ts", "Check results are incomplete or unknown.", "ci"],
   ["advance-host.ts", "Draft PR: finish the work and mark it ready for review.", "draft"],
   ["advance-host.ts", "GitHub has not confirmed that all merge requirements are satisfied.", "merge-requirements"],
-  ["bulk-advance.ts", "Another thread or action is working on this PR or checkout", "writer-available"],
+  [null, "Another thread or action is working on this PR or checkout", "writer-available"],
   ["advance-host.ts", "Resolve conflicts, test, and push the prepared branch.", "branch"],
   ["advance-host.ts", "Update the branch against its base, test, and push.", "branch"],
   ["advance-host.ts", "One or more checks failed.", "checks-failed"],
@@ -29,18 +29,18 @@ const WRITTEN: [module: string, detail: string, cause: LegacyCause][] = [
   ["advance-host.ts", "Review threads are incomplete; readiness needs another check.", "review-feedback"],
   ["advance-host.ts", "Review requests changes without a verified author follow-up.", "review-feedback"],
   ["advance-host.ts", "Review follow-up could not be verified; inspect the review discussion.", "review-feedback"],
-  ["bulk-advance.ts", "Approval feedback evidence is missing, incomplete, or stale for the current head and review.", "feedback-evidence"],
-  ["server.ts", "Approval feedback history is incomplete; refresh and verify the current review.", "feedback-evidence"],
-  ["server.ts", "Approval feedback needs code and validation evidence for the current head.", "feedback-evidence"],
-  ["bulk-advance.ts", "Worker reported incomplete work or failed validation; inspect its result", "worker-blocked"],
-  ["bulk-advance.ts", "PR head, approval, feedback, base, or workspace changed since preview. Preview it again.", "preview-stale"],
-  ["bulk-advance.ts", "Selected parent advanced; preview this PR again for branch preparation", "preview-stale"],
-  ["bulk-advance.ts", "PR state changed since verification. Recheck its current state.", "preview-stale"],
-  ["server.ts", "Fork PRs need manual preparation and review follow-up in this version", "fork"],
-  ["server.ts", "No matching scanned repository in a BB project; add it and rescan", "no-clone"],
-  ["bulk-advance.ts", "Verification failed: ", "verification-failed"],
-  ["server.ts", "Inspection failed: ", "verification-failed"],
-  ["server.ts", "GitHub inspection failed", "verification-failed"],
+  [null, "Approval feedback evidence is missing, incomplete, or stale for the current head and review.", "feedback-evidence"],
+  [null, "Approval feedback history is incomplete; refresh and verify the current review.", "feedback-evidence"],
+  [null, "Approval feedback needs code and validation evidence for the current head.", "feedback-evidence"],
+  [null, "Worker reported incomplete work or failed validation; inspect its result", "worker-blocked"],
+  [null, "PR head, approval, feedback, base, or workspace changed since preview. Preview it again.", "preview-stale"],
+  [null, "Selected parent advanced; preview this PR again for branch preparation", "preview-stale"],
+  [null, "PR state changed since verification. Recheck its current state.", "preview-stale"],
+  [null, "Fork PRs need manual preparation and review follow-up in this version", "fork"],
+  [null, "No matching scanned repository in a BB project; add it and rescan", "no-clone"],
+  [null, "Verification failed: ", "verification-failed"],
+  [null, "Inspection failed: ", "verification-failed"],
+  [null, "GitHub inspection failed", "verification-failed"],
 ];
 
 describe("legacy Advance history", () => {
@@ -99,9 +99,9 @@ describe("legacy Advance history", () => {
     expect(legacyCause({ status: "needs-attention", detail: "Worker stopped; inspect its thread before retrying", uncertain: true }).cause).toBe("uncertain");
   });
 
-  it("types every detail legacy Advance writes and every job status", () => {
+  it("types every detail legacy Advance wrote and every job status", () => {
     for (const [module, detail, cause] of WRITTEN) {
-      expect(readFileSync(new URL(module, import.meta.url), "utf8"), module).toContain(detail);
+      if (module) expect(readFileSync(new URL(module, import.meta.url), "utf8"), module).toContain(detail);
       expect(legacyCause({ status: "needs-attention", detail, uncertain: false }).cause, detail).toBe(cause);
     }
     // A status alone types every job except needs-attention, which needs its detail.

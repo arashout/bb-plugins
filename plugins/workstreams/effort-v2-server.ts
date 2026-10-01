@@ -1061,10 +1061,6 @@ export function createEffortV2(deps: EffortV2Deps) {
     const read = new Set(urls.map(prWorkItemKey));
     if (read.size) markDue(v2Rows().filter((row) => read.has(row.target) || read.has(waitsOn(row) ?? "")).map((row) => row.target));
   }
-  /** Legacy Advance changed: rows waiting for a legacy job to drain look again. */
-  function legacyChanged(): void {
-    markDue(v2Rows().filter((row) => row.phase === "waiting" && row.body.cause === "legacy-drain").map((row) => row.target));
-  }
   const isLimited = (now: number) => limitedUntil !== null && now < limitedUntil;
   /** A read that hit GitHub's rate limit holds every read until the reported reset, or backs off when GitHub names none; true when it was one. */
   async function limit(error: string, now: number): Promise<boolean> {
@@ -1472,5 +1468,5 @@ export function createEffortV2(deps: EffortV2Deps) {
   };
   /** A GitHub write that hit a rate limit holds every read too: when the write may run again, or null when the error is no rate limit. */
   const rateLimitedUntil = async (error: string) => await limit(error, deps.reconciler.now()) ? limitedUntil : null;
-  return { handlers, commands, settle, planRow, criteria, reconciler: { run, tick, recoverAll, threadChanged, observed, legacyChanged, due: markDue, readFull, rateLimitedUntil } };
+  return { handlers, commands, settle, planRow, criteria, reconciler: { run, tick, recoverAll, threadChanged, observed, due: markDue, readFull, rateLimitedUntil } };
 }

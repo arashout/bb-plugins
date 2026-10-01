@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { APPROVAL_FEEDBACK_MIGRATION, FEEDBACK_REPORT_PREFIX, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, parseFeedbackReport,
-  userConfirmation, type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
+import { APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore, feedbackVerificationState, feedbackVerified, userConfirmation, validateFeedbackReport,
+  type ApprovalFeedbackSnapshot } from "./approval-feedback.js";
 import { readReviewThreads, type GhRunner } from "./ghactions.js";
 
 const url = "https://github.com/example/widget/pull/42";
@@ -29,8 +29,7 @@ describe("approval feedback verification", () => {
     const db = new Database(":memory:");
     db.exec(APPROVAL_FEEDBACK_MIGRATION);
     const store = createApprovalFeedbackStore(db);
-    const output = `${FEEDBACK_REPORT_PREFIX}${JSON.stringify(report("attempt-1", snapshot.fingerprint!, "not-needed"))}\nWorkstreams job attempt-1 complete: prepared`;
-    const parsed = parseFeedbackReport(output, "attempt-1", snapshot, head);
+    const parsed = validateFeedbackReport(report("attempt-1", snapshot.fingerprint!, "not-needed"), "attempt-1", snapshot, head);
     expect(parsed).not.toBeNull();
     store.save(url, "thread-1", parsed!, 1_000);
     expect(store.get(url)?.provenance).toEqual({ kind: "worker" });
@@ -46,8 +45,7 @@ describe("approval feedback verification", () => {
     const read = await readReviewThreads(gh, target);
     if (!read.ok) throw new Error(read.error);
     const snapshot = read.approvalFeedback;
-    const parsed = parseFeedbackReport(`${FEEDBACK_REPORT_PREFIX}${JSON.stringify(report("old-attempt", snapshot.fingerprint!))}`,
-      "old-attempt", snapshot, head);
+    const parsed = validateFeedbackReport(report("old-attempt", snapshot.fingerprint!), "old-attempt", snapshot, head);
     if (!parsed) throw new Error("Synthetic report did not parse");
     const db = new Database(":memory:");
     db.exec(APPROVAL_FEEDBACK_MIGRATION);
@@ -122,7 +120,7 @@ describe("approval feedback verification", () => {
     expect(userConfirmation(store.get(url), snapshot, "b".repeat(40))).toEqual({ at: 5_000, current: false, evidence: false });
     expect(store.revoke(url)).toEqual(confirmed);
     expect([store.get(url), store.revoke(url)]).toEqual([null, null]);
-    const parsed = parseFeedbackReport(`${FEEDBACK_REPORT_PREFIX}${JSON.stringify(report("attempt-2", snapshot.fingerprint!))}`, "attempt-2", snapshot, head)!;
+    const parsed = validateFeedbackReport(report("attempt-2", snapshot.fingerprint!), "attempt-2", snapshot, head)!;
     store.save(url, "thread-1", parsed, 7_000);
     expect([store.revoke(url), store.get(url)?.provenance, userConfirmation(store.get(url), snapshot, head)]).toEqual([null, { kind: "worker" }, null]);
     db.close();
@@ -181,12 +179,11 @@ describe("approval feedback verification", () => {
     const read = await readReviewThreads(gh, target);
     if (!read.ok) throw new Error(read.error);
     const snapshot = read.approvalFeedback;
-    const line = (value: unknown) => `${FEEDBACK_REPORT_PREFIX}${JSON.stringify(value)}`;
-    expect(parseFeedbackReport(line(report("attempt-1", snapshot.fingerprint!, "failed")), "attempt-1", snapshot, head)).toBeNull();
-    expect(parseFeedbackReport(line({ ...report("attempt-1", snapshot.fingerprint!), findings: [] }), "attempt-1", snapshot, head)).toBeNull();
-    expect(parseFeedbackReport(line(report("attempt-2", snapshot.fingerprint!)), "attempt-1", snapshot, head)).toBeNull();
-    expect(parseFeedbackReport(line(report("attempt-1", "d".repeat(64))), "attempt-1", snapshot, head)).toBeNull();
-    expect(parseFeedbackReport(line(report("attempt-1", snapshot.fingerprint!)), "attempt-1", snapshot, "b".repeat(40))).toBeNull();
+    expect(validateFeedbackReport(report("attempt-1", snapshot.fingerprint!, "failed"), "attempt-1", snapshot, head)).toBeNull();
+    expect(validateFeedbackReport({ ...report("attempt-1", snapshot.fingerprint!), findings: [] }, "attempt-1", snapshot, head)).toBeNull();
+    expect(validateFeedbackReport(report("attempt-2", snapshot.fingerprint!), "attempt-1", snapshot, head)).toBeNull();
+    expect(validateFeedbackReport(report("attempt-1", "d".repeat(64)), "attempt-1", snapshot, head)).toBeNull();
+    expect(validateFeedbackReport(report("attempt-1", snapshot.fingerprint!), "attempt-1", snapshot, "b".repeat(40))).toBeNull();
   });
 
   it("cannot claim an approved PR has no inline feedback when a thread root lacks review identity", async () => {

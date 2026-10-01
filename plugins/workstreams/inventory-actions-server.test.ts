@@ -1,7 +1,5 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AdvanceFacts } from "./advance-contract.js";
-import { advancePreviewJobSchema } from "./bulk-advance.js";
 import type { Pr, RawUnit } from "./contract.js";
 import { createEffortStore } from "./effort-store.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
@@ -21,7 +19,6 @@ const pr = (number: number, extra: Record<string, unknown> = {}): Pr => parsePrL
   createdAt: daysAgo(12), ...extra }]))!.pr;
 const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githubRepo: "inkwell/folio", branch: "main", dirty: false, ahead: 0, behind: 0,
   lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
-const BATCH = "00000000-0000-4000-8000-000000000091", JOB = "00000000-0000-4000-8000-000000000092";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
@@ -33,7 +30,7 @@ const NOTE_WAITS = "An approval comment waits on your answer: reply on the PR or
 /**
  * You author a green draft (#313), a PR no one was asked to review (#314), a PR mira was asked to review ten days ago (#315), a PR
  * whose change request from otto a push yesterday answered (#318), and a PR mira approved with comments two days ago (#319). mira and
- * otto reviewed #316 and #317. #313 carries a legacy Advance job that never launched.
+ * otto reviewed #316 and #317.
  */
 async function setup() {
   const calls: { method: string; input: unknown }[] = [];
@@ -82,18 +79,7 @@ async function setup() {
     }
     throw new Error(`Unexpected host method ${method}`);
   } });
-  const facts: AdvanceFacts = { prUrl: url(313), number: 313, title: "ABC-313 Keep shelf order", repo: "inkwell/folio", headRefName: "branch-313", baseRefName: "main",
-    headOid: HEAD, baseOid: "d".repeat(40), state: "OPEN", isDraft: true, isCrossRepository: false, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "CLEAN",
-    mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention", detail: "Draft", unresolvedThreads: 0, threadsComplete: true,
-    checks: "passed", basePrNumber: null, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } };
   const db = bb.storage.database();
-  db.prepare("CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)").run();
-  const job = { ...advancePreviewJobSchema.parse({ ...facts, eligible: true, workspace: "create" }), id: JOB, hiddenFromProgress: false, status: "needs-attention",
-    attemptId: null, dedicated: false, previousAttempts: [], threadId: null, path: null, checkedHeadOid: null, updatedAt: Date.now(), uncertain: false };
-  db.prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run(BATCH, JSON.stringify({ id: BATCH, token: "00000000-0000-4000-8000-000000000093",
-    createdAt: Date.now(), cancelled: false, jobs: [job], facts: { [JOB]: { ...facts, eligible: true, workspace: "create", projectId: "project-folio", hostId: HOST,
-      sourcePath: null, path: null, effortId: null, effortKey: null, effortMembers: null, needsFeedback: false, needsChecks: false, blockedBy: null } },
-    pollUntil: Date.now() + 60_000, prepared: {}, repairs: {} }));
   await plugin(bb);
   cleanups.push(() => harness.lifecycle.dispose());
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
@@ -103,7 +89,7 @@ async function setup() {
 }
 
 describe("inventory actions on the server", () => {
-  it("marks a draft ready from its row: reads first, writes on the shown head, reads back without rechecking Advance, and records it", async () => {
+  it("marks a draft ready from its row: reads first, writes on the shown head, reads back, and records it", async () => {
     const env = await setup();
     const after = env.since();
     expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: (await env.row(313)).head })).toEqual({ ok: true, detail: "Wrote ready." });
@@ -113,10 +99,6 @@ describe("inventory actions on the server", () => {
     expect(await env.row(313)).toMatchObject({ draft: false, attention: [{ question: "missing-reviewer" }],
       lastAction: { action: "mark-ready", ok: true, detail: "Wrote ready." } });
     expect(env.spawn).not.toHaveBeenCalled();
-    // The next legacy refresh still rechecks #313's Advance job on the change the click's read stored first.
-    const refresh = env.since();
-    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-    expect(refresh().map((call) => call.method)).toContain("advanceInspect");
   });
 
   it("tells a roster that numbers the PR what the click's read-back saw, since the roster shows the same PR", async () => {

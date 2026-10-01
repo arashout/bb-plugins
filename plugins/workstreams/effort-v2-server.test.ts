@@ -771,7 +771,7 @@ describe("effort instructions", () => {
     expect(env.work.instruction(env.effort.id)!.scope.criteria).toEqual([expect.objectContaining({ id: "c1", droppedInRevision: 3 })]);
   });
 
-  it("includes an unowned PR outside membership without changing membership, numbers it, and fences it from legacy Advance", async () => {
+  it("includes an unowned PR outside membership without changing membership, numbers it, and fences it from legacy launchers", async () => {
     const future = INKWELL_ROSTER.future;
     const env = await instructed("Catalog follow-ups", github({ [future]: () => facts(future) }));
     const before = env.store.get(env.effort.id)!.members;
@@ -780,8 +780,7 @@ describe("effort instructions", () => {
     expect(env.store.get(env.effort.id)!.members).toEqual(before);
     const row = (await env.roster(env.effort.id)).rows.find((item) => item.target === future);
     expect(row).toMatchObject({ n: 32, outsideMembership: true, state: "doing", cause: "observe" });
-    const preview = await env.harness.callRpc("advance_preview", { prUrls: [future] }) as { jobs: { eligible: boolean; detail: string }[] };
-    expect(preview.jobs).toEqual([expect.objectContaining({ eligible: false, detail: "Managed by the Catalog follow-ups roster; instruct there." })]);
+    expect((await env.harness.callRpc("board_get", null) as Board).v2Managed[prWorkItemKey(future)]).toMatchObject({ effortName: "Catalog follow-ups" });
     // Refresh reaches it too, though it isn't a member.
     expect(await env.reconcile(env.effort.id, future)).toMatchObject({ status: "checked", row: { target: future, outsideMembership: true } });
   });
@@ -795,8 +794,7 @@ describe("effort instructions", () => {
     await env.admit("move 2 forward");
     expect(env.work.row(future)).toMatchObject({ effortId: env.effort.id, phase: "paused", body: { cause: "membership-moved" } });
     // Vault runs on legacy launchers, and the paused row doesn't keep them out.
-    const preview = await env.harness.callRpc("advance_preview", { prUrls: [future] }) as { jobs: { detail: string }[] };
-    expect(preview.jobs[0]!.detail).not.toContain("Managed by");
+    expect((await env.harness.callRpc("board_get", null) as Board).v2Managed[prWorkItemKey(future)]).toBeUndefined();
     // Once Vault is on its roster, its instruction takes the row over, where it wakes.
     env.work.setMode(vault.id, "v2", 0, () => []);
     await env.admitIn(vault.id, `move ${future} forward`);
