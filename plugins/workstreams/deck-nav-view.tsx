@@ -15,7 +15,7 @@ import { DECK_CHANGED } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, deckRing, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, numberedEffort, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor,
   type FocusKey, type Place, type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
+import { acceptLabel, acceptPlan, addressPicks, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
   paletteItems, paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
   type PaletteItem, type RowFacts } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
@@ -722,7 +722,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         return;
       }
       // The selection's Your turn rows go to one batch thread, started now; each row says why any stays out, and Undo takes it back for 8 s.
-      case "address": if (card && on.address.on) void batch.address(card.card.id, selected.filter((item) => !item.dim && item.row?.yourTurn).map((item) => item.prUrl)); return;
+      case "address": if (card && on.address.on) void batch.address(card.card.id, addressPicks(selected).map((item) => item.prUrl)); return;
       case "undo": if (undo?.live()) { const run = undo; setUndo(null); setFlash(null); void run.run(); } return;
       case "hold-pr": {
         if (!row?.row) return;
@@ -928,7 +928,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       open={new Set(here.open)} stuck={stuck}
       on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null}
       flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)}
-      batch={{ kinds, address: on.address.on ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : 0, refusal: batch.refusal,
+      batch={{ kinds, address: on.address.on ? addressPicks(selected).length : 0, refusal: batch.refusal,
         working: batch.working && { kind: batch.working.kind, label: workingLabel(batch.working) },
         refresh: { count: selected.filter((line) => line.row && !line.ghost).length, busy: refresh.reading.size > 0, progress: refresh.progress } }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}

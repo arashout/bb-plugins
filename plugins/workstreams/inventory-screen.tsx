@@ -28,7 +28,7 @@ export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; 
   const split = { turn: [] as SimpleGroup[], dismissed: [] as SimpleGroup[], other: [] as SimpleGroup[] };
   for (const group of screen.groups) {
     const identity = { key: group.key, label: group.label, effortId: group.effort?.id ?? null };
-    const of = (line: InventoryLine) => onYourTurn(line) ? split.turn : line.dismissed ? split.dismissed : split.other;
+    const of = (line: InventoryLine) => onYourTurn(line) ? split.turn : line.turn.list === "dismissed" ? split.dismissed : split.other;
     for (const list of [split.turn, split.dismissed, split.other]) {
       const lines = group.lines.filter((line) => of(line) === list);
       if (lines.length) list.push({ ...identity, lines });

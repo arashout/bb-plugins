@@ -144,7 +144,7 @@ import {
 } from "./threads.js";
 import { startThread, type SpawnSdk } from "./spawn.js";
 import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
-import { dismissalSchema, sentState, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
+import { dismissalSchema, sentState, turnOf, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
 import { MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
@@ -4219,15 +4219,15 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
   /**
-   * What Address lists of each row: the feedback waiting on it, what keeps it (an agent on it or its checkout), and its
-   * checkout, or without one the checkout of its repository its worktree is added from; for Each PR in its own thread, that thread's Ask or
-   * Fix, and only a thread it has.
+   * What Address lists of each row: the feedback waiting on it, what keeps it past its row's turn (another agent on it or its checkout), and
+   * its checkout, or without one the checkout of its repository its worktree is added from; for Each PR in its own thread, that thread's Ask
+   * or Fix, and only a thread it has.
    */
   async function addressFacts(rows: ReturnType<typeof deckRows>, each: boolean): Promise<Map<string, Pick<PlanRow, "address" | "ask" | "fix">>> {
     const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
     return new Map(await Promise.all(rows.map(async ({ row, input }): Promise<[string, Pick<PlanRow, "address" | "ask" | "fix">]> => {
       const path = prCheckout(row.prUrl);
-      const busy = input.threads.executor?.active ? "An agent is already working on it." : agentOn(row.prUrl, path);
+      const busy = agentOn(row.prUrl, path);
       const source = path ? null : repoCheckout(row.prUrl);
       const address = { feedback: input.yourTurn?.why ?? null, busy, checkout: path && (path.split("/").at(-1) ?? path),
         source: source && (source.split("/").at(-1) ?? source), confirm: input.attention.some((reason) => reason.kind === "approval-comments") };
@@ -4279,23 +4279,28 @@ export default async function plugin(bb: BbPluginApi) {
     const hostId = (await bb.sdk.system.config()).primaryHostId;
     if (hostId === null) return all("No primary BB host is available; nothing was started.");
     /**
-     * What keeps a PR out, as a check that awaits nothing once read: a hold, its effort stopped, the thread its row names at work
-     * (planning reads the same; a PR with no checkout shows no other sign of one), or an agent on it or its checkout. With it, the threads
-     * its row names, from the same read.
+     * What keeps a PR out, as a check that awaits nothing once read: a hold or its effort stopped, in the server's words; then Your turn's
+     * rule (turnOf) on `owes`, the feedback the listing or GitHub's read shows, and on the thread its row names at work (planning reads the
+     * same; a PR with no checkout shows no other sign of one); then another agent on it or its checkout. Dismiss and Sent were the
+     * listing's to check: this batch is its Sent now. With it, the threads its row names, from the same read.
      */
     const stops = async () => {
       const stopped = await effortStops(false);
       const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
       const threads = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts });
-      return { threads, why: (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl)
-        ?? (threads(prUrl).executor?.active ? "An agent is already working on it." : null) ?? agentOn(prUrl, path) };
+      return { threads, why: (prUrl: string, path: string | null, owes: boolean) => {
+        const held = holdMessage(prUrl) ?? stopped(prUrl);
+        if (held) return held;
+        const turn = turnOf({ owes, hold: false, pile: "active", dismissed: false, executorActive: !!threads(prUrl).executor?.active, sent: null }).addressable;
+        return turn === true ? agentOn(prUrl, path) : turn;
+      } };
     };
     let stop = await stops();
     const ready: { item: BatchItem; pr: Pr; path: string | null; source: string | null; feedback: string }[] = [];
     for (const item of items) {
       const refuse = (error: string) => { results.set(item.prUrl, { ok: false, error }); };
       const path = prCheckout(item.prUrl);
-      const why = stop.why(item.prUrl, path);
+      const why = stop.why(item.prUrl, path, true);
       if (why) { refuse(why); continue; }
       const source = path ? null : repoCheckout(item.prUrl);
       if (!path && !source) { refuse("No local checkout of its repository to add a worktree from; nothing was started."); continue; }
@@ -4303,9 +4308,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (!read.ok) { refuse(`GitHub couldn't be read, so nothing was started: ${read.error}`); continue; }
       if (!read.pr) { refuse("This PR is no longer open; nothing was started."); continue; }
       if (read.pr.headRefOid !== item.headOid) { refuse("New commits landed since the listing. Review it and try again; nothing was started."); continue; }
-      const turn = yourTurn(read.pr, await attentionOf(read.pr), false);
-      if (!turn) { refuse("No feedback waits on you now; nothing was started."); continue; }
-      ready.push({ item, pr: read.pr, path, source, feedback: turn.why });
+      const owed = yourTurn(read.pr);
+      const now = stop.why(item.prUrl, path, owed !== null);
+      if (now) { refuse(now); continue; }
+      ready.push({ item, pr: read.pr, path, source, feedback: owed!.why });
     }
     if (place.parentThreadId && !await liveThread(place.parentThreadId)) return all("Its parent thread is gone since the listing. Review it and try again; nothing was started.");
     // A hold, an effort's hold, a claim, or an agent may have landed while GitHub answered. The claims: nothing is awaited from the last
@@ -4313,7 +4319,7 @@ export default async function plugin(bb: BbPluginApi) {
     // so their checks match it.
     stop = await stops();
     const claimed = ready.filter(({ item, path }) => {
-      const why = stop.why(item.prUrl, path);
+      const why = stop.why(item.prUrl, path, true);
       if (why) results.set(item.prUrl, { ok: false, error: why });
       return !why;
     }).map((entry) => ({ ...entry, runId: runs.begin({ path: entry.path ?? "", ticket: null, prUrl: entry.pr.url, prNumber: entry.pr.number,

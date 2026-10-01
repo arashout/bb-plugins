@@ -118,17 +118,17 @@ export const deckBatchContract = {
 };
 
 /** A deck row with its pile, when you last marked it seen, and the facts its write binds to, as the row showed them. */
-export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
+export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold" | "turn">;
   pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers;
   /** Ask's destination, as the listing names it ("Ask “Spine labels”", "Start a thread under Store pickup"), or why it has none. */
   ask?: { to: string } | { why: string };
   /** A fix's destination, named as Ask's is, with what its PR needs now; or why it has none. */
   fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string };
   /**
-   * Address: the feedback that waits on you, as its listing names it, or null when none does; why an agent or its claim keeps
-   * it; and its checkout's name, or null without one; without one, the name of a local checkout of its repository its worktree is added
-   * from, or null with none. `confirm`: approval notes you answered wait only on your Confirm, which no batch gives. Each PR in its own
-   * thread takes its Ask or Fix above, from its thread alone.
+   * Address: the feedback that waits on you, as its listing names it, or null when none does; why another agent, a claim, or a thread in
+   * its checkout keeps it, past what its row's turn says; and its checkout's name, or null without one; without one, the name of a local
+   * checkout of its repository its worktree is added from, or null with none. `confirm`: approval notes you answered wait only on your
+   * Confirm, which no batch gives. Each PR in its own thread takes its Ask or Fix above, from its thread alone.
    */
   address?: { feedback: string | null; busy: string | null; checkout: string | null; source: string | null; confirm?: boolean } };
 
@@ -214,32 +214,33 @@ function planFix(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof
 }
 
 /**
- * Address: each chosen PR whose feedback waits on you, bound to the head its row showed, and why any other is left out: a hold, a paused
- * effort, an agent or claim already on it, or a write just sent. One batch thread takes every PR, in its checkout or a new
- * worktree from a local checkout of its repository, never a fresh clone; each PR's own thread takes its Ask or Fix, only where it has a thread.
+ * Address: each chosen PR its row's turn lets Address take (turnOf), bound to the head its row showed, and why any other is left out: no
+ * feedback, a hold, a paused effort, Dismiss, a thread already at work, another agent or claim on it, or a write just sent. One batch thread
+ * takes every PR, in its checkout or a new worktree from a local checkout of its repository, never a fresh clone; each PR's own thread
+ * takes its Ask or Fix, only where it has a thread.
  */
 function planAddress(rows: readonly PlanRow[], mode: AddressMode): ReturnType<typeof planBatch> {
   const items: ReturnType<typeof planBatch>["items"] = [], skipped: Skipped[] = [];
   for (const plan of rows) {
-    const { row, pile, seenAt, head, address } = plan;
+    const { row, seenAt, head } = plan;
     const ref = `${row.repo.split("/").at(-1)} #${row.number}`;
     const skip = (reason: string) => skipped.push({ prUrl: row.prUrl, ref, reason });
-    if (row.hold) { skip("On hold. Release it first."); continue; }
-    if (pile !== "active") { skip(PILE_WHY[pile]!); continue; }
-    if (address?.busy) { skip(address.busy); continue; }
-    if (!address?.feedback) { skip(address?.confirm ? "Answered. Confirm it yourself." : "No feedback waits on you."); continue; }
+    if (row.turn.addressable !== true) { skip(row.turn.list === "other" && plan.address?.confirm ? "Answered. Confirm it yourself." : row.turn.addressable); continue; }
+    // Its turn says feedback waits, which the listing names.
+    const address = plan.address!, feedback = address.feedback!;
+    if (address.busy) { skip(address.busy); continue; }
     if (!counted(row, seenAt)) { skip("A write on it is waiting or just ran."); continue; }
     if (!head) { skip("Not read in full yet. Refresh it first."); continue; }
     if (mode === "batch") {
       if (!address.checkout && !address.source) { skip("No local checkout of its repository to add a worktree from."); continue; }
       items.push({ prUrl: row.prUrl, ref, title: row.title, kind: "address", what: "Batch thread", reviewers: [], headOid: head, fingerprint: null, notes: 0,
-        shown: null, feedback: address.feedback, where: address.checkout ? `In ${address.checkout}` : `No checkout: a new worktree from ${address.source}` });
+        shown: null, feedback, where: address.checkout ? `In ${address.checkout}` : `No checkout: a new worktree from ${address.source}` });
       continue;
     }
     // Its own thread: the approval's notes through Ask, else its fixes through Fix, as the Ask its thread button sends them.
     const own = row.section === "confirm" ? planAsk([plan]) : row.section === "work" ? planFix([plan], true)
       : { items: [], skipped: [{ prUrl: row.prUrl, ref, reason: "Its thread has nothing to ask for now." }] };
-    items.push(...own.items.map((item) => ({ ...item, feedback: address.feedback! })));
+    items.push(...own.items.map((item) => ({ ...item, feedback })));
     skipped.push(...own.skipped);
   }
   return { items, skipped };

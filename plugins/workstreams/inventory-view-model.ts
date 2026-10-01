@@ -2,11 +2,12 @@
 // from inventory_get's output to what the screen draws. The server decided
 // each row's state word, attention, owner, and age; this words them, nests
 // each stack under its parent, and says which one-click action a row offers
-// and why an action it can't take is disabled. It imports types only, so no
-// server module reaches the browser.
+// and why an action it can't take is disabled. It imports types, and Your
+// turn's one rule from your-turn.ts, which is pure, so no server module
+// reaches the browser.
 import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
 import type { AttentionReason } from "./pr-attention";
-import type { Sent } from "./your-turn";
+import { turnOf, type Sent, type Turn, type TurnFacts } from "./your-turn";
 
 /** An observation's or hold's age: 25s, 52m, 5h, 2d. */
 export function age(at: number, now: number): string {
@@ -94,8 +95,8 @@ export type InventoryLine = {
   last: { text: string; ok: boolean } | null;
   /** A person's feedback that waits on you, as the server found it, and how long it has waited. */
   yourTurn: { why: string; age: string | null } | null;
-  /** You dismissed it from Your turn; it returns when the head moves or someone says something new. */
-  dismissed: boolean;
+  /** Where it lists, Your turn or dismissed from it among them, and whether Address takes it (turnOf). */
+  turn: Turn;
   /** The batch thread addressing that feedback now, which holds the PR's claim until it finishes; its id is null while it starts. */
   addressing: { threadId: string | null } | null;
   /** Where the newest Address batch sent it, and its thread's live status. */
@@ -326,36 +327,31 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   const yourTurn = row.yourTurn && { why: row.yourTurn.why, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) };
   const addressing = row.addressing && { threadId: row.addressing.threadId };
   const sent = row.sent ?? null;
-  // Whether Your turn lists the row decides its actions: a Nudge there would leave the feedback waiting on you.
-  const turn = waitsOnYou({ yourTurn, primary, threads, effortPile, sent });
+  const turn = rowTurn(row, effortPile ?? "active");
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
     authored: row.authored, reviewers: reviewerChips(row), suggested: row.suggestedReviewers,
     status: statusOf(row),
     hold: row.hold && { reason: row.hold.reason || null, age: age(row.hold.heldAt, now) }, effortPile,
     steps, primary,
-    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile, turn }),
+    // Feedback waits on you on a Your turn row, dismissed or not, and a Nudge there would leave it waiting.
+    actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile,
+      turn: turn.list === "turn" || turn.list === "dismissed" }),
     threads,
     checked: checked(row, now),
     last: lastOf(row, context.outcome, now),
-    yourTurn, dismissed: row.dismissed, addressing, sent,
+    yourTurn, turn, addressing, sent,
     depth: 0, branch: null,
   };
 }
 
-type TurnFacts = Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effortPile" | "sent">;
-/**
- * Waits on you: the server found feedback waiting on you, and neither a thread working on it now nor a held effort, which asks nothing
- * until you resume it, has it instead. A PR an Address batch sent stays, with its state, until GitHub shows its feedback cleared.
- */
-const waitsOnYou = (line: TurnFacts): boolean => line.yourTurn !== null &&
-  line.effortPile !== "held" && (line.sent !== null || !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active)));
-/** On Your turn: it waits on you, and you haven't dismissed it. */
-export const onYourTurn = (line: TurnFacts & Pick<InventoryLine, "dismissed">): boolean => waitsOnYou(line) && !line.dismissed;
-/** Sent states a batch or its thread still owns: Address takes the PR again only once they end. */
-const OWNED = new Set<Sent["state"]>(["sending", "working", "needs-you"]);
-/** A Your turn row Address can take now: nothing it sent is still under way. */
-export const sendable = (line: TurnFacts & Pick<InventoryLine, "dismissed">): boolean => onYourTurn(line) && !(line.sent && OWNED.has(line.sent.state));
+/** Where a row lists and whether Address takes it, from its facts on its effort's pile: All PRs and the deck both read it so. */
+export const rowTurn = (row: InventoryRow, pile: TurnFacts["pile"]): Turn => turnOf({ owes: row.yourTurn !== null, hold: row.hold !== null, pile,
+  dismissed: row.dismissed, executorActive: !!row.threads.executor?.active, sent: row.sent });
+/** On Your turn. A PR an Address batch sent stays, with its state, until GitHub shows its feedback cleared. */
+export const onYourTurn = (line: Pick<InventoryLine, "turn">): boolean => line.turn.list === "turn";
+/** A Your turn row Address can take now: nothing it sent is still under way, and its effort is active. */
+export const sendable = (line: Pick<InventoryLine, "turn">): boolean => line.turn.addressable === true;
 
 /**
  * The selection after a click on one of `order`'s rows: Shift adds every row from the last one you clicked through this one, in the order

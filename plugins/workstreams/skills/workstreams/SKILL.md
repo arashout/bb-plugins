@@ -439,17 +439,18 @@ board's words, the PR of yours it is
 stacked on (`stackedOn`, whose row it files under), and each attention
 reason with its next step, owner, and age. It also gives when GitHub last
 answered for the PR, its last failed read and why, any hold, and the thread the
-work started in and the one working on it. On your own PRs, `yourTurn.why`
-says in one line which person's feedback waits on you: an approval comment
-with no reply of yours after it, a change request with no push or reply since,
-an open thread whose last word is theirs, or their comment with no reply of
-yours. Bots never set it. A change request you answered is an attention reason
-to re-request review instead, and approval notes you answered one to confirm;
-neither is `yourTurn`. All PRs lists it as Your turn, and the badge counts it,
-unless you dismissed it on this head (`dismissed`), a thread is working on it,
-a batch thread holds it (`addressing`), or its effort is on hold. `sent` links
-the newest batch thread that took it, with BB's status for it. Held PRs have
-none; drafts count. The header counts PRs forgotten in
+work started in and the one working on it. On your own PRs, held or not,
+`yourTurn.why` says in one line which person's feedback waits on you: an
+approval comment with no reply of yours after it, a change request with no
+push or reply since, an open thread whose last word is theirs, or their
+comment with no reply of yours. Bots never set it; drafts count. A change
+request you answered is an attention reason to re-request review instead, and
+approval notes you answered one to confirm; neither is `yourTurn`. All PRs
+lists it as Your turn, and the badge counts it, unless a thread other than its
+own batch thread is working on it, you or its effort hold it, or you dismissed
+it on this head (`dismissed`), whatever button its row leads with. `sent`
+links the newest batch thread that took it, with BB's status for it, and keeps
+it on Your turn while that thread works. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
@@ -588,11 +589,13 @@ edit, thread change, and batch step. Every row is an inventory row, filed in
 one section by the move its inventory row leads with: `merge`, `confirm`,
 `nudge`, `request`, `ready`, or `work` (fixed in its thread) is the user's;
 `flight` needs no one yet (a review not yet due a nudge, running checks, or
-code work a thread is doing); `blocked` waits on something else, named in
-`waitsOn`: the PR it is stacked on; `held` is a PR on
+code work or feedback a thread is doing); `blocked` waits on something else,
+named in `waitsOn`: the PR it is stacked on; `held` is a PR on
 hold, with its `hold` reason and since when, and in no other section. A
 stacked PR in an approved stack is a merge, since the preview merges the stack
-in order.
+in order. Each row's `turn` says where All PRs lists it (`list`: `turn`,
+`dismissed`, `held`, `in-flight`, or `other`) and whether Address takes it
+(`addressable`: true, or why not), by one rule for both views.
 
 **Needs you** counts rows in the user's sections on the active pile, service
 cards included. Held and done efforts pause. A row the user acted
@@ -679,9 +682,9 @@ never includes it. `address` takes the selected Your turn PRs, with `mode`
 `batch` (the default) or `each`. Each item names its `feedback` and, for a
 batch, `where` it's worked: its checkout, or for a PR with none, a new
 worktree from a local checkout of its repository ("No checkout: a new
-worktree from folio"); `skipped` names why a PR stays out: a hold, a held
-or done effort, an agent or open run on the PR or its
-checkout, no feedback waiting, a write just sent, or, for a batch, no local
+worktree from folio"); `skipped` names why a PR stays out: no feedback
+waiting, a hold, a held or done effort, a Dismiss, an agent or open run on
+the PR or its checkout, a write just sent, or, for a batch, no local
 checkout of its repository to add a worktree from. A batch plan returns its
 `thread`: the project, and the effort parent it starts under when every PR
 shares that effort, else none. When it sends, it reads each PR again, claims

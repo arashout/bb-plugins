@@ -36,7 +36,7 @@ export const inventoryRowSchema = z.object({
   /** The approval comments' fingerprint, when approving reviews left any: Confirm handled sends it back with `head`. */
   feedbackFingerprint: z.string().nullable(),
   attention: z.array(attentionReasonSchema),
-  /** Reviewer feedback on your PR that waits on your move (your-turn.ts); null on a teammate's PR, a draft, or one you hold. */
+  /** Reviewer feedback on your PR that waits on your move (your-turn.ts), held or not; null on a teammate's PR. turnOf says where it lists. */
   yourTurn: yourTurnSchema.nullable(),
   /** You dismissed it from Your turn on this head, and no person has said anything since. */
   dismissed: z.boolean(),
@@ -112,7 +112,7 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
   const { pr, observation, stackedOn } = input;
   const stage = pr === null ? null : stageFor(prLifecycle(pr), pr, stackedOn);
   const target = prTarget(input.prUrl);
-  const turn = input.authored && pr ? yourTurn(pr, input.reasons, input.hold !== null) : null;
+  const turn = input.authored && pr ? yourTurn(pr) : null;
   return {
     prUrl: input.prUrl, repo: target?.slug ?? "", number: target?.number ?? 0,
     title: displayTitle(pr?.title ?? ""), authored: input.authored,

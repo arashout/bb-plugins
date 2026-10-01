@@ -216,7 +216,7 @@ describe("asking threads to fix an effort's code work", () => {
     env.efforts.recordWorker(env.effort.id, "thr-43", url(43), "pr");
     await env.refresh();
     const row = (await env.card()).sections.flatMap((section) => section.rows).find((item) => item.number === 43)!;
-    expect(row).toMatchObject({ section: "work", yourTurn: { why: "Comment from @mira" }, step: { text: "Answer @mira's comment" } });
+    expect(row).toMatchObject({ section: "work", turn: { list: "turn", addressable: true }, step: { text: "Answer @mira's comment" } });
     const plan = await env.rpc("deck_batch_plan", { kind: "fix", prUrls: [url(43)] }) as { ok: true; batchId: string; items: BatchItem[] };
     expect(plan.items.map((item) => [item.what, item.fixes, item.route])).toEqual([["Ask “Order reads”: answer comments", ["comments"], { kind: "thread", id: "thr-43" }]]);
     await env.rpc("deck_batch_start", { batchId: plan.batchId });

@@ -166,6 +166,9 @@ describe("an effort card", () => {
     // Off Your turn and no longer addressed, the PR's own working thread leads, not the old batch's link.
     expect(line(inkwellDeck({}, (row) => row.number === 211 ? { sent: sent("idle"), yourTurn: null,
       threads: { origin: null, executor: { id: "thr-own", title: "Fix quill #211", active: false } } } : {}))).toMatchObject({ section: "work", trail: { kind: "thread", threadId: "thr-own" } });
+    // Its feedback still waits, but its own thread is at work on it now: In flight, and the old batch's Idle link no longer leads (b5b4758).
+    expect(line(inkwellDeck({}, (row) => row.number === 211 ? { sent: sent("idle"),
+      threads: { origin: null, executor: { id: "thr-own", title: "Fix quill #211", active: true } } } : {}))).toMatchObject({ section: "flight", trail: null });
     // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
     expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
     // Dispatch refused it, or the last Address left it out: the server's reason, on the row.
@@ -444,8 +447,8 @@ describe("what the keys act on", () => {
   it("offers Address selected, and b, only while the selection holds Your turn rows", () => {
     const pickup = card(inkwellDeck(), PICKUP);
     const rows = pickup.sections.flatMap((section) => section.lines);
-    const turn = rows.filter((line) => line.row?.yourTurn);
-    const other = rows.filter((line) => line.row && !line.row.yourTurn);
+    const turn = rows.filter((line) => line.row?.turn.list === "turn");
+    const other = rows.filter((line) => line.row && line.row.turn.list !== "turn");
     expect(turn.length && other.length).toBeTruthy();
     const on = (patch: Partial<KeyContext>, screen: CardScreen = pickup) => availability(context(screen, patch)).address;
     expect(on({ selected: turn })).toEqual({ on: true, why: "" });
@@ -454,6 +457,11 @@ describe("what the keys act on", () => {
     expect(hintKeys(context(pickup, { selected: turn }), availability(context(pickup, { selected: turn })))).toContainEqual(["b", "address selected"]);
     // A held card's rows wait with it.
     expect(on({ selected: turn }, { ...pickup, card: { ...pickup.card, pile: "held" } })).toEqual({ on: false, why: "this card is paused" });
+    // A row you dismissed, or one its own thread is at work on, isn't on Your turn: All PRs lists neither, so Address takes neither here.
+    const off = card(inkwellDeck({}, (row) => row.number === 211 ? { dismissed: true }
+      : row.number === 155 ? { threads: { origin: null, executor: { id: "thr-own", title: "Fix spine #155", active: true } } } : {}), PICKUP);
+    const left = off.sections.flatMap((section) => section.lines).filter((line) => line.ref === "quill #211" || line.ref === "spine #155");
+    expect([left.length, on({ selected: left }, off)]).toEqual([2, { on: false, why: "select Your turn rows first" }]);
     const items = paletteItems(availability(context(pickup, { selected: turn })), [], { held: [], done: [] }, PICKUP, true);
     expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected", keys: ["b"], on: true });
     // All PRs: x selects the focused Your turn row, ⇧X all of Your turn, and b addresses the selection.

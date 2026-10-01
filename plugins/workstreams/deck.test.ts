@@ -147,10 +147,11 @@ describe("the effort deck", () => {
       .toEqual([[], null, ["held"], { tone: "waiting", text: "1 held" }]);
   });
 
-  // The badge and All PRs' Your turn say a reviewer's feedback waits on your move; its card must say so too. A card that offered Merge, or
-  // led with a nudge that waits on other reviewers, while the feedback waits, or called a PR a thread is fixing In flight, or paused one
-  // with its effort, would send you two ways at once.
-  it("files every PR Your turn lists under a move of yours, never Merge, on an active card", () => {
+  // The badge and All PRs' Your turn say a reviewer's feedback waits on your move; its card must say so too, and the deck's Address must
+  // take the same PRs. A card that offered Merge, or led with a nudge that waits on other reviewers, while the feedback waits, or called a
+  // PR nothing works on In flight, or paused one with its effort, or addressed one you dismissed, would send you two ways at once. A PR a
+  // thread is at work on is In flight in both, whatever its row leads with.
+  it("files every PR Your turn lists under a move of yours, never Merge, on an active card, and addresses only those", () => {
     const comments = { why: "Comment from @ines-v", since: INVENTORY_NOW - 3_600_000, latest: INVENTORY_NOW - 3_600_000 };
     const merge: AttentionReason = { question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [],
       since: INVENTORY_NOW - 2 * DAY, ageMs: 2 * DAY, basis: "github" };
@@ -161,6 +162,12 @@ describe("the effort deck", () => {
       [input({}, (row) => row.number === 96 ? { yourTurn: comments } : {}), [210, 211, 155, 96, 301, 318]],
       [input({}, (row) => row.number === 211 ? { threads: { ...row.threads, executor: { ...row.threads.executor!, active: true } } } : {}), [210, 155, 301, 318]],
       [input({ efforts: held }), [301, 318]],
+      // An approval's note leads with Confirm, not its thread; a thread at work on it still has it.
+      [input({}, (row) => row.number === 301 ? { threads: { origin: null, executor: { id: "thr_folio_301", title: "Answer mira", active: true } } } : {}), [210, 211, 155, 318]],
+      // An older batch thread is done with it, and the PR's own thread took it since.
+      [input({}, (row) => row.number === 211 ? { sent: { state: "idle", threadId: "thr-batch", title: "Address feedback on 2 PRs", detail: null, batchId: null },
+        threads: { ...row.threads, executor: { ...row.threads.executor!, active: true } } } : {}), [210, 155, 301, 318]],
+      [input({}, (row) => row.number === 155 ? { dismissed: true } : {}), [210, 211, 301, 318]],
     ];
     for (const [deck, listed] of cases) {
       // All PRs reads the same rows, each group with its effort's pile.
@@ -173,6 +180,9 @@ describe("the effort deck", () => {
       expect([...turn].map((prUrl) => rows.get(prUrl)!.number)).toEqual(listed);
       expect(deckRows(deck).filter(({ row, pile }) => turn.has(row.prUrl) && !(needsYou(row, pile) && row.section !== "merge" && row.step?.owner === "you"))
         .map(({ row, pile }) => [row.number, pile, row.section, row.step?.owner])).toEqual([]);
+      const rowsOf = (list: string) => deckRows(deck).filter(({ row }) => row.turn.list === list).map(({ row }) => row.number);
+      expect(rowsOf("turn").sort()).toEqual([...listed].sort());
+      expect(deckRows(deck).filter(({ row }) => row.turn.list === "in-flight" && row.section !== "flight").map(({ row }) => [row.number, row.section])).toEqual([]);
     }
   });
 

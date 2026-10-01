@@ -157,9 +157,9 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
   // Why the last Address didn't send it; else its sent thread, linked with BB's status for it, while it addresses the PR or the PR is on Your
-  // turn. After that, the PR's own working thread leads.
+  // turn as All PRs lists it. After that, the PR's own working thread leads.
   const left = acted ? null : context.details?.get(item.prUrl) ?? null;
-  const sent = row?.sent?.threadId && (row.addressing || row.yourTurn) && (!acted || acted.kind === "address") ? row.sent : null;
+  const sent = row?.sent?.threadId && (row.addressing || row.turn.list === "turn") && (!acted || acted.kind === "address") ? row.sent : null;
   if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Not sent: ${left}` };
   else if (sent) trail = { kind: "thread", text: sentText(sent), threadId: sent.threadId! };
   else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
@@ -564,6 +564,8 @@ export function advanceTarget(context: Pick<KeyContext, "cur" | "focused" | "sel
 const NO_CARD = "open an effort card";
 const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are waiting", nudge: "no nudge is due", request: "every PR has a reviewer",
   ready: "no draft is ready", release: "nothing here is on hold", fix: "no PR here needs a thread's fix" } as const;
+/** The selected deck rows Address takes: live ones All PRs lists on Your turn. The listing says why any it can't take stays out. */
+export const addressPicks = (selected: readonly DeckLine[]): DeckLine[] => selected.filter((line) => !line.dim && line.row?.turn.list === "turn");
 /** Every action's availability now, with why one can't run, for the keys, the hint bar, the ? sheet, and ⌘K. */
 export function availability(context: KeyContext): Availability {
   const { focused, selected } = context;
@@ -598,7 +600,7 @@ export function availability(context: KeyContext): Availability {
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);
   }
   // Address takes the selection's Your turn rows, never a row by focus alone: you pick what one thread gets.
-  const picked = deck ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : prs?.picked ?? 0;
+  const picked = deck ? addressPicks(selected).length : prs?.picked ?? 0;
   set("address", (deck ? live : true) && picked > 0, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : "select Your turn rows first");
   set("undo", context.undo, "nothing to undo");
   const row = deck ? !!focused?.row && !focused.ghost : !!prs?.row;

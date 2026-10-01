@@ -96,15 +96,16 @@ describe("the PR inventory read model", () => {
     expect(view).toMatchObject({ checkedAt: expect.any(String), refreshing: false, rateLimitedUntil: null });
   });
 
-  // Your turn is the server's word in both read models, so the badge, All PRs, and the deck agree; a held PR waits in Held on its card.
+  // Your turn is one rule (turnOf) over the server's facts in both read models, so the badge, All PRs, and the deck agree; a held PR waits
+  // in Held on its card.
   it("marks Your turn in inventory_get and deck_get, never on a held PR, and signals when a release makes it yours again", async () => {
     const env = await setup();
-    const turns = async () => (await env.get()).groups.flatMap((group) => group.rows).filter((row) => row.yourTurn).map((row) => [row.number, row.yourTurn!.why]);
+    const turns = async () => yourTurnRows(await env.get(), Date.now()).map((line) => [line.number, line.yourTurn!.why]);
     expect(await turns()).toEqual([[316, "Changes requested by @otto-v"]]);
     const deck = await env.harness.callRpc("deck_get", {}) as DeckView;
     const rows = [...deck.active, ...deck.held].flatMap((card) => card.sections.flatMap((section) => section.rows));
-    expect(rows.find((row) => row.number === 316)?.yourTurn?.why).toBe("Changes requested by @otto-v");
-    expect(rows.find((row) => row.number === 315)).toMatchObject({ section: "held", yourTurn: null });
+    expect(rows.find((row) => row.number === 316)?.turn).toEqual({ list: "turn", addressable: true });
+    expect(rows.find((row) => row.number === 315)).toMatchObject({ section: "held", turn: { list: "held", addressable: "On hold. Release it first." } });
     const before = env.harness.inspection.realtimeSignals.length;
     await env.harness.callRpc("pr_hold_set", { prUrl: url(315), held: false });
     expect(env.harness.inspection.realtimeSignals.slice(before).map((signal) => signal.channel)).toContain("inventory-changed");

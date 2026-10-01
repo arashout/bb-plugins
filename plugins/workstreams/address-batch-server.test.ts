@@ -329,6 +329,21 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect(env.spawn).not.toHaveBeenCalled();
   });
 
+  // A PR you dismissed is off Your turn, so neither list offers it, and the listing leaves it out too, whichever list picked it: the deck
+  // once still sent it, since it never read Dismiss. A new word brings it back.
+  it("leaves out a PR you dismissed from Your turn, and takes it again once a person says more", async () => {
+    const env = await setup();
+    const row = async () => (await env.rpc("inventory_get", {}) as InventoryView).groups.flatMap((group) => group.rows).find((item) => item.number === 44)!;
+    expect(await env.rpc("inventory_dismiss", { prUrl: url(44), head: HEAD, latest: (await row()).yourTurn!.latest })).toEqual({ ok: true });
+    expect(await env.turn()).toEqual([42, 43, 45, 46]);
+    const plan = await env.plan([43, 44].map(url));
+    expect([plan.items.map((item) => item.ref), plan.skipped.map((skip) => `${skip.ref}: ${skip.reason}`)])
+      .toEqual([["folio #43"], ["folio #44: You dismissed it from Your turn."]]);
+    env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 2, comment: { login: "ines", at: ago(HOUR / 4) }, repliedAt: null } });
+    await env.refresh();
+    expect((await env.plan([44].map(url))).items.map((item) => item.ref)).toEqual(["folio #44"]);
+  });
+
   // The removed Advance engine's saved jobs are history: nothing can settle one it left mid-run, so it holds neither its PR nor its checkout.
   it("lists for Address, and messages, PRs whose only owner is a legacy Advance job that never settled", async () => {
     const env = await setup();
@@ -475,7 +490,7 @@ describe("the checks a batch thread's claims pass as it starts", () => {
       env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 0, comment: { login: "ines", at: ago(HOUR) }, repliedAt: ago(HOUR / 2) } });
     })).toEqual(["folio #42: sent: Started “Address feedback: folio #42”.",
       "folio #43: refused: New commits landed since the listing. Review it and try again; nothing was started.",
-      "folio #44: refused: No feedback waits on you now; nothing was started."]);
+      "folio #44: refused: No feedback waits on you."]);
     expect(claims(env)).toEqual([[42, "running"]]);
     expect(spawned(env).map((args) => [args.title, args.prompt.includes(url(42)), args.prompt.includes(url(43)), args.prompt.includes(url(44))]))
       .toEqual([["Address feedback: folio #42", true, false, false]]);
@@ -601,8 +616,9 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     await vi.waitFor(() => expect(env.hostCalls.filter((method) => method === "inspectPaths").length).toBe(rescans + 1));
     await drain();
     expect(await env.turn()).toContain(44);
-    expect((await env.rows()).get(44)).toMatchObject({ addressing: null, yourTurn: { why: "Comment from @ines · 2 open threads" },
-      sent: { state: "idle", threadId: "thr-batch-1" } });
+    const row = (await env.rpc("inventory_get", {}) as InventoryView).groups.flatMap((group) => group.rows).find((item) => item.number === 44)!;
+    expect(row.yourTurn?.why).toBe("Comment from @ines · 2 open threads");
+    expect((await env.rows()).get(44)).toMatchObject({ addressing: null, turn: { list: "turn", addressable: true }, sent: { state: "idle", threadId: "thr-batch-1" } });
   });
 
   // Address selected's own path, with no listing: its one click schedules the batch, the row reads Sending with Undo, and Undo starts nothing.

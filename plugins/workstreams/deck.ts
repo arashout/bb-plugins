@@ -18,9 +18,9 @@ import { EFFORT_PILES, type EffortPileState } from "./effort-piles.js";
 import { effortNotesSchema, NO_NOTES, type EffortNotes } from "./effort-notes.js";
 import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
-import { inventoryLine, type ActionId } from "./inventory-view-model.js";
+import { inventoryLine, rowTurn, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
-import { sentSchema, yourTurnSchema } from "./your-turn.js";
+import { sentSchema, turnSchema, type Turn } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
 const WEEK_MS = 7 * 86_400_000;
@@ -46,8 +46,8 @@ export const deckRowSchema = z.object({
   suggested: z.array(z.string()), nudge: z.array(z.string()),
   /** Approval comments waiting for your confirmation. */
   notes: z.number(),
-  /** Reviewer feedback that waits on your move, as All PRs' Your turn lists it. */
-  yourTurn: yourTurnSchema.nullable(),
+  /** Where All PRs lists it, Your turn among them, and whether Address takes it (turnOf). */
+  turn: turnSchema,
   tickets: z.array(z.string()),
   stackedOn: z.number().nullable(),
   thread: z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict().nullable(),
@@ -190,12 +190,12 @@ const oldest = (a: number | null, b: number | null) => (a ?? Number.POSITIVE_INF
 /**
  * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write, and files
  * the row under Held alone. Only a parent blocks: a review not yet due a nudge, running checks, code work a thread is
- * doing, and feedback a batch thread's claim holds are in flight.
+ * doing, feedback a thread is at work on (turnOf, whatever the row leads with), and feedback a batch thread's claim holds are in flight.
  */
-function place(row: DeckRowInput, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
+function place(row: DeckRowInput, turn: Turn, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
   const blocked = (waitsOn: NonNullable<DeckRow["waitsOn"]>) => ({ section: "blocked" as const, waitsOn });
   if (row.hold) return { section: "held", waitsOn: { kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt } };
-  if (row.addressing) return { section: "flight", waitsOn: null };
+  if (row.addressing || turn.list === "in-flight") return { section: "flight", waitsOn: null };
   const move = primary && MOVES[primary];
   if (move && !(move === "work" && row.threads.executor?.active)) return { section: move, waitsOn: null };
   if (owner === "parent" && row.stackedOn !== null) {
@@ -205,18 +205,19 @@ function place(row: DeckRowInput, primary: ActionId | null, owner: string | null
   return { section: "flight", waitsOn: null };
 }
 
-/** One row as the deck draws it, worded by the inventory's own view model. */
-export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, InventoryRow>, now: number): DeckRow {
+/** One row as the deck draws it on a card on `pile`, worded by the inventory's own view model. */
+export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, InventoryRow>, now: number, pile: DeckPile): DeckRow {
   const line = inventoryLine(row, parents, { now, limitedUntil: null });
   const first = line.steps[0];
-  const { section, waitsOn } = place(row, line.primary, first?.owner.kind ?? null);
+  const turn = rowTurn(row, pile);
+  const { section, waitsOn } = place(row, turn, line.primary, first?.owner.kind ?? null);
   const thread = row.threads.executor ?? row.threads.origin;
   const feedback = row.pr?.approvalFeedback;
   return {
     prUrl: row.prUrl, repo: row.repo, number: row.number, title: row.title, draft: row.draft, section, status: line.status,
     step: first ? { text: first.text, owner: first.owner.label, since: first.since } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
-    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
+    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, turn, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing, sent: row.sent,
     hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
     checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
@@ -348,7 +349,7 @@ export function deckRows(input: Pick<DeckInput, "now" | "efforts" | "rows">): (P
   const piles = new Map(input.efforts.map((effort) => [effort.id, effort.pile.pile]));
   return input.rows.flatMap((row) => {
     const pile = row.effort ? piles.get(row.effort.id) : "active";
-    return pile ? [{ row: deckRow(row, parents, input.now), input: row, pile, cardId: row.effort?.id ?? serviceId(row.repo) }] : [];
+    return pile ? [{ row: deckRow(row, parents, input.now, pile), input: row, pile, cardId: row.effort?.id ?? serviceId(row.repo) }] : [];
   });
 }
 

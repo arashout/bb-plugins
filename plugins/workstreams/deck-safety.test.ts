@@ -66,7 +66,7 @@ describe("the deck's write safety", () => {
     }
     // The deck's Address selected, and b, start its selected Your turn rows, and only while the selection has some.
     const nav = source("deck-nav-view.tsx");
-    expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.address\(card\.card\.id, selected\.filter\(\(item\) => !item\.dim && item\.row\?\.yourTurn\)/u);
+    expect(nav).toMatch(/case "address": if \(card && on\.address\.on\) void batch\.address\(card\.card\.id, addressPicks\(selected\)/u);
     expect(source("deck-screen.tsx")).toContain('onClick={() => run({ kind: "action", id: "address" })}');
     // All PRs exposes only Address selected, eligible Nudge buttons, a sent PR's chip, which opens its thread, and a batch's Undo. Its keys
     // move focus or select; n opens the same listing confirm as the deck's, and b starts Address selected. Its Nudge button stays one

@@ -147,10 +147,10 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
 });
 
 describe("the PR inventory screen view model", () => {
-  it("imports only types, so it can't compute attention or reach a server module", () => {
+  it("imports only types and Your turn's pure rule, so it can't compute attention or reach a server module", () => {
     const source = readFileSync(new URL("./inventory-view-model.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import (type )?.* from "(.+)";$/gmu)].map((match) => [match[2], match[1] === "type " ? "type" : "value"]);
-    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "type"]]);
+    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "value"]]);
     // The server publishes this channel (inventory-get-server.test.ts pins its side), and the picker checks logins as gh would.
     expect(INVENTORY_CHANGED).toBe("inventory-changed");
     expect(LOGIN.source).toBe(REVIEWER.source);
@@ -301,6 +301,24 @@ describe("the PR inventory screen view model", () => {
     const inFlight = find("catalog #96", withRow("catalog #96", { yourTurn: threads, threads: { origin: null, executor: working } }));
     expect(onYourTurn(inFlight)).toBe(false);
     expect(action(inFlight, "nudge")).toMatchObject({ enabled: true, label: "Nudge", reviewers: ["mira-l", "theo-k"] });
+  });
+
+  // The button a row leads with is presentation: Your turn and Address read the PR's facts. A note to confirm leads with Confirm and a
+  // comment with its thread, and a thread at work on either takes it off alike; a re-request leading the row (756e943) changes nothing.
+  it("lists a row on Your turn, and lets Address take it, whatever button it leads with", () => {
+    const working = { origin: null, executor: { id: "thr_catalog_96", title: "Series order", active: true } };
+    const note = reason({ kind: "approval-note", action: "confirm-handled", nextStep: "Answer the approval's comment", owner: "you", reviewers: [] });
+    const comment = reason({ kind: "review-comments", action: "open-thread", nextStep: "Answer @theo-k's comment", owner: "you", reviewers: [] });
+    const yourTurn = { why: "Comment from @theo-k", since: null, latest: null };
+    for (const attention of [[note], [comment]]) {
+      const free = find("catalog #96", withRow("catalog #96", { attention, yourTurn }));
+      const busy = find("catalog #96", withRow("catalog #96", { attention, yourTurn, threads: working }));
+      expect([onYourTurn(free), sendable(free), onYourTurn(busy), sendable(busy)]).toEqual([true, true, false, false]);
+      for (const primary of ["thread", "confirm-handled", "nudge", "merge", null] as const) {
+        const [led, busyLed]: InventoryLine[] = [{ ...free, primary }, { ...busy, primary }];
+        expect([primary, onYourTurn(led), sendable(led), onYourTurn(busyLed)]).toEqual([primary, true, true, false]);
+      }
+    }
   });
 
   // Your turn's moves are Address, Refresh, and Dismiss: while a person's feedback waits on you, asking a reviewer again only hands them a
@@ -459,6 +477,9 @@ describe("the PR inventory screen view model", () => {
     for (const state of ["idle", "refused"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, true]);
     expect(onYourTurn(sent("idle", { yourTurn: null }))).toBe(false);
     expect([onYourTurn(find("quill #211")), sendable(find("quill #211"))]).toEqual([true, true]);
+    // Its batch thread ended and another thread took the PR: that one has it, so Address can't, as the server's listing refuses it.
+    const other = sent("idle", { threads: { origin: null, executor: { id: "thr_quill_211", title: "Work on quill #211", active: true } } });
+    expect([onYourTurn(other), sendable(other)]).toEqual([false, false]);
   });
 
   it("explains the two lists and why Nudge is conditional", () => {

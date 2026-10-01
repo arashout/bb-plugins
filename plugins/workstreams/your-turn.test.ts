@@ -1,12 +1,13 @@
 // Your turn lists your PRs where a person's feedback waits on you, and nothing else, as the Reviews plugin reads it: each of the four
-// clauses puts a PR on, a bot never does, and your answer takes it off. A held PR, one waiting only on CI, and one waiting on its reviewers
-// stay off, so the badge never asks you to act where nothing is yours. Dismiss hides a row until its head moves or a person says more, and a
-// sent PR keeps its thread's link with BB's live status for as long as it's open.
+// clauses puts a PR on, a bot never does, and your answer takes it off. A PR waiting only on CI or on its reviewers stays off, so the badge
+// never asks you to act where nothing is yours. One rule then says where a PR lists and whether Address takes it: a hold or a thread at
+// work keeps it off, Dismiss hides it until its head moves or a person says more, and a sent PR keeps its thread's link with BB's live
+// status for as long as it's open.
 import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { dismissed, sentState, sentText, yourTurn, type Sent, type SentItem, type SentRun } from "./your-turn.js";
+import { dismissed, sentState, sentText, turnOf, yourTurn, type Sent, type SentItem, type SentRun, type Turn, type TurnFacts } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -16,9 +17,10 @@ const base = parsePrList(JSON.stringify([{ number: 96, url: "https://github.com/
 const pr = (patch: Partial<Pr>): Pr => ({ ...base, headCommittedAt: at(9), unresolvedReviewThreads: 0, resolvedReviewThreads: 0,
   approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true,
   reviewFeedback: { openThreads: 0, comment: null, repliedAt: null }, ...patch });
-/** Your turn as the server computes it: with the PR's own attention, which asks for an approval's notes only once nothing else holds it. */
+/** The PR's own attention, which offers Re-request once you answered a change request and Confirm once you answered an approval's note. */
 const reasons = (facts: Pr) => attentionReasons(facts, {}, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 });
-const turn = (facts: Pr, held = false) => yourTurn(facts, reasons(facts), held);
+/** Your turn from the PR's facts alone: a hold, a Dismiss, or a thread at work is turnOf's to weigh. */
+const turn = (facts: Pr) => yourTurn(facts);
 const why = (facts: Pr) => turn(facts)?.why ?? null;
 
 const changes = pr({ reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(10) }] });
@@ -87,10 +89,10 @@ describe("Your turn", () => {
     expect(turn({ ...approval, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true })).toBeNull();
   });
 
-  // Drafts count, as in Reviews: a person's open thread or change request on your draft still waits on you.
-  it("leaves off a held or closed PR and one waiting on CI or reviewers, but keeps a draft for every clause", () => {
+  // Drafts count, as in Reviews: a person's open thread or change request on your draft still waits on you. A hold hides nothing here:
+  // the feedback still waits, and turnOf keeps the PR off Your turn until you release it.
+  it("leaves off a closed PR and one waiting on CI or reviewers, but keeps a draft for every clause", () => {
     for (const facts of [changes, approval, threads, comments]) {
-      expect(turn(facts, true)).toBeNull();
       expect(turn({ ...facts, state: "MERGED" })).toBeNull();
       expect(why({ ...facts, isDraft: true })).toBe(why(facts));
     }
@@ -113,6 +115,39 @@ describe("Dismiss", () => {
     // Nothing waiting, or never dismissed, is nothing to hide.
     expect(dismissed(seen, head, null)).toBe(false);
     expect(dismissed(null, head, turn(comments))).toBe(false);
+  });
+});
+
+// One rule says where a PR lists and whether Address takes it, for All PRs, its badge, the deck, a batch's listing, and its dispatch. It
+// reads facts, never the button a row leads with: a re-request leading the row once dropped Address (756e943). A thread at work has the PR
+// instead of you, unless it's the batch thread its own Address started, whose state the row keeps showing; a hold or a held effort parks it.
+describe("where a PR lists", () => {
+  const ready: TurnFacts = { owes: true, hold: false, pile: "active", dismissed: false, executorActive: false, sent: null };
+  const sent = (state: Sent["state"]) => ({ state });
+  const BUSY = "An agent is already working on it.";
+  it("lists each PR once by its facts, and says why Address can't take it", () => {
+    const table: [Partial<TurnFacts>, Turn["list"], Turn["addressable"]][] = [
+      [{}, "turn", true],
+      [{ owes: false }, "other", "No feedback waits on you."],
+      [{ owes: false, hold: true, executorActive: true, dismissed: true }, "other", "No feedback waits on you."],
+      [{ executorActive: true }, "in-flight", BUSY],
+      // The batch's thread ended and another took the PR: that one has it, not you.
+      [{ executorActive: true, sent: sent("idle") }, "in-flight", BUSY],
+      [{ executorActive: true, sent: sent("working") }, "turn", BUSY],
+      [{ sent: sent("needs-you") }, "turn", BUSY],
+      [{ sent: sent("sending") }, "turn", "A write on it is waiting or just ran."],
+      [{ sent: sent("idle") }, "turn", true],
+      [{ sent: sent("refused") }, "turn", true],
+      [{ hold: true }, "held", "On hold. Release it first."],
+      [{ pile: "held" }, "held", "Its effort is on hold."],
+      // A done or archived effort's PR still lists, as All PRs shows it, but nothing writes to it.
+      [{ pile: "done" }, "turn", "Its effort is done."],
+      [{ pile: "archived" }, "turn", "Its effort is archived."],
+      [{ dismissed: true }, "dismissed", "You dismissed it from Your turn."],
+      [{ dismissed: true, hold: true }, "held", "On hold. Release it first."],
+      [{ dismissed: true, executorActive: true }, "in-flight", BUSY],
+    ];
+    expect(table.map(([facts]) => { const turn = turnOf({ ...ready, ...facts }); return [facts, turn.list, turn.addressable]; })).toEqual(table);
   });
 });
 

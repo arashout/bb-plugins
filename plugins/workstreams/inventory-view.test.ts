@@ -64,13 +64,14 @@ describe("the PR inventory", () => {
       .toEqual({ at: "2026-09-28T21:01:00.000Z", error: "HTTP 502" });
   });
 
-  // The badge counts these rows: a teammate's PR asks nothing of you, and a PR you hold waits in Held on its card until you release it.
-  it("marks Your turn on your own PR with feedback waiting on you, never a teammate's or one you hold", () => {
+  // A teammate's PR asks nothing of you. A PR you hold still has its feedback, which turnOf parks in Held until you release it: the row
+  // keeps the facts, not the verdict.
+  it("reads the feedback waiting on you on your own PR, held or not, never on a teammate's", () => {
     const changes = pr(1, { reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ author: { login: "otto-v" }, state: "CHANGES_REQUESTED", submittedAt: "2026-09-28T20:00:00Z" }] });
     expect(inventoryRow(input(1, { pr: changes })).yourTurn).toEqual({ why: "Changes requested by @otto-v",
       since: Date.parse("2026-09-28T20:00:00Z"), latest: Date.parse("2026-09-28T20:00:00Z") });
     expect(inventoryRow(input(1, { pr: changes, authored: false })).yourTurn).toBeNull();
-    expect(inventoryRow(input(1, { pr: changes, hold: { reason: "Store layout first", heldAt: 0 } })).yourTurn).toBeNull();
+    expect(inventoryRow(input(1, { pr: changes, hold: { reason: "Store layout first", heldAt: 0 } })).yourTurn).toMatchObject({ why: "Changes requested by @otto-v" });
     expect(inventoryRow(input(1)).yourTurn).toBeNull();
   });
 
