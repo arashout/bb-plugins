@@ -288,6 +288,18 @@ describe("fetchWatchedPullRequests: parsing", () => {
     expect(pr?.myLastReview).toBeNull();
   });
 
+  it("keeps the latest submitted review when a newer draft review is pending", async () => {
+    const { fetchImpl, calls } = stubFetch(() =>
+      json(searchPayload([rawNode({ reviews: { nodes: [
+        { state: "COMMENTED", submittedAt: "2026-09-20T09:00:00Z" },
+        { state: "PENDING", submittedAt: null },
+      ] } })])),
+    );
+    const [pr] = await tokenClient(fetchImpl).fetchWatchedPullRequests("reader-ada", "2026-09-15");
+    expect(pr?.myLastReview).toEqual({ state: "COMMENTED", submittedAt: "2026-09-20T09:00:00Z" });
+    expect(calls[0]?.body.query).toContain("reviews(author: $login, last: 10)");
+  });
+
   it("skips non-pull-request search rows, which the ISSUE search type can return", async () => {
     const skips: string[] = [];
     const { fetchImpl } = stubFetch((search) =>
@@ -334,6 +346,23 @@ describe("fetchOpenNodeIds", () => {
     const client = createGithubClient({ transport: async () => ({ nodes: [null] }) });
     await expect(client.fetchOpenNodeIds(["PR_unreadable"]))
       .rejects.toThrow("cannot safely update the queue");
+  });
+});
+
+describe("fetchRetainedPullRequests", () => {
+  it("reads review details only for retained started rows and excludes closed PRs", async () => {
+    const queries: string[] = [];
+    const client = createGithubClient({ transport: async (query) => {
+      queries.push(query);
+      return { nodes: [
+        { ...rawNode({ reviews: { nodes: [{ state: "APPROVED", submittedAt: "2026-09-22T13:00:00Z" }] } }), state: "OPEN" },
+        { id: "PR_closed", state: "CLOSED" },
+      ] };
+    } });
+    const result = await client.fetchRetainedPullRequests(["PR_node1", "PR_closed"], "reader-ada");
+    expect(result.openNodeIds).toEqual(new Set(["PR_node1"]));
+    expect(result.pullRequests[0]?.myLastReview?.submittedAt).toBe("2026-09-22T13:00:00Z");
+    expect(queries[0]).toContain("reviews(author: $login, last: 10)");
   });
 });
 

@@ -17,9 +17,10 @@ export type Rule = z.infer<typeof ruleSchema>;
 
 /**
  * Queue rows are never deleted on sight of the same pull request again:
- * `dismissed` and `started` must survive a poll, or the watcher nags forever.
+ * `dismissed`, `started`, and `archived` survive polls so threads stay reachable
+ * and past decisions do not return to the queue.
  */
-export const itemStateSchema = z.enum(["queued", "started", "dismissed"]);
+export const itemStateSchema = z.enum(["queued", "started", "dismissed", "archived"]);
 export type ItemState = z.infer<typeof itemStateSchema>;
 
 /** A pull request as review-watch needs it, flattened out of GraphQL. */
@@ -79,6 +80,8 @@ export const queueItemSchema = z.object({
   noticedAt: z.string(),
   /** The pull request's own updatedAt, for sorting. */
   updatedAt: z.string(),
+  /** Last submitted review when this item was first classified. */
+  reviewBaselineSubmittedAt: z.string().nullable().optional(),
   /** Set once a thread has been started for this item. */
   threadId: z.string().optional(),
 });

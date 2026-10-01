@@ -38,6 +38,7 @@ function toItem(
     reason,
     noticedAt: now,
     updatedAt: pr.updatedAt,
+    reviewBaselineSubmittedAt: pr.myLastReview?.submittedAt ?? null,
   };
 }
 
@@ -105,21 +106,35 @@ function byUpdatedAtDesc(a: QueueItem, b: QueueItem): number {
 export function mergeQueue(
   existing: QueueItem[],
   incoming: QueueItem[],
-  options: { openNodeIds: Set<string>; maxAgeDays: number; now: string },
+  options: { openNodeIds: Set<string>; observedPullRequests?: PullRequest[]; maxAgeDays: number; now: string },
 ): QueueItem[] {
   const incomingByKey = new Map(incoming.map((item) => [item.key, item]));
   const incomingKeys = new Set(incomingByKey.keys());
   const storedKeys = new Set(existing.map((item) => item.key));
+  const observed = new Map(options.observedPullRequests?.map((pr) => [pr.nodeId, pr]) ?? []);
 
   const merged = existing.filter((item) => {
-    // The pull request merged or closed: nothing left to act on.
-    if (!options.openNodeIds.has(item.nodeId)) return false;
-    // The poll no longer justifies this item. A `queued` row is now noise, but a
-    // `started` row has a thread behind it that the user must still be able to
-    // reach, and a `dismissed` row has to stay to keep the item from returning.
+    if (item.state === "archived") return true;
+    // Closed queued and dismissed rows need no further action. Started threads
+    // become archived below so their history remains reachable.
+    if (!options.openNodeIds.has(item.nodeId) && item.state !== "started") return false;
+    // A missing classification removes queued work only. Started rows need
+    // concrete completion evidence, and dismissed rows prevent repeat asks.
     if (!incomingKeys.has(item.key) && item.state === "queued") return false;
     return true;
   }).map((item) => {
+    if (item.state === "started") {
+      const pr = observed.get(item.nodeId);
+      const baseline = item.reviewBaselineSubmittedAt ?? item.noticedAt;
+      const review = pr?.myLastReview;
+      const reviewSent = review !== null && review !== undefined &&
+        review.state !== "PENDING" && review.state !== "DISMISSED" &&
+        isBefore(baseline, review.submittedAt);
+      if (!options.openNodeIds.has(item.nodeId) ||
+          (pr !== undefined && pr.headSha !== item.headSha) || reviewSent) {
+        return { ...item, state: "archived" as const };
+      }
+    }
     const latest = incomingByKey.get(item.key);
     return item.state === "queued" && latest !== undefined
       ? { ...item, updatedAt: latest.updatedAt }

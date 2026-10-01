@@ -47,7 +47,53 @@ function graphqlResponse(data: unknown): Response {
   return new Response(JSON.stringify({ data }), { status: 200 });
 }
 
+function retainedNode(id: string, state = "OPEN", review: { state: string; submittedAt: string | null } | null = null) {
+  const number = Number(id.replace("node-", ""));
+  return {
+    id, state, number, title: `Fix review issue number ${number}`,
+    url: `https://github.com/owner/repo/pull/${number}`, isDraft: false,
+    updatedAt: "2026-01-01T00:00:00.000Z", reviewDecision: "REVIEW_REQUIRED",
+    baseRefName: "main", headRefName: `feature-${number}`, headRefOid: `sha-${number}`,
+    author: { login: "author" }, repository: { nameWithOwner: "owner/repo" },
+    commits: { nodes: [{ commit: { committedDate: "2026-01-01T00:00:00.000Z" } }] },
+    reviewRequests: { pageInfo: { hasNextPage: false }, nodes: [] },
+    reviews: { nodes: review === null ? [] : [review] },
+  };
+}
+
 describe("poll with date-limited searches", () => {
+  it("archives a retained started thread after GitHub confirms a later submitted review", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T12:00:00.000Z"));
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init: RequestInit) => {
+      const { query } = JSON.parse(String(init.body)) as { query: string };
+      if (query.includes("query Viewer")) return graphqlResponse({ viewer: { login: "reader-ada" } });
+      if (query.includes("query WatchedPullRequests")) return graphqlResponse({ search: {
+        nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+      } });
+      return graphqlResponse({ nodes: [retainedNode("node-10", "OPEN", {
+        state: "COMMENTED", submittedAt: "2026-09-30T01:00:00.000Z",
+      })] });
+    }));
+    const started = {
+      ...item(10), state: "started" as const, threadId: "old-thread",
+      reviewBaselineSubmittedAt: null, updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const host = await setup([started], "test-token");
+    expect(await host.harness.behavior.callRpc("poll_now", null)).toMatchObject({ ok: true, changed: true });
+    const archived = { ...started, state: "archived" };
+    expect(await host.bb.storage.kv.get<QueueItem[]>("queue")).toEqual([archived]);
+    expect(await host.harness.behavior.callRpc("queue_list", null)).toMatchObject({ items: [archived] });
+    const status = await host.harness.behavior.runCli(["status", "--json"]);
+    expect(status.exitCode).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      queued: { "review-requested": 0, "review-followup": 0 },
+      pending: { "review-requested": 0, "review-followup": 0 },
+      started: 0,
+      archived: 1,
+    });
+  });
+
   it("keeps old started PRs that remain open and drops closed retained PRs", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-30T12:00:00.000Z"));
@@ -67,10 +113,8 @@ describe("poll with date-limited searches", () => {
         } });
       }
       lookups.push(query);
-      return graphqlResponse({ nodes: [
-        { id: "node-10", state: "OPEN" },
-        { id: "node-11", state: "CLOSED" },
-      ] });
+      if (query.includes("RetainedPullRequestDetails")) return graphqlResponse({ nodes: [retainedNode("node-10")] });
+      return graphqlResponse({ nodes: [{ id: "node-11", state: "CLOSED" }] });
     }));
     const started = { ...item(10), state: "started" as const, threadId: "old-thread", updatedAt: "2026-01-01T00:00:00.000Z" };
     const dismissed = { ...item(11), state: "dismissed" as const, updatedAt: "2026-01-01T00:00:00.000Z" };
@@ -81,8 +125,9 @@ describe("poll with date-limited searches", () => {
     expect(result).toMatchObject({ ok: true, removed: 1 });
     expect(searches).toHaveLength(2);
     expect(searches.every((search) => search.includes("updated:>=2026-09-15"))).toBe(true);
-    expect(lookups).toHaveLength(1);
-    expect(lookups[0]).toContain('nodes(ids: ["node-10","node-11"])');
+    expect(lookups).toHaveLength(2);
+    expect(lookups[0]).toContain('nodes(ids: ["node-10"])');
+    expect(lookups[1]).toContain('nodes(ids: ["node-11"])');
     expect((await host.bb.storage.kv.get<QueueItem[]>("queue")))
       .toEqual([started]);
   });
@@ -129,7 +174,7 @@ describe("refresh after a review-watch thread becomes idle", () => {
         } });
       }
       const ids = JSON.parse(query.match(/nodes\(ids: (\[[^)]*\])\)/)?.[1] ?? "[]") as string[];
-      return graphqlResponse({ nodes: ids.map((id) => ({ id, state: "OPEN" })) });
+      return graphqlResponse({ nodes: ids.map((id) => retainedNode(id)) });
     }));
     const first = item(20);
     const second = item(21);
@@ -174,7 +219,7 @@ describe("refresh after a review-watch thread becomes idle", () => {
         } });
       }
       const ids = JSON.parse(query.match(/nodes\(ids: (\[[^)]*\])\)/)?.[1] ?? "[]") as string[];
-      return graphqlResponse({ nodes: ids.map((id) => ({ id, state: "OPEN" })) });
+      return graphqlResponse({ nodes: ids.map((id) => retainedNode(id)) });
     }));
     const first = { ...item(30), state: "started" as const, threadId: "thread-1" };
     const second = { ...item(31), state: "started" as const, threadId: "thread-2" };
@@ -219,7 +264,7 @@ describe("refresh after a review-watch thread becomes idle", () => {
         } });
       }
       const ids = JSON.parse(query.match(/nodes\(ids: (\[[^)]*\])\)/)?.[1] ?? "[]") as string[];
-      return graphqlResponse({ nodes: ids.map((id) => ({ id, state: "OPEN" })) });
+      return graphqlResponse({ nodes: ids.map((id) => retainedNode(id)) });
     }));
     const first = { ...item(32), state: "started" as const, threadId: "thread-1" };
     const second = { ...item(33), state: "started" as const, threadId: "thread-2" };
@@ -253,6 +298,11 @@ describe("batch review start", () => {
 
     expect(result.threadId).toBe("thread-1");
     expect(result.items.map((row) => row.state)).toEqual(["started", "started"]);
+    const status = await host.harness.behavior.runCli(["status", "--json"]);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      queued: { "review-requested": 0, "review-followup": 0 },
+      pending: { "review-requested": 1, "review-followup": 1 }, started: 2,
+    });
     const calls = host.harness.sdk.callsTo("threads.spawn");
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[0]).toMatchObject({

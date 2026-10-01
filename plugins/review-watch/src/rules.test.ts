@@ -68,6 +68,7 @@ describe("classify: review-requested", () => {
     expect(items[0]?.rule).toBe("review-requested");
     expect(items[0]?.state).toBe("queued");
     expect(items[0]?.noticedAt).toBe(NOW);
+    expect(items[0]?.reviewBaselineSubmittedAt).toBeNull();
     expect(items[0]?.reason).toBe("@alice requested your review");
     expect(items[0]?.key).toBe(itemKey("review-requested", "PR_node1", "sha-head"));
   });
@@ -107,6 +108,7 @@ describe("classify: review-requested", () => {
     expect(items.filter((item) => item.rule === "review-requested")).toHaveLength(0);
     expect(items.filter((item) => item.rule === "review-followup")).toHaveLength(1);
     expect(items[0]?.reason).toBe("@alice requested your follow-up review");
+    expect(items[0]?.reviewBaselineSubmittedAt).toBe(T.pushed);
   });
 
   it("leaves drafts alone, because the author has not asked anyone to look yet", () => {
@@ -243,7 +245,8 @@ describe("mergeQueue", () => {
     incoming: QueueItem[],
     openNodeIds = open("PR_node1"),
     maxAgeDays = 14,
-  ) => mergeQueue(existing, incoming, { openNodeIds, maxAgeDays, now: NOW });
+    observedPullRequests: PullRequest[] = [],
+  ) => mergeQueue(existing, incoming, { openNodeIds, maxAgeDays, now: NOW, observedPullRequests });
 
   it("does not re-queue a dismissed item when the same head commit is seen again", () => {
     const stored = queueItem({ state: "dismissed", noticedAt: T.reviewed });
@@ -262,9 +265,57 @@ describe("mergeQueue", () => {
     expect(merge([], [incoming])).toEqual([incoming]);
   });
 
-  it("drops an item whose pull request has merged or closed, since there is nothing to do", () => {
-    const stored = queueItem({ state: "started" });
-    expect(merge([stored], [], open())).toEqual([]);
+  it("archives an opened thread when the pull request closes, so its history remains reachable", () => {
+    const stored = queueItem({ state: "started", threadId: "thread-9" });
+    expect(merge([stored], [], open())).toEqual([{ ...stored, state: "archived" }]);
+  });
+
+  it("keeps an opened initial review pending after a withdrawn request or date-filter omission", () => {
+    const stored = queueItem({ state: "started", threadId: "thread-9", reviewBaselineSubmittedAt: null });
+    const withdrawn = pullRequest({ requestedReviewers: [] });
+    expect(merge([stored], [], open("PR_node1"), 14, [withdrawn])).toEqual([stored]);
+    expect(merge([stored], [])).toEqual([stored]);
+  });
+
+  it("archives an opened initial review only after GitHub shows my submitted review", () => {
+    const stored = queueItem({ state: "started", threadId: "thread-9", reviewBaselineSubmittedAt: null });
+    const submitted = pullRequest({ myLastReview: { state: "COMMENTED", submittedAt: "2026-09-22T13:00:00Z" } });
+    expect(merge([stored], [], open("PR_node1"), 14, [submitted]))
+      .toEqual([{ ...stored, state: "archived" }]);
+  });
+
+  it("uses noticedAt for older stored rows without a review baseline", () => {
+    const stored = queueItem({ state: "started", threadId: "thread-9" });
+    const prior = pullRequest({ myLastReview: { state: "COMMENTED", submittedAt: T.reviewed } });
+    const later = pullRequest({ myLastReview: { state: "COMMENTED", submittedAt: "2026-09-22T13:00:00Z" } });
+    expect(merge([stored], [], open("PR_node1"), 14, [prior])).toEqual([stored]);
+    expect(merge([stored], [], open("PR_node1"), 14, [later]))
+      .toEqual([{ ...stored, state: "archived" }]);
+  });
+
+  it("keeps a same-head follow-up pending until a review later than its baseline", () => {
+    const stored = queueItem({ rule: "review-followup", state: "started", reviewBaselineSubmittedAt: T.reviewed });
+    const prior = pullRequest({ myLastReview: { state: "COMMENTED", submittedAt: T.reviewed } });
+    const later = pullRequest({ myLastReview: { state: "APPROVED", submittedAt: "2026-09-22T13:00:00Z" } });
+    expect(merge([stored], [], open("PR_node1"), 14, [prior])).toEqual([stored]);
+    expect(merge([stored], [], open("PR_node1"), 14, [later]))
+      .toEqual([{ ...stored, state: "archived" }]);
+  });
+
+  it("does not treat a dismissed or pending review as a submitted review", () => {
+    const stored = queueItem({ state: "started", reviewBaselineSubmittedAt: null });
+    for (const state of ["DISMISSED", "PENDING"] as const) {
+      const observed = pullRequest({ myLastReview: { state, submittedAt: "2026-09-22T13:00:00Z" } });
+      expect(merge([stored], [], open("PR_node1"), 14, [observed])).toEqual([stored]);
+    }
+  });
+
+  it("archives the old opened thread when a new head creates a fresh pending item", () => {
+    const stored = queueItem({ state: "started", threadId: "thread-9" });
+    const fresh = queueItem({ headSha: "sha-next", key: itemKey("review-requested", "PR_node1", "sha-next") });
+    const observed = pullRequest({ headSha: "sha-next" });
+    expect(merge([stored], [fresh], open("PR_node1"), 14, [observed]))
+      .toEqual([{ ...stored, state: "archived" }, fresh]);
   });
 
   it("drops a queued item the poll no longer justifies, so stale asks disappear", () => {

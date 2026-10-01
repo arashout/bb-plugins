@@ -8,7 +8,7 @@ description: Read the GitHub review queue and start work on a queued item. Use w
 Review Watch keeps one queue of pull requests that need the user's attention. A
 background poller asks GitHub every few minutes. The **Reviews** page and
 `bb review-watch` command read the same queue. The sidebar and thread-header
-badges show queued `review-requested` and `review-followup` items in two
+badges show `review-requested` and `review-followup` items in two
 colored chips. Each badge shows both counts, including zeros. Hover over the
 header badge to see labeled counts, preview up to five review requests, and
 open **Reviews**.
@@ -75,14 +75,17 @@ matters even when the poller uses a token.
 5. If `list` looks stale, run `bb review-watch poll` instead of waiting for the
    next tick.
 
-In **Reviews**, select queued `review-requested` and `review-followup` items,
-then choose **Review selected** to open one aggregate review thread. This action
-does not have a CLI command. Use **Start** to open an individual review thread.
+In **Reviews**, select queued review requests and follow-ups, then choose
+**Review selected** to open one aggregate review thread. This action does not
+have a CLI command. Use **Start** to open an individual review thread.
 
-The queued sections show only queued review requests and follow-ups. Started
-review items appear at the bottom under **Opened threads**, with a link to each
-thread. Threads in that section can still be running or can be complete.
-Dismissed items do not appear.
+Queued and started review items stay in their action sections and remain
+counted. A started row links to its open thread and stays pending until a
+GitHub poll confirms a submitted review newer than the item's baseline. A new
+head supersedes the item; a closed or merged pull request ends its pending
+status. The plugin moves completed or superseded reviewer items to **Archived
+threads** at the bottom, where you can reopen their threads. Dismissed items do
+not appear. Workstreams displays feedback on the user's own pull requests.
 
 ## Constraints
 

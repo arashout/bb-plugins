@@ -61,6 +61,8 @@ export interface GithubClient {
   fetchWatchedPullRequests(login: string, updatedSince: string): Promise<PullRequest[]>;
   /** Open pull request node IDs from stored rows absent from the fresh searches. */
   fetchOpenNodeIds(ids: string[]): Promise<Set<string>>;
+  /** Full details for started rows outside date-limited searches. */
+  fetchRetainedPullRequests(ids: string[], login: string): Promise<{ openNodeIds: Set<string>; pullRequests: PullRequest[] }>;
 }
 
 /**
@@ -89,7 +91,7 @@ const PR_FIELDS = `
     pageInfo { hasNextPage }
     nodes { requestedReviewer { __typename ... on User { login } } }
   }
-  reviews(author: $login, last: 1) { nodes { state submittedAt } }
+  reviews(author: $login, last: 10) { nodes { state submittedAt } }
 `;
 
 const SEARCH_QUERY = `
@@ -162,13 +164,10 @@ function flatten(node: z.infer<typeof searchNodeSchema>): unknown {
     requestedReviewers: node.reviewRequests.nodes
       .map((request) => request.requestedReviewer?.login)
       .filter((login): login is string => login !== undefined),
-    // An unsubmitted (PENDING) draft review has no timestamp to compare against,
-    // so it counts as not having reviewed yet rather than skipping the row.
-    myLastReview: node.reviews.nodes.flatMap((review) =>
-      review.submittedAt === null
-        ? []
-        : [{ state: review.state, submittedAt: review.submittedAt }],
-    )[0] ?? null,
+    // Ignore an unsubmitted draft while retaining the latest submitted review.
+    myLastReview: node.reviews.nodes
+      .filter((review): review is { state: string; submittedAt: string } => review.submittedAt !== null)
+      .sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt))[0] ?? null,
   };
 }
 
@@ -526,6 +525,33 @@ export function createGithubClient(options: {
         }
       }
       return open;
+    },
+
+    async fetchRetainedPullRequests(ids: string[], login: string): Promise<{ openNodeIds: Set<string>; pullRequests: PullRequest[] }> {
+      const openNodeIds = new Set<string>();
+      const pullRequests: PullRequest[] = [];
+      for (let index = 0; index < ids.length; index += NODE_BATCH_SIZE) {
+        const batch = ids.slice(index, index + NODE_BATCH_SIZE);
+        const query = `query RetainedPullRequestDetails($login: String!) { nodes(ids: ${JSON.stringify(batch)}) { ... on PullRequest { state ${PR_FIELDS} } } }`;
+        const data = z.object({ nodes: z.array(z.unknown().nullable()) }).parse(await graphql(query, { login }));
+        if (data.nodes.length !== batch.length) {
+          throw new Error("GitHub returned an incomplete retained pull request detail lookup.");
+        }
+        for (const [offset, node] of data.nodes.entries()) {
+          const state = z.object({ id: z.string(), state: z.enum(["OPEN", "CLOSED", "MERGED"]) }).safeParse(node);
+          if (!state.success || state.data.id !== batch[offset]) {
+            throw new Error("GitHub returned an unknown retained pull request; the poll cannot safely update the queue.");
+          }
+          if (state.data.state !== "OPEN") continue;
+          const parsed = parseSearchNode(node);
+          if ("error" in parsed) {
+            throw new Error(`GitHub returned an unreadable retained pull request: ${parsed.error}`);
+          }
+          openNodeIds.add(state.data.id);
+          pullRequests.push(parsed.pullRequest);
+        }
+      }
+      return { openNodeIds, pullRequests };
     },
   };
 }

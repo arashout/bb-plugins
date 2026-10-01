@@ -29,6 +29,10 @@ const SECTIONS: readonly { rule: Rule; title: string }[] = [
   { rule: "review-followup", title: "Needs a follow-up" },
 ];
 
+function isActiveItem(item: QueueItem): boolean {
+  return item.state === "queued" || item.state === "started";
+}
+
 function canBatchReview(item: QueueItem): boolean {
   return item.state === "queued";
 }
@@ -190,6 +194,11 @@ function ReviewRow({
         <p className="mt-1 text-xs text-muted-foreground">
           {item.author} · {item.reason} · {relativeAge(item.updatedAt)}
         </p>
+        {item.state === "started" ? (
+          <p className="mt-1 text-xs font-medium text-amber-800 dark:text-amber-200">
+            Review not sent
+          </p>
+        ) : null}
       </div>
       {threadId !== undefined ? (
         <Button
@@ -201,7 +210,7 @@ function ReviewRow({
           <Icon name="ExternalLink" className="size-3.5" />
           Open thread
         </Button>
-      ) : item.state === "started" ? (
+      ) : item.state !== "queued" ? (
         <span className="shrink-0 text-xs text-muted-foreground">
           Thread unavailable
         </span>
@@ -244,8 +253,8 @@ function ReviewsPage() {
   const [polling, setPolling] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const navigate = useBbNavigate();
-  const queuedItems = items?.filter((item) => item.state === "queued") ?? [];
-  const startedItems = items?.filter((item) => item.state === "started") ?? [];
+  const activeItems = items?.filter(isActiveItem) ?? [];
+  const archivedItems = items?.filter((item) => item.state === "archived") ?? [];
   const eligibleReviewKeys = new Set(
     items?.filter(canBatchReview).map((item) => item.key),
   );
@@ -364,14 +373,14 @@ function ReviewsPage() {
             <EmptyState>Loading the queue…</EmptyState>
           ) : (
             <>
-              {queuedItems.length === 0 ? (
+              {activeItems.length === 0 ? (
                 <EmptyState>
-                  No review requests or follow-ups queued. Select Refresh to
-                  check GitHub again.
+                  No review requests or follow-ups need attention. Select
+                  Refresh to check GitHub again.
                 </EmptyState>
               ) : null}
               {SECTIONS.map(({ rule, title }) => {
-                const group = queuedItems.filter((item) => item.rule === rule);
+                const group = activeItems.filter((item) => item.rule === rule);
                 if (group.length === 0) return null;
                 return (
                   <section key={rule} className="mt-6">
@@ -396,13 +405,13 @@ function ReviewsPage() {
                   </section>
                 );
               })}
-              {startedItems.length > 0 ? (
+              {archivedItems.length > 0 ? (
                 <section className="mt-8 border-t border-border/60 pt-5">
                   <h2 className="px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Opened threads <span className="font-normal">{startedItems.length}</span>
+                    Archived threads <span className="font-normal">{archivedItems.length}</span>
                   </h2>
                   <ul className="mt-2 divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-muted/30 px-4">
-                    {startedItems.map((item) => (
+                    {archivedItems.map((item) => (
                       <ReviewRow
                         key={item.key}
                         item={item}
@@ -429,14 +438,14 @@ function ReviewsPage() {
  * header action mounts once per visible pane in a split layout, so the count
  * cannot live in a module-level singleton.
  */
-function useQueuedItems(): { items: QueueItem[]; lastPoll: LastPoll } {
+function useActiveReviewItems(): { items: QueueItem[]; lastPoll: LastPoll } {
   const rpc = useRpc<typeof rpcContract>();
-  const [queued, setQueued] = useState<QueueItem[]>([]);
+  const [activeReviews, setActiveReviews] = useState<QueueItem[]>([]);
   const [lastPoll, setLastPoll] = useState<LastPoll>(null);
   const refetch = useCallback(() => {
     rpc.call("queue_list").then(
       (result) => {
-        setQueued(result.items.filter((item) => item.state === "queued"));
+        setActiveReviews(result.items.filter(isActiveItem));
         setLastPoll(result.lastPoll);
       },
       // Keep the last queue response visible while a transient fetch fails.
@@ -447,7 +456,7 @@ function useQueuedItems(): { items: QueueItem[]; lastPoll: LastPoll } {
     refetch();
   }, [refetch]);
   useRealtime("queue-changed", refetch);
-  return { items: queued, lastPoll };
+  return { items: activeReviews, lastPoll };
 }
 
 /**
@@ -456,7 +465,7 @@ function useQueuedItems(): { items: QueueItem[]; lastPoll: LastPoll } {
  * are the notification.
  */
 function QueuedBadge() {
-  const { items } = useQueuedItems();
+  const { items } = useActiveReviewItems();
   const initial = items.filter((item) => item.rule === "review-requested").length;
   const followups = items.filter((item) => item.rule === "review-followup").length;
   return (
@@ -481,10 +490,10 @@ function QueuedHeaderAction({
   isCompactViewport,
 }: PluginThreadHeaderActionProps) {
   const navigate = useBbNavigate();
-  const { items, lastPoll } = useQueuedItems();
+  const { items, lastPoll } = useActiveReviewItems();
   const initial = items.filter((item) => item.rule === "review-requested").length;
   const followups = items.filter((item) => item.rule === "review-followup").length;
-  const queued = items.length;
+  const activeCount = items.length;
   const previewItems = [...items].sort((left, right) => {
     const ruleOrder = SECTIONS.findIndex((section) => section.rule === left.rule)
       - SECTIONS.findIndex((section) => section.rule === right.rule);
@@ -552,12 +561,19 @@ function QueuedHeaderAction({
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     {ruleLabel(item.rule)}
                   </p>
+                  {item.state === "started" ? (
+                    <p className="mt-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-200">
+                      Review not sent
+                    </p>
+                  ) : null}
                 </li>
               ))}
             </ul>
           )}
-          {queued > 5 ? (
-            <p className="mt-2 text-xs text-muted-foreground">+{queued - 5} more</p>
+          {activeCount > 5 ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              +{activeCount - 5} more
+            </p>
           ) : null}
         </HoverCard.Content>
       </HoverCard.Portal>

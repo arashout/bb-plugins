@@ -8,13 +8,17 @@ choose to.
   on your own pull requests appears in Workstreams as **Your turn**.
 - A **Start** button on each row that opens an individual BB thread with a
   prompt written for that kind of work.
-- Started items appear under **Opened threads** at the bottom, with a link to
-  each thread. The section includes active and completed threads; dismissed
-  items do not appear.
-- Checkboxes for queued review requests. **Review selected** opens one
-  aggregate review thread.
+- Queued and started review items stay in their action sections and remain
+  counted. Started rows link to their open threads and stay pending until a
+  GitHub poll confirms a submitted review newer than the item's baseline. A new
+  head supersedes an item; a closed or merged pull request ends its pending
+  status.
+- Completed or superseded reviewer threads move to **Archived threads** at the
+  bottom, where they remain available. Dismissed items do not appear.
+- Checkboxes for queued review requests. **Review selected** opens one aggregate
+  review thread.
 - A `bb review-watch` command that reads the same queue from a terminal.
-- Badges on the sidebar row and thread header show queued `review-requested`
+- Oval badges on the sidebar row and thread header show `review-requested`
   and `review-followup` items in two colored chips. Each badge shows both
   counts, including zeros. Hover over the header badge to see labeled counts,
   preview up to five review requests, or open the full **Reviews** page. Live
@@ -24,8 +28,10 @@ choose to.
 
 A background poller asks GitHub every few minutes what needs your attention and
 stores a deduplicated queue in this plugin's own storage on the BB server.
-Dismissing an item, or starting one, survives later polls, so the queue stops
-asking once you have answered it.
+Dismissing an item survives later polls. Starting a review keeps it pending
+until GitHub confirms a submitted review newer than the item's baseline. A new
+head supersedes the item, and a closed or merged pull request ends its pending
+status. The queue moves completed or superseded items to **Archived threads**.
 
 GitHub searches paginate through all matching pull requests. If nested review
 data is truncated, the poll reports an error and does not update the queue from

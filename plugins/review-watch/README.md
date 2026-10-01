@@ -15,7 +15,7 @@ on its own. The queue notifies; you dispatch.
   `bb review-watch` CLI, RPC for the page, and the realtime signal that keeps
   every open page current.
 - `app.tsx` — the **Reviews** page in the left sidebar
-  (`app.slots.navPanel`), two queued review counts on its sidebar row and
+  (`app.slots.navPanel`), two review counts on its sidebar row and
   thread header, and a hover preview of up to five review requests.
 - `src/types.ts` — the shared vocabulary: `Rule`, `PullRequest`, `QueueItem`.
 - `src/github.ts` — the GitHub client and its two transports, a personal access
@@ -49,17 +49,22 @@ item. Every command that takes a key accepts an unambiguous prefix.
 ## Notifications
 
 BB exposes no public SDK route for a plugin to raise a user notification. The
-sidebar and thread-header badges show queued `review-requested` and
+sidebar and thread-header badges show `review-requested` and
 `review-followup` items in two colored chips. Each badge shows both counts,
 including zero counts. Hover over the header badge to see labeled counts,
 preview up to five review requests, and open the full **Reviews** page. The
 realtime signal keeps these surfaces current.
 
-On the **Reviews** page, select queued `review-requested` and `review-followup`
-items, then choose **Review selected** to open one aggregate review thread.
-Use **Start** for an individual review request. The page shows started review
-items under **Opened threads** with links to their threads, whether those
-threads are still running or have completed. Dismissed items do not appear.
+On the **Reviews** page, queued and started `review-requested` and
+`review-followup` items stay in their action sections and remain counted.
+Started rows link to their open threads. They stay pending until a GitHub poll
+confirms a submitted review newer than the item's baseline. A new head
+supersedes the item; a closed or merged pull request also ends its pending
+status. Select queued review items and choose **Review selected** to open one
+aggregate review thread, or use **Start** for an individual item. Completed or
+superseded reviewer threads move to **Archived threads** at the bottom, where you
+can reopen them. Dismissed items do not appear. Workstreams displays feedback
+on your own pull requests.
 
 Each thread uses the configured project's default environment. The agent finds
 the matching repository checkout before it inspects code. Review Watch does

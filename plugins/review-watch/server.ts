@@ -326,6 +326,7 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.set(QUEUE_KEY, items);
     bb.realtime.publish(QUEUE_CHANGED, {
       queued: items.filter((item) => item.state === "queued").length,
+      pending: items.filter((item) => item.state === "queued" || item.state === "started").length,
     });
   }
 
@@ -450,12 +451,18 @@ export default async function plugin(bb: BbPluginApi) {
       });
       const existing = await readQueue();
       const openNodeIds = new Set(pullRequests.map((pr) => pr.nodeId));
-      const retainedIds = [...new Set(existing
-        .filter((item) => item.state !== "queued" && !openNodeIds.has(item.nodeId))
+      const retainedStartedIds = [...new Set(existing
+        .filter((item) => item.state === "started" && !openNodeIds.has(item.nodeId))
         .map((item) => item.nodeId))];
-      for (const id of await github.fetchOpenNodeIds(retainedIds)) openNodeIds.add(id);
+      const retained = await github.fetchRetainedPullRequests(retainedStartedIds, viewer);
+      for (const id of retained.openNodeIds) openNodeIds.add(id);
+      const retainedDismissedIds = [...new Set(existing
+        .filter((item) => item.state === "dismissed" && !openNodeIds.has(item.nodeId))
+        .map((item) => item.nodeId))];
+      for (const id of await github.fetchOpenNodeIds(retainedDismissedIds)) openNodeIds.add(id);
       const merged = mergeQueue(existing, incoming, {
         openNodeIds,
+        observedPullRequests: [...pullRequests, ...retained.pullRequests],
         maxAgeDays: current.maxAgeDays,
         now,
       });
@@ -838,10 +845,16 @@ export default async function plugin(bb: BbPluginApi) {
         case "status": {
           const items = await readQueue();
           const lastPoll = await readLastPoll();
-          const counts = Object.fromEntries(
+          const queuedCounts = Object.fromEntries(
             ruleSchema.options.map((rule) => [
               rule,
-              items.filter((item) => item.rule === rule && item.state === "queued")
+              items.filter((item) => item.rule === rule && item.state === "queued").length,
+            ]),
+          ) as Record<Rule, number>;
+          const pendingCounts = Object.fromEntries(
+            ruleSchema.options.map((rule) => [
+              rule,
+              items.filter((item) => item.rule === rule && (item.state === "queued" || item.state === "started"))
                 .length,
             ]),
           ) as Record<Rule, number>;
@@ -858,8 +871,10 @@ export default async function plugin(bb: BbPluginApi) {
             repoAllowlist: allowlist,
             maxAgeDays: current.maxAgeDays,
             lastPoll,
-            queued: counts,
+            queued: queuedCounts,
+            pending: pendingCounts,
             started: items.filter((item) => item.state === "started").length,
+            archived: items.filter((item) => item.state === "archived").length,
           };
           if (json) return ok(JSON.stringify(state));
           return ok(
@@ -879,10 +894,12 @@ export default async function plugin(bb: BbPluginApi) {
                   ? "never"
                   : `${lastPoll.at} — ${lastPoll.ok ? `ok, ${lastPoll.added} added` : `failed: ${lastPoll.error ?? "unknown error"}`}`
               }`,
+              "pending by rule:",
               ...ruleSchema.options.map(
-                (rule) => `${`${RULE_LABELS[rule]}:`.padEnd(14)}${counts[rule]}`,
+                (rule) => `${`${RULE_LABELS[rule]}:`.padEnd(14)}${pendingCounts[rule]}`,
               ),
               `started:      ${state.started}`,
+              `archived:     ${state.archived}`,
             ].join("\n"),
           );
         }
