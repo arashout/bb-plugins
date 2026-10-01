@@ -43,6 +43,8 @@ async function setup(options: { ready?: boolean; legacyJob?: "running" } = {}) {
       unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
       approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
     if (method === "inspectPrs") return { entries: [{ repo, pr }], closed: [], failed: [], warnings: [] };
+    if (method === "checkoutState") return { ok: true, branch: unit.branch, rebasing: false };
+    if (method === "prWrite") return { ok: true, detail: `Wrote ${(input as { kind: string }).kind}.` };
     throw new Error(`Unexpected host method ${method}`);
   } });
   if (options.legacyJob) {
@@ -86,13 +88,13 @@ describe("PR refresh and manual write fences", () => {
     expect(board.prInventory.entries[0]?.pr.approvalFeedbackVerified).toBe(true);
   });
 
-  it("keeps a legacy Advance job that never settled fencing its PR from manual GitHub writes", async () => {
-    const env = await setup({ legacyJob: "running" });
-    expect(await env.harness.callRpc("action_merge", { prUrl: env.url, sha: HEAD, acknowledgeUnresolved: false }))
-      .toEqual({ ok: false, error: "A batch or another action owns this PR." });
-    expect(await env.harness.callRpc("inventory_mark_ready", { prUrl: env.url, headOid: HEAD }))
-      .toEqual({ ok: false, error: "A batch or another action owns this PR; nothing was written." });
-    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
+  // Nothing can settle a job the removed engine left mid-run, so its history fences nothing: no worker will start, and no cancel exists.
+  it("writes a PR and its checkout whose only owner is a legacy Advance job that never settled", async () => {
+    const env = await setup({ ready: true, legacyJob: "running" });
+    expect(await env.harness.callRpc("action_merge", { prUrl: env.url, sha: HEAD, acknowledgeUnresolved: false })).toMatchObject({ ok: true });
+    expect(await env.harness.callRpc("inventory_request_review", { prUrl: env.url, logins: ["mira"], shown: { requested: [], reviewed: [] } }))
+      .toEqual({ ok: true, detail: "Wrote nudge." });
+    expect(env.calls.filter((call) => call.method === "prWrite").map((call) => (call.input as { kind: string }).kind)).toEqual(["merge", "nudge"]);
     expect([env.spawn.mock.calls, env.send.mock.calls]).toEqual([[], []]);
   });
 });

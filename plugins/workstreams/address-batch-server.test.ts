@@ -329,6 +329,22 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect(env.spawn).not.toHaveBeenCalled();
   });
 
+  // The removed Advance engine's saved jobs are history: nothing can settle one it left mid-run, so it holds neither its PR nor its checkout.
+  it("lists for Address, and messages, PRs whose only owner is a legacy Advance job that never settled", async () => {
+    const env = await setup();
+    const job = (number: number, patch: Record<string, unknown>) => ({ prUrl: url(number), repo: REPO, number, title: `ABC-${number} Keep manuscripts in order`,
+      headOid: HEAD, baseRefName: "main", headRefName: `abc-${number}-order`, needsPreparation: false, needsFeedback: true, needsChecks: false, eligible: true,
+      detail: "Addressing review feedback", workspace: "existing", id: `job-${number}`, threadId: null, path: null, checkedHeadOid: null, updatedAt: Date.now(), ...patch });
+    env.bb.storage.database().prepare("INSERT INTO advance_batches (id, body) VALUES (?, ?)").run("batch-legacy", JSON.stringify({ id: "batch-legacy",
+      createdAt: Date.now(), cancelled: false, jobs: [job(42, { status: "queued" }), job(43, { status: "verifying", uncertain: true })], facts: { "job-43": { path: PATH } } }));
+    await env.restart();
+    await env.refresh();
+    const plan = await env.plan([42, 43].map(url));
+    expect([plan.items.map((item) => item.ref), plan.skipped]).toEqual([["folio #42", "folio #43"], []]);
+    expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." })).toMatchObject({ ok: true });
+    expect(env.send).toHaveBeenCalledTimes(1);
+  });
+
   // Undo takes the batch back before anything starts, and a restart inside the window keeps both the cancel and the one start.
   it("starts nothing after an Undo, and a restart inside the window neither starts twice nor loses the Undo", async () => {
     const env = await setup();

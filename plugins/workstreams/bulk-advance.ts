@@ -1,9 +1,8 @@
-// Legacy Advance's saved batches. Nothing starts or rechecks a job any more: the
-// batches are history that thread links, All PRs, and every writer's fence read,
-// in the shape the removed engine wrote them.
+// Legacy Advance's saved batches. Nothing starts, rechecks, or settles a job any
+// more: the batches are history that thread links and All PRs read, in the shape
+// the removed engine wrote them. A job it left unsettled holds nothing.
 import { z } from "zod";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
-import { canonicalPrUrl } from "./pr-holds.js";
 import type { RunDb } from "./runstore.js";
 
 export const advancePreviewJobSchema = z.object({
@@ -22,24 +21,11 @@ export const advanceJobSchema = advancePreviewJobSchema.extend({
 export const advanceBatchSchema = z.object({ id: z.string(), createdAt: z.number(), cancelled: z.boolean(), instruction: z.string().max(4_000).optional(), jobs: z.array(advanceJobSchema) });
 export type AdvanceJob = z.infer<typeof advanceJobSchema>;
 export type AdvanceBatch = z.infer<typeof advanceBatchSchema>;
-/** The saved form also kept each job's routing facts; only the scanned checkout path each was routed from still matters, to the fence. */
-const savedSchema = advanceBatchSchema.extend({ facts: z.record(z.string(), z.object({ path: z.string().nullable() })).default({}) });
 export const ADVANCE_MIGRATIONS = ["CREATE TABLE IF NOT EXISTS advance_batches (id TEXT PRIMARY KEY, body TEXT NOT NULL)"];
-const ACTIVE = new Set<AdvanceJob["status"]>(["queued", "launching", "running", "verifying"]);
 
 /** The saved batches, read once when the plugin loads, newest first. */
 export function createAdvanceHistory(db: RunDb) {
-  const saved = (db.prepare("SELECT body FROM advance_batches").all() as { body: string }[])
-    .map(({ body }) => savedSchema.parse(JSON.parse(body))).sort((a, b) => b.createdAt - a.createdAt);
-  const batches = saved.map(({ facts: _facts, ...batch }): AdvanceBatch => batch);
-  return {
-    list: (): AdvanceBatch[] => [...batches],
-    /** A job that never settled (queued, launching, running, verifying, or uncertain) still holds its PR and checkouts. */
-    reserved(prUrl: string, path: string | null): boolean {
-      const key = canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
-      return saved.some((batch) => batch.jobs.some((job) => (ACTIVE.has(job.status) || job.uncertain) &&
-        ((canonicalPrUrl(job.prUrl) ?? job.prUrl.toLowerCase()) === key ||
-          (path !== null && (batch.facts[job.id]?.path === path || job.path === path)))));
-    },
-  };
+  const batches = (db.prepare("SELECT body FROM advance_batches").all() as { body: string }[])
+    .map(({ body }) => advanceBatchSchema.parse(JSON.parse(body))).sort((a, b) => b.createdAt - a.createdAt);
+  return { list: (): AdvanceBatch[] => [...batches] };
 }

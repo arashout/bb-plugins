@@ -724,7 +724,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, MIGRATIONS);
   const runs = createRunStore(db);
   const approvalFeedback = createApprovalFeedbackStore(db);
-  /** Legacy Advance's saved jobs: history, and a fence while any never settled. */
+  /** Legacy Advance's saved jobs: history for thread links and All PRs, which holds no PR. */
   const advance = createAdvanceHistory(db);
   const inventory = createInventoryStore(db);
   const prHolds = createPrHoldStore(db);
@@ -3740,8 +3740,6 @@ export default async function plugin(bb: BbPluginApi) {
         (ticket != null && tickets.has(ticket));
       for (const run of runs.recent(Number.MAX_SAFE_INTEGER)) if (run.status === "running" && touches(run.path, run.prUrl, run.ticket))
         blockers.push(`Run ${run.id} is ${run.status} for affected work.`);
-      for (const batch of advance.list()) for (const job of batch.jobs) if ((job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) &&
-        touches(job.path, job.prUrl)) blockers.push(`Advance job ${job.id} is ${job.status}${job.uncertain ? " and uncertain" : ""} for affected work.`);
       for (const thread of threads) if (!["idle", "error"].includes(thread.status))
         blockers.push(`Thread ${thread.id} is ${thread.status}. Wait for it to settle before merging.`);
       const preview = { scope: effortAdminScope(source, destination, sourceControllers, destinationControllers,
@@ -3878,7 +3876,7 @@ export default async function plugin(bb: BbPluginApi) {
   const pendingPrThreads = new Map<string, { id: string; startedAt: number }>();
   async function withPrWriter<T>(path: string, prUrl: string | undefined, action: () => Promise<T>): Promise<T | { ok: false; error: string }> {
     const key = prUrl?.toLowerCase();
-    if (advance.reserved(key ?? "", path) || (key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
+    if ((key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
     // A batch thread's claim holds the PR and its checkout until the thread finishes: no second agent starts beside it.
     if (openRunOn(prUrl ?? null, path, ADDRESS_RUN)) return { ok: false, error: ADDRESSING };
     if (key) manualPrWrites.add(key);
@@ -3982,7 +3980,7 @@ export default async function plugin(bb: BbPluginApi) {
     // A PR's own hold stops only its merge; its effort's pile stops every write.
     const held = prUrl ? (action === "merge" ? holdMessage(prUrl) : null) ?? await effortStop(prUrl, action === "merge") : null;
     if (held) return { ok: false, error: held };
-    if (prUrl && (advance.reserved(prUrl, unit?.path ?? null) || manualPrWrites.has(prUrl.toLowerCase()))) return { ok: false, error: "A batch or another action owns this PR." };
+    if (prUrl && manualPrWrites.has(prUrl.toLowerCase())) return { ok: false, error: "A batch or another action owns this PR." };
     if (prUrl) manualPrWrites.add(prUrl.toLowerCase());
     try {
       // Remote-only actions report through their dialog and fresh PR state. Run
@@ -4203,13 +4201,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /**
    * Why an agent or another action already holds this PR or its checkout, or null: an open run on either (a batch thread's claim among
-   * them), an Advance reservation, a board action in flight, a thread just asked to work on it, or an active thread in
-   * its checkout. Synchronous, so a claim reads it in the same step it writes.
+   * them), a board action in flight, a thread just asked to work on it, or an active thread in its checkout. Synchronous, so a claim
+   * reads it in the same step it writes.
    */
   function agentOn(prUrl: string, path: string | null): string | null {
     const key = prWorkItemKey(prUrl);
     if (openRunOn(prUrl, path)) return "An agent is already working on it.";
-    if (advance.reserved(prUrl, path) || manualPrWrites.has(key) || (path !== null && launchingCheckouts.has(path))) {
+    if (manualPrWrites.has(key) || (path !== null && launchingCheckouts.has(path))) {
       return "Another action owns it now.";
     }
     const pending = pendingPrThreads.get(key);
@@ -4500,7 +4498,7 @@ export default async function plugin(bb: BbPluginApi) {
     effortHold: (prUrl) => effortStop(prUrl, false),
     writer: (prUrl) => {
       const paths = readUnits().flatMap((unit) => unit.pr && prWorkItemKey(unit.pr.url) === prWorkItemKey(prUrl) ? [unit.path] : []);
-      return [null, ...paths].some((path) => advance.reserved(prUrl, path) || (path !== null && launchingCheckouts.has(path)))
+      return paths.some((path) => launchingCheckouts.has(path))
         ? "A batch or another action owns this PR; nothing was written." : null;
     },
     lock: (prUrl) => {
@@ -4644,12 +4642,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
       const paths = new Set(record.members.checkoutPaths ?? []);
       const prs = new Set(record.members.prUrls.map((url) => canonicalPrUrl(url) ?? url));
-      if (archived && (advance.list().some((batch) => batch.jobs.some((job) =>
-        (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) &&
-        ((job.path && paths.has(job.path)) || prs.has(canonicalPrUrl(job.prUrl) ?? job.prUrl)))) ||
-        runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" &&
-          (paths.has(run.path) || (run.prUrl && prs.has(canonicalPrUrl(run.prUrl) ?? run.prUrl))))))
-        return { ok: false as const, error: "An affected worker or advance job is still active. Wait for it to settle before archiving." };
+      if (archived && runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" &&
+        (paths.has(run.path) || (run.prUrl && prs.has(canonicalPrUrl(run.prUrl) ?? run.prUrl)))))
+        return { ok: false as const, error: "An affected worker is still active. Wait for it to settle before archiving." };
       const effort = effortStore.setArchived(record.id, archived);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
@@ -4682,9 +4677,8 @@ export default async function plugin(bb: BbPluginApi) {
           const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
           const touches = (path: string | null, pr: string | null, ticket?: string | null) =>
             (path !== null && paths.has(path)) || (pr !== null && prs.has(canonicalPrUrl(pr) ?? pr)) || (ticket != null && tickets.has(ticket));
-          if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && touches(run.path, run.prUrl, run.ticket)) ||
-            advance.list().some((batch) => batch.jobs.some((job) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.path, job.prUrl))))
-            throw new Error("Affected work became active or uncertain. Reopen the merge preview after it settles.");
+          if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && touches(run.path, run.prUrl, run.ticket)))
+            throw new Error("Affected work became active. Reopen the merge preview after it settles.");
           prepareAdminSync(result.preview.source, result.preview.destination, result.threadDetails);
           seeds.move(result.preview.source.id, result.preview.destination.id);
           return effortStore.merge(result.preview.source.id, result.preview.destination.id);
@@ -4998,12 +4992,6 @@ export default async function plugin(bb: BbPluginApi) {
       const activeOwnerIds = new Set<string>();
       for (const run of runs.recent(0, 1_000)) if (run.prUrl && canonicalPrUrl(run.prUrl) === canonical &&
         (run.status === "running" || run.status === "needs-you") && run.threadId) activeOwnerIds.add(run.threadId);
-      for (const batch of advance.list()) for (const job of batch.jobs) if (canonicalPrUrl(job.prUrl) === canonical &&
-        (["queued", "launching", "running", "verifying"].includes(job.status) || job.uncertain)) {
-        if (job.status === "queued") return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
-        if (!job.threadId) return { ok: false as const, error: "Advance has reserved this PR. Wait for its worker to start or cancel the job." };
-        activeOwnerIds.add(job.threadId);
-      }
       const pending = pendingPrThreads.get(canonical);
       if (pending && pending.id !== threadId) {
         try {
@@ -5023,9 +5011,7 @@ export default async function plugin(bb: BbPluginApi) {
       let sendMode: "auto" | "queue-if-active" = "auto";
       if (context.threads.find((thread) => thread.id === threadId)?.role === "repo") {
         const anotherPr = runs.recent(0, 1_000).some((run) => run.threadId === threadId && run.prUrl &&
-          canonicalPrUrl(run.prUrl) !== canonical && (run.status === "running" || run.status === "needs-you")) ||
-          advance.list().some((batch) => batch.jobs.some((job) => job.threadId === threadId && canonicalPrUrl(job.prUrl) !== canonical &&
-            ["launching", "running", "verifying"].includes(job.status)));
+          canonicalPrUrl(run.prUrl) !== canonical && (run.status === "running" || run.status === "needs-you"));
         if (anotherPr) sendMode = "queue-if-active";
       }
       if ([...activeOwnerIds].some((id) => id !== threadId)) {
