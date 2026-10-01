@@ -139,9 +139,11 @@ describe("a sent PR", () => {
     expect(sentState(null, run("done"), null)).toMatchObject({ state: "idle", threadId: "thr-1", title: null });
   });
 
-  it("says why dispatch refused it, and lets a newer batch replace an older thread's link", () => {
+  // A refused batch started nothing, so the older thread it would have replaced stays linked beside the reason.
+  it("says why dispatch refused it beside an older thread's link, and lets a newer batch replace that link", () => {
     const old = run("done", T - 3_600_000);
-    expect(shown(sentState(item("refused", "On hold. Release it first."), old, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(item("refused", "On hold. Release it first."), old, thread(false)))).toEqual(["refused", "thr-1", "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(item("refused", "On hold. Release it first."), null, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
     expect(shown(sentState(item("queued"), old, null))).toEqual(["sending", null, "Sending"]);
     expect(shown(sentState(item("unknown", "The plugin restarted"), { ...run("running"), threadId: "thr-2" }, thread(true)))).toEqual(["working", "thr-2", "Working"]);
   });

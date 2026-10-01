@@ -63,7 +63,7 @@ export const dismissed = (dismissal: Dismissal | null | undefined, head: string 
 
 /**
  * Where the newest Address batch sent a PR, and how its thread stands now: waiting out its Undo window, refused by dispatch, or its
- * thread's live status. The link stays for as long as the PR is open, until a newer batch takes it.
+ * thread's live status. The link stays for as long as the PR is open, a refusal's included, until a newer batch's thread takes it.
  */
 export const SENT_STATES = ["sending", "refused", "working", "needs-you", "idle"] as const;
 export const sentSchema = z.object({
@@ -84,12 +84,14 @@ export function sentState(item: SentItem | null, run: SentRun | null, thread: { 
   const none = { threadId: null, title: null, detail: null, batchId: null };
   if (item?.state === "queued" || item?.state === "sending") return { ...none, state: "sending", batchId: item.state === "queued" ? item.batchId : null };
   // A claim started after the batch was confirmed is this batch's; without one, dispatch refused it or was cut off before claiming.
+  // A refusal keeps an older claim's thread linked.
   const claimed = run !== null && (!item || run.startedAt >= item.confirmedAt);
-  if (item && !claimed && (item.state === "refused" || item.state === "unknown")) return { ...none, state: "refused", detail: item.detail };
+  const link = { threadId: run?.threadId ?? null, title: thread?.title ?? null };
+  if (item && !claimed && (item.state === "refused" || item.state === "unknown")) return { ...none, ...link, state: "refused", detail: item.detail };
   if (!run) return null;
   // An open claim is its thread at work or asking you; once it ends, BB's own word for the thread.
   const state = run.status === "needs-you" ? "needs-you" : run.status === "running" || thread?.active ? "working" : "idle";
-  return { ...none, state, threadId: run.threadId, title: thread?.title ?? null };
+  return { ...none, ...link, state };
 }
 
 /** A Sent's words. Sending's Undo is the row's own button. */
