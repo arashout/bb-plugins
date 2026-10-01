@@ -2,7 +2,7 @@
 //
 // Start and Review N ask the server to spawn threads; Dismiss drops a row. The
 // page never talks to GitHub; the server's poller owns that.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as HoverCard from "@radix-ui/react-hover-card";
 import {
   definePluginApp,
@@ -13,7 +13,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import { groupByArea } from "./src/areas";
+import { groupByArea, type AreaGroup } from "./src/areas";
 import type { QueueItem, Rule } from "./src/types";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -65,6 +65,8 @@ const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-
 const ROW = "flex items-start gap-2 py-1 pl-2 pr-1.5 text-[12.5px] leading-5";
 /** A row's checkbox: faint until you point at the row. */
 const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
+/** The card an area's rows sit in under its title: a deck tile's border, radius, and tint, padded less. */
+const GROUP_CARD = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2 py-1";
 const EMPTY = "py-8 text-center text-[12px] text-muted-foreground";
 /** Preflight leaves native controls on the arrow cursor; this scopes the pointer to the page. */
 const POINTER_CURSORS = "[&_button:not(:disabled)]:cursor-pointer [&_summary]:cursor-pointer [&_a[href]]:cursor-pointer [&_input[type=checkbox]:not(:disabled)]:cursor-pointer";
@@ -257,7 +259,7 @@ export function ReviewRow({
   const updated = `${age(Date.parse(item.updatedAt), now)} ago`;
   // The rule chip already says why; the reason stays in the tooltip.
   return (
-    <li className={cn("group ml-7 min-w-0 rounded-md hover:bg-foreground/[0.03]", picked && "bg-sky-500/[0.07]")}>
+    <li className={cn("group min-w-0 rounded-md hover:bg-foreground/[0.03]", picked && "bg-sky-500/[0.07]")}>
       <div className={ROW}>
         {onPick === undefined ? null : canBatchReview(item) ? (
           <input
@@ -348,6 +350,43 @@ function ScopeCheckbox({
       onChange={() => onPick(keys, !full)}
       className="size-3.5 shrink-0 accent-sky-600"
     />
+  );
+}
+
+/** An area's title, then its rows in a card under it. */
+export function AreaSection({
+  area,
+  picked,
+  onPickScope,
+  children,
+}: {
+  area: AreaGroup;
+  picked: ReadonlySet<string>;
+  onPickScope: (keys: readonly string[], select: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="min-w-0" aria-label={area.label}>
+      {/* ml-9 puts the box over the rows' boxes (the card's margin, border, and
+          padding plus the row's pl-2), and gap-2 puts the label over their PR column. */}
+      <h3 className="ml-9 flex min-w-0 items-center gap-2 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
+        <ScopeCheckbox
+          keys={area.items.filter(canBatchReview).map((item) => item.key)}
+          picked={picked}
+          label={area.label}
+          onPick={onPickScope}
+        />
+        <span className="min-w-0 truncate">
+          {area.label}
+          {area.repos.join(", ") === area.label ? null : (
+            <span className="font-normal text-muted-foreground/70"> · {area.repos.join(", ")}</span>
+          )}
+        </span>
+        <span className="font-normal tabular-nums">{area.items.length}</span>
+      </h3>
+      {/* The card's edge lines up with the section's title, which keeps its rows where they were, under the area's title. */}
+      <ul className={cn("ml-[19px] list-none", GROUP_CARD)}>{children}</ul>
+    </section>
   );
 }
 
@@ -520,35 +559,16 @@ function ReviewsPage() {
               ) : (
                 <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-7 pb-1.5 pt-0.5">
                   {areas.map((area) => (
-                    <section key={area.key} className="min-w-0" aria-label={area.label}>
-                      {/* ml-9 puts the box over the rows' boxes (ml-7 plus the row's
-                          pl-2), and gap-2 puts the label over their PR column. */}
-                      <h3 className="ml-9 flex min-w-0 items-center gap-2 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
-                        <ScopeCheckbox
-                          keys={area.items.filter(canBatchReview).map((item) => item.key)}
-                          picked={picked}
-                          label={area.label}
-                          onPick={pickScope}
+                    <AreaSection key={area.key} area={area} picked={picked} onPickScope={pickScope}>
+                      {area.items.map((item) => (
+                        <ReviewRow
+                          key={item.key}
+                          {...rowProps(item)}
+                          picked={picked.has(item.key)}
+                          onPick={(shift) => pick(item.key, shift)}
                         />
-                        <span className="min-w-0 truncate">
-                          {area.label}
-                          {area.repos.join(", ") === area.label ? null : (
-                            <span className="font-normal text-muted-foreground/70"> · {area.repos.join(", ")}</span>
-                          )}
-                        </span>
-                        <span className="font-normal tabular-nums">{area.items.length}</span>
-                      </h3>
-                      <ul className="min-w-0 list-none">
-                        {area.items.map((item) => (
-                          <ReviewRow
-                            key={item.key}
-                            {...rowProps(item)}
-                            picked={picked.has(item.key)}
-                            onPick={(shift) => pick(item.key, shift)}
-                          />
-                        ))}
-                      </ul>
-                    </section>
+                      ))}
+                    </AreaSection>
                   ))}
                 </div>
               )}
@@ -557,7 +577,7 @@ function ReviewsPage() {
                   <summary className={cn("ml-9 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>
                     {archivedItems.length} archived · show
                   </summary>
-                  <ul className="grid min-w-0 list-none grid-cols-[minmax(0,1fr)] pb-1.5 pt-0.5 opacity-70">
+                  <ul className={cn("ml-[19px] mt-0.5 grid list-none grid-cols-[minmax(0,1fr)] opacity-70", GROUP_CARD)}>
                     {archivedItems.map((item) => <ReviewRow key={item.key} {...rowProps(item)} />)}
                   </ul>
                 </details>

@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { ReviewRow } from "../app.js";
+import { AreaSection, ReviewRow } from "../app.js";
 import { itemKey, type QueueItem } from "./types.js";
 
 // The page needs BB's host; a row needs only its link and the thread navigator.
@@ -44,5 +44,21 @@ describe("a review's row", () => {
     expect(titleClass).toContain("truncate");
     expect(lineClass).toContain("flex-wrap");
     expect(whyClass).not.toContain("truncate");
+  });
+});
+
+describe("an area", () => {
+  // An area reads as one thing: its title, then a card holding its rows, in the same tile look as Workstreams' All PRs groups.
+  it("puts its rows in a card directly under its title", () => {
+    const next: QueueItem = { ...item, key: itemKey("review-requested", "PR_node8", "sha-8"), number: 8, nodeId: "PR_node8", url: "https://github.com/inkwell/folio/pull/8" };
+    const area = { key: "repo:inkwell/folio", label: "folio", repos: ["folio"], items: [item, next] };
+    const now = Date.parse("2026-09-24T12:00:00Z");
+    const children = area.items.map((entry) => createElement(ReviewRow, { key: entry.key, item: entry, now, busy: false, onPick: noop, onStart: noop, onDismiss: noop }));
+    const html = renderToStaticMarkup(createElement(AreaSection, { area, picked: new Set<string>(), onPickScope: noop, children }));
+    // The title closes, the card opens, and every row sits in it.
+    const card = html.match(/<\/h3><ul class="([^"]*)">(.*)<\/ul><\/section>$/u);
+    expect(card).not.toBeNull();
+    expect(card![1]!.split(" ")).toEqual(expect.arrayContaining("rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2 py-1".split(" ")));
+    expect(card![2]!.match(/<li /gu)).toHaveLength(2);
   });
 });
