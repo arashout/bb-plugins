@@ -3362,6 +3362,17 @@ export default async function plugin(bb: BbPluginApi) {
     const remote = inventory.get(canonical);
     return remote ? { pr: remote.pr, repo: remote.repo, path: null } : null;
   }
+  /**
+   * Where a PR's work happens on this machine: its scanned checkout, else a scanned worktree of its repository on its head branch, never
+   * one on that repository's default branch, which a fork's PR can share a name with. Null with neither.
+   */
+  function prCheckout(prUrl: string): string | null {
+    const known = knownPr(prUrl);
+    if (!known || known.path) return known?.path ?? null;
+    const branch = known.pr.headRefName;
+    return readUnits().find((unit) => branch && unit.branch === branch && unit.branch !== unit.defaultBranch
+      && unit.githubRepo?.toLowerCase() === known.repo.toLowerCase())?.path ?? null;
+  }
 
   type PlacementScope = { key: string; name: string; goal: string; members: EffortMembers; establishedId: string | null };
   function scopeOfEstablished(effort: NonNullable<ReturnType<typeof effortStore.get>>): PlacementScope {
@@ -5863,7 +5874,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function addressFacts(rows: ReturnType<typeof deckRows>, each: boolean): Promise<Map<string, Pick<PlanRow, "address" | "ask" | "fix">>> {
     const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
     return new Map(await Promise.all(rows.map(async ({ row, input }): Promise<[string, Pick<PlanRow, "address" | "ask" | "fix">]> => {
-      const path = knownPr(row.prUrl)?.path ?? null;
+      const path = prCheckout(row.prUrl);
       const busy = v2Claimed(row.prUrl, path) ? "A v2 roster worker holds it." : input.threads.executor?.active ? "An agent is already working on it."
         : agentOn(row.prUrl, path);
       const address = { feedback: input.yourTurn && turnSummary(input.yourTurn, input.reviewers.reviewed), busy, checkout: path && (path.split("/").at(-1) ?? path) };
@@ -5887,7 +5898,7 @@ export default async function plugin(bb: BbPluginApi) {
     const found = shared?.coordinatorThreadId ? await liveThread(shared.coordinatorThreadId) : null;
     const parent = found ? shared!.coordinatorThreadId : null;
     const usable = (id: string | null | undefined) => id && id !== "proj_personal" ? id : null;
-    const checkout = prUrls.map((url) => knownPr(url)?.path ?? null).find((path) => path !== null) ?? null;
+    const checkout = prUrls.map(prCheckout).find((path) => path !== null) ?? null;
     const projectId = usable(shared?.projectId) ?? (checkout ? projectForPath(await bb.sdk.projects.list(), checkout)?.projectId : null)
       ?? usable(efforts.find(Boolean)?.projectId);
     if (!projectId) return { why: "No BB project holds these PRs or their checkouts, so there's nowhere to start the thread." };
@@ -5916,21 +5927,23 @@ export default async function plugin(bb: BbPluginApi) {
     if (hostId === null) return all("No primary BB host is available; nothing was started.");
     /**
      * What keeps a PR out, as a check that awaits nothing once read: a hold, its effort stopped, a v2 claim, the thread its row names at work
-     * (planning reads the same; a PR with no checkout shows no other sign of one), or an agent on it or its checkout.
+     * (planning reads the same; a PR with no checkout shows no other sign of one), or an agent on it or its checkout. With it, the threads
+     * its row names, from the same read.
      */
     const stops = async () => {
       const stopped = await effortStops(false);
       const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-      const threadAtWork = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
-        attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null }).executor?.active ? "An agent is already working on it." : null;
-      return (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl) ?? v2Claimed(prUrl, path) ?? threadAtWork(prUrl) ?? agentOn(prUrl, path);
+      const threads = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
+        attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null });
+      return { threads, why: (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl) ?? v2Claimed(prUrl, path)
+        ?? (threads(prUrl).executor?.active ? "An agent is already working on it." : null) ?? agentOn(prUrl, path) };
     };
     let stop = await stops();
     const ready: { item: BatchItem; pr: Pr; path: string | null; feedback: string }[] = [];
     for (const item of items) {
       const refuse = (error: string) => { results.set(item.prUrl, { ok: false, error }); };
-      const path = knownPr(item.prUrl)?.path ?? null;
-      const why = stop(item.prUrl, path);
+      const path = prCheckout(item.prUrl);
+      const why = stop.why(item.prUrl, path);
       if (why) { refuse(why); continue; }
       const read = await readPrNow(item.prUrl);
       if (!read.ok) { refuse(`GitHub couldn't be read, so nothing was started: ${read.error}`); continue; }
@@ -5946,7 +5959,7 @@ export default async function plugin(bb: BbPluginApi) {
     // so their checks match it.
     stop = await stops();
     const claimed = ready.filter(({ item, path }) => {
-      const why = stop(item.prUrl, path);
+      const why = stop.why(item.prUrl, path);
       if (why) results.set(item.prUrl, { ok: false, error: why });
       return !why;
     }).map((entry) => ({ ...entry, runId: runs.begin({ path: entry.path ?? "", ticket: null, prUrl: entry.pr.url, prNumber: entry.pr.number,
@@ -5954,10 +5967,14 @@ export default async function plugin(bb: BbPluginApi) {
     if (!claimed.length) return results;
     for (const { runId } of claimed) addressStarting.add(runId);
     const title = addressBatchTitle(claimed.map(({ item, pr }) => ({ repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number })));
+    // Each PR's own threads go with it as context to read, from the read its claim passed.
+    const ref = (thread: { id: string; title: string } | null) => thread && { id: thread.id, title: thread.title };
     try {
-      const prompt = addressBatchPrompt(claimed.map(({ item, pr, path, feedback, runId }) => ({ attemptId: `address-${runId}`, prUrl: prWorkItemKey(item.prUrl),
-        repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title, headOid: item.headOid!, headBranch: pr.headRefName, baseBranch: pr.baseRefName,
-        checkout: path, feedback })));
+      const prompt = addressBatchPrompt(claimed.map(({ item, pr, path, feedback, runId }) => {
+        const { origin, executor } = stop.threads(item.prUrl);
+        return { attemptId: `address-${runId}`, prUrl: prWorkItemKey(item.prUrl), repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title,
+          headOid: item.headOid!, headBranch: pr.headRefName, baseBranch: pr.baseRefName, checkout: path, feedback, threads: { origin: ref(origin), executor: ref(executor) } };
+      }));
       const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: place.projectId, title, prompt, environment: await contextWorkspace(hostId),
         ...(place.parentThreadId ? { parentThreadId: place.parentThreadId } : {}), pluginMetadata: { role: ADDRESS_RUN, runIds: claimed.map(({ runId }) => runId) } });
       for (const { runId } of claimed) runs.attach(runId, thread.id);

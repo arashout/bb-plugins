@@ -9,7 +9,7 @@ import { startAddress } from "./deck-flow.js";
 import type { DeckView } from "./deck.js";
 import { createEffortStore } from "./effort-store.js";
 import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
-import { RESULT_PREFIX } from "./effort-recipes.js";
+import { PR_THREADS_RULE, RESULT_PREFIX } from "./effort-recipes.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
 import { yourTurnRows } from "./inventory-view-model.js";
@@ -53,6 +53,8 @@ async function setup() {
   ]);
   const raw: RawUnit = { path: PATH, dirName: "folio-abc-43", repo: REPO, githubRepo: REPO, branch: "abc-43-order", dirty: false, ahead: 0, behind: 0,
     lastCommitAt: null, defaultBranch: "main", pr: current.get(43)!, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
+  /** More checkouts the scan finds, with no PR it linked. */
+  const units: RawUnit[] = [];
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const metadata = new Map<string, Record<string, unknown>>();
   const add = (id: string, patch: Record<string, unknown> = {}) => {
@@ -100,7 +102,7 @@ async function setup() {
     },
   }, experimental_callHostRpc: ({ method, input }) => {
     hostCalls.push(method);
-    if (method === "scan" || method === "inspectPaths") return { units: [{ ...raw, pr: current.get(43)! }], warnings: [] };
+    if (method === "scan" || method === "inspectPaths") return { units: [{ ...raw, pr: current.get(43)! }, ...units], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [...current.values()].map((entry) => ({ repo: REPO, pr: entry })),
       discoveryComplete: true, repositories: [{ repo: REPO, complete: true }], complete: true, warnings: [] };
     if (method === "inspectPrs") return (async () => {
@@ -122,7 +124,7 @@ async function setup() {
   efforts.recordWorker(effort.id, "thr-42", url(42), "pr");
   add("thr-coordinator", { title: "🧭 Manuscript review" });
   efforts.save({ ...efforts.get(effort.id)!, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
-  const env = { harness, bb, current, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls, reads, lists,
+  const env = { harness, bb, current, units, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls, reads, lists,
     rpc: (method: string, value: unknown) => env.harness.callRpc(method as never, value as never),
     refresh: async () => expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0),
     batch: async (batchId: string) => await env.rpc("deck_batch_get", { batchId }) as DeckBatch,
@@ -143,6 +145,12 @@ async function setup() {
 type Env = Awaited<ReturnType<typeof setup>>;
 const spawned = (env: Env) => env.spawn.mock.calls.map(([args]) => args as unknown as { title: string; prompt: string; parentThreadId?: string; projectId: string;
   providerId: string; model: string; reasoningLevel: string; environment: unknown; pluginMetadata: { role: string; runIds: number[] } });
+/** The batch thread's work order, each PR's line by its number. */
+const orders = (env: Env) => new Map(spawned(env)[0]!.prompt.split("\n").filter((line) => line.startsWith('{"attemptId"'))
+  .map((line) => JSON.parse(line) as { url: string; checkout: string | null; threads: unknown }).map((order) => [Number(order.url.split("/").pop()), order]));
+/** A checkout the scan found with no PR linked. */
+const worktree = (path: string, githubRepo: string, branch: string): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: githubRepo, githubRepo, branch,
+  dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
 const result = (attemptId: string, number: number, outcome = "changed") => `${RESULT_PREFIX}${JSON.stringify({ attemptId, target: url(number),
   actions: ["address_review_feedback"], outcome, headOid: "b".repeat(40), baseOid: "c".repeat(40), commits: [], validation: [], blockers: [] })}`;
 /** Manuscript review's v2 roster claims #43 and its checkout. */
@@ -223,6 +231,36 @@ describe("addressing Your turn PRs in one batch thread", () => {
       sent: { state: "working", threadId: "thr-batch-1", title: "Address feedback: folio #42, #43, #44" } });
     expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
     expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
+  });
+
+  // A PR the scan linked no checkout to still works where its branch already is, so the thread neither clones again nor works on a stale
+  // copy; a worktree on another branch, in another repository, or on the default branch a fork's head can share a name with is not it.
+  it("lists and sends a PR without a scanned checkout in its repository's worktree on its head branch, and no other", async () => {
+    const env = await setup();
+    env.current.set(46, { ...env.current.get(46)!, headRefName: "main" });
+    env.units.push(worktree("/p/folio-wt-44", REPO, "abc-44-order"), worktree("/p/folio-abc-42-draft", REPO, "abc-42-draft"),
+      worktree("/p/quill-abc-45", "inkwell/quill", "abc-45-order"), worktree("/p/folio", REPO, "main"));
+    await env.refresh();
+    const plan = await env.plan([42, 44, 45, 46].map(url));
+    expect(plan.items.map((item) => [item.ref, item.where])).toEqual([["folio #42", "No checkout: a clean clone"], ["folio #44", "In folio-wt-44"],
+      ["folio #45", "No checkout: a clean clone"], ["folio #46", "No checkout: a clean clone"]]);
+    await confirm(env, plan.batchId);
+    expect([...orders(env)].map(([number, order]) => [number, order.checkout])).toEqual([[42, null], [44, "/p/folio-wt-44"], [45, null], [46, null]]);
+  });
+
+  // The PR's earlier threads hold what was decided and why; the batch thread may read them, but they never steer it and it never writes there.
+  it("gives each PR's line the thread its work started in and the one that worked on it, to read for context and never message", async () => {
+    const env = await setup();
+    env.add("thr-42-origin", { title: "Start manuscript order" });
+    env.metadata.set("thr-42-origin", { prUrl: url(42) });
+    await env.refresh();
+    const plan = await env.plan([42, 44].map(url));
+    await confirm(env, plan.batchId);
+    expect([...orders(env)].map(([number, order]) => [number, order.threads])).toEqual([
+      [42, { origin: { id: "thr-42-origin", title: "Start manuscript order" }, executor: { id: "thr-42", title: "Order fixes" } }],
+      [44, { origin: null, executor: null }]]);
+    expect(spawned(env)[0]!.prompt).toContain(PR_THREADS_RULE);
+    expect(env.send).not.toHaveBeenCalled();
   });
 
   // One writer per PR: while the batch thread's claims hold, no second agent starts on a batched PR, from any path that starts one.
