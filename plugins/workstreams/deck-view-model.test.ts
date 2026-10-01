@@ -163,6 +163,9 @@ describe("an effort card", () => {
     expect(line(held(null, sent("needs-you")))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Needs you", threadId: "thr-batch" } });
     // Its thread ended: its feedback files it again, needing you, and the row still links the thread with BB's status for it.
     expect(line(held(null, sent("idle")))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text: "Idle", threadId: "thr-batch" } });
+    // Off Your turn and no longer addressed, the PR's own working thread leads, not the old batch's link.
+    expect(line(inkwellDeck({}, (row) => row.number === 211 ? { sent: sent("idle"), yourTurn: null,
+      threads: { origin: null, executor: { id: "thr-own", title: "Fix quill #211", active: false } } } : {}))).toMatchObject({ section: "work", trail: { kind: "thread", threadId: "thr-own" } });
     // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
     expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
     // Dispatch refused it, or the last Address left it out: the server's reason, on the row.

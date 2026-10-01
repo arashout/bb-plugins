@@ -156,9 +156,10 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
-  // Why the last Address didn't send it; else its sent thread, linked with BB's status for it.
+  // Why the last Address didn't send it; else its sent thread, linked with BB's status for it, while it addresses the PR or the PR is on Your
+  // turn. After that, the PR's own working thread leads.
   const left = acted ? null : context.details?.get(item.prUrl) ?? null;
-  const sent = row?.sent?.threadId && (!acted || acted.kind === "address") ? row.sent : null;
+  const sent = row?.sent?.threadId && (row.addressing || row.yourTurn) && (!acted || acted.kind === "address") ? row.sent : null;
   if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Not sent: ${left}` };
   else if (sent) trail = { kind: "thread", text: sentText(sent), threadId: sent.threadId! };
   else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
