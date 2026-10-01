@@ -1,12 +1,12 @@
-// Your turn lists your PRs where a reviewer's feedback waits on you, and nothing else: each kind of feedback puts a PR in, whatever CI says,
-// and a held PR, one waiting only on CI, and one waiting on its reviewers stay out, so the badge never asks you to act where nothing is
-// yours. A draft is in only for feedback to address, and only your reply on the PR answers a comment: a push never does, and neither does
-// a PR that mentions it.
+// Your turn lists your PRs where a person's feedback waits on you, and nothing else, as the Reviews plugin reads it: each of the four
+// clauses puts a PR on, a bot never does, and your answer takes it off. A held PR, one waiting only on CI, and one waiting on its reviewers
+// stay off, so the badge never asks you to act where nothing is yours. Dismiss hides a row until its head moves or a person says more, and a
+// sent PR keeps its thread's link with BB's live status for as long as it's open.
 import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { sentChip, sentState, turnSummary, yourTurn, type Sent, type SentItem, type SentRun } from "./your-turn.js";
+import { dismissed, sentState, sentText, yourTurn, type Sent, type SentItem, type SentRun } from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -19,6 +19,7 @@ const pr = (patch: Partial<Pr>): Pr => ({ ...base, headCommittedAt: at(9), unres
 /** Your turn as the server computes it: with the PR's own attention, which asks for an approval's notes only once nothing else holds it. */
 const reasons = (facts: Pr) => attentionReasons(facts, {}, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 });
 const turn = (facts: Pr, held = false) => yourTurn(facts, reasons(facts), held);
+const why = (facts: Pr) => turn(facts)?.why ?? null;
 
 const changes = pr({ reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(10) }] });
 const approval = pr({ reviewDecision: "APPROVED", latestReviews: [{ login: "mira-l", state: "APPROVED", submittedAt: at(11) }],
@@ -27,193 +28,121 @@ const approval = pr({ reviewDecision: "APPROVED", latestReviews: [{ login: "mira
 const threads = pr({ reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } });
 const comments = pr({ latestReviews: [{ login: "theo-k", state: "COMMENTED", submittedAt: at(12) }],
   reviewFeedback: { openThreads: 0, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
-/** Codex's review with its threads: the review read leaves its threads out of the open threads a person started. */
+/** Codex's review with its threads: the review read leaves its threads out of the open threads a person had the last word in. */
 const codex = { login: "chatgpt-codex-connector", state: "COMMENTED", submittedAt: at(12) };
 const botOnly = pr({ latestReviews: [codex], reviewFeedback: { openThreads: 0, comment: null, repliedAt: null } });
 
 describe("Your turn", () => {
-  // Only an approval with comments or a person's change request is a real follow-up, which Your turn and the badge count. A bot's review,
-  // a person's comment, and a person's open threads still wait, as Comments only, which a batch addresses but nothing counts; drop the
-  // split and the badge would count every Codex or Copilot drive-by.
-  it("makes only an approval with comments or a person's change request a real follow-up, and the rest Comments only", () => {
-    expect([changes, approval].map((facts) => turn(facts)?.followUp)).toEqual(["Changes requested by @otto-v", "Approved with comments"]);
-    for (const facts of [threads, comments]) expect(turn(facts)).toMatchObject({ followUp: null });
-    // The follow-up leads; comments and bot notes follow it.
-    const busy = pr({ ...approval, latestReviews: [...approval.latestReviews, codex], reviewFeedback: { ...approval.reviewFeedback!, comment: { login: "theo-k", at: at(12) } } });
-    expect(turn(busy)).toMatchObject({ kinds: ["approval", "comments", "bots"], text: "Approved with comments · New comments from @theo-k · 1 bot note",
-      followUp: "Approved with comments" });
-  });
-
-  // A code-review app's review, Claude's, Codex's, or Copilot's, is a bot note: it waits until you reply on the PR after it, but alone it
-  // never makes the PR a follow-up, and its change request is never a person's.
-  it("keeps a bot-only PR off Your turn, in Comments only until you reply after its review", () => {
-    expect(turn(botOnly)).toEqual({ kinds: ["bots"], text: "1 bot note", followUp: null, since: Date.parse(at(12)) });
-    const two = pr({ ...botOnly, latestReviews: [codex, { login: "claude", state: "CHANGES_REQUESTED", submittedAt: at(13) }], reviewDecision: "CHANGES_REQUESTED" });
-    expect(turn(two)).toEqual({ kinds: ["bots"], text: "2 bot notes", followUp: null, since: Date.parse(at(12)) });
-    // Your reply after it answers it; one before it, a push, or a PR that links it doesn't.
-    expect(turn({ ...botOnly, reviewFeedback: { ...botOnly.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
-    expect(turn({ ...botOnly, reviewFeedback: { ...botOnly.reviewFeedback!, repliedAt: at(11), followUpAt: at(14) }, headCommittedAt: at(14) })?.kinds).toEqual(["bots"]);
-    // A bot's approval says nothing to address, and a draft waits only for feedback to address.
-    expect(turn(pr({ latestReviews: [{ login: "copilot-pull-request-reviewer", state: "APPROVED", submittedAt: at(12) }] }))).toBeNull();
-    expect(turn({ ...botOnly, isDraft: true })).toBeNull();
-  });
-
-  it("lists each kind of feedback that waits on you, with who and since when", () => {
-    expect(turn(changes)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
-    expect(turn(approval)).toEqual({ kinds: ["approval"], text: "Approved with comments", followUp: "Approved with comments", since: Date.parse(at(11)) });
-    expect(turn(threads)).toEqual({ kinds: ["threads"], text: "2 open threads", followUp: null, since: null });
-    expect(turn(comments)).toEqual({ kinds: ["comments"], text: "New comments from @theo-k", followUp: null, since: Date.parse(at(12)) });
-  });
-
-  it("names every kind a PR has, oldest feedback first for its age", () => {
+  // Each clause alone puts a PR on, with one line of why: drop any and that kind of feedback waits unseen.
+  it("puts a PR on for each of the four clauses, saying why and since when", () => {
+    expect(turn(changes)).toEqual({ why: "Changes requested by @otto-v", since: Date.parse(at(10)), latest: Date.parse(at(10)) });
+    expect(turn(approval)).toEqual({ why: "Approval comment from @mira-l", since: Date.parse(at(11)), latest: Date.parse(at(11)) });
+    expect(turn(threads)).toEqual({ why: "2 open threads", since: null, latest: null });
+    expect(turn(comments)).toEqual({ why: "Comment from @theo-k", since: Date.parse(at(12)), latest: Date.parse(at(12)) });
+    // Several in one line, oldest for its age; a change request's reviewer isn't named again for its comment.
     const both = pr({ ...changes, reviewFeedback: { openThreads: 1, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
-    expect(turn(both)).toEqual({ kinds: ["changes", "threads", "comments"],
-      text: "Changes requested by @otto-v · 1 open thread · New comments from @theo-k", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
+    expect(turn(both)).toMatchObject({ why: "Changes requested by @otto-v · Comment from @theo-k · 1 open thread", since: Date.parse(at(10)) });
+    expect(why(pr({ ...changes, reviewFeedback: { openThreads: 0, comment: { login: "otto-v", at: at(10) }, repliedAt: null } }))).toBe("Changes requested by @otto-v");
   });
 
-  // A change request is a review, and so a comment: the reviewer it names isn't named again for it.
-  it("names a reviewer's change request once, not again as new comments", () => {
-    const requested = pr({ ...changes, reviewFeedback: { openThreads: 0, comment: { login: "otto-v", at: at(10) }, repliedAt: null } });
-    expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
+  // A code-review app (Claude, Codex, Copilot) never puts a PR on: drop the rule and every drive-by review fills the list and the badge.
+  it("keeps a bot-only PR off, whatever the bot said", () => {
+    expect(turn(botOnly)).toBeNull();
+    expect(turn(pr({ ...botOnly, reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "claude", state: "CHANGES_REQUESTED", submittedAt: at(13) }] }))).toBeNull();
+    expect(turn(pr({ latestReviews: [{ login: "copilot-pull-request-reviewer", state: "APPROVED", submittedAt: at(12) }] }))).toBeNull();
+    // Beside a person's feedback it's named nowhere.
+    expect(why(pr({ ...changes, latestReviews: [...changes.latestReviews, codex] }))).toBe("Changes requested by @otto-v");
   });
 
-  // A person's change request is a real follow-up only while nothing of yours followed it. Once you pushed or replied on the PR, the next
-  // move is asking them again, which the row offers as Re-request off Your turn, and GitHub's decision still holds the merge. Drop the rule
-  // and every answered request sits on Your turn until the reviewer comes back (the live false positive).
-  it("flags a change request only while no push or reply of yours followed it, and offers Re-request once one did", () => {
-    expect(turn(changes)?.followUp).toBe("Changes requested by @otto-v");
-    expect(reasons(changes).map((reason) => reason.kind)).not.toContain("rereview-needed");
-    const pushed = pr({ ...changes, headCommittedAt: at(13) });
-    const replied = pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } });
-    for (const answered of [pushed, replied]) {
+  // Your reply last makes it the reviewer's turn: the review read leaves such a thread out of openThreads (ghactions.ts), and a reply
+  // after a comment answers it. Drop it and answered threads stay on the list forever.
+  it("takes a thread or comment off once your reply is last, and never on a push or a PR that links it", () => {
+    expect(turn(pr({ reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } }))).toBeNull();
+    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
+    expect(why({ ...comments, headCommittedAt: at(13) })).toBe("Comment from @theo-k");
+    expect(why({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, followUpAt: at(13) } })).toBe("Comment from @theo-k");
+    expect(why({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11) } })).toBe("Comment from @theo-k");
+    expect(turn({ ...comments, reviewFeedback: undefined })).toBeNull();
+  });
+
+  // Answered by a push or a reply, a change request waits on your re-request, which the row offers off Your turn; GitHub's decision still
+  // holds the merge. Drop it and every answered request sits on Your turn until the reviewer comes back.
+  it("takes a change request off once you pushed or replied after it, and offers Re-request", () => {
+    for (const answered of [pr({ ...changes, headCommittedAt: at(13) }), pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } })]) {
       expect(turn(answered)).toBeNull();
       expect(reasons(answered)).toContainEqual(expect.objectContaining({ kind: "rereview-needed", action: "rerequest", reviewers: ["otto-v"] }));
-      expect(reasons(answered).map((reason) => reason.kind)).not.toContain("merge-waiting");
     }
-    // A reply from before the review answers an older one, not this.
-    expect(turn(pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(9) } }))?.followUp).toBe("Changes requested by @otto-v");
-    // Another reviewer's change request that nothing answered keeps its own words.
-    const mixed = pr({ ...pushed, latestReviews: [...changes.latestReviews, { login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: at(14) }] });
-    expect(turn(mixed)?.followUp).toBe("Changes requested by @mira-l");
+    expect(why(pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(9) } }))).toBe("Changes requested by @otto-v");
+    expect(turn({ ...changes, reviewRequests: ["otto-v"] })).toBeNull();
   });
 
-  // An approval's note is a real follow-up only while no reply of yours followed it. Notes you answered wait only on your Confirm, which
-  // the row offers: not Your turn, and still not ready to merge. Drop the rule and every answered approval goes to a batch for nothing.
-  it("flags an approval note only while no reply of yours followed it, and leaves answered notes to Confirm", () => {
+  // An approval's note waits on your reply whatever CI says; once you replied it waits only on your Confirm, which still blocks the merge.
+  it("keeps an approval comment on until you reply on the PR, then leaves it to Confirm", () => {
+    for (const checks of [["PENDING"], ["FAILURE"]]) expect(why({ ...approval, checkConclusions: checks, mergeStateStatus: "UNSTABLE" })).toBe("Approval comment from @mira-l");
+    // A PR that mentions it later, or a worker's evidence, is no answer the reviewer sees.
+    expect(why({ ...approval, approvalFeedbackVerified: true, reviewFeedback: { ...approval.reviewFeedback!, followUpAt: at(14) } })).toBe("Approval comment from @mira-l");
     const answered = pr({ ...approval, reviewFeedback: { ...approval.reviewFeedback!, repliedAt: at(13) } });
     expect(turn(answered)).toBeNull();
     expect(reasons(answered)).toEqual([expect.objectContaining({ kind: "approval-comments", action: "confirm-handled" })]);
-    // Beside a bot note it is Comments only, never a follow-up.
-    expect(turn({ ...answered, latestReviews: [...answered.latestReviews, { ...codex, submittedAt: at(14) }] })).toMatchObject({ kinds: ["bots"], followUp: null });
+    expect(turn({ ...approval, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true })).toBeNull();
   });
 
-  // An open thread where another person spoke last waits on you; one where you replied last is the reviewer's turn, which the review read
-  // leaves out of openThreads (ghactions.ts), so it asks nothing here.
-  it("keeps an open thread a person spoke last in as Comments only, and asks nothing once you replied last", () => {
-    expect(turn(pr({ reviewFeedback: { openThreads: 1, comment: null, repliedAt: at(13) } }))).toMatchObject({ kinds: ["threads"], followUp: null });
-    expect(turn(pr({ reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } }))).toBeNull();
-  });
-
-  it("leaves out a PR you hold and a closed PR, whatever feedback they carry, and a draft but for its feedback to address", () => {
+  it("leaves off a held or closed PR, one waiting on CI or reviewers, and a draft but for its comments and approval notes", () => {
     for (const facts of [changes, approval, threads, comments]) {
       expect(turn(facts, true)).toBeNull();
       expect(turn({ ...facts, state: "MERGED" })).toBeNull();
     }
     for (const facts of [changes, threads]) expect(turn({ ...facts, isDraft: true })).toBeNull();
-    expect(turn({ ...approval, isDraft: true })?.kinds).toEqual(["approval"]);
-    expect(turn({ ...comments, isDraft: true })?.kinds).toEqual(["comments"]);
-  });
-
-  // Red or running checks are the thread's work or CI's, not a reviewer's feedback: they never make it your turn on their own.
-  it("leaves out a PR waiting only on CI, or on reviewers you asked", () => {
+    expect(why({ ...approval, isDraft: true })).toBe("Approval comment from @mira-l");
+    expect(why({ ...comments, isDraft: true })).toBe("Comment from @theo-k");
     expect(turn(pr({ checkConclusions: ["FAILURE"], mergeStateStatus: "UNSTABLE" }))).toBeNull();
     expect(turn(pr({ reviewRequests: ["mira-l"] }))).toBeNull();
-    // Asked again after their change request, the next move is theirs.
-    expect(turn({ ...changes, reviewRequests: ["otto-v"] })).toBeNull();
-    // An approval whose comments you confirmed on this head, or that left none.
-    expect(turn({ ...approval, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true })).toBeNull();
-    expect(turn({ ...approval, approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true })).toBeNull();
-  });
-
-  // An approval that said something waits on your answer whatever CI says, and a worker's evidence is no answer the reviewer sees.
-  it("keeps an approval comment to address on Your turn while checks run or fail, and over a worker's evidence", () => {
-    for (const checks of [["PENDING"], ["FAILURE"]]) {
-      expect(turn({ ...approval, checkConclusions: checks, mergeStateStatus: "UNSTABLE" })?.kinds).toEqual(["approval"]);
-    }
-    expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approved with comments");
-  });
-
-  // The live case: a conditional approval, then the rest of its stack mentioned the PR hours later. Those links date a follow-up, but the
-  // reviewer saw no reply, so it stays yours until you reply on the PR; then only notes a worker verified are off your turn.
-  it("keeps an approval comment on Your turn when a PR that mentions it lands later, until you reply on the PR", () => {
-    const mentioned = { ...approval, approvalFeedbackVerified: true, reviewFeedback: { ...approval.reviewFeedback!, followUpAt: at(14) } };
-    expect(turn(mentioned)).toEqual({ kinds: ["approval"], text: "Approved with comments", followUp: "Approved with comments", since: Date.parse(at(11)) });
-    expect(turn({ ...mentioned, reviewFeedback: { ...mentioned.reviewFeedback, repliedAt: at(13) } })).toBeNull();
-  });
-
-  // A push says nothing to the reviewer, and neither does a PR that mentions this one: only your reply on the PR after the comment answers it.
-  it("clears a reviewer's comment once you reply after it, and never on a push or a PR that links it", () => {
-    expect(turn({ ...comments, headCommittedAt: at(13) })?.kinds).toEqual(["comments"]);
-    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
-    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, followUpAt: at(13) } })?.kinds).toEqual(["comments"]);
-    // A reply before the comment answers an older one, not this.
-    expect(turn({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, repliedAt: at(11) } })?.kinds).toEqual(["comments"]);
-  });
-
-  // With no push to compare against, the comment still waits: no answer is dated after it. A PR never read for it asks nothing.
-  it("keeps a comment no reply answered without the push's date, and asks nothing of a PR never read for it", () => {
-    expect(turn({ ...comments, headCommittedAt: undefined })?.kinds).toEqual(["comments"]);
-    expect(turn({ ...comments, reviewFeedback: undefined })).toBeNull();
-  });
-
-  // Address selected lists each PR with who left what, so you can tell two approvals apart before one thread takes them all.
-  it("names who left an approval's comment in a listing, and keeps every other part as Your turn words it", () => {
-    const both = { ...approval, reviewFeedback: { ...approval.reviewFeedback!, openThreads: 3 } };
-    const summary = turnSummary(turn(both)!, both.latestReviews);
-    expect(summary).toBe("Approval comment from @mira-l · 3 open threads");
-    expect(turnSummary(turn(changes)!, changes.latestReviews)).toBe("Changes requested by @otto-v");
-    // With no approver read, it says what Your turn says.
-    expect(turnSummary(turn(approval)!, [])).toBe("Approved with comments");
-    // A part that holds a " · " of its own must not shift the approval's part out of place.
-    const asked = { text: "Changes requested by @otto-v · Approved with comments · 2 open threads · 3 bot notes" };
-    expect(turnSummary(asked, approval.latestReviews)).toBe("Changes requested by @otto-v · Approval comment from @mira-l · 2 open threads · 3 bot notes");
   });
 });
 
-// A sent PR's one chip reads its batch item while the batch waits or was refused, else its newest claim: the thread working, waiting on
-// you, or how it ended. The thread's link outlives the thread however it ends, until a newer batch or newer feedback replaces it.
-describe("a sent PR's state", () => {
+// Dismiss hides a row from Your turn on the head it saw, like Reviews' dismissed items: a new head or a person's newer word brings it back.
+describe("Dismiss", () => {
+  const head = base.headRefOid!;
+  const seen = { head, at: Date.parse(at(13)) };
+  it("hides until the head moves or a person says something newer", () => {
+    expect(dismissed(seen, head, turn(comments))).toBe(true);
+    expect(dismissed(seen, "d".repeat(40), turn(comments))).toBe(false);
+    const newer = pr({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, comment: { login: "theo-k", at: at(14) } } });
+    expect(dismissed(seen, head, turn(newer))).toBe(false);
+    expect(dismissed(seen, head, turn(pr({ ...changes, latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(14) }] })))).toBe(false);
+    // Nothing waiting, or never dismissed, is nothing to hide.
+    expect(dismissed(seen, head, null)).toBe(false);
+    expect(dismissed(null, head, turn(comments))).toBe(false);
+  });
+});
+
+// A sent PR's one link reads its batch item while the batch waits or was refused, else its newest claim and BB's status for that thread.
+// The link outlives the claim for as long as the PR is open; only a newer batch replaces it.
+describe("a sent PR", () => {
   const T = 1_000_000;
   const item = (state: SentItem["state"], detail: string | null = null): SentItem => ({ state, detail, batchId: "b-2", confirmedAt: T });
-  const run = (status: SentRun["status"], text: string | null = null, startedAt = T + 8_000): SentRun => ({ threadId: "thr-1", status, startedAt,
-    finishedAt: status === "running" || status === "needs-you" ? null : startedAt + 60_000, result: status === "done" ? text : null, error: status === "failed" ? text : null });
-  const chip = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentChip(sent).text];
+  const run = (status: string, startedAt = T + 8_000): SentRun => ({ threadId: "thr-1", status, startedAt });
+  const shown = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentText(sent)];
+  const thread = (active: boolean) => ({ title: "Address feedback: catalog #96", active });
 
-  it("follows the thread through its run, and keeps its link after it ends with a report, a blocker, or none", () => {
-    expect(chip(sentState(item("queued"), null, null, null))).toEqual(["sending", null, "Sending"]);
-    expect(sentState(item("queued"), null, null, null)?.batchId).toBe("b-2");
-    expect(chip(sentState(item("sent"), run("running"), "Address feedback on 2 PRs", null))).toEqual(["working", "thr-1", "Working"]);
-    expect(chip(sentState(item("sent"), run("needs-you"), null, null))).toEqual(["needs-you", "thr-1", "Needs you"]);
-    expect(chip(sentState(item("sent"), run("done", "Reported changed at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · pushed"]);
-    expect(chip(sentState(item("sent"), run("done", "Reported no-change at bbbbbbb"), null, null))).toEqual(["done", "thr-1", "Done · replied"]);
-    expect(chip(sentState(item("sent"), run("failed", "Blocked: mira-l asks for a new order"), null, null))).toEqual(["blocked", "thr-1", "Blocked: mira-l asks for a new order"]);
-    // Stopped or failed with nothing in its output, or archived or deleted before its output was read: no report, and the link stays.
-    for (const text of ["No result line for this PR.", "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read."]) {
-      expect(chip(sentState(item("sent"), run("failed", text), null, null))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+  it("shows Sending with Undo, then its thread with BB's live status, and keeps the link after the thread ends", () => {
+    expect(shown(sentState(item("queued"), null, null))).toEqual(["sending", null, "Sending"]);
+    expect(sentState(item("queued"), null, null)?.batchId).toBe("b-2");
+    expect(sentState(item("sending"), null, null)?.batchId).toBeNull();
+    expect(shown(sentState(item("sent"), run("running"), thread(true)))).toEqual(["working", "thr-1", "Working"]);
+    expect(shown(sentState(item("sent"), run("needs-you"), thread(false)))).toEqual(["needs-you", "thr-1", "Needs you"]);
+    // The claim ended, however it ended: the link stays, and BB says whether the thread works again.
+    for (const status of ["done", "failed"]) {
+      expect(shown(sentState(item("sent"), run(status), thread(false)))).toEqual(["idle", "thr-1", "Idle"]);
+      expect(shown(sentState(null, run(status), thread(true)))).toEqual(["working", "thr-1", "Working"]);
     }
-    // Past the day a batch item is kept, the claim alone still speaks.
-    expect(chip(sentState(null, run("failed", "No result line for this PR."), null, null))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+    expect(sentState(null, run("done"), null)).toMatchObject({ state: "idle", threadId: "thr-1", title: null });
   });
 
-  it("says why dispatch refused it, lets a newer batch replace an old thread's link, and drops the link for feedback newer than the thread", () => {
-    const old = run("failed", "No result line for this PR.", T - 3_600_000);
-    // A newer batch refused at dispatch never claimed the PR: its reason replaces the old thread's link.
-    expect(chip(sentState(item("refused", "On hold. Release it first."), old, null, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
-    // A newer batch waiting out its window, then its own claim, replace it too.
-    expect(chip(sentState(item("queued"), old, null, null))).toEqual(["sending", null, "Sending"]);
-    expect(chip(sentState(item("unknown", "The plugin restarted"), { ...run("running"), threadId: "thr-2" }, null, null))).toEqual(["working", "thr-2", "Working"]);
-    // Feedback that arrived after the thread ended isn't what it answered; feedback from before keeps the link.
-    expect(sentState(null, old, null, old.finishedAt! + 1)).toBeNull();
-    expect(chip(sentState(null, old, null, old.startedAt - 1))).toEqual(["no-report", "thr-1", "Ended without a report"]);
+  it("says why dispatch refused it, and lets a newer batch replace an older thread's link", () => {
+    const old = run("done", T - 3_600_000);
+    expect(shown(sentState(item("refused", "On hold. Release it first."), old, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(item("queued"), old, null))).toEqual(["sending", null, "Sending"]);
+    expect(shown(sentState(item("unknown", "The plugin restarted"), { ...run("running"), threadId: "thr-2" }, thread(true)))).toEqual(["working", "thr-2", "Working"]);
   });
 });

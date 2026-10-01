@@ -233,7 +233,7 @@ describe("a forced read from GitHub", () => {
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     env.state.polled = listing([pr(42), reviewed()]);
     expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
-    expect(await turn(env)).toMatchObject({ text: "1 open thread · New comments from @mira", followUp: null });
+    expect(await turn(env)).toMatchObject({ why: "Comment from @mira · 1 open thread" });
     await tick();
     return env;
   }

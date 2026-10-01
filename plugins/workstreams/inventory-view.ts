@@ -15,7 +15,7 @@ import type { ResolvedThreadLink } from "./work-context.js";
 import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
 import { prTarget } from "./ghactions.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
-import { sentSchema, yourTurn, yourTurnSchema, type Sent } from "./your-turn.js";
+import { dismissed, sentSchema, yourTurn, yourTurnSchema, type Dismissal, type Sent } from "./your-turn.js";
 
 export const INVENTORY_QUESTIONS = ["forgotten-draft", "missing-reviewer", "needs-nudge"] as const;
 /** Every action a row records, as inventory-actions.ts takes them. */
@@ -38,6 +38,8 @@ export const inventoryRowSchema = z.object({
   attention: z.array(attentionReasonSchema),
   /** Reviewer feedback on your PR that waits on your move (your-turn.ts); null on a teammate's PR, a draft, or one you hold. */
   yourTurn: yourTurnSchema.nullable(),
+  /** You dismissed it from Your turn on this head, and no person has said anything since. */
+  dismissed: z.boolean(),
   /** The last read GitHub answered, and the last it didn't, with why, while no read since has succeeded. */
   checkedAt: z.string().nullable(), failure: z.object({ at: z.string(), error: z.string().nullable() }).strict().nullable(),
   /** The last full inventory read no longer listed it, or couldn't read it. */
@@ -47,7 +49,7 @@ export const inventoryRowSchema = z.object({
   threads: z.object({ origin: threadSchema.nullable(), executor: threadSchema.nullable() }).strict(),
   /** The batch thread whose claim holds the PR while it addresses the feedback, by id and title, both null while it starts. */
   addressing: z.object({ threadId: z.string().nullable(), title: z.string().nullable() }).strict().nullable(),
-  /** Where the last Address batch sent it, and how that stands, with the thread's link however it ended. */
+  /** Where the newest Address batch sent it, and its thread's live status, for as long as the PR is open. */
   sent: sentSchema.nullable(),
   managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
@@ -90,8 +92,8 @@ export type InventoryRowInput = {
   lastAction: NonNullable<InventoryRow["lastAction"]> | null;
   confirmation?: InventoryRow["confirmation"];
   addressing?: InventoryRow["addressing"];
-  /** Its Sent, given when the feedback now waiting on you arrived. */
-  sent?: (since: number | null) => Sent | null;
+  sent?: Sent | null;
+  dismissal?: Dismissal | null;
 };
 
 const EXECUTORS = new Set(["advance", "dispatch", "run", "worker"]);
@@ -127,11 +129,11 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
     feedbackFingerprint: pr?.approvalFeedback?.fingerprint ?? null,
     attention: [...input.reasons],
-    yourTurn: turn,
+    yourTurn: turn, dismissed: dismissed(input.dismissal, pr?.headRefOid ?? null, turn),
     checkedAt: observation?.checkedAt ?? null,
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
-    threads: rowThreads(input), addressing: input.addressing ?? null, sent: input.sent?.(turn?.since ?? null) ?? null,
+    threads: rowThreads(input), addressing: input.addressing ?? null, sent: input.sent ?? null,
     managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
     suggestedReviewers: [...input.suggestedReviewers], confirmation: input.confirmation ?? null,
     lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,

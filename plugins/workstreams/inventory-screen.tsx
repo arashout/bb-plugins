@@ -1,9 +1,9 @@
-// All PRs: Your turn, your PRs where a real follow-up waits on you (onYourTurn), by effort, then Comments only, collapsed, where only
-// comments and bot notes wait (commentsOnly), above every other open PR you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
-// none for a reviewer who hasn't answered yet, and any row reads Re-request @login where you've answered. Your turn and Comments only rows select
-// (x, a click, Shift for a range; ⇧X or the list's box for all of Your turn), and Address selected, or b, starts one batch thread for them at once, with 8 s to Undo. Each
-// PR it sent stays on Your turn with one state chip that opens its thread, until GitHub shows its feedback cleared; what it left out, or
-// why nothing started, shows on the rows and the selection bar. f on a row opens the deck's listing confirm for the PR's own thread. It
+// All PRs: Your turn, your PRs where a person's feedback waits on you (onYourTurn), by effort, above every other open PR you author or an
+// effort names. Its direct writes are Nudge, one click on a row where the server says it's due (a Your turn row offers none for a reviewer
+// who hasn't answered yet, and any row reads Re-request @login where you've answered), and Dismiss, which hides a Your turn row until its
+// head moves or someone says something new. Your turn rows select (x, a click, Shift for a range; ⇧X or the list's box for all), and
+// Address, or b, starts one batch thread for them at once, with 8 s to Undo. A sent PR links its thread with BB's status for it while the
+// PR is open, on Other open PRs once it leaves Your turn; why one wasn't sent shows on its row. f on a row opens the deck's listing confirm for the PR's own thread. It
 // shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the
 // focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the selection reads those PRs from GitHub again, four at a time;
 // a click on Last read reads every open PR again.
@@ -13,7 +13,7 @@ import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, askKind, commentsOnly, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
+import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
   type Outcome } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
@@ -24,24 +24,21 @@ import { DeckDialog, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel,
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
 
-/** Your turn, then Comments only, above every other open PR, each by effort; a PR shows in only one. */
-export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; comments: SimpleGroup[]; other: SimpleGroup[] } {
-  const turn: SimpleGroup[] = [];
-  const comments: SimpleGroup[] = [];
-  const other: SimpleGroup[] = [];
+/** Your turn, the rows you dismissed from it, and every other open PR, each by effort; a PR shows in only one. */
+export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; dismissed: SimpleGroup[]; other: SimpleGroup[] } {
+  const split = { turn: [] as SimpleGroup[], dismissed: [] as SimpleGroup[], other: [] as SimpleGroup[] };
   for (const group of screen.groups) {
     const identity = { key: group.key, label: group.label, effortId: group.effort?.id ?? null };
-    const mine = group.lines.filter(onYourTurn);
-    const noted = group.lines.filter(commentsOnly);
-    const rest = group.lines.filter((line) => !onYourTurn(line) && !commentsOnly(line));
-    if (mine.length) turn.push({ ...identity, lines: mine });
-    if (noted.length) comments.push({ ...identity, lines: noted });
-    if (rest.length) other.push({ ...identity, lines: rest });
+    const of = (line: InventoryLine) => onYourTurn(line) ? split.turn : line.dismissed ? split.dismissed : split.other;
+    for (const list of [split.turn, split.dismissed, split.other]) {
+      const lines = group.lines.filter((line) => of(line) === list);
+      if (lines.length) list.push({ ...identity, lines });
+    }
   }
-  return { turn, comments, other };
+  return split;
 }
-/** The rows Address can take, in drawn order: Your turn's, then Comments only's. */
-const addressable = (split: ReturnType<typeof splitInventory>) => [...split.turn, ...split.comments].flatMap((group) => group.lines).filter(sendable);
+/** The rows Address can take, in drawn order. */
+const addressable = (split: ReturnType<typeof splitInventory>) => split.turn.flatMap((group) => group.lines).filter(sendable);
 
 /** The shared header, with this read's freshness; ⌘K and ? open the deck's palette and key sheet. */
 function Header({ read, onView, onPalette, onHelp }: { read: HeaderProps["read"]; onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void }) {
@@ -73,7 +70,7 @@ function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, 
     <button type="button" data-inventory-action="address" disabled={!!working} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
       title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
       className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background", FOCUS)}>
-      {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address selected ({count})<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
+      {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address {count}<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
     <RefreshSelected count={count} busy={!!refresh?.busy} progress={refresh?.progress ?? null} onClick={onRefresh} />
     {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
     <span className="flex-1" />
@@ -85,10 +82,10 @@ function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
-  /** Your turn and Comments only rows selected for Address, by PR; a row's checkbox, Your turn's box for all or none, Address selected, and Clear. */
+  /** Your turn rows selected for Address, by PR; a row's checkbox, Your turn's box for all or none, Address, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
-  /** Why the last Address started nothing, and why it left each PR out, by PR; and a batch's Undo from its row. */
-  refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void;
+  /** Why the last Address started nothing, and why it didn't send each PR, by PR; a batch's Undo from its row; and Dismiss and back. */
+  refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void; onDismiss?(line: InventoryLine, dismiss: boolean): void;
   /** A batch call out now, whose rows show pending; and each item of a batch sending now, by PR. */
   working?: Working | null; live?: LiveItems;
   /** The deck's shared hint bar, under the lists. */
@@ -96,16 +93,15 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   /** ↻ on a row, Refresh on the selection, and a click on Last read; the rows reading now, and the selection's progress. */
   onRefresh?(line: InventoryLine): void; onRefreshSelected?(): void; onRefreshAll?(): void; reading?: ReadonlySet<string>; refresh?: { busy: boolean; progress: string | null } }) {
   const split = splitInventory(props.screen);
-  const { turn, comments, other } = split;
+  const { turn, dismissed, other } = split;
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading };
+    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
   // Address takes only rows nothing it sent is still working on; Your turn's box takes only Your turn's.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
-  const picked = addressable(split).filter((line) => props.selected?.has(line.prUrl)).length;
   const listed = turn.reduce((sum, group) => sum + group.lines.length, 0);
-  const noted = comments.reduce((sum, group) => sum + group.lines.length, 0);
+  const hidden = dismissed.reduce((sum, group) => sum + group.lines.length, 0);
   const rows = { ...callbacks, selected: props.selected, onSelect: props.onSelect, notes: props.notes, onUndo: props.onUndo, working: props.working?.prUrls, live: props.live };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null, onRefresh: props.onRefreshAll }} onView={props.onView}
@@ -128,21 +124,19 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
             className="size-3.5 shrink-0 accent-sky-600" /> : null}
           Your turn <span className="font-normal tabular-nums text-muted-foreground">{listed}</span></h2>
         {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...rows} />
-          : <p className="px-4 text-[12px] text-muted-foreground">No follow-ups wait on you.</p>}
+          : <p className="px-4 text-[12px] text-muted-foreground">Nothing waits on you.</p>}
+        {hidden ? <details className="mt-2" data-inventory-dismissed>
+          <summary className={cn("mx-4 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", FOCUS)}>{hidden} dismissed · show</summary>
+          <div className="pt-2"><SimpleInventoryList groups={dismissed} kind="dismissed" {...callbacks} /></div>
+        </details> : null}
       </section>
-      {/* Only comments and bot notes wait here: Address takes them, but nothing counts them, so the list stays closed until opened. */}
-      {noted ? <details className="mt-5" data-inventory-comments aria-label="Comments only">
-        <summary className={cn("mx-4 w-fit rounded-sm text-[13px] font-semibold text-muted-foreground hover:text-foreground", FOCUS)}>
-          Comments only <span className="font-normal tabular-nums">{noted}</span></summary>
-        <div className="pt-2"><SimpleInventoryList groups={comments} kind="comments" {...rows} /></div>
-      </details> : null}
       <section className="mt-7" aria-label="Other open PRs">
         <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.lines.length, 0)}</span></h2>
         {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
           : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
     </div>
-    <SelectionBar count={picked} refusal={props.refusal} working={props.working} refresh={props.refresh} onAddress={() => props.onAddress?.()}
+    <SelectionBar count={turnPicked} refusal={props.refusal} working={props.working} refresh={props.refresh} onAddress={() => props.onAddress?.()}
       onRefresh={() => props.onRefreshSelected?.()} onClear={() => props.onClear?.()} />
     {props.footer}
   </div>;
@@ -249,8 +243,8 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const readable = !!focused?.actions.some((action) => action.id === "refresh" && action.enabled);
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const fix = focused && askKind(focused) === "fix";
-  // Your turn then Comments only in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row
-  // that leaves them is no longer selected. ⇧X takes Your turn's alone.
+  // Your turn in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row that leaves it is no
+  // longer selected.
   const split = screen ? splitInventory(screen) : null;
   const turnLines = split ? split.turn.flatMap((group) => group.lines).filter(sendable) : [];
   const selectable = split ? addressable(split) : [];
@@ -262,8 +256,12 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
     prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : [], ...readable ? ["refresh" as const] : []]),
       selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
-  /** Address the selected Your turn and Comments only rows: one batch thread, started now, with 8 s to Undo. */
+  /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
+  /** Dismiss a row on the head it shows, or bring it back. */
+  const dismiss = (line: InventoryLine, on: boolean) => {
+    void rpc.call("inventory_dismiss", { prUrl: line.prUrl, head: on ? rows.get(line.prUrl)?.head ?? null : null }).then(load, (cause: unknown) => say(message(cause)));
+  };
   const undoBatch = async (batchId: string) => {
     const undone = await rpc.call("deck_batch_undo", { batchId }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
     say(undone.ok ? "Undone. Nothing was sent." : undone.error);
@@ -317,7 +315,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
       selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : []))} onAddress={address}
-      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} working={batch.working} live={batch.live}
+      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} onDismiss={dismiss} working={batch.working} live={batch.live}
       onRefresh={(line) => void refresh.read([line.prUrl])} onRefreshSelected={reread} onRefreshAll={refresh.all} reading={refresh.reading}
       refresh={{ busy: refresh.reading.size > 0, progress: refresh.progress }}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />

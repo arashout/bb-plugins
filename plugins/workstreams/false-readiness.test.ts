@@ -76,7 +76,7 @@ function views({ pr, record, since }: Shape) {
     headRefOid: pr.headRefOid ?? null, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0,
     approvalNotesComplete: true, approvalFeedback: pr.approvalFeedback!, reviewFeedback: pr.reviewFeedback };
   return { reasons: reasons.map((reason) => reason.kind), status: line.status, primary: line.primary, lineMerge: line.actions.some((action) => action.id === "merge"),
-    yourTurn: row.yourTurn?.text ?? null, followUp: row.yourTurn?.followUp ?? null, section: deck!.row.section, lifecycle: prLifecycle(pr), board: card!.blocker.label, boardAction: card!.action?.kind ?? null,
+    yourTurn: row.yourTurn?.why ?? null, section: deck!.row.section, lifecycle: prLifecycle(pr), board: card!.blocker.label, boardAction: card!.action?.kind ?? null,
     preview: mergeVerdict(live, record).refusals };
 }
 const WAITS = "An approval comment waits on your answer: reply on the PR or confirm it.";
@@ -84,13 +84,13 @@ const WAITS = "An approval comment waits on your answer: reply on the PR or conf
 describe("feedback to address holds a PR from ready and from merge", () => {
   it("holds an approval whose body asks for more, with no reply, over a worker's evidence, in every view", () => {
     expect(views(bodyComment())).toEqual({ reasons: ["approval-note"], status: "Approval comment to address", primary: "confirm-handled", lineMerge: false,
-      yourTurn: "Approved with comments", followUp: "Approved with comments", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
+      yourTurn: "Approval comment from @mira-l", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
       preview: [WAITS] });
   });
 
   it("names a conditional approval beside red CI after a push, and keeps it on Your turn", () => {
     expect(views(conditional())).toEqual({ reasons: ["approval-note", "ci-red"], status: "CI failing · approval comment to address", primary: "confirm-handled",
-      lineMerge: false, yourTurn: "Approved with comments", followUp: "Approved with comments", section: "confirm", lifecycle: "blocked", board: "CI failing · approval comment to address",
+      lineMerge: false, yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "blocked", board: "CI failing · approval comment to address",
       boardAction: "advance", preview: ["Approval feedback needs verified follow-up on the current head.", WAITS] });
     // Green again on that head, with the worker's evidence carried to it, it still waits on the condition: nothing offers the merge.
     const green = conditional({ checkConclusions: ["SUCCESS"], mergeStateStatus: "CLEAN" });
@@ -133,7 +133,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const mentioned = read();
     expect(mentioned).toMatchObject({ repliedAt: null, noteAt: iso(NOW - 30 * HOUR), followUpAt: iso(NOW - 5 * HOUR) });
     expect(shown(mentioned)).toEqual({ reasons: ["approval-note"], status: "Approval comment to address", primary: "confirm-handled", lineMerge: false,
-      yourTurn: "Approved with comments", followUp: "Approved with comments", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
+      yourTurn: "Approval comment from @theo-k", section: "confirm", lifecycle: "approved-with-note", board: "Approval comment to address", boardAction: "advance",
       preview: [WAITS] });
     // ana-w's reply after the note, in the conversation or as a review, answers it.
     const ready = { status: "Ready to merge", yourTurn: null, section: "merge", lineMerge: true, preview: [] };
@@ -173,7 +173,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const { pr } = bodyComment();
     const replied = verified({ ...pr, reviewFeedback: { ...pr.reviewFeedback!, repliedAt: iso(NOW - 2 * HOUR) } }, null);
     expect(views({ pr: replied, record: null, since: {} })).toMatchObject({ reasons: ["approval-comments"], status: "Approved with comments", primary: "confirm-handled",
-      yourTurn: null, followUp: null, section: "confirm", lineMerge: false });
+      yourTurn: null, section: "confirm", lineMerge: false });
     expect(views({ pr: replied, record: null, since: {} }).preview).not.toEqual([]);
   });
 
@@ -184,7 +184,7 @@ describe("feedback to address holds a PR from ready and from merge", () => {
       approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: iso(NOW - 2 * HOUR) } };
     expect(views({ pr: requested, record: null, since: {} })).toMatchObject({ reasons: ["rereview-needed"], primary: "nudge", yourTurn: null, section: "nudge", lineMerge: false });
     expect(views({ pr: { ...requested, reviewFeedback: { ...requested.reviewFeedback!, repliedAt: null } }, record: null, since: {} }))
-      .toMatchObject({ reasons: [], followUp: "Changes requested by @mira-l", lineMerge: false });
+      .toMatchObject({ reasons: [], yourTurn: "Changes requested by @mira-l", lineMerge: false });
   });
 
   // Asking again follows the change request you answered, never feedback still waiting: a person's open thread, or another reviewer's
@@ -198,18 +198,18 @@ describe("feedback to address holds a PR from ready and from merge", () => {
     const second: Pr = { ...pushed, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null },
       latestReviews: [...pushed.latestReviews, { login: "pia-r", state: "CHANGES_REQUESTED", submittedAt: iso(NOW - HOUR) }] };
     expect(views({ pr: second, record: null, since: {} })).toMatchObject({ reasons: ["rereview-needed"], primary: "thread",
-      followUp: "Changes requested by @pia-r", section: "work", lineMerge: false });
+      yourTurn: "Changes requested by @pia-r", section: "work", lineMerge: false });
   });
 
-  // Comments only is no real follow-up, so nothing counts it, yet a person's comment there holds the PR from ready and from merge as
-  // before. A bot's review is a note to address in a batch: alone it neither holds the PR nor makes it a follow-up.
-  it("holds a PR on a person's comment that waits only as Comments only, and never on a bot's review alone", () => {
+  // A person's comment puts the PR on Your turn and holds it from ready and from merge. A bot's review is a note to address in a batch:
+  // alone it neither holds the PR nor puts it on Your turn.
+  it("holds a PR on a person's comment, on Your turn, and never on a bot's review alone", () => {
     const { pr, record } = bodyComment();
     const answered = { ...pr.reviewFeedback!, repliedAt: iso(NOW - 20 * HOUR) };
     const asked = { ...answered, comment: { login: "pia-r", at: iso(NOW - 5 * HOUR) } };
-    expect(views({ pr: { ...pr, reviewFeedback: asked }, record, since: {} })).toMatchObject({ yourTurn: "New comments from @pia-r", followUp: null,
+    expect(views({ pr: { ...pr, reviewFeedback: asked }, record, since: {} })).toMatchObject({ yourTurn: "Comment from @pia-r",
       status: "Comment to address", lineMerge: false, preview: ["A comment from @pia-r waits on your answer."] });
     const codex = { ...pr, reviewFeedback: answered, latestReviews: [...pr.latestReviews, { login: "chatgpt-codex-connector", state: "COMMENTED", submittedAt: iso(NOW - 4 * HOUR) }] };
-    expect(views({ pr: codex, record, since: {} })).toMatchObject({ yourTurn: "1 bot note", followUp: null, status: "Ready to merge", preview: [] });
+    expect(views({ pr: codex, record, since: {} })).toMatchObject({ yourTurn: null, status: "Ready to merge", preview: [] });
   });
 });

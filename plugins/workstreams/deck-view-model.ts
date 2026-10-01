@@ -16,7 +16,7 @@ import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./roster-view-model";
 import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
 import { firstLine } from "./effort-notes";
-import { sentChip } from "./your-turn";
+import { sentText } from "./your-turn";
 
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
@@ -156,13 +156,11 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
   const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
   let trail: DeckLine["trail"] = null;
-  // Why the last Address left it out; else what Address made of it, its thread linked however it ended, until its feedback clears.
+  // Why the last Address didn't send it; else its sent thread, linked with BB's status for it.
   const left = acted ? null : context.details?.get(item.prUrl) ?? null;
-  const sent = row?.sent && row.sent.state !== "sending" && row.sent.state !== "refused" && (row.addressing || row.yourTurn) && (!acted || acted.kind === "address")
-    ? row.sent : null;
-  if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Left out: ${left}` };
-  else if (sent) trail = sent.threadId ? { kind: "thread", text: sentChip(sent).text, threadId: sent.threadId }
-    : { kind: "acted", failed: false, undo: null, title: null, text: sentChip(sent).text };
+  const sent = row?.sent?.threadId && (!acted || acted.kind === "address") ? row.sent : null;
+  if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Not sent: ${left}` };
+  else if (sent) trail = { kind: "thread", text: sentText(sent), threadId: sent.threadId! };
   else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
     busy: live.state === "sending", text: live.state === "pending" ? "Queued" : live.state === "refused" ? "Not sent" : live.state === "unknown" ? "May not have sent"
       : ACTED[live.kind][live.state === "sent" ? 1 : 0] };

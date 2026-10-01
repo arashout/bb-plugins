@@ -23,9 +23,10 @@ export const QUESTIONS: readonly { key: InventoryQuestion; label: string; none: 
 export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
-    ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments."],
-    ["Address selected", "Select Your turn rows with x, a click, or Shift for a range, then Address selected or b. One thread starts for all of them 8 s later unless you Undo, and never merges. Anything it leaves out says why on its row."],
-    ["State", "Each PR Address sent stays on Your turn with one chip that opens its thread: Sending, Working, Needs you, Done, Blocked, Ended without a report, or Not sent. It leaves once GitHub shows the feedback cleared."],
+    ["Your turn", "A person's approval comment you haven't replied to, their change request with no push or reply since, a thread where they spoke last, or their comment with no reply of yours. Bots never put a PR here. Held PRs stay out."],
+    ["Address", "Select rows with x, a click, or Shift for a range, then Address or b. One thread starts for all of them at once, with 8 s to Undo, and never merges."],
+    ["Sent", "A sent row links its thread with BB's status for it: Working, Needs you, or Idle. The link stays while the PR is open, on Other open PRs once it leaves Your turn."],
+    ["Dismiss", "Hides a row from Your turn until its head moves or someone says something new."],
     ["Ask its thread", "f on a row lists what the PR's own thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],
@@ -80,14 +81,13 @@ export type InventoryLine = {
   managed: { effortId: string; n: number | null; label: string } | null;
   /** What the last action on the PR did, or why it was refused. */
   last: { text: string; ok: boolean } | null;
-  /**
-   * Reviewer feedback that waits on you, as the server found it, and how long it has waited: `tag` names the real follow-up, or for
-   * Comments only what waits, and `rest` the comments and bot notes beside a follow-up.
-   */
-  yourTurn: { text: string; tag: string; rest: string | null; followUp: boolean; age: string | null } | null;
+  /** A person's feedback that waits on you, as the server found it, and how long it has waited. */
+  yourTurn: { why: string; age: string | null } | null;
+  /** You dismissed it from Your turn; it returns when the head moves or someone says something new. */
+  dismissed: boolean;
   /** The batch thread addressing that feedback now, which holds the PR's claim until it finishes; its id is null while it starts. */
   addressing: { threadId: string | null } | null;
-  /** Where the last Address batch sent it, and how that stands, with the thread's link however it ended. */
+  /** Where the newest Address batch sent it, and its thread's live status. */
   sent: Sent | null;
   /** Stack depth under its parent, and its branch glyph. */
   depth: number; branch: "├" | "└" | null;
@@ -315,13 +315,10 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
   const working = row.threads.executor;
   const started = row.threads.origin && row.threads.origin.id !== working?.id ? row.threads.origin : null;
   const threads = [...working ? [{ ...working, role: "working" as const }] : [], ...started ? [{ ...started, role: "started" as const }] : []];
-  const followUp = row.yourTurn?.followUp ?? null;
-  const yourTurn = row.yourTurn && { text: row.yourTurn.text, tag: followUp ?? row.yourTurn.text,
-    rest: followUp && row.yourTurn.text.length > followUp.length ? row.yourTurn.text.slice(followUp.length + 3) : null, followUp: followUp !== null,
-    age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) };
+  const yourTurn = row.yourTurn && { why: row.yourTurn.why, age: row.yourTurn.since === null ? null : age(row.yourTurn.since, now) };
   const addressing = row.addressing && { threadId: row.addressing.threadId };
   const sent = row.sent ?? null;
-  // Whether Your turn or Comments only lists the row decides its actions: a Nudge there would leave the feedback waiting on you.
+  // Whether Your turn lists the row decides its actions: a Nudge there would leave the feedback waiting on you.
   const turn = waitsOnYou({ yourTurn, primary, threads, effortPile, sent });
   return {
     prUrl: row.prUrl, repo: row.repo.split("/").at(-1) ?? row.repo, slug: row.repo, number: row.number, title: row.title, draft: row.draft === true,
@@ -335,7 +332,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
       label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
-    yourTurn, addressing, sent,
+    yourTurn, dismissed: row.dismissed, addressing, sent,
     depth: 0, branch: null,
   };
 }
@@ -358,14 +355,12 @@ type TurnFacts = Pick<InventoryLine, "yourTurn" | "primary" | "threads" | "effor
  */
 const waitsOnYou = (line: TurnFacts): boolean => line.yourTurn !== null &&
   line.effortPile !== "held" && (line.sent !== null || !(line.primary === "thread" && line.threads.some((thread) => thread.role === "working" && thread.active)));
-/** On Your turn: a real follow-up waits on you, an approval with comments or changes a person requested. Only these count. */
-export const onYourTurn = (line: TurnFacts): boolean => waitsOnYou(line) && line.yourTurn!.followUp;
-/** Comments only: only comments, open threads, and bot notes wait, which Address takes as it takes Your turn but nothing counts. */
-export const commentsOnly = (line: TurnFacts): boolean => waitsOnYou(line) && !line.yourTurn!.followUp;
+/** On Your turn: it waits on you, and you haven't dismissed it. */
+export const onYourTurn = (line: TurnFacts & Pick<InventoryLine, "dismissed">): boolean => waitsOnYou(line) && !line.dismissed;
 /** Sent states a batch or its thread still owns: Address takes the PR again only once they end. */
 const OWNED = new Set<Sent["state"]>(["sending", "working", "needs-you"]);
-/** A Your turn or Comments only row Address can take now: nothing it sent is still under way. */
-export const sendable = (line: TurnFacts): boolean => waitsOnYou(line) && !(line.sent && OWNED.has(line.sent.state));
+/** A Your turn row Address can take now: nothing it sent is still under way. */
+export const sendable = (line: TurnFacts & Pick<InventoryLine, "dismissed">): boolean => onYourTurn(line) && !(line.sent && OWNED.has(line.sent.state));
 
 /**
  * The selection after a click on one of `order`'s rows: Shift adds every row from the last one you clicked through this one, in the order

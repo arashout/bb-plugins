@@ -705,20 +705,17 @@ board's words (its roster's when a v2 roster manages it), the PR of yours it is
 stacked on (`stackedOn`, whose row it files under), and each attention
 reason with its next step, owner, and age. It also gives when GitHub last
 answered for the PR, its last failed read and why, any hold, and the thread the
-work started in and the one working on it. On your own PRs, `yourTurn` names
-the reviewer feedback waiting on you (`approval` and `comments` that neither
-your reply on the PR nor your confirmation answered, whatever CI says, then
-`changes` a person asked for that no push or reply of yours followed,
-`threads` still open where another person had the last word (bots aside), and `bots`, review apps'
-notes no reply of yours followed). A change request you answered is an
-attention reason to re-request review instead, and approval notes you
-answered one to confirm; neither is `yourTurn`. `followUp` names the real
-follow-up, an approval's unanswered note or a person's change request, which
-All PRs lists as Your turn and the badge counts; with it null, only comments and bot notes wait, and All PRs
-lists the PR under Comments only. Either way, All PRs lists it unless a thread is
-working on it, a batch thread holds it (`addressing`, with that thread's
-`threadId` and `title`), or its effort is on hold. Held PRs have none, and a
-draft has only its `approval` and `comments`. The header counts PRs forgotten in
+work started in and the one working on it. On your own PRs, `yourTurn.why`
+says in one line which person's feedback waits on you: an approval comment
+with no reply of yours after it, a change request with no push or reply since,
+an open thread whose last word is theirs, or their comment with no reply of
+yours. Bots never set it. A change request you answered is an attention reason
+to re-request review instead, and approval notes you answered one to confirm;
+neither is `yourTurn`. All PRs lists it as Your turn, and the badge counts it,
+unless you dismissed it on this head (`dismissed`), a thread is working on it,
+a batch thread holds it (`addressing`), or its effort is on hold. `sent` links
+the newest batch thread that took it, with BB's status for it. Held PRs have
+none, and a draft has only its approval and conversation comments. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory

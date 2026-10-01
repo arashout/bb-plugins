@@ -161,18 +161,15 @@ describe("an effort card", () => {
       .find((item) => item.ref === "quill #211")!;
     expect(line(held("sent", sent("working")))).toMatchObject({ section: "flight", dim: true, trail: { kind: "thread", text: "Working", threadId: "thr-batch" } });
     expect(line(held(null, sent("needs-you")))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Needs you", threadId: "thr-batch" } });
-    // Its thread ended, whether with a report or without: its feedback files it again, needing you, and the row still links the thread.
-    for (const [now, text] of [[sent("no-report"), "Ended without a report"], [sent("blocked", { detail: "otto-v asks for a new order" }), "Blocked: otto-v asks for a new order"],
-      [sent("done", { detail: "pushed" }), "Done · pushed"]] as const) {
-      expect(line(held(null, now))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text, threadId: "thr-batch" } });
-    }
+    // Its thread ended: its feedback files it again, needing you, and the row still links the thread with BB's status for it.
+    expect(line(held(null, sent("idle")))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text: "Idle", threadId: "thr-batch" } });
     // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
     expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
     // Dispatch refused it, or the last Address left it out: the server's reason, on the row.
     expect(line(held("refused", sent("refused", { threadId: null, detail: "Its effort is on hold. Nothing was started." })))).toMatchObject({ trail: { kind: "acted", failed: true,
       text: "Not sent: Its effort is on hold. Nothing was started." } });
     expect(line(held(null, null), new Map([[url("quill", 211), "An agent is already working on it."]]))).toMatchObject({ trail: { kind: "acted", failed: true,
-      text: "Left out: An agent is already working on it." } });
+      text: "Not sent: An agent is already working on it." } });
   });
 
   it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {

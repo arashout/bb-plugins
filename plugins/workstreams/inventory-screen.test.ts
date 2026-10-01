@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
-import { actionCall, commentsOnly, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
+import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
 import type { Sent } from "./your-turn.js";
@@ -11,7 +11,7 @@ import type { Sent } from "./your-turn.js";
 const VIEW = inkwellInventory();
 const SCREEN = inventoryScreen(VIEW, { now: NOW, filter: null });
 const noop = () => {};
-const CALLBACKS = { busyKey: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop };
+const CALLBACKS = { busyKey: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop, onDismiss: noop };
 function pane(view: InventoryView = VIEW) {
   return renderToStaticMarkup(createElement(InventoryPane, { screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS }));
 }
@@ -82,31 +82,32 @@ describe("simple All PRs list", () => {
     expect(yourTurnRows(VIEW, NOW)).toHaveLength(5);
   });
 
-  // Only a real follow-up counts: a PR where only comments and bot notes wait sits in Comments only, closed under Your turn with its own
-  // count, out of Your turn and the badge, yet Address takes it as it takes Your turn's, with the same box and chips.
-  it("keeps Comments only out of Your turn and the badge, closed under it with its count, its rows selectable for Address", () => {
-    const noted = { kinds: ["comments" as const, "bots" as const], text: "New comments from @theo-k · 2 bot notes", followUp: null, since: NOW - 3_600_000 };
-    const view = patched((row) => row.number === 96 ? { yourTurn: noted } : null);
-    const screen = inventoryScreen(view, { now: NOW, filter: null });
-    const parts = splitInventory(screen);
-    expect(refs(parts.comments)).toEqual([["No effort", ["inkwell/catalog#96"]]]);
-    expect(refs(parts.turn)).toEqual(refs(splitInventory(SCREEN).turn));
-    expect(yourTurnRows(view, NOW)).toHaveLength(5);
-    const catalog = parts.comments[0]!.lines[0]!;
-    expect([onYourTurn(catalog), commentsOnly(catalog), sendable(catalog)]).toEqual([false, true, true]);
-    const html = renderToStaticMarkup(createElement(InventoryPane, { screen, error: null, ...CALLBACKS, selected: new Set([catalog.prUrl]), onSelect: noop }));
-    expect(html).toMatch(/<details[^>]*data-inventory-comments="true"[^>]*>/u);
-    expect(html).not.toMatch(/<details[^>]*data-inventory-comments="true"[^>]*open/u);
-    expect(text(html)).toContain("Your turn 5 ");
-    expect(text(html)).toContain("Comments only 1 ");
-    const row = rowOf(html, "inkwell/catalog#96");
-    expect(row).toContain('aria-label="Select inkwell/catalog#96"');
-    expect(text(row)).toContain("New comments from @theo-k · 2 bot notes · 1h");
-    expect(text(html)).toContain("Address selected (1)");
-    // A follow-up's row leads with it; its comments and bot notes follow, quieter.
-    const busy = { kinds: ["approval" as const, "bots" as const], text: "Approved with comments · 2 bot notes", followUp: "Approved with comments", since: null };
-    const lead = rowOf(pane(patched((row) => row.number === 96 ? { yourTurn: busy } : null)), "inkwell/catalog#96");
-    expect(lead).toMatch(/>Approved with comments<span data-inventory-rest="true" class="[^"]*"> · 2 bot notes<\/span>/u);
+  // One list: a person's comment puts a PR on Your turn and the badge like any other clause, with its one line of why. Dismissed, it leaves
+  // both for a closed "N dismissed" toggle whose rows come back with Undismiss, and never select for Address.
+  it("lists every clause in one Your turn with its why, and keeps dismissed rows under a closed toggle, out of the badge and Address", () => {
+    const comment = { why: "Comment from @theo-k", since: NOW - 3_600_000, latest: NOW - 3_600_000 };
+    const view = patched((row) => row.number === 96 ? { yourTurn: comment } : null);
+    const parts = splitInventory(inventoryScreen(view, { now: NOW, filter: null }));
+    expect(refs(parts.turn).flatMap(([, lines]) => lines)).toContain("inkwell/catalog#96");
+    expect(yourTurnRows(view, NOW)).toHaveLength(6);
+    const html = pane(view);
+    expect(html).not.toContain("Comments only");
+    expect(text(rowOf(html, "inkwell/catalog#96"))).toContain("Comment from @theo-k · 1h");
+    expect(rowOf(html, "inkwell/catalog#96")).toMatch(/data-inventory-action="dismiss"[^>]*>Dismiss<\/button>/u);
+    const gone = patched((row) => row.number === 96 ? { yourTurn: comment, dismissed: true } : null);
+    const hidden = splitInventory(inventoryScreen(gone, { now: NOW, filter: null }));
+    expect(refs(hidden.dismissed)).toEqual([["No effort", ["inkwell/catalog#96"]]]);
+    expect(refs(hidden.turn).flatMap(([, lines]) => lines)).not.toContain("inkwell/catalog#96");
+    expect(refs(hidden.other).flatMap(([, lines]) => lines)).not.toContain("inkwell/catalog#96");
+    const line = hidden.dismissed[0]!.lines[0]!;
+    expect([onYourTurn(line), sendable(line), yourTurnRows(gone, NOW).length]).toEqual([false, false, 5]);
+    const shown = pane(gone);
+    expect(shown).toMatch(/<details[^>]*data-inventory-dismissed="true"[^>]*>/u);
+    expect(shown).not.toMatch(/<details[^>]*data-inventory-dismissed="true"[^>]*open/u);
+    expect(text(shown)).toContain("1 dismissed · show");
+    const row = rowOf(shown, "inkwell/catalog#96");
+    expect(row).toMatch(/data-inventory-action="undismiss"[^>]*>Undismiss<\/button>/u);
+    expect(row).not.toContain("Select inkwell/catalog#96");
   });
 
   // The deck files a PR a thread is fixing now In flight, and a held effort's PRs wait with it, so neither asks anything of you yet: the list
@@ -124,7 +125,7 @@ describe("simple All PRs list", () => {
   it("says why it's your turn and since when, with no Open thread or Ask its thread competing on the row", () => {
     const html = pane();
     expect(text(rowOf(html, "inkwell/quill#210"))).toContain("ABC-370 Hold books at the counter Changes requested by @otto-v · 1d");
-    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approved with comments · 2d");
+    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approval comment from @mira-l · 2d");
     for (const ref of ["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) {
       expect([ref, rowOf(html, ref).match(/Open thread|Ask its thread/u)]).toEqual([ref, null]);
     }
@@ -135,7 +136,7 @@ describe("simple All PRs list", () => {
   });
 
   it("says when no feedback waits on you", () => {
-    expect(text(pane(patched(() => ({ yourTurn: null }))))).toContain("Your turn 0 No follow-ups wait on you.");
+    expect(text(pane(patched(() => ({ yourTurn: null }))))).toContain("Your turn 0 Nothing waits on you.");
   });
 
   it("offers Nudge only where the inventory action is enabled", () => {
@@ -148,7 +149,7 @@ describe("simple All PRs list", () => {
   // The button is the row's own action: a reviewer who hasn't answered is nudged only off Your turn, and an answered change request reads
   // Re-request, so the word on the button says what the click sends.
   it("draws no Nudge on a Your turn row for a reviewer who hasn't answered, and Re-request where you've answered", () => {
-    const waiting = { kinds: ["approval" as const, "threads" as const], text: "Approved with comments · 5 open threads", followUp: "Approved with comments", since: null };
+    const waiting = { why: "Approval comment from @mira-l · 5 open threads", since: null, latest: null };
     const turn = rowOf(pane(patched((row) => row.number === 96 ? { yourTurn: waiting } : null)), "inkwell/catalog#96");
     expect(turn).toContain("5 open threads");
     expect(turn).not.toContain('data-inventory-action="nudge"');
@@ -197,9 +198,9 @@ describe("simple All PRs list", () => {
 
   // Confirming review notes is the deck's: one PR's notes, read fresh, in its confirm. All PRs shows the wait and offers no way around it.
   it("lists an approval with comments as your turn, with no Confirm handled or Merge… here", () => {
-    for (const ref of ["inkwell/folio#301", "inkwell/folio#318"]) {
-      const row = rowOf(pane(), ref);
-      expect(text(row)).toContain("Approved with comments · 2d");
+    for (const [ref, by] of [["inkwell/folio#301", "mira-l"], ["inkwell/folio#318", "theo-k"]]) {
+      const row = rowOf(pane(), ref!);
+      expect(text(row)).toContain(`Approval comment from @${by} · 2d`);
       expect(row).not.toContain('data-inventory-action="confirm-handled"');
       expect(row).not.toContain('data-inventory-action="merge"');
     }
@@ -304,51 +305,58 @@ describe("selecting Your turn PRs to address together", () => {
     expect(boxes(pane())).toEqual([]);
   });
 
-  it("shows the selection with Address selected (N) and its key, and Clear", () => {
+  it("shows the selection with Address N and its key, and Clear", () => {
     const picked = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/folio/pull/301"]);
     const html = selectedPane(picked);
     expect(rowOf(html, "inkwell/quill#210")).toContain('data-inventory-selected="true"');
     expect(rowOf(html, "inkwell/quill#211")).not.toContain("data-inventory-selected");
-    expect(text(html)).toContain("2 selected Address selected (2) b Refresh (2) g Clear esc");
+    expect(text(html)).toContain("2 selected Address 2 b Refresh (2) g Clear esc");
     expect(html).toMatch(/data-inventory-action="address" title="Starts one thread for them now, with 8 s to Undo\. Nothing merges\."/u);
     expect(html).not.toContain("data-inventory-refusal");
     // Every row selected: the list's box reads as clearing them.
     expect(selectedPane(new Set(yourTurnRows(VIEW, NOW).map((line) => line.prUrl)))).toContain('aria-label="Clear the selection"');
   });
 
-  // Sent PRs are tracked in one place: each stays on Your turn with one state chip that opens its thread however it ended, and can't be
-  // picked again while its batch or thread still has it.
-  it("keeps each PR a batch sent on Your turn with one state chip linking its thread, and no box while its thread works", () => {
+  // A sent PR links its thread with BB's live status, Working, Needs you, or Idle, and can't be picked again while its batch or thread has it.
+  // The link stays once the PR leaves Your turn, grey on Other open PRs with no box, like Reviews' started items.
+  it("links each sent PR's thread with its live status, offers no box while it works, and keeps the link off Your turn", () => {
     const sent = (state: Sent["state"], detail: string | null = null, threadId: string | null = "thr-batch") => ({ state, threadId, title: "Address feedback on 5 PRs",
       detail, batchId: state === "sending" ? "b-1" : null });
     const view = patched((row) => row.number === 210 ? { addressing: { threadId: "thr-batch", title: "Address feedback on 5 PRs" }, sent: sent("working") }
-      : row.number === 211 ? { sent: sent("sending", null, null) } : row.number === 155 ? { sent: sent("no-report") }
-        : row.number === 301 ? { sent: sent("done", "replied") } : row.number === 318 ? { sent: sent("blocked", "mira-l asks for a new sort order") } : null);
+      : row.number === 211 ? { sent: sent("sending", null, null) } : row.number === 155 ? { sent: sent("idle") }
+        : row.number === 301 ? { sent: sent("needs-you") } : null);
     const html = selectedPane(new Set(), view);
     expect(refs(splitInventory(inventoryScreen(view, { now: NOW, filter: null })).turn)).toEqual([["Store pickup", ["inkwell/quill#210", "inkwell/quill#211",
       "inkwell/spine#155"]], ["No effort", ["inkwell/folio#301", "inkwell/folio#318"]]]);
-    expect(boxes(html)).toEqual(["inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
-    const chip = (ref: string) => { const row = rowOf(html, ref); const at = row.indexOf("data-inventory-sent="); return text(row.slice(row.lastIndexOf("<", at), row.indexOf("</li>", at))).trim(); };
-    expect(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"].map(chip)).toEqual(["Working ↗",
-      "Sending Undo", "Ended without a report ↗", "Done · replied ↗", "Blocked: mira-l asks for a new sort order ↗"]);
-    // Each ended chip is a button to its thread; Sending's Undo takes the batch back.
-    for (const ref of ["inkwell/quill#210", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) expect(rowOf(html, ref)).toMatch(/<button type="button" data-inventory-sent="[\w-]+" title="[^"]+ · open “Address feedback on 5 PRs”"/u);
-    expect(rowOf(html, "inkwell/quill#211")).toMatch(/data-inventory-sent="sending"[^>]*>Sending<button type="button"[^>]*>Undo<\/button>/u);
-    // A dispatch refusal says why on its row; feedback cleared takes the row off Your turn, chip and all.
+    expect(boxes(html)).toEqual(["inkwell/spine#155", "inkwell/folio#318"]);
+    const chip = (markup: string, ref: string) => { const row = rowOf(markup, ref); const at = row.indexOf("data-inventory-sent="); return text(row.slice(row.lastIndexOf("<", at), row.indexOf("</li>", at))).trim(); };
+    expect(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301"].map((ref) => chip(html, ref))).toEqual(["Working ↗",
+      "Sending · Undo", "Idle ↗", "Needs you ↗"]);
+    for (const ref of ["inkwell/quill#210", "inkwell/spine#155", "inkwell/folio#301"]) expect(rowOf(html, ref)).toMatch(/<button type="button" data-inventory-sent="[\w-]+" title="[^"]+ · open “Address feedback on 5 PRs”"/u);
+    expect(rowOf(html, "inkwell/quill#211")).toMatch(/data-inventory-sent="sending"[^>]*>Sending · <button type="button"[^>]*>Undo<\/button>/u);
+    // A dispatch refusal is one line on its row.
     expect(text(rowOf(selectedPane(new Set(), patched((row) => row.number === 210 ? { sent: sent("refused", "Its effort is on hold. Nothing was started.", null) } : null)),
       "inkwell/quill#210"))).toContain("Not sent: Its effort is on hold. Nothing was started.");
-    expect(refs(splitInventory(inventoryScreen(patched((row) => row.number === 155 ? { sent: sent("no-report"), yourTurn: null } : null), { now: NOW, filter: null })).turn)
-      .flatMap(([, lines]) => lines)).not.toContain("inkwell/spine#155");
+    // Answered, it leaves Your turn and keeps its link, grey on Other open PRs, with no box.
+    const left = patched((row) => row.number === 155 ? { sent: sent("idle"), yourTurn: null } : null);
+    const parts = splitInventory(inventoryScreen(left, { now: NOW, filter: null }));
+    expect(refs(parts.turn).flatMap(([, lines]) => lines)).not.toContain("inkwell/spine#155");
+    expect(refs(parts.other).flatMap(([, lines]) => lines)).toContain("inkwell/spine#155");
+    const other = selectedPane(new Set(), left);
+    expect(chip(other, "inkwell/spine#155")).toBe("Idle ↗");
+    expect(rowOf(other, "inkwell/spine#155")).not.toContain("Select inkwell/spine#155");
+    expect(rowOf(selectedPane(new Set(), patched((row) => row.number === 155 ? { sent: sent("working"), yourTurn: null } : null)), "inkwell/spine#155"))
+      .toMatch(/data-inventory-sent="working"[^>]*class="[^"]*text-muted-foreground/u);
   });
 
-  // Nothing fails quietly: why nothing started shows on the selection bar, and why each PR was left out shows on its own row.
-  it("shows why nothing started on the selection bar, and each left-out PR's reason on its row", () => {
+  // Nothing fails quietly: why nothing started shows on the selection bar, and why each PR wasn't sent, in one line on its own row.
+  it("shows why nothing started on the selection bar, and each unsent PR's reason on its row", () => {
     const picked = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/folio/pull/301"]);
     const html = selectedPane(picked, VIEW, { refusal: "Nothing started. quill #210: An agent is already working on it.",
       notes: new Map([["https://github.com/inkwell/quill/pull/210", "An agent is already working on it."]]) });
     expect(html).toMatch(/role="alert" data-inventory-refusal[^>]*>Nothing started\. quill #210: An agent is already working on it\.</u);
-    expect(rowOf(html, "inkwell/quill#210")).toMatch(/role="alert" data-inventory-left[^>]*><span class="truncate">Left out: An agent is already working on it\.</u);
-    expect(rowOf(html, "inkwell/folio#301")).not.toContain("Left out");
+    expect(rowOf(html, "inkwell/quill#210")).toMatch(/role="alert" data-inventory-sent="refused"[^>]*><span class="truncate">Not sent: An agent is already working on it\.</u);
+    expect(rowOf(html, "inkwell/folio#301")).not.toContain("Not sent");
   });
 });
 

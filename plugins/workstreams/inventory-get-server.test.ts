@@ -8,6 +8,7 @@ import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
+import { yourTurnRows } from "./inventory-view-model.js";
 import type { DeckView } from "./deck.js";
 import { createPrHoldStore } from "./pr-hold-store.js";
 import plugin from "./server.js";
@@ -75,7 +76,7 @@ async function setup() {
   efforts.setArchived(old.id, true);
   createPrHoldStore(db).set(url(315), true, "Waiting on the store layout review");
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
-  return { harness, db, shelf, facts, get: async (input: object = {}) => await harness.callRpc("inventory_get", input) as InventoryView };
+  return { harness, bb, db, shelf, facts, get: async (input: object = {}) => await harness.callRpc("inventory_get", input) as InventoryView };
 }
 
 describe("the PR inventory read model", () => {
@@ -102,16 +103,34 @@ describe("the PR inventory read model", () => {
   // Your turn is the server's word in both read models, so the badge, All PRs, and the deck agree; a held PR waits in Held on its card.
   it("marks Your turn in inventory_get and deck_get, never on a held PR, and signals when a release makes it yours again", async () => {
     const env = await setup();
-    const turns = async () => (await env.get()).groups.flatMap((group) => group.rows).filter((row) => row.yourTurn).map((row) => [row.number, row.yourTurn!.text]);
+    const turns = async () => (await env.get()).groups.flatMap((group) => group.rows).filter((row) => row.yourTurn).map((row) => [row.number, row.yourTurn!.why]);
     expect(await turns()).toEqual([[316, "Changes requested by @otto-v"]]);
     const deck = await env.harness.callRpc("deck_get", {}) as DeckView;
     const rows = [...deck.active, ...deck.held].flatMap((card) => card.sections.flatMap((section) => section.rows));
-    expect(rows.find((row) => row.number === 316)?.yourTurn?.kinds).toEqual(["changes"]);
+    expect(rows.find((row) => row.number === 316)?.yourTurn?.why).toBe("Changes requested by @otto-v");
     expect(rows.find((row) => row.number === 315)).toMatchObject({ section: "held", yourTurn: null });
     const before = env.harness.inspection.realtimeSignals.length;
     await env.harness.callRpc("pr_hold_set", { prUrl: url(315), held: false });
     expect(env.harness.inspection.realtimeSignals.slice(before).map((signal) => signal.channel)).toContain("inventory-changed");
     expect(await turns()).toEqual([[315, "Changes requested by @otto-v"], [316, "Changes requested by @otto-v"]]);
+  });
+
+  // Dismiss, as Reviews dismisses: one plugin KV key per PR and no table, so a rollback reads nothing new. It holds on the head it saw;
+  // a new head brings the PR back. Drop the head check and a dismissed PR never returns.
+  it("hides a dismissed PR from Your turn on the head it saw, kept in plugin KV, until the head moves or you bring it back", async () => {
+    const env = await setup();
+    const shown = async () => { const view = await env.get();
+      return [yourTurnRows(view, Date.now()).map((line) => line.number), view.groups.flatMap((group) => group.rows).find((row) => row.number === 316)!.dismissed]; };
+    expect(await shown()).toEqual([[316], false]);
+    expect(await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40) })).toEqual({ ok: true });
+    expect(await shown()).toEqual([[], true]);
+    expect(await env.bb.storage.kv.list("yourTurnDismissed:")).toEqual([`yourTurnDismissed:${url(316)}`]);
+    // Dismissed on an older head: the PR moved since, so it's back.
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "b".repeat(40) });
+    expect(await shown()).toEqual([[316], false]);
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40) });
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: null });
+    expect([await shown(), await env.bb.storage.kv.list("yourTurnDismissed:")]).toEqual([[[316], false], []]);
   });
 
   it("settles an effort's PR the board holds no facts for as its roster does, so the two agree on whether it is open", async () => {

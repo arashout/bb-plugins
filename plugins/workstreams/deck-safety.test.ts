@@ -79,7 +79,7 @@ describe("the deck's write safety", () => {
     expect(inventory).toMatch(/case "address": address\(\); return;/u);
     expect(inventory).toContain("onClick={onAddress}");
     expect(inventory.match(/batch\.plan\(/gu)).toHaveLength(2);
-    expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge", "deck_batch_undo"]);
+    expect([...inventory.matchAll(/rpc\.call\("(\w+)"/gu)].map((match) => match[1])).toEqual(["inventory_get", "inventory_nudge", "inventory_dismiss", "deck_batch_undo"]);
     // Review notes and merges are the deck's alone: no key or button here confirms or merges.
     expect(inventory).not.toMatch(/case "(confirm|request|ready|merge)"/u);
     expect(inventory).not.toContain('"inventory_confirm_handled"');

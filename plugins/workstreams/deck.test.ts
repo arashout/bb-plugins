@@ -4,7 +4,7 @@ import { deckRows, deckView, type DeckEffortInput, type DeckInput, type DeckRowI
 import type { SuggestionGroup } from "./effort-classify.js";
 import { inkwellDeck, inkwellInventory, inkwellInventoryPrs, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
-import { commentsOnly, inventoryScreen, onYourTurn } from "./inventory-view-model.js";
+import { inventoryScreen, onYourTurn } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
 import type { Criterion } from "./outcome-evidence.js";
 import type { AttentionReason } from "./pr-attention.js";
@@ -154,7 +154,7 @@ describe("the effort deck", () => {
   // led with a nudge that waits on other reviewers, while the feedback waits, or called a PR a thread is fixing In flight, or paused one
   // with its effort, would send you two ways at once.
   it("files every PR Your turn lists under a move of yours, never Merge, on an active card", () => {
-    const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", followUp: null, since: INVENTORY_NOW - 3_600_000 };
+    const comments = { why: "Comment from @ines-v", since: INVENTORY_NOW - 3_600_000, latest: INVENTORY_NOW - 3_600_000 };
     const merge: AttentionReason = { question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [],
       since: INVENTORY_NOW - 2 * DAY, ageMs: 2 * DAY, basis: "github" };
     const held = [effort("shelf"), effort("pickup", { pile: { effortId: INVENTORY_EFFORTS.pickup.id, pile: "held", reason: "", since: 1 } })];
@@ -172,9 +172,7 @@ describe("the effort deck", () => {
       const base = inkwellInventory();
       const view: InventoryView = { ...base, groups: base.groups.map((group) => ({ effort: group.effort && { ...group.effort, pile: piles.get(group.effort.id) },
         rows: group.rows.map((row) => rows.get(row.prUrl)!) })) };
-      // Comments only waits on you as Your turn does, though only Your turn counts: both file under a move of yours.
-      const turn = new Set(inventoryScreen(view, { now: deck.now, filter: null }).groups.flatMap((group) => group.lines)
-        .filter((line) => onYourTurn(line) || commentsOnly(line)).map((line) => line.prUrl));
+      const turn = new Set(inventoryScreen(view, { now: deck.now, filter: null }).groups.flatMap((group) => group.lines).filter(onYourTurn).map((line) => line.prUrl));
       expect([...turn].map((prUrl) => rows.get(prUrl)!.number)).toEqual(listed);
       expect(deckRows(deck).filter(({ row, pile }) => turn.has(row.prUrl) && !(needsYou(row, pile) && row.section !== "merge" && row.step?.owner === "you"))
         .map(({ row, pile }) => [row.number, pile, row.section, row.step?.owner])).toEqual([]);

@@ -154,8 +154,7 @@ import {
 } from "./threads.js";
 import { startThread } from "./spawn.js";
 import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
-import { sentState, turnSummary, yourTurn, type Sent } from "./your-turn.js";
-import { batchResults } from "./completion-envelope.js";
+import { dismissalSchema, sentState, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
 import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, recommendThread, type DirectAction, type MergeMethod, type ThreadCandidate } from "./actions.js";
 import { planAgent, runAgent, type AgentSdk } from "./agent.js";
 import { sendRowMessage } from "./threadmessage.js";
@@ -197,6 +196,8 @@ const RESCAN_DELAY_MS = 3_000;
 const TARGETED_MAX = 8;
 /** A batch thread's action in the board's run record: one run per PR it claims, all in its thread. */
 const ADDRESS_RUN = "address-feedback";
+/** Each PR's Dismiss from Your turn, a KV key per PR. */
+const DISMISSED = "yourTurnDismissed:";
 /** What every other writer hears while a batch thread's claim holds the PR. */
 const ADDRESSING = "A batch thread is addressing this PR's feedback. Wait for it to finish.";
 
@@ -460,6 +461,8 @@ export const rpcContract = defineRpcContract({
   inventory_request_review: { input: prUrlInput.extend({ logins: z.array(z.string().max(140)).min(1).max(20), shown: inventoryRowSchema.shape.reviewers }).strict(),
     output: writeResult },
   inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
+  /** Hide a PR from Your turn until its head moves or a person says something newer (`head` is the head its row showed), or show it again. */
+  inventory_dismiss: { input: prUrlInput.extend({ head: z.string().regex(/^[0-9a-f]{40}$/u).nullable() }).strict(), output: z.object({ ok: z.literal(true) }) },
   /**
    * Read-only, for the confirm: the approval's notes (review bodies and the threads it opened) and what came after the newest, read from
    * GitHub now, with the thread Ask would send the approval-feedback recipe to.
@@ -2746,13 +2749,11 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.onDispose(() => rescans.dispose());
 
-  /** Runs changed: open views refetch, and a finished run rescans the row it touched. A batch thread's finished claims read its report. */
+  /** Runs changed: open views refetch, and a finished run rescans the row it touched; a batch thread's finished claims read their PRs again. */
   function runsChanged(changed: readonly Run[]): void {
     if (changed.length === 0) return;
-    const addressed = changed.filter((run) => run.action === ADDRESS_RUN && run.threadId !== null && (run.status === "done" || run.status === "failed"));
-    for (const threadId of new Set(addressed.map((run) => run.threadId!))) {
-      void verifyAddress(threadId, addressed.filter((run) => run.threadId === threadId)).catch(onThreadError);
-    }
+    // Its claims ended: only your reply on the PR, or your Confirm, clears the feedback, so GitHub is read again, never the thread's report.
+    scheduleInventoryUrls(changed.flatMap((run) => run.action === ADDRESS_RUN && run.prUrl && (run.status === "done" || run.status === "failed") ? [run.prUrl] : []));
     for (const run of changed) {
       const finished = run.kind === "agent" ? run.status === "done" || run.status === "failed" : run.status === "succeeded";
       if (run.action === LINEAR_FETCH) {
@@ -2858,7 +2859,7 @@ export default async function plugin(bb: BbPluginApi) {
     const listed = new Set(rows.map((row) => row.id));
     const lost = [...bound].filter((id) => !listed.has(id)).flatMap((id) => runs.openIn(id).filter((run) => run.action === ADDRESS_RUN));
     if (!lost.length) return;
-    for (const run of lost) runs.settle(run.id, false, "Its batch thread is gone: deleted or archived while the board wasn't listening. Its report was never read.");
+    for (const run of lost) runs.settle(run.id, false, "Its batch thread is gone: deleted or archived while the board wasn't listening.");
     scheduleInventoryUrls(lost.flatMap((run) => run.prUrl ? [run.prUrl] : []));
     for (const run of lost) if (run.path) rescans.add(run.path);
     bb.log.info(`released ${lost.length} batch claim(s) whose thread is gone`);
@@ -5687,8 +5688,9 @@ export default async function plugin(bb: BbPluginApi) {
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
     const claims = addressClaims();
     const sentOf = addressSent();
+    const dismissals = await dismissed();
     const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
-      addressing: claims.get(prWorkItemKey(prUrl)) ?? null, sent: (since: number | null) => sentOf(prUrl, since),
+      addressing: claims.get(prWorkItemKey(prUrl)) ?? null, sent: sentOf(prUrl), dismissal: dismissals.get(prWorkItemKey(prUrl)) ?? null,
       confirmation: userConfirmation(approvalFeedback.get(prUrl), pr?.approvalFeedback, pr?.headRefOid ?? null),
       links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
     const entries = current.prInventory.entries;
@@ -5870,18 +5872,24 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
   /**
-   * Where the last Address batch sent each PR, and how that stands: its batch item while it waits out its window or when dispatch refused
-   * it, else its newest claim, open or ended, with that thread's link however it ended.
+   * Where the newest Address batch sent each PR: its batch item while it waits out its window or when dispatch refused it, else its newest
+   * claim, open or ended, with that thread's link and BB's status for it now.
    */
-  function addressSent(): (prUrl: string, since: number | null) => Sent | null {
+  function addressSent(): (prUrl: string) => Sent | null {
     const items = deckBatches.addressed();
     const latest = new Map<string, Run>();
     for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && run.prUrl !== null && !latest.has(prWorkItemKey(run.prUrl))) latest.set(prWorkItemKey(run.prUrl), run);
-    return (prUrl, since) => {
+    return (prUrl) => {
       const run = latest.get(prWorkItemKey(prUrl)) ?? null;
       const facts = run?.threadId ? threadFacts.get(run.threadId) : undefined;
-      return sentState(items.get(prWorkItemKey(prUrl)) ?? null, run, facts ? facts.title ?? facts.titleFallback ?? null : null, since);
+      return sentState(items.get(prWorkItemKey(prUrl)) ?? null, run, facts ? { title: facts.title ?? facts.titleFallback ?? null, active: facts.status === "active" } : null);
     };
+  }
+  /** Each Dismiss, by PR, from the plugin's KV: one key per PR, so no table holds them. */
+  async function dismissed(): Promise<Map<string, Dismissal>> {
+    const keys = await bb.storage.kv.list(DISMISSED);
+    return new Map((await Promise.all(keys.map(async (key) => [key.slice(DISMISSED.length), dismissalSchema.safeParse(await bb.storage.kv.get(key))] as const)))
+      .flatMap(([prUrl, read]) => read.success ? [[prUrl, read.data] as const] : []));
   }
   /**
    * Why an agent or another action already holds this PR or its checkout, or null: an open run on either (a batch thread's claim among
@@ -5912,7 +5920,7 @@ export default async function plugin(bb: BbPluginApi) {
       const path = prCheckout(row.prUrl);
       const busy = v2Claimed(row.prUrl, path) ? "A v2 roster worker holds it." : input.threads.executor?.active ? "An agent is already working on it."
         : agentOn(row.prUrl, path);
-      const address = { feedback: input.yourTurn && turnSummary(input.yourTurn, input.reviewers.reviewed), busy, checkout: path && (path.split("/").at(-1) ?? path),
+      const address = { feedback: input.yourTurn?.why ?? null, busy, checkout: path && (path.split("/").at(-1) ?? path),
         confirm: input.attention.some((reason) => reason.kind === "approval-comments") };
       if (!each) return [row.prUrl, { address }];
       const route = await askRoute(row.prUrl, work);
@@ -5987,7 +5995,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (read.pr.headRefOid !== item.headOid) { refuse("New commits landed since the listing. Review it and try again; nothing was started."); continue; }
       const turn = yourTurn(read.pr, await attentionOf(read.pr), false);
       if (!turn) { refuse("No feedback waits on you now; nothing was started."); continue; }
-      ready.push({ item, pr: read.pr, path, feedback: turnSummary(turn, read.pr.latestReviews) });
+      ready.push({ item, pr: read.pr, path, feedback: turn.why });
     }
     if (place.parentThreadId && !await liveThread(place.parentThreadId)) return all("Its parent thread is gone since the listing. Review it and try again; nothing was started.");
     // A hold, an effort's hold, a claim, or an agent may have landed while GitHub answered. The claims: nothing is awaited from the last
@@ -6006,9 +6014,9 @@ export default async function plugin(bb: BbPluginApi) {
     // Each PR's own threads go with it as context to read, from the read its claim passed.
     const ref = (thread: { id: string; title: string } | null) => thread && { id: thread.id, title: thread.title };
     try {
-      const prompt = addressBatchPrompt(claimed.map(({ item, pr, path, feedback, runId }) => {
+      const prompt = addressBatchPrompt(claimed.map(({ item, pr, path, feedback }) => {
         const { origin, executor } = stop.threads(item.prUrl);
-        return { attemptId: `address-${runId}`, prUrl: prWorkItemKey(item.prUrl), repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title,
+        return { prUrl: prWorkItemKey(item.prUrl), repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title,
           headOid: item.headOid!, headBranch: pr.headRefName, baseBranch: pr.baseRefName, checkout: path, feedback, threads: { origin: ref(origin), executor: ref(executor) } };
       }));
       const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: place.projectId, title, prompt, environment: await contextWorkspace(hostId),
@@ -6024,21 +6032,6 @@ export default async function plugin(bb: BbPluginApi) {
     } finally { for (const { runId } of claimed) addressStarting.delete(runId); }
     announceThreads();
     return results;
-  }
-  /**
-   * What the batch thread reported for each PR it claimed, from its typed result lines, kept on that PR's run. A report answers no feedback:
-   * each PR is read from GitHub again, where only your reply on the PR, or your Confirm, clears it.
-   */
-  async function verifyAddress(threadId: string, finished: readonly Run[]): Promise<void> {
-    let output = "";
-    try { output = (await bb.sdk.threads.output({ threadId })).output ?? ""; } catch (error) { bb.log.warn(`address thread ${threadId}: output read failed: ${String(error).slice(0, 200)}`); }
-    const reports = batchResults(output, finished.map((run) => ({ attemptId: `address-${run.id}`, target: run.prUrl ?? "" })));
-    for (const run of finished) {
-      const report = reports.get(`address-${run.id}`)!;
-      runs.settle(run.id, report.ok && report.changed, report.text);
-    }
-    scheduleInventoryUrls(finished.flatMap((run) => run.prUrl ? [run.prUrl] : []));
-    announceThreads();
   }
   /**
    * A batch thread's claims that a reload cut off before its start returned: bound to the thread BB made, found by the claims its metadata
@@ -6724,6 +6717,12 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
+    inventory_dismiss: async ({ prUrl, head }) => {
+      const key = `${DISMISSED}${prWorkItemKey(prUrl)}`;
+      if (head) await bb.storage.kv.set(key, { head, at: Date.now() } satisfies Dismissal); else await bb.storage.kv.delete(key);
+      inventoryChanged();
+      return { ok: true as const };
+    },
     inventory_confirm_read: ({ prUrl }) => confirmRead(prWorkItemKey(prUrl)),
     inventory_confirm_revoke: ({ prUrl }) => revokeConfirmation(prWorkItemKey(prUrl)),
     inventory_confirm_handled: ({ prUrl, headOid, fingerprint, anyway }) => inventoryActions.confirmHandled(prWorkItemKey(prUrl), headOid, fingerprint, anyway),

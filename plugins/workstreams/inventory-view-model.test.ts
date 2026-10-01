@@ -289,7 +289,7 @@ describe("the PR inventory screen view model", () => {
   // The live case: a reviewer approved and left open threads while another was asked over a business day ago. You owe answers first, and a
   // Nudge to the slow one leaves them waiting; it returns once the feedback clears and the row leaves Your turn.
   it("offers no Nudge for a reviewer who hasn't answered on a Your turn row, and still does where Your turn doesn't list it", () => {
-    const threads = { kinds: ["approval" as const, "threads" as const], text: "Approved with comments · 5 open threads", followUp: "Approved with comments", since: null };
+    const threads = { why: "Approval comment from @mira-l · 5 open threads", since: null, latest: null };
     const turn = find("catalog #96", withRow("catalog #96", { yourTurn: threads }));
     expect(onYourTurn(turn)).toBe(true);
     expect(rowOf("catalog #96").attention.map((item) => [item.kind, item.action])).toEqual([["review-waiting", "nudge"]]);
@@ -406,9 +406,9 @@ describe("the PR inventory screen view model", () => {
 
   // Feedback the state word doesn't name is still yours, and a thread's to address, so the deck files it under Work in threads.
   it("leads a Your turn row the state word doesn't explain with the review feedback, which its thread addresses", () => {
-    const commented = withRow("catalog #96", { attention: [], yourTurn: { kinds: ["comments"], text: "New comments from @theo-k", followUp: null, since: NOW - 3_600_000 } });
+    const commented = withRow("catalog #96", { attention: [], yourTurn: { why: "Comment from @theo-k", since: NOW - 3_600_000, latest: NOW - 3_600_000 } });
     expect(find("catalog #96", commented)).toMatchObject({ steps: [{ text: "Address the review feedback", owner: { kind: "you" } }], primary: "thread",
-      yourTurn: { text: "New comments from @theo-k", age: "1h" } });
+      yourTurn: { why: "Comment from @theo-k", age: "1h" } });
     // A read that left it unknown asks for a read first.
     expect(find("catalog #96", withRow("catalog #96", { status: "Status unknown" }, commented)).primary).toBe("refresh");
     // With no feedback, it waits on its reviewers as before.
@@ -418,7 +418,7 @@ describe("the PR inventory screen view model", () => {
   // Merging, nudging someone else, or asking again leaves Your turn's feedback waiting on you, so the row leads with the move that answers
   // it, or with the feedback itself, and the deck files it where Your turn lists it: never under Merge or Nudge reviewers while it waits.
   it("leads a Your turn row with the move that answers its feedback, or the feedback, before a merge, a nudge, or a re-request", () => {
-    const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", followUp: null, since: NOW - 3_600_000 };
+    const comments = { why: "Comment from @ines-v", since: NOW - 3_600_000, latest: NOW - 3_600_000 };
     const merge = reason({ kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [] });
     expect(find("folio #340", withRow("folio #340", { attention: [merge], yourTurn: comments }))).toMatchObject({ primary: "thread",
       steps: [{ text: "Address the review feedback", age: "1h", since: NOW - 3_600_000 }, { text: "Merge" }] });
@@ -426,7 +426,7 @@ describe("the PR inventory screen view model", () => {
       steps: [{ text: "Address the review feedback" }, { text: "Nudge @mira-l, @theo-k", owner: { kind: "reviewers" } }] });
     // A re-request follows a change request you answered: a person's thread, or another's change request, still waits, and its fix leads.
     const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v", owner: "you", reviewers: ["otto-v"] });
-    const threads = { kinds: ["threads" as const], text: "1 open thread", followUp: null, since: null };
+    const threads = { why: "1 open thread", since: null, latest: null };
     const answered = find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: threads }));
     expect(answered).toMatchObject({ primary: "thread", steps: [{ text: "Address the review feedback" }, { text: "Re-request review from @otto-v" }] });
     expect(askKind(answered)).toBe("fix");
@@ -463,16 +463,16 @@ describe("the PR inventory screen view model", () => {
   });
 
   // A batch thread holding the PR is working on its feedback: the row isn't your turn, and offers no ask of its own.
-  // Sent PRs are tracked in one place: each stays on Your turn with its state until GitHub shows the feedback cleared, and Address takes
-  // one again only once nothing it sent is under way, which the server's claim enforces too.
-  it("keeps a PR a batch sent on Your turn with its state until its feedback clears, and Address takes it again only once its thread ends", () => {
+  // A sent PR stays on Your turn only while the rule says so, and Address takes it again only once nothing it sent is under way, which the
+  // server's claim enforces too.
+  it("keeps a sent PR on Your turn only while its feedback waits, and Address takes it again only once its thread is idle", () => {
     const sent = (state: Sent["state"], patch: Partial<InventoryRow> = {}) => find("quill #211", withRow("quill #211", { sent: { state, threadId: "thr-batch",
       title: "Address feedback on 2 PRs", detail: null, batchId: null }, ...patch }));
     const held = sent("working", { addressing: { threadId: "thr-batch", title: "Address feedback on 2 PRs" } });
     expect([held.addressing, onYourTurn(held), sendable(held), askKind(held)]).toEqual([{ threadId: "thr-batch" }, true, false, null]);
     for (const state of ["sending", "needs-you"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, false]);
-    for (const state of ["done", "blocked", "no-report", "refused"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, true]);
-    expect(onYourTurn(sent("no-report", { yourTurn: null }))).toBe(false);
+    for (const state of ["idle", "refused"] as const) expect([state, onYourTurn(sent(state)), sendable(sent(state))]).toEqual([state, true, true]);
+    expect(onYourTurn(sent("idle", { yourTurn: null }))).toBe(false);
     expect([onYourTurn(find("quill #211")), sendable(find("quill #211"))]).toEqual([true, true]);
   });
 
@@ -480,15 +480,15 @@ describe("the PR inventory screen view model", () => {
     const words = new Map(INVENTORY_HOW.rows);
     expect(INVENTORY_HOW.intro).toContain("Your turn lists your PRs where a reviewer's feedback waits on you");
     expect(INVENTORY_HOW.intro).not.toContain("Reviews");
-    expect(words.get("Your turn")).toContain("whatever CI says");
-    expect(words.get("Your turn")).toContain("A push answers nothing, and neither does a PR that mentions it");
-    expect(words.get("Your turn")).toContain("Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out");
+    expect(words.get("Your turn")).toContain("Bots never put a PR here");
+    expect(words.get("Your turn")).toContain("Held PRs stay out");
     expect(words.has("Back to me")).toBe(false);
     expect(words.get("Ask its thread")).toContain("for you to confirm. It sends 8 s later unless you Undo");
-    // Address has no listing and no choice of thread: one thread starts, with Undo, and each sent PR keeps its state on Your turn.
-    expect(words.get("Address selected")).toContain("One thread starts for all of them 8 s later unless you Undo");
-    expect(words.get("Address selected")).not.toMatch(/confirm|each PR's own/u);
-    expect(words.get("State")).toContain("It leaves once GitHub shows the feedback cleared");
+    // Address has no listing and no choice of thread: one thread starts, with Undo, and each sent PR links it while the PR is open.
+    expect(words.get("Address")).toContain("One thread starts for all of them at once, with 8 s to Undo");
+    expect(words.get("Address")).not.toMatch(/confirm|each PR's own/u);
+    expect(words.get("Sent")).toContain("Working, Needs you, or Idle");
+    expect(words.get("Dismiss")).toContain("until its head moves");
     expect(words.get("Nudge")).toContain("server checks again");
   });
 

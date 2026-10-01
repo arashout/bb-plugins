@@ -151,28 +151,3 @@ export function parseCompletion(output: string, expected: ExpectedReport): Compl
       blocker: blocked ? { summary: "The legacy worker reported blocked without naming a blocker", question: null, options: [], prUrl: null } : null };
   }
 }
-
-/** What one PR's result line in a batch thread's output says: its report, or why there's none to read. Accepted or not, it clears nothing. */
-export type BatchResult = { ok: true; envelope: Envelope; text: string; changed: boolean } | { ok: false; text: string };
-
-/**
- * Each PR's result line in a batch thread's output, by the claim it answers: exactly one line whose attemptId and target are that PR's,
- * read strictly. `changed` is a report of changed or no-change with no blocker; Workstreams still reads GitHub for the rest.
- */
-export function batchResults(output: string, expected: readonly { attemptId: string; target: string }[]): Map<string, BatchResult> {
-  const lines = output.split(/\r?\n/u).filter((line) => line.startsWith(RESULT_PREFIX) && line.length <= LINE_LIMIT).flatMap((line) => {
-    try { return [JSON.parse(line.slice(RESULT_PREFIX.length)) as unknown]; } catch { return []; }
-  });
-  return new Map(expected.map(({ attemptId, target }): [string, BatchResult] => {
-    const mine = lines.filter((json) => isRecord(json) && json.attemptId === attemptId);
-    if (mine.length !== 1) return [attemptId, { ok: false, text: mine.length ? `${mine.length} result lines for this PR; a report has one.` : "No result line for this PR." }];
-    const parsed = envelopeSchema.safeParse(mine[0]);
-    if (!parsed.success) return [attemptId, { ok: false, text: `Its result line doesn't read: ${zodError(parsed.error)}`.slice(0, 300) }];
-    const envelope = parsed.data;
-    if (canonicalPrUrl(envelope.target) !== canonicalPrUrl(target)) return [attemptId, { ok: false, text: `Its result line is for ${envelope.target}.` }];
-    const [blocker] = envelope.blockers;
-    const changed = !blocker && (envelope.outcome === "changed" || envelope.outcome === "no-change");
-    return [attemptId, { ok: true, envelope, changed,
-      text: blocker ? `Blocked: ${blocker.summary}`.slice(0, 300) : `Reported ${envelope.outcome} at ${envelope.headOid.slice(0, 7)}` }];
-  }));
-}

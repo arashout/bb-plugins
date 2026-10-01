@@ -25,13 +25,13 @@ const view: InventoryView = { ...base, rateLimitedUntil: NOW + 4 * 60_000, group
     : row.number === 97 ? { ...row, failure: { at: new Date(NOW - 90_000).toISOString(), error: "HTTP 502" } }
       : row.number === 96 ? { ...row, lastAction: { at: NOW - 120_000, action: "nudge" as const, ok: false, reviewers: [],
         detail: "Who needs a nudge changed since the row was shown (now @mira-l). Review it and try again; nothing was written." } } : row) })) };
-/** Address's states on Your turn: what each sent PR's chip reads, a PR the last Address left out, and why it started nothing. */
+/** Address's states: each sent PR's thread link and status, a PR the last Address didn't send, and why it started nothing. */
 const sent = (state: Sent["state"], detail: string | null = null, threadId: string | null = "thr_batch") =>
   ({ state, threadId, title: "Address feedback on 4 PRs", detail, batchId: state === "sending" ? "b-1" : null });
 const states = (by: Record<number, Sent>) => ({ ...base, groups: base.groups.map((group) => ({ ...group, rows: group.rows.map((row) => by[row.number]
   ? { ...row, sent: by[row.number]!, addressing: by[row.number]!.state === "working" || by[row.number]!.state === "needs-you" ? { threadId: "thr_batch", title: null } : null }
   : row) })) });
-const tracked = states({ 210: sent("working"), 211: sent("needs-you"), 155: sent("no-report"), 301: sent("done", "replied"), 318: sent("blocked", "mira-l asks for a new sort order") });
+const tracked = states({ 210: sent("working"), 211: sent("needs-you"), 155: sent("idle"), 301: sent("idle") });
 const starting = states({ 210: sent("sending", null, null), 211: sent("refused", "On hold. Release it first.", null) });
 const left = new Map([["https://github.com/inkwell/spine/pull/155", "An agent is working in its checkout."]]);
 const pane = (shown: InventoryView, extra: Record<string, unknown> = {}) => renderToStaticMarkup(createElement(InventoryPane, {
