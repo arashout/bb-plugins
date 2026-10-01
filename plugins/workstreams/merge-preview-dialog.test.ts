@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { blockers, mergeBlocked, mergeInOrder, MergePreviewBody, mergeTrigger, type MergeItem, type MergePreview } from "./roster-merge-dialog";
+import { blockers, mergeBlocked, mergeInOrder, MergePreviewBody, mergeTrigger, type MergeItem, type MergePreview } from "./merge-preview-dialog";
 
 const noop = () => {};
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&#x27;/gu, "'").replace(/\s+/gu, " ").trim();
@@ -13,9 +13,9 @@ const item = (n: number, number: number, preview: MergeItem["preview"]): MergeIt
   ({ n, target: `https://github.com/inkwell/spine/pull/${number}`, repo: "spine", number, title: `PR ${n}`, preview, result: null });
 const nine = item(9, 212, fresh("a41c9e0", { live: { ...fresh("a41c9e0").live, stackedAbove: [215, 217] } }));
 const sixteen = item(16, 192, fresh("9c2f1e7"));
-const claimed = { ...sixteen, preview: fresh("9c2f1e7", { refusals: ["A v2 worker holds this PR; merge after it finishes"] }) };
+const held = { ...sixteen, preview: fresh("9c2f1e7", { refusals: ["On hold. Release the hold before advancing or merging this PR."] }) };
 
-describe("roster merge preview", () => {
+describe("the fresh merge preview", () => {
   it("merges only on a pointer click or ⌘↵, and refuses Enter or Space on its button", () => {
     expect(mergeTrigger({ kind: "click", detail: 0 })).toBe("refuse");
     expect(mergeTrigger({ kind: "click", detail: 1 })).toBe("merge");
@@ -41,8 +41,8 @@ describe("roster merge preview", () => {
   it("keeps Merge disabled while GitHub is read, with nothing picked, or while a picked PR has a refusal", () => {
     expect(mergeBlocked([nine, { ...sixteen, preview: null }], new Set([nine.target]))).toBe("Reading GitHub…");
     expect(mergeBlocked([nine, sixteen], new Set())).toBe("Pick a PR to merge");
-    expect(mergeBlocked([nine, claimed], new Set([nine.target, claimed.target]))).toBe("16 can't merge: A v2 worker holds this PR; merge after it finishes");
-    expect(mergeBlocked([nine, claimed], new Set([nine.target]))).toBeNull();
+    expect(mergeBlocked([nine, held], new Set([nine.target, held.target]))).toBe("16 can't merge: On hold. Release the hold before advancing or merging this PR.");
+    expect(mergeBlocked([nine, held], new Set([nine.target]))).toBeNull();
     // A batch never acknowledges unresolved threads for you, and a failed read can't merge.
     expect(blockers(item(9, 212, fresh("a41c9e0", { live: { ...fresh("a41c9e0").live, unresolvedThreads: 2 } }))))
       .toEqual(["2 unresolved review threads; merge it from its own preview to acknowledge them"]);
@@ -50,14 +50,14 @@ describe("roster merge preview", () => {
   });
 
   it("shows each PR's fresh facts, leaves a refused PR unpicked, and says Enter doesn't merge", () => {
-    const refusedPicked = renderToStaticMarkup(createElement(MergePreviewBody, { items: [nine, claimed], selected: new Set([nine.target, claimed.target]), busy: false,
+    const refusedPicked = renderToStaticMarkup(createElement(MergePreviewBody, { items: [nine, held], selected: new Set([nine.target, held.target]), busy: false,
       notice: null, onToggle: noop, onMerge: noop, onCancel: noop, onOpenUrl: noop }));
     expect(refusedPicked.match(/<button[^>]*data-merge-go[^>]*>/u)?.[0]).toContain('disabled=""');
-    const html = renderToStaticMarkup(createElement(MergePreviewBody, { items: [nine, claimed], selected: new Set([nine.target]), busy: false,
+    const html = renderToStaticMarkup(createElement(MergePreviewBody, { items: [nine, held], selected: new Set([nine.target]), busy: false,
       notice: "Merging needs ⌘↵ or a click; Enter alone doesn't merge", onToggle: noop, onMerge: noop, onCancel: noop, onOpenUrl: noop }));
     expect(text(html)).toContain("9 spine #212 PR 9 head a41c9e0 · open · approved · CLEAN · then #215, #217 retarget");
     expect(html).toMatch(/aria-checked="false"[^>]*disabled=""[^>]*aria-label="Merge 16"|disabled=""[^>]*aria-checked="false"[^>]*aria-label="Merge 16"/u);
-    expect(text(html)).toContain("A v2 worker holds this PR; merge after it finishes");
+    expect(text(html)).toContain("On hold. Release the hold before advancing or merging this PR.");
     const go = html.match(/<button[^>]*data-merge-go[^>]*>/u)?.[0] ?? "";
     expect(go).toContain('title="Click, or press ⌘↵. Merging needs ⌘↵ or a click; Enter alone doesn&#x27;t merge."');
     expect(go).not.toContain('disabled=""');

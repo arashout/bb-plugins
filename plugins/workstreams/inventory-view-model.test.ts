@@ -147,10 +147,10 @@ describe("the PR inventory screen: A13 acceptance shape", () => {
 });
 
 describe("the PR inventory screen view model", () => {
-  it("imports only types and the roster's time words, so it can't compute attention or reach a server module", () => {
+  it("imports only types, so it can't compute attention or reach a server module", () => {
     const source = readFileSync(new URL("./inventory-view-model.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import (type )?.* from "(.+)";$/gmu)].map((match) => [match[2], match[1] === "type " ? "type" : "value"]);
-    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "type"], ["./roster-view-model", "value"]]);
+    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "type"]]);
     // The server publishes this channel (inventory-get-server.test.ts pins its side), and the picker checks logins as gh would.
     expect(INVENTORY_CHANGED).toBe("inventory-changed");
     expect(LOGIN.source).toBe(REVIEWER.source);

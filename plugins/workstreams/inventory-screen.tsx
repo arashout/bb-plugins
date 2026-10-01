@@ -79,7 +79,7 @@ function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, 
 }
 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
-  onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
+  onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenEffort(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** Your turn rows selected for Address, by PR; a row's checkbox, Your turn's box for all or none, Address, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
@@ -95,7 +95,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   const { turn, dismissed, other } = split;
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenRoster: props.onOpenRoster, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
+    onOpenEffort: props.onOpenEffort, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
   // Address takes only rows nothing it sent is still working on; Your turn's box takes only Your turn's.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
@@ -308,7 +308,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   return <>
     {screen ? <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
       onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
-      onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
+      onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
       selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : []))} onAddress={address}
       onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} onDismiss={dismiss} working={batch.working} live={batch.live}

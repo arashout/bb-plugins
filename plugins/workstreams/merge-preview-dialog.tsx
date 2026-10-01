@@ -1,19 +1,18 @@
-// The batched fresh merge preview behind M and a Ready row (V2-UI-SPEC §4.2).
-// Merging stays separately authorized: `merge 9 16` only opened this, every
-// PR is read live from GitHub again, a PR with any refusal can't be picked,
-// and the merge itself needs a pointer click on Merge or ⌘↵. Enter or Space
-// on the focused button arrives as a click with detail 0 and is refused, and
-// the dialog opens with focus on itself, never on that button. Merges run
-// one at a time in number order, each pinned to the head commit shown, and
-// stop at the first failure. Like the row's own merge dialog, each PR shows
-// its written approval history, and says when that history is incomplete.
+// The batched fresh merge preview behind the deck's Merge (M). Merging stays
+// separately authorized: M only opens this, every PR is read live from GitHub
+// again, a PR with any refusal can't be picked, and the merge itself needs a
+// pointer click on Merge or ⌘↵. Enter or Space on the focused button arrives
+// as a click with detail 0 and is refused, and the dialog opens with focus on
+// itself, never on that button. Merges run one at a time in number order,
+// each pinned to the head commit shown, and stop at the first failure. Like
+// the row's own merge dialog, each PR shows its written approval history, and
+// says when that history is incomplete.
 import { useEffect, useRef, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./components/ui/dialog";
 import { Checkbox } from "./components/ui/checkbox";
 import { cn, POINTER_CURSORS } from "./lib/utils";
-import type { RosterRow } from "./effort-roster";
 
 /** action_merge_preview's fresh read, as far as this dialog uses it. */
 export type MergePreview = { ok: true; live: { state: string; isDraft: boolean; reviewDecision: string | null; mergeStateStatus: string; headRefOid: string | null;
@@ -136,8 +135,8 @@ export function MergePreviewBody({ items, selected, busy, notice, onToggle, onMe
  * `onClosed` puts focus back where the caller wants it, since the dialog has no trigger of its own to return to.
  */
 export function MergePreviewDialog({ targets, rows, onClose, onMerged, onOpenUrl, onClosed }: { targets: readonly { target: string; n: number | null }[] | null;
-  /** What names each PR: the roster's rows, or the inventory's. */
-  rows: readonly Pick<RosterRow, "target" | "repo" | "number" | "title">[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void; onClosed?: () => void }) {
+  /** What names each PR: the deck's rows. */
+  rows: readonly { target: string; repo: string; number: number | null; title: string }[]; onClose(): void; onMerged(): void; onOpenUrl(url: string): void; onClosed?: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
   const [items, setItems] = useState<MergeItem[]>([]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());

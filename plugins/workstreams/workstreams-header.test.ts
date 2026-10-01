@@ -6,18 +6,16 @@ import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import { describe, expect, it } from "vitest";
-import { inkwellDeck, inkwellInventory, INKWELL_SHELVING_ROSTER as ROSTER, INVENTORY_NOW as NOW, SHELVING_ROSTER_NOW } from "./inkwell-fixtures.js";
+import { inkwellDeck, inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, hintKeys, stripChips, type KeyContext } from "./deck-view-model.js";
 import { DeckPane, MoreItems, viewPaletteItems, WorkstreamsHeader, type DeckCommand, type DeckPaneProps, type HeaderProps } from "./deck-screen.js";
 import { inventoryScreen } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending } from "./inventory-screen.js";
-import { askCards, firstAsk, rosterView, settle } from "./roster-view-model.js";
-import { RosterPane } from "./roster-view.js";
 
 const noop = () => {};
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&#x27;/gu, "'").replace(/\s+/gu, " ").trim();
 const source = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
-const VIEWS: HeaderProps["view"][] = ["deck", "inventory", "map", "efforts", "roster"];
+const VIEWS: HeaderProps["view"][] = ["deck", "inventory", "map", "efforts"];
 const MORE = ["Map", "Efforts admin", "How it works"];
 
 /** What a view's header offers: which view it says it's on, its tabs and the pressed one, More's label, and the right side in order. */
@@ -78,7 +76,7 @@ describe("the shared Workstreams header", () => {
       expect(got.right).toEqual(["palette", "help"]);
     }
     // More names the view it holds, so the Map, which has no title of its own, still says where you are.
-    expect(VIEWS.map((view) => items(header(view)).more)).toEqual(["More ▾", "More ▾", "Map ▾", "Efforts admin ▾", "More ▾"]);
+    expect(VIEWS.map((view) => items(header(view)).more)).toEqual(["More ▾", "More ▾", "Map ▾", "Efforts admin ▾"]);
   });
 
   it("lists the same views in More on every view, marking only the one you're on, then How it works", () => {
@@ -91,9 +89,9 @@ describe("the shared Workstreams header", () => {
   });
 
   it("shows Mark seen only where the view has it, with that view's key, and a read error in place of freshness", () => {
-    expect(items(header("roster", { seen: { changed: 2, available: true, note: null, key: "space" } })).right).toEqual(["seen", "palette", "help"]);
-    expect(header("roster", { seen: { changed: 2, available: true, note: null, key: "space" } })).toMatch(/<b>2<\/b> changed here · Mark seen <kbd[^>]*>space<\/kbd>/u);
-    expect(header("roster", { seen: { changed: 0, available: true, note: null, key: "space", title: "Settle rows into their groups" } }))
+    expect(items(header("deck", { seen: { changed: 2, available: true, note: null, key: "s" } })).right).toEqual(["seen", "palette", "help"]);
+    expect(header("deck", { seen: { changed: 2, available: true, note: null, key: "s" } })).toMatch(/<b>2<\/b> changed here · Mark seen <kbd[^>]*>s<\/kbd>/u);
+    expect(header("deck", { seen: { changed: 0, available: true, note: null, key: "s", title: "Settle rows into their groups" } }))
       .toContain('title="Settle rows into their groups"');
     expect(items(header("deck", { seen: { changed: 0, available: false, note: null, key: "s" } })).right).toEqual(["palette", "help"]);
     const failed = header("deck", { read: { text: "Read 1m ago", error: "Couldn't read the deck: HTTP 500" } });
@@ -117,7 +115,6 @@ describe("the shared Workstreams header", () => {
       for (const key of TARGETS) on.get(key)!();
       return got;
     };
-    expect(sent("roster")).toEqual(["deck", "inventory", "map", "efforts", "how"]);
     expect(sent("map")).toEqual(["deck", "inventory", "efforts", "how"]);
     expect(sent("inventory")).toEqual(["deck", "map", "efforts", "how"]);
   });
@@ -137,28 +134,17 @@ describe("the shared Workstreams header", () => {
 });
 
 describe("every Workstreams view", () => {
-  it("draws the shared header on the deck, All PRs, and the full-width roster", () => {
+  it("draws the shared header on the deck and All PRs", () => {
     const deckHtml = renderToStaticMarkup(createElement(DeckPane, deckPane()));
-    const callbacks = { busyKey: null, error: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop };
+    const callbacks = { busyKey: null, error: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenEffort: noop, onNudge: noop, onAsk: noop };
     const inventory = renderToStaticMarkup(createElement(InventoryPane, { screen: inventoryScreen(inkwellInventory(), { now: NOW, filter: null }), ...callbacks }));
     const pending = renderToStaticMarkup(createElement(InventoryPending, { error: null, onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
-    const view = rosterView(ROSTER, { order: "number", now: SHELVING_ROSTER_NOW, settled: settle(ROSTER), seen: { seq: 400, at: SHELVING_ROSTER_NOW - 60 * 60_000 } });
-    const roster = renderToStaticMarkup(createElement(RosterPane, { view, wide: true, mount: "nav", live: true, order: "number", focusN: null, menuN: null, liveThreads: new Set<string>(),
-      command: { value: "", onValue: noop, onSubmit: noop, ack: null, open: false, onToggle: noop, onLeave: noop, note: null },
-      asks: { ...askCards(ROSTER), state: { focus: firstAsk(askCards(ROSTER).asks), open: null, picks: new Map(), subsets: new Map(), hint: null }, wide: true, now: SHELVING_ROSTER_NOW,
-        onFocusAsk: noop, onFocus: noop, onAnswer: noop, onField: noop, onSubset: noop, onCompose: noop, onUndo: noop, onRecover: noop, onPreview: noop, onOpenThread: noop, onOpenUrl: noop },
-      history: ROSTER.history, hasParent: true, onOrder: noop, onMarkSeen: noop, onHeader: noop, onFocus: noop, onCompose: noop, onMenu: noop, onAction: noop, onToggleGroup: noop,
-      onOpenUrl: noop, header: createElement(WorkstreamsHeader, { view: "roster", read: { text: "Scanned 2m ago · GitHub 1m ago", error: null }, palette: "go to", help: "Roster keys",
-        seen: { changed: 0, available: true, note: null, key: "space" }, onView: noop, onPalette: noop, onHelp: noop }) }));
-    const got = [deckHtml, inventory, pending, roster].map(items);
-    expect(got.map((item) => item.view)).toEqual(["deck", "inventory", "inventory", "roster"]);
-    expect(got.map((item) => item.tabs)).toEqual([["Efforts ✓", "All PRs"], ["Efforts", "All PRs ✓"], ["Efforts", "All PRs ✓"], ["Efforts", "All PRs"]]);
-    expect(got.map((item) => item.more)).toEqual(["More ▾", "More ▾", "More ▾", "More ▾"]);
-    expect(got.map((item) => item.right)).toEqual([["seen", "palette", "help"], ["palette", "help"], ["palette", "help"], ["seen", "palette", "help"]]);
-    expect(got.map((item) => item.freshness)).toEqual(["Read 25s ago", "Last read 25s ago", "Reading…", "Scanned 2m ago · GitHub 1m ago"]);
-    // The full-width roster keeps one Mark seen, in the header: its since-line drops its own.
-    expect(roster.match(/data-deck-focus="seen"/gu)).toHaveLength(1);
-    expect(roster).not.toContain(">Mark seen</button>");
+    const got = [deckHtml, inventory, pending].map(items);
+    expect(got.map((item) => item.view)).toEqual(["deck", "inventory", "inventory"]);
+    expect(got.map((item) => item.tabs)).toEqual([["Efforts ✓", "All PRs"], ["Efforts", "All PRs ✓"], ["Efforts", "All PRs ✓"]]);
+    expect(got.map((item) => item.more)).toEqual(["More ▾", "More ▾", "More ▾"]);
+    expect(got.map((item) => item.right)).toEqual([["seen", "palette", "help"], ["palette", "help"], ["palette", "help"]]);
+    expect(got.map((item) => item.freshness)).toEqual(["Read 25s ago", "Last read 25s ago", "Reading…"]);
   });
 
   // The deck's header clicks go through its nav view's run, so a click there has to reach the page's go as the view it names.
@@ -171,19 +157,16 @@ describe("every Workstreams view", () => {
     expect(source("deck-nav-view.tsx")).toContain('case "view": onView(command.view); return;');
     const app = source("app.tsx");
     expect(app).toMatch(/const go = useCallback\(\(target: HeaderTarget\) => \{\n\s+if \(target === "how"\) openHow\(\);\n\s+else navigate\.toPluginPanel\("board", \{ subPath: target \}\);/u);
-    expect(app.match(/onView=\{go\}|onView: go/gu)).toHaveLength(4);
+    expect(app.match(/onView=\{go\}|onView: go/gu)).toHaveLength(3);
   });
 
-  // The Map, Efforts admin, and roster pages call the SDK, so their wiring is checked in the source.
-  it("wires the header into the Map, Efforts admin, and roster pages, and no view draws tabs of its own", () => {
+  // The Map and Efforts admin pages call the SDK, so their wiring is checked in the source.
+  it("wires the header into the Map and Efforts admin pages, and no view draws tabs of its own", () => {
     const app = source("app.tsx");
     for (const view of ["map", "efforts"]) expect(app).toContain(`{header("${view}"`);
     // The Map passes its Approved filter, Rescan, and scan notices as the header's tools.
     expect([...app.matchAll(/\{header\("(\w+)", boardTools\)\}/gu)].map((match) => match[1])).toEqual(["map"]);
     expect(app).toMatch(/const boardTools = <>[\s\S]*>Approved \{approvedCount\}<[\s\S]*rpc\.call\("board_refresh"\)[\s\S]*<Warnings warnings=\{board\.warnings\} \/>\}\n\s+<\/>;/u);
-    const roster = source("roster-view.tsx");
-    expect(roster.match(/<WorkstreamsHeader view="roster"/gu)).toHaveLength(2);
-    expect(roster).toMatch(/<RosterView key=\{route\.effortId\} [^>]*chrome=\{chrome\}/u);
     expect(source("deck-screen.tsx")).toContain('<WorkstreamsHeader view="deck"');
     expect(source("inventory-screen.tsx")).toContain('<WorkstreamsHeader view="inventory"');
     const views = readdirSync(new URL(".", import.meta.url)).filter((file) => file.endsWith(".tsx"));

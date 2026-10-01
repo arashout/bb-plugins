@@ -647,8 +647,8 @@ export type HeaderView = (typeof TABS)[number]["id"] | (typeof MORE_VIEWS)[numbe
 /** Where a header click goes: a view, or the How this works tab. */
 export type HeaderTarget = HeaderView | "how";
 export type HeaderProps = {
-  /** The view under the header; an effort's roster sits under neither tab. */
-  view: HeaderView | "roster";
+  /** The view under the header. */
+  view: HeaderView;
   /** How fresh this view's read is; `title` gives the exact times. `onRefresh`: a click reads every open PR again, except while one reads. */
   read: { text: string; error: string | null; title?: string; busy?: boolean; onRefresh?(): void };
   /** Mark seen, on a view that has it, with its key and what it settles there. */

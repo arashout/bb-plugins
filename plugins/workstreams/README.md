@@ -148,8 +148,7 @@ Every view shares one header. Its tabs are **Efforts** and **All PRs**, and
 **More** opens **Map**, **Efforts admin**, and **How it works**. On its right,
 the header shows when the view last read its data, **Mark seen** on a view that
 has it, **⌘K**, and **?**. In Efforts and All PRs, ⌘K lists every action and ?
-lists the keys. On other views, ⌘K goes to a view, and ? opens How this works,
-or a roster's keys on a roster.
+lists the keys. On other views, ⌘K goes to a view, and ? opens How this works.
 
 - **Efforts:** Workstreams first opens here, then on the last view you chose.
   **Overview** comes first, before the effort cards, and takes no number key.
@@ -189,7 +188,7 @@ or a roster's keys on a roster.
   enough, and the server checks again before it sends. Your turn rows offer
   none. All PRs never confirms
   review notes or merges; those run from the effort's card. Each effort's name
-  opens its roster.
+  opens that card.
 - **Efforts admin:** Administer explicitly saved efforts from one list.
   Create an effort without starting a thread, edit its name and goal, archive
   it, or restore it. Archived efforts retain their work and history. **Merge into…**

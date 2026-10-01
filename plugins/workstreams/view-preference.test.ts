@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deckLinkStep, deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
+import { deckLinkStep, deckRoute, readLastView, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -14,7 +14,7 @@ describe("Workstreams view preference", () => {
   });
 
   it("sends an old link to a removed view to the remembered view, not a blank page", () => {
-    expect(["pipeline/details", "work", "board", "board-v2/details"].map(viewFromSubPath)).toEqual([null, null, null, null]);
+    expect(["pipeline/details", "work", "board", "board-v2/details", "roster/eff-shelving/7"].map(viewFromSubPath)).toEqual([null, null, null, null, null]);
   });
 
   it("opens the deck on the card a thread's effort chip links to", () => {
@@ -62,29 +62,12 @@ describe("Workstreams view preference", () => {
     storeLastView("efforts");
     expect(values.get(VIEW_STORAGE_KEY)).toBe("efforts");
     expect(readLastView()).toBe("efforts");
-    // A view remembered before Pipeline, Work, and Board were removed opens the deck.
-    for (const removed of ["pipeline", "work", "board", "board-v2"]) {
+    // A view remembered before Pipeline, Work, Board, and Roster were removed opens the deck.
+    for (const removed of ["pipeline", "work", "board", "board-v2", "roster"]) {
       values.set(VIEW_STORAGE_KEY, removed);
       expect(readLastView()).toBe("deck");
     }
     values.set(VIEW_STORAGE_KEY, "unexpected");
-    expect(readLastView()).toBe("deck");
-  });
-
-  it("routes to an effort's roster and focused row, and never reopens a roster from the panel root", () => {
-    expect(rosterRoute("roster")).toEqual({ effortId: null, n: null });
-    expect(rosterRoute("roster/eff-shelving")).toEqual({ effortId: "eff-shelving", n: null });
-    expect(rosterRoute("roster/eff-shelving/7")).toEqual({ effortId: "eff-shelving", n: 7 });
-    expect(rosterRoute(`roster/${encodeURIComponent("effort:a/b")}/x`)).toEqual({ effortId: "effort:a/b", n: null });
-    expect(rosterRoute("efforts/eff-shelving")).toBeNull();
-    expect(viewFromSubPath("roster/eff-shelving/7")).toBe("roster");
-
-    const values = new Map<string, string>();
-    vi.stubGlobal("window", { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } });
-    storeLastView("map");
-    storeLastView("roster");
-    expect(readLastView()).toBe("map");
-    values.set(VIEW_STORAGE_KEY, "roster");
     expect(readLastView()).toBe("deck");
   });
 

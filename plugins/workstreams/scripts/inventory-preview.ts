@@ -36,7 +36,7 @@ const starting = states({ 210: sent("sending", null, null), 211: sent("refused",
 const left = new Map([["https://github.com/inkwell/spine/pull/155", "An agent is working in its checkout."]]);
 const pane = (shown: InventoryView, extra: Record<string, unknown> = {}) => renderToStaticMarkup(createElement(InventoryPane, {
   screen: inventoryScreen(shown, { now: NOW, filter: null }), busyKey: null, error: null,
-  onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop,
+  onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenEffort: noop, onNudge: noop,
   selected: new Set<string>(), onSelect: noop, onSelectAll: noop, onAddress: noop, onClear: noop, onUndo: noop, ...extra }));
 const frame = (width: number, body: string) =>
   `<section style="width:${width}px;height:1100px;border:1px solid #2a2a2a;flex:none;display:flex" data-bb-plugin="workstreams">${body}</section>`;

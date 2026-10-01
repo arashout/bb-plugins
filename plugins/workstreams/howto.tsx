@@ -10,7 +10,6 @@ import { relativeTime } from "./workstreams";
 import { TIER_WORDS } from "./threadmenu";
 import { THREAD_TIERS } from "./threads";
 import { runLabel } from "./runs";
-import { ROSTER_KEYS } from "./roster-view-model";
 import { INVENTORY_HOW } from "./inventory-view-model";
 import { ACTION } from "./deck-keys";
 import { SEND_DELAY_MS } from "./deck-shared";
@@ -49,7 +48,7 @@ const DECK_KEYS: [string, string][] = (["next", "prev", "jump", "row-next", "row
 const BOTH_KEYS: [string, string][] = [
   ["v", "Next view; in Efforts and All PRs, switch between the two"],
   ["⌘K", "Go to a view; in Efforts and All PRs, list every action"],
-  ["?", "Open this panel; in Efforts and All PRs, list their keys; on a roster, list its keys"],
+  ["?", "Open this panel; in Efforts and All PRs, list their keys"],
 ];
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -179,8 +178,6 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <Pairs rows={DECK_KEYS} mono />
         <p className="pt-1 text-foreground">Map</p>
         <Pairs rows={MAP_KEYS} mono />
-        <p className="pt-1 text-foreground">Roster</p>
-        <Pairs rows={ROSTER_KEYS} mono />
         <p className="pt-1 text-foreground">All views</p>
         <Pairs rows={BOTH_KEYS} mono />
       </Section>

@@ -4,7 +4,7 @@
 // counted Needs you with deck-shared.ts's one rule; this settles rows in
 // place until Mark seen (deck-place.ts), words them for one line, and says
 // which actions the keys, hint bar, ? sheet, and ⌘K offer right now. It
-// imports types, zero-import modules, the roster's time format, and
+// imports types, zero-import modules, All PRs' time format, and
 // approval-evidence.ts's wording (zod only), so no server module reaches the
 // browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
@@ -13,7 +13,7 @@ import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND
 import { settleRows, type RowFilter, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
-import { age, clock } from "./roster-view-model";
+import { age, clock } from "./inventory-view-model";
 import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
 import { firstLine } from "./effort-notes";
 import { sentText } from "./your-turn";

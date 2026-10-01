@@ -262,8 +262,8 @@ export function EffortsView({ board }: { board: Board | null }) {
         {selected?.archivedAt && !selected.mergedInto ? <p className="mt-2 text-[12px] text-muted-foreground">Archived. Restore it to assign new work.</p> : null}
         {notice ? <p role="status" className="mt-3 text-[11px] text-muted-foreground">{notice}</p> : null}
         {error ? <p role="alert" className="mt-3 text-[11px] text-destructive">{error} {selected ? <button type="button" onClick={() => void reloadDetails()} className="underline">Reload details</button> : null}</p> : null}
-        {selected && !selected.mergedInto ? <button type="button" onClick={() => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(selected.id)}` })}
-          className="mr-4 mt-3 text-[12px] font-medium underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring">Open roster</button> : null}
+        {selected && !selected.mergedInto ? <button type="button" onClick={() => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(selected.id)}` })}
+          className="mr-4 mt-3 text-[12px] font-medium underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring">Open card</button> : null}
         {selected?.coordinatorThreadId ? <button type="button" onClick={() => navigate.toThread(selected.coordinatorThreadId!)}
           className="mt-3 text-[12px] font-medium underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring">Open coordinator thread</button> : null}
         <div className="mt-5 max-w-xl space-y-4">

@@ -431,7 +431,7 @@ finds them merged or closed.
 
 The Workstreams panel shows this inventory as **All PRs**, one tab from the
 effort deck it opens on. Map and Efforts admin sit under
-the header's More, and each effort's name opens its roster.
+the header's More, and each effort's name opens its card on the deck.
 
 ```
 bb workstreams inventory [--attention draft|reviewer|nudge] [--json]

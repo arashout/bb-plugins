@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -5,13 +6,13 @@ import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
-import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
+import { MergePreviewBody, mergeTrigger, type MergePreview } from "./merge-preview-dialog.js";
 import type { Sent } from "./your-turn.js";
 
 const VIEW = inkwellInventory();
 const SCREEN = inventoryScreen(VIEW, { now: NOW, filter: null });
 const noop = () => {};
-const CALLBACKS = { busyKey: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenRoster: noop, onNudge: noop, onAsk: noop, onDismiss: noop };
+const CALLBACKS = { busyKey: null, onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenEffort: noop, onNudge: noop, onAsk: noop, onDismiss: noop };
 function pane(view: InventoryView = VIEW) {
   return renderToStaticMarkup(createElement(InventoryPane, { screen: view === VIEW ? SCREEN : inventoryScreen(view, { now: NOW, filter: null }), error: null, ...CALLBACKS }));
 }
@@ -181,13 +182,16 @@ describe("simple All PRs list", () => {
     expect(html).toContain("Retry");
   });
 
-  it("links each effort's group to its roster, with No effort last and plain", () => {
+  it("links each effort's group to its deck card, with No effort last and plain", () => {
     const html = pane();
     const heading = (label: string) => html.slice(html.indexOf(`data-inventory-group="${label}"`), html.indexOf("</h3>", html.indexOf(`data-inventory-group="${label}"`)));
     expect(heading("Shelf order")).toMatch(/<button type="button"[^>]*>Shelf order<\/button>$/u);
     expect(heading("Store pickup")).toMatch(/<button type="button"[^>]*>Store pickup<\/button>$/u);
     expect(html.indexOf('data-inventory-group="No effort"')).toBeGreaterThan(html.indexOf('data-inventory-group="Store pickup"'));
     expect(heading("No effort")).not.toContain("<button");
+    // The Roster is gone, so a group's name opens its effort's card on the deck.
+    expect(readFileSync(new URL("inventory-screen.tsx", import.meta.url), "utf8"))
+      .toContain('onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}');
   });
 
   it("shows each row's state word and next step with its age", () => {

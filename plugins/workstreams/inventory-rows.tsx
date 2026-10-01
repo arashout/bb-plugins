@@ -12,7 +12,7 @@ export type SimpleRowsProps = {
   busyKey: string | null;
   onOpenPr(url: string): void;
   onOpenThread(id: string): void;
-  onOpenRoster(effortId: string): void;
+  onOpenEffort(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void;
   /** Your turn rows you selected for Address, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. */
   selected?: ReadonlySet<string>;
@@ -50,7 +50,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
   return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
     {props.groups.map((group) => <section key={group.key} data-inventory-group={group.label} className="min-w-0">
       <h3 className="mb-1 px-4 text-[11px] font-medium text-muted-foreground">
-        {group.effortId ? <button type="button" onClick={() => props.onOpenRoster(group.effortId!)} className={cn("rounded-sm hover:text-foreground hover:underline", FOCUS)}>{group.label}</button> : group.label}
+        {group.effortId ? <button type="button" onClick={() => props.onOpenEffort(group.effortId!)} className={cn("rounded-sm hover:text-foreground hover:underline", FOCUS)}>{group.label}</button> : group.label}
       </h3>
       <ul className="min-w-0 divide-y divide-border/50 border-y border-border/50">
         {group.lines.map((line) => {

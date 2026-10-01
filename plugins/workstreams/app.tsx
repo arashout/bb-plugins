@@ -25,17 +25,14 @@ import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
-import { deckRoute, readLastView, rosterRoute, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
+import { deckRoute, readLastView, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
-import { RosterNavView, RosterPanelTab } from "./roster-view";
 import { InventoryNavView, useInventory } from "./inventory-screen";
 import { yourTurnRows } from "./inventory-view-model";
 import { DeckNavView } from "./deck-nav-view";
 import { PaletteBody, viewPaletteItems, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
 import { DeckDialog } from "./deck-flow";
 import { paletteMatch, type PaletteItem } from "./deck-view-model";
-import { RosterHeaderButton, RosterParentsFeed } from "./roster-header";
-import { rosterPanelOpen, rosterParents } from "./roster-parents";
 
 export type Group = WireGroup;
 export type Cluster = Group["clusters"][number];
@@ -381,8 +378,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
 
   // `V` cycles the views from anywhere on the page. The Map's own keys are
   // + − 0 Esc Backspace and the arrows, and Tab stays focus navigation.
-  // `?` opens How this works from any view, and ⌘K the Go to palette. The effort deck and All PRs own their keys, ⌘K and `?` included;
-  // a roster owns its keys but ⌘K.
+  // `?` opens How this works from any view, and ⌘K the Go to palette. The effort deck and All PRs own their keys, ⌘K and `?` included.
   useEffect(() => {
     if (view === "deck" || view === "inventory") return;
     const onKey = (event: KeyboardEvent) => {
@@ -393,7 +389,6 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
         setPalette(true);
         return;
       }
-      if (view === "roster") return;
       if (event.key !== "v" && event.key !== "V" && event.key !== "?") return;
       if (event.metaKey || event.ctrlKey || event.altKey || isEditable(event.target) || (event.target instanceof HTMLElement && event.target.closest("[role=dialog], [role=menu], [role=combobox]"))) return;
       event.preventDefault();
@@ -404,12 +399,8 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate, openHow, view]);
 
-  // A leaving roster keeps drawing the effort it showed while it fades out.
-  const rosterPath = useRef(subPath);
-  if (view === "roster") rosterPath.current = subPath;
-
   const read = boardRead(board, now);
-  const header = (id: Exclude<ViewId, "deck" | "inventory" | "roster">, tools?: ReactNode) => <WorkstreamsHeader view={id} read={read} palette="go to" help="How this works"
+  const header = (id: Exclude<ViewId, "deck" | "inventory">, tools?: ReactNode) => <WorkstreamsHeader view={id} read={read} palette="go to" help="How this works"
     tools={tools} onView={go} onPalette={() => setPalette(true)} onHelp={openHow} />;
   // The Map keeps its Approved filter, Rescan, and scan notices beside More.
   const boardTools = <>
@@ -442,8 +433,6 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       <DeckNavView openCard={deckRoute(subPath)} onView={go} />
     ) : id === "inventory" ? (
       <InventoryNavView onView={go} />
-    ) : id === "roster" ? (
-      <RosterNavView route={rosterRoute(rosterPath.current) ?? { effortId: null, n: null }} chrome={{ read, onView: go, onPalette: () => setPalette(true), onHow: openHow }} />
     ) : id === "efforts" ? (
       <>{header("efforts")}<EffortsView board={board} /></>
     ) : (
@@ -465,7 +454,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
       )}
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(["deck", "inventory", "map", "efforts", "roster"] as const).map((id) =>
+        {(["deck", "inventory", "map", "efforts"] as const).map((id) =>
           id === view || id === leaving ? (
             <ViewLayer key={id} leaving={id !== view}>
               {render(id)}
@@ -547,12 +536,6 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "thread-effort-control", chrome: "bare", component: ThreadEffortControl }],
   });
-  // The roster beside a thread: the effort parent's own roster, or a picker in any other thread. Effort parent threads also get a
-  // Roster button in their header; one overlay keeps the parents current for every header and for this launcher.
-  app.slots.threadPanelAction({ id: "effort-roster", title: "Roster", layout: "flush", component: RosterPanelTab,
-    run: (context) => { context.openPanel(rosterPanelOpen(context.threadId, rosterParents())); } });
-  app.slots.experimental_appOverlay({ id: "roster-parents", component: RosterParentsFeed });
-  app.slots.experimental_threadHeaderAction({ id: "effort-roster", title: "Effort roster", component: RosterHeaderButton });
   app.slots.navPanel({
     id: "board",
     title: "Workstreams",

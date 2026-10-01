@@ -2,12 +2,25 @@
 // from inventory_get's output to what the screen draws. The server decided
 // each row's state word, attention, owner, and age; this words them, nests
 // each stack under its parent, and says which one-click action a row offers
-// and why an action it can't take is disabled. It imports types and the
-// roster's time formatting only, so no server module reaches the browser.
+// and why an action it can't take is disabled. It imports types only, so no
+// server module reaches the browser.
 import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
 import type { AttentionReason } from "./pr-attention";
 import type { Sent } from "./your-turn";
-import { age, clock } from "./roster-view-model";
+
+/** An observation's or hold's age: 25s, 52m, 5h, 2d. */
+export function age(at: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - at) / 1_000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : seconds < 86_400 ? `${Math.floor(seconds / 3_600)}h` : `${Math.floor(seconds / 86_400)}d`;
+}
+
+/** A time of day today, else a date: "11:32", "Sep 26". */
+export function clock(at: number, now: number): string {
+  const when = new Date(at);
+  return when.toDateString() === new Date(now).toDateString()
+    ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    : when.toLocaleDateString([], { month: "short", day: "numeric" });
+}
 
 /** Realtime: the server publishes it after each inventory read, single-PR read, hold change, and recorded inventory action. */
 export const INVENTORY_CHANGED = "inventory-changed";

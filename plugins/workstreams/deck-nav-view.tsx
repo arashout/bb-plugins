@@ -24,7 +24,7 @@ import { DeckDialog, message, useBatchConfirm, useRefresh, useRegistryKeys, work
 import { readNote } from "./inventory-view-model";
 import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
-import { MergePreviewDialog } from "./roster-merge-dialog";
+import { MergePreviewDialog } from "./merge-preview-dialog";
 import type { SeedProposal } from "./linear-seed";
 import { deckLinkStep } from "./view-preference";
 
