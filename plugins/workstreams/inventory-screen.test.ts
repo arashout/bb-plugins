@@ -221,6 +221,19 @@ describe("simple All PRs list", () => {
     expect(numbers.map((match) => `${match[1]}#${match[2]}`)).toEqual(expect.arrayContaining([`${long}#96`, `${long}#210`]));
   });
 
+  // The title gets all the width beside the PR, so the why moves under it, where a narrow pane wraps it rather than cutting it short.
+  it("puts the title on a line of its own, the why on the next, and the PR in a column beside both", () => {
+    const row = rowOf(pane(), "inkwell/catalog#96");
+    // The PR's column closes before the title's line opens, and the title's line closes before the why's opens.
+    const match = row.match(/#96<\/b><\/button><div class="[^"]*"><p class="([^"]*)" title="[^"]*">([^<]*)<\/p><div class="([^"]*)"><span class="([^"]*)" title="[^"]*">([^<]*)<\/span>/u);
+    expect(match).not.toBeNull();
+    const [, titleClass, title, lineClass, whyClass, why] = match!;
+    expect([title, why]).toEqual(["ABC-121 Show series order on catalog pages", "Awaiting review · Nudge @mira-l, @theo-k · 2d"]);
+    expect(titleClass).toContain("truncate");
+    expect(lineClass).toContain("flex-wrap");
+    expect(whyClass).not.toContain("truncate");
+  });
+
   it("shows a row's last action, or the server's refusal word for word, under its next step", () => {
     const refused = "Who needs a nudge changed since the row was shown (now @mira-l). Review it and try again; nothing was written.";
     const view = { ...VIEW, groups: VIEW.groups.map((group) => ({ ...group, rows: group.rows.map((row) => row.number === 96
@@ -432,7 +445,7 @@ describe("All PRs while Address starts and sends", () => {
   it("shows each row's item as the batch moves it: queued, sending with a spinner, then sent or not sent", () => {
     const live = (a: string, b: string) => render({ live: new Map([["https://github.com/inkwell/quill/pull/210", { kind: "address", state: a }],
       ["https://github.com/inkwell/folio/pull/301", { kind: "address", state: b }]]) });
-    const chip = (html: string, ref: string) => { const match = /data-inventory-live="([^"]+)"[^>]*>(.*?)<\/span>(?=<\/div><\/li>|$)/u.exec(rowOf(html, ref));
+    const chip = (html: string, ref: string) => { const match = /data-inventory-live="([^"]+)"[^>]*>(.*?)<\/span>(?=<\/span><\/div><\/div><\/div><\/li>|$)/u.exec(rowOf(html, ref));
       return match && [match[1], text(match[2]!).trim()]; };
     expect([chip(live("sending", "pending"), "inkwell/quill#210"), chip(live("sending", "pending"), "inkwell/folio#301")]).toEqual([["sending", "↻ Sending…"], ["pending", "Queued"]]);
     expect([chip(live("sent", "refused"), "inkwell/quill#210"), chip(live("sent", "refused"), "inkwell/folio#301")]).toEqual([["sent", "Sent"], ["refused", "Not sent"]]);

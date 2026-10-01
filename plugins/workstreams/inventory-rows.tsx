@@ -1,5 +1,5 @@
 import { sendable, type InventoryLine, type LineAction } from "./inventory-view-model";
-import { BUTTON, CHECKBOX, PrRef, RING, ROW, Spin, TONE, WORKING_ROW } from "./deck-screen";
+import { BUTTON, CHECKBOX, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
 import type { LiveItems } from "./deck-flow";
 import { sentText, type Sent } from "./your-turn";
 import { cn } from "./lib/utils";
@@ -29,6 +29,8 @@ export type SimpleRowsProps = {
   onRefresh?(line: InventoryLine): void; reading?: ReadonlySet<string>;
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 items-center gap-1 rounded px-1.5 text-[11px]";
+/** One PR's row, taller than the deck's: the PR in its own column, then the title on a line of its own with the why, chips, and action under it. */
+const TWO_LINE_ROW = "flex items-start gap-2 py-1 pl-2 pr-1.5 text-[12.5px] leading-5";
 
 const SENT_TONE: Record<Sent["state"], keyof typeof TONE> = { sending: "gray", refused: "red", working: "blue", "needs-you": "amber", failed: "red", idle: "gray" };
 /** A sent PR's link to its thread with BB's status for it, grey off Your turn; Sending's is Undo instead, and a refusal says why. */
@@ -46,7 +48,7 @@ const LIVE: Record<NonNullable<ReturnType<LiveItems["get"]>>["state"], { text: s
   sending: { text: "Sending…", tone: "blue" }, sent: { text: "Sent", tone: "green" }, refused: { text: "Not sent", tone: "red" }, unknown: { text: "May not have sent", tone: "red" } };
 
 export function SimpleInventoryList(props: SimpleRowsProps) {
-  // The deck's rows: one line each, indented under their section's heading, with no rules between them.
+  // Two lines a row, indented under their section's heading, with no rules between them.
   return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 pb-1.5 pt-0.5">
     {props.groups.map((group) => <section key={group.key} data-inventory-group={group.label} className="min-w-0">
       <h3 className="ml-9 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
@@ -72,26 +74,33 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
             data-inventory-working={working || undefined} aria-busy={working || undefined}
             className={cn("group ml-7 min-w-0 rounded-md hover:bg-foreground/[0.03] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500",
               picked && "bg-sky-500/[0.07]", working && WORKING_ROW)}>
-            <div className={ROW}>
+            <div className={TWO_LINE_ROW}>
               {box ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
-                onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className={CHECKBOX} />
+                onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className={cn(CHECKBOX, "mt-[3px]")} />
                 : <span aria-hidden className="size-3.5 shrink-0" /> : null}
               <PrRef repo={line.slug} number={line.number} strong={mine || !!nudge} onClick={() => props.onOpenPr(line.prUrl)} />
-              <span className={cn("min-w-16 flex-1 truncate @min-[900px]:min-w-0", mine || nudge ? "text-foreground" : "text-foreground/80")} title={line.title}>{line.title}</span>
-              <span className="min-w-0 truncate text-[11.5px] text-muted-foreground" title={info}>{info}</span>
-              {refresh ? <button type="button" tabIndex={-1} data-inventory-action="refresh" disabled={reading || !refresh.enabled} aria-busy={reading || undefined}
-                aria-label={reading ? `Reading ${line.slug}#${line.number} from GitHub` : refresh.title} title={reading ? "Reading GitHub now…" : refresh.why ?? `${refresh.title} (g)`}
-                onClick={() => props.onRefresh!(line)} className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground disabled:hover:bg-transparent",
-                  RING, reading ? "text-sky-700 dark:text-sky-300" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
-                <span aria-hidden className={cn("inline-block leading-none", reading && "motion-safe:animate-spin")}>↻</span></button> : null}
-              {turn && props.onDismiss ? <button type="button" tabIndex={-1} data-inventory-action={mine ? "dismiss" : "undismiss"} onClick={() => props.onDismiss!(line, mine)}
-                title={mine ? "Hide until the head moves or someone says something new" : "Back on Your turn"}
-                className={cn("shrink-0 rounded px-1 text-[11.5px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING,
-                  mine && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{mine ? "Dismiss" : "Undismiss"}</button> : null}
-              {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
-                : sent ? <SentChip sent={sent} quiet={!mine} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />
-                : nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
-                title={nudge.title} className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}>{nudge.label}</button> : null}
+              <div className="min-w-0 flex-1">
+                <p className={cn("truncate", mine || nudge ? "text-foreground" : "text-foreground/80")} title={line.title}>{line.title}</p>
+                {/* Why, then the chips and action at its right; in a narrow pane they wrap under it rather than cut it short. */}
+                <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                  <span className="min-w-0" title={info}>{info}</span>
+                  <span className="ml-auto flex min-w-0 max-w-full items-center gap-1.5">
+                    {refresh ? <button type="button" tabIndex={-1} data-inventory-action="refresh" disabled={reading || !refresh.enabled} aria-busy={reading || undefined}
+                      aria-label={reading ? `Reading ${line.slug}#${line.number} from GitHub` : refresh.title} title={reading ? "Reading GitHub now…" : refresh.why ?? `${refresh.title} (g)`}
+                      onClick={() => props.onRefresh!(line)} className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground disabled:hover:bg-transparent",
+                        RING, reading ? "text-sky-700 dark:text-sky-300" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
+                      <span aria-hidden className={cn("inline-block leading-none", reading && "motion-safe:animate-spin")}>↻</span></button> : null}
+                    {turn && props.onDismiss ? <button type="button" tabIndex={-1} data-inventory-action={mine ? "dismiss" : "undismiss"} onClick={() => props.onDismiss!(line, mine)}
+                      title={mine ? "Hide until the head moves or someone says something new" : "Back on Your turn"}
+                      className={cn("shrink-0 rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING,
+                        mine && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{mine ? "Dismiss" : "Undismiss"}</button> : null}
+                    {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
+                      : sent ? <SentChip sent={sent} quiet={!mine} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />
+                      : nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
+                      title={nudge.title} className={cn(BUTTON, "h-5 border-border px-1.5 text-[11px] hover:bg-foreground/[0.06]")}>{nudge.label}</button> : null}
+                  </span>
+                </div>
+              </div>
             </div>
             {/* The last action's outcome, word for word, under the line rather than truncated in it. */}
             {line.last ? <p role="status" className={cn("pb-1.5 pr-1.5 text-[11px]", box ? "pl-[30px]" : "pl-2", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
