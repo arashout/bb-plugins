@@ -589,8 +589,9 @@ realtime event fires after each inventory read or action, pile move, effort
 edit, thread change, and batch step. Every row is an inventory row, filed in
 one section by the move its inventory row leads with: `merge`, `confirm`,
 `nudge`, `request`, `ready`, or `work` (fixed in its thread) is the user's;
-`flight` needs no one yet (a review not yet due a nudge, running checks, or
-code work or feedback a thread is doing); `blocked` waits on something else,
+`flight` needs no one yet (a review not yet due a nudge, running checks,
+code work or feedback a thread is doing, or feedback the user dismissed until
+someone says more); `blocked` waits on something else,
 named in `waitsOn`: the PR it is stacked on; `held` is a PR on
 hold, with its `hold` reason and since when, and in no other section. A
 stacked PR in an approved stack is a merge, since the preview merges the stack

@@ -190,12 +190,13 @@ const oldest = (a: number | null, b: number | null) => (a ?? Number.POSITIVE_INF
 /**
  * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write, and files
  * the row under Held alone. Only a parent blocks: a review not yet due a nudge, running checks, code work a thread is
- * doing, feedback a thread is at work on (turnOf, whatever the row leads with), and feedback a batch thread's claim holds are in flight.
+ * doing, feedback a thread is at work on or you dismissed (turnOf, whatever the row leads with), and feedback a batch thread's claim holds
+ * are in flight.
  */
 function place(row: DeckRowInput, turn: Turn, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
   const blocked = (waitsOn: NonNullable<DeckRow["waitsOn"]>) => ({ section: "blocked" as const, waitsOn });
   if (row.hold) return { section: "held", waitsOn: { kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt } };
-  if (row.addressing || turn.list === "in-flight") return { section: "flight", waitsOn: null };
+  if (row.addressing || turn.list === "in-flight" || turn.list === "dismissed") return { section: "flight", waitsOn: null };
   const move = primary && MOVES[primary];
   if (move && !(move === "work" && row.threads.executor?.active)) return { section: move, waitsOn: null };
   if (owner === "parent" && row.stackedOn !== null) {

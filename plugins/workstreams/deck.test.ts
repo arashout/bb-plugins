@@ -149,9 +149,9 @@ describe("the effort deck", () => {
 
   // The badge and All PRs' Your turn say a reviewer's feedback waits on your move; its card must say so too, and the deck's Address must
   // take the same PRs. A card that offered Merge, or led with a nudge that waits on other reviewers, while the feedback waits, or called a
-  // PR nothing works on In flight, or paused one with its effort, or addressed one you dismissed, would send you two ways at once. A PR a
-  // thread is at work on is In flight in both, whatever its row leads with.
-  it("files every PR Your turn lists under a move of yours, never Merge, on an active card, and addresses only those", () => {
+  // PR nothing works on In flight, or paused one with its effort, or addressed or counted one you dismissed, would send you two ways at once.
+  // A PR a thread is at work on is In flight in both, whatever its row leads with, and so is one you dismissed, until a person says more.
+  it("files every PR Your turn lists under a move of yours, never Merge, on an active card, and addresses only those; one you dismissed, under none", () => {
     const comments = { why: "Comment from @ines-v", since: INVENTORY_NOW - 3_600_000, latest: INVENTORY_NOW - 3_600_000 };
     const merge: AttentionReason = { question: "needs-nudge", kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [],
       since: INVENTORY_NOW - 2 * DAY, ageMs: 2 * DAY, basis: "github" };
@@ -182,7 +182,8 @@ describe("the effort deck", () => {
         .map(({ row, pile }) => [row.number, pile, row.section, row.step?.owner])).toEqual([]);
       const rowsOf = (list: string) => deckRows(deck).filter(({ row }) => row.turn.list === list).map(({ row }) => row.number);
       expect(rowsOf("turn").sort()).toEqual([...listed].sort());
-      expect(deckRows(deck).filter(({ row }) => row.turn.list === "in-flight" && row.section !== "flight").map(({ row }) => [row.number, row.section])).toEqual([]);
+      expect(deckRows(deck).filter(({ row }) => ["in-flight", "dismissed"].includes(row.turn.list) && row.section !== "flight")
+        .map(({ row }) => [row.number, row.section])).toEqual([]);
     }
   });
 
