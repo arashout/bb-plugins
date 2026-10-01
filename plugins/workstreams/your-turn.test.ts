@@ -87,14 +87,13 @@ describe("Your turn", () => {
     expect(turn({ ...approval, approvalFeedbackVerified: true, approvalFeedbackConfirmed: true })).toBeNull();
   });
 
-  it("leaves off a held or closed PR, one waiting on CI or reviewers, and a draft but for its comments and approval notes", () => {
+  // Drafts count, as in Reviews: a person's open thread or change request on your draft still waits on you.
+  it("leaves off a held or closed PR and one waiting on CI or reviewers, but keeps a draft for every clause", () => {
     for (const facts of [changes, approval, threads, comments]) {
       expect(turn(facts, true)).toBeNull();
       expect(turn({ ...facts, state: "MERGED" })).toBeNull();
+      expect(why({ ...facts, isDraft: true })).toBe(why(facts));
     }
-    for (const facts of [changes, threads]) expect(turn({ ...facts, isDraft: true })).toBeNull();
-    expect(why({ ...approval, isDraft: true })).toBe("Approval comment from @mira-l");
-    expect(why({ ...comments, isDraft: true })).toBe("Comment from @theo-k");
     expect(turn(pr({ checkConclusions: ["FAILURE"], mergeStateStatus: "UNSTABLE" }))).toBeNull();
     expect(turn(pr({ reviewRequests: ["mira-l"] }))).toBeNull();
   });

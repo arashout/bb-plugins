@@ -102,7 +102,7 @@ describe("authored PR inventory", () => {
   });
 
   // A draft's approval can say the work isn't done, and Your turn lists a draft for that: its read keeps the approval's notes and who spoke
-  // last, but no thread count, since open threads on a draft aren't your turn yet.
+  // last, but not the thread counts a draft's state word skips.
   it("reads a reviewed draft's approval notes for Your turn, keeping its thread counts unread", async () => {
     const approval = { id: "approval-1", state: "APPROVED", body: "Hold this until the migration runs.", submittedAt: "2026-09-29T10:00:00Z",
       author: { __typename: "User", login: "mira-l" }, commit: { oid: "a".repeat(40) } };

@@ -3,8 +3,8 @@
 // person asked for that neither a push nor a reply of yours followed, an open thread where another person had the last word (the review
 // read skips bots' words, and your reply last is the reviewer's turn), or another person's comment no reply of yours on the PR followed.
 // A bot (Claude, Codex, Copilot, CI) never puts a PR on it; a batch still addresses every comment, bots' included. A push answers no
-// comment or thread, and neither does a PR that mentions this one. A PR you hold is never on it; a draft is only for its comments and its
-// approval's notes. Pure: the server computes it per row; the badge and the list only count and show it.
+// comment or thread, and neither does a PR that mentions this one. A PR you hold is never on it; a draft is, as Reviews counts drafts. Pure:
+// the server computes it per row; the badge and the list only count and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
@@ -19,7 +19,7 @@ export const yourTurnSchema = z.object({
 }).strict();
 export type YourTurn = z.infer<typeof yourTurnSchema>;
 
-export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback" | "headCommittedAt">;
+export type YourTurnFacts = Pick<Pr, "state" | "reviewRequests" | "latestReviews" | "reviewFeedback" | "headCommittedAt">;
 
 const time = (value: string | null | undefined): number | null => {
   const at = value ? Date.parse(value) : Number.NaN;
@@ -34,7 +34,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   const people = pr.latestReviews.filter((review) => !isBot(review.login));
   const parts: { text: string; since: number | null }[] = [];
   // A person's change request that no push or reply of yours followed. Answered, it waits on your re-request, which attention offers.
-  const changes = pr.isDraft ? [] : awaitingRerequest({ ...pr, latestReviews: people }).filter((review) => review.state === "CHANGES_REQUESTED" && !answeredSince(review, pr));
+  const changes = awaitingRerequest({ ...pr, latestReviews: people }).filter((review) => review.state === "CHANGES_REQUESTED" && !answeredSince(review, pr));
   if (changes.length) parts.push({ text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
     since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
   // Only a note no reply of yours followed: notes you answered wait on the row's Confirm, which still holds the merge.
@@ -45,7 +45,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   // Another person's comment no reply on the PR answered; a change request's reviewer is named once.
   const comment = feedbackToAddress({ reviewFeedback: read }, false).find((item) => item.kind === "comment");
   if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ text: `Comment from @${comment.login}`, since: comment.since });
-  const open = pr.isDraft ? 0 : read?.openThreads ?? 0;
+  const open = read?.openThreads ?? 0;
   if (open > 0) parts.push({ text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
   if (!parts.length) return null;
   const oldest = dates(parts.map((part) => part.since));
