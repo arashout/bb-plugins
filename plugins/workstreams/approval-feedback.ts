@@ -33,13 +33,12 @@ export const feedbackReportSchema = z.object({
   findings: z.array(feedbackFindingSchema).min(1).max(300),
   blockers: z.array(z.string().max(500)).max(20),
 }).strict();
-export type FeedbackReport = z.infer<typeof feedbackReportSchema>;
 export const approvalFeedbackProvenanceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("worker") }).strict(),
   z.object({ kind: z.literal("legacy-reconciliation"), auditThreadId: z.string().trim().min(1).max(200),
     evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100) }).strict(),
-  // You confirmed the feedback handled from the inventory: your word, not a worker's evidence. The gates, the merge preview, and the
-  // roster's evidence read it as verified all the same, as they read every variant: provenance is the record's audit trail, not a gate.
+  // You confirmed the feedback handled from the inventory: your word, not a worker's evidence. The merge preview and every other reader
+  // read it as verified all the same, as they read every variant: provenance is the record's audit trail, not a gate.
   // `evidence` is what GitHub showed since the approval when you confirmed; a record without it predates that check.
   z.object({ kind: z.literal("user"), evidence: approvalEvidenceSchema.optional() }).strict(),
 ]);
@@ -61,19 +60,6 @@ export const APPROVAL_FEEDBACK_MIGRATION =
 /** Append-only: server.ts adds this after Linear seed provenance (id 65). Each confirmation you record or revoke, with what it covered. */
 export const APPROVAL_CONFIRMATION_AUDIT_MIGRATION =
   "CREATE TABLE IF NOT EXISTS approval_confirmation_audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, pr_url TEXT NOT NULL, at INTEGER NOT NULL, action TEXT NOT NULL, body TEXT NOT NULL)";
-export const FEEDBACK_REPORT_PREFIX = "Workstreams approval feedback evidence: ";
-
-/** Evidence for exactly the feedback on this head: this attempt, head, and fingerprint, one passing finding per source, and no blocker. */
-export function validateFeedbackReport(report: FeedbackReport, attemptId: string, snapshot: ApprovalFeedbackSnapshot, headOid: string): FeedbackReport | null {
-  if (snapshot.status !== "present" || snapshot.fingerprint === null || !sha.safeParse(headOid).success) return null;
-  if (report.attemptId !== attemptId || report.headOid !== headOid || report.fingerprint !== snapshot.fingerprint || report.blockers.length > 0 ||
-      report.findings.some((finding) => finding.validation.outcome === "failed" || finding.validation.outcome === "blocked")) return null;
-  const expected = [...new Set(snapshot.sourceIds)].sort();
-  const actual = report.findings.map((finding) => finding.sourceId).sort();
-  if (expected.length === 0 || expected.length !== snapshot.sourceIds.length || JSON.stringify(actual) !== JSON.stringify(expected)) return null;
-  return report;
-}
-
 export function feedbackVerified(snapshot: ApprovalFeedbackSnapshot, headOid: string | null, record: ApprovalFeedbackRecord | null): boolean {
   if (snapshot.status === "none") return true;
   if (snapshot.status !== "present" || snapshot.fingerprint === null || headOid === null || record === null) return false;

@@ -106,36 +106,5 @@ export function createCoordinatorService(store: EffortStore, sdk: CoordinatorSdk
       if (stableKey) { pending.set(stableKey, task); void task.finally(() => pending.delete(stableKey)); }
       return task;
     },
-    /** Point the effort at an existing thread: an idle one is retitled and associated, and nothing is sent to it. */
-    async adopt(effortId: string, threadId: string): Promise<EstablishedEffort> {
-      const effort = store.get(effortId);
-      if (!effort) throw new Error("The effort no longer exists. Refresh the preview.");
-      if (effort.coordinatorThreadId === threadId) return effort;
-      if (store.list().some((other) => other.coordinatorThreadId === threadId)) throw new Error("That thread already coordinates another effort.");
-      const thread = await sdk.get(threadId);
-      if (thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle") throw new Error("Choose an idle, unarchived thread as the parent.");
-      if (thread.title !== effortTitle(effort.name)) await sdk.rename(threadId, effortTitle(effort.name));
-      await sdk.associate(threadId, effort.id);
-      return store.save({ ...effort, coordinatorThreadId: threadId, coordinatorState: "ready" });
-    },
-    /**
-     * Start one new coordinator with the caller's prompt. The launch is recorded
-     * first and replaces the pointer, so an ambiguous spawn is never retried blindly;
-     * a workspace BB refuses outright restores the pointer it replaced.
-     */
-    async start(effortId: string, prompt: string): Promise<EstablishedEffort> {
-      const effort = store.get(effortId);
-      if (!effort) throw new Error("The effort no longer exists. Refresh the preview.");
-      if (effort.coordinatorState === "creating") throw new Error("A coordinator launch is unresolved. Check BB, then choose that thread.");
-      const creating = store.save({ ...effort, coordinatorThreadId: null, coordinatorState: "creating" });
-      let thread: { id: string };
-      try {
-        thread = await sdk.spawn({ projectId: creating.projectId, title: effortTitle(creating.name), prompt, pluginMetadata: { effortId: creating.id, role: "coordinator" } });
-      } catch (error) {
-        if (rejectedScratchPlacement(error)) store.resetRejectedCoordinator(creating, effort);
-        throw error;
-      }
-      return store.save({ ...creating, coordinatorThreadId: thread.id, coordinatorState: "ready" });
-    },
   };
 }

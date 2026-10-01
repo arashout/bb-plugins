@@ -51,7 +51,6 @@ async function setup(world: { threads?: ReturnType<typeof thread>[]; units?: Raw
       return { entries: open.map((entry) => ({ repo: "inkwell/folio", pr: entry })), closed: merged.map((entry) => entry.url), failed: [], warnings: [],
         merged: merged.map((entry) => ({ url: entry.url, at: entry.mergedAt!, title: entry.title, headRefName: entry.headRefName })) };
     }
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host method ${method}`);
   } });
   await plugin(bb);

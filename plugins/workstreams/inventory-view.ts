@@ -10,7 +10,7 @@ import type { PrObservation } from "./inventory-store.js";
 import { attentionReasonSchema, type AttentionReason } from "./pr-attention.js";
 import { EFFORT_PILES } from "./effort-piles.js";
 import { prHoldSchema, type PrHold } from "./pr-holds.js";
-import { blockerFor, managedLabel, stageFor, PIPELINE_STAGES, type ManagedPr } from "./pr-stage.js";
+import { blockerFor, stageFor, PIPELINE_STAGES } from "./pr-stage.js";
 import type { ResolvedThreadLink } from "./work-context.js";
 import { compactAge, displayTitle, prLifecycle, relativeTime } from "./workstreams.js";
 import { prTarget } from "./ghactions.js";
@@ -25,10 +25,10 @@ export type InventoryQuestion = (typeof INVENTORY_QUESTIONS)[number];
 const threadSchema = z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict();
 export const inventoryRowSchema = z.object({
   prUrl: z.string(), repo: z.string(), number: z.number(), title: z.string(),
-  /** False for a PR an effort names that someone else authored: the inventory reads its checkout, or its roster's last read. */
+  /** False for a PR an effort names that someone else authored: the inventory reads its checkout. */
   authored: z.boolean(),
   reviewers: z.object({ requested: z.array(z.string()), reviewed: z.array(z.object({ login: z.string(), state: z.string(), submittedAt: z.string().optional() }).strict()) }).strict(),
-  /** The board's stage, and its state word there: the roster's when a v2 roster manages the PR. */
+  /** The board's stage, and its state word there. */
   stage: z.enum(PIPELINE_STAGES).nullable(), status: z.string(),
   /** Your open PR in its repository that this one of yours is stacked on, by number: file this row under that one, which merges first. */
   stackedOn: z.number().nullable(),
@@ -51,7 +51,6 @@ export const inventoryRowSchema = z.object({
   addressing: z.object({ threadId: z.string().nullable(), title: z.string().nullable() }).strict().nullable(),
   /** Where the newest Address batch sent it, and its thread's live status, for as long as the PR is open. */
   sent: sentSchema.nullable(),
-  managed: z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(), label: z.string() }).strict().nullable(),
   /** Whom to ask for review: this PR's past reviewers, then its repository's most recent ones. */
   suggestedReviewers: z.array(z.string()),
   /** Your confirmation of its approval's notes, at any age: whether it still covers this head and these notes, and whether evidence backed it. */
@@ -80,13 +79,8 @@ export type ThreadRef = { title: string | null; titleFallback: string | null; st
 /** Everything one row reads. `pr` is null for a PR an effort names that nothing on the board has read. */
 export type InventoryRowInput = {
   prUrl: string; pr: Pr | null; authored: boolean; stale: boolean;
-  /** When no Pr facts exist: the roster's last full read of the PR. */
-  read: { title: string; isDraft: boolean; headOid: string } | null;
-  reasons: readonly AttentionReason[]; hold: PrHold | null; observation: PrObservation | null;
-  managed: ManagedPr | null; stackedOn: number | null;
+  reasons: readonly AttentionReason[]; hold: PrHold | null; observation: PrObservation | null; stackedOn: number | null;
   links: readonly ResolvedThreadLink[];
-  /** The thread of this PR's newest v2 attempt. */
-  attemptThread: string | null;
   threads: ReadonlyMap<string, ThreadRef>;
   suggestedReviewers: readonly string[];
   lastAction: NonNullable<InventoryRow["lastAction"]> | null;
@@ -99,7 +93,7 @@ export type InventoryRowInput = {
 const EXECUTORS = new Set(["advance", "run", "worker"]);
 
 /** The thread a PR's work started in, and the one working on it now or last, as its row and its Open thread name them. */
-export function rowThreads(input: Pick<InventoryRowInput, "links" | "attemptThread" | "threads">): InventoryRow["threads"] {
+export function rowThreads(input: Pick<InventoryRowInput, "links" | "threads">): InventoryRow["threads"] {
   const thread = (id: string | null | undefined): InventoryRow["threads"]["origin"] => {
     const known = id ? input.threads.get(id) : undefined;
     return id && known ? { id, title: (known.title ?? known.titleFallback ?? id).slice(0, 200), active: known.status === "active" } : null;
@@ -107,26 +101,25 @@ export function rowThreads(input: Pick<InventoryRowInput, "links" | "attemptThre
   const known = (link: ResolvedThreadLink) => input.threads.has(link.threadId);
   // Where the work started: a thread started for its ticket, or one whose metadata names the PR.
   const origin = input.links.find((link) => known(link) && link.tier === "started" && link.sources.some((source) => source === "cluster" || source === "metadata"));
-  // Who works on it: our v2 attempt's thread, else the busiest, newest legacy worker or run thread.
-  const executor = input.attemptThread ?? input.links.filter((link) => known(link) && link.sources.some((source) => EXECUTORS.has(source)))
+  // Who works on it: the busiest, newest legacy worker or run thread.
+  const executor = input.links.filter((link) => known(link) && link.sources.some((source) => EXECUTORS.has(source)))
     .sort((a, b) => Number(input.threads.get(b.threadId)!.status === "active") - Number(input.threads.get(a.threadId)!.status === "active") ||
       input.threads.get(b.threadId)!.updatedAt - input.threads.get(a.threadId)!.updatedAt)[0]?.threadId;
   return { origin: thread(origin?.threadId), executor: thread(executor) };
 }
 
 export function inventoryRow(input: InventoryRowInput): InventoryRow {
-  const { pr, observation, managed, stackedOn } = input;
+  const { pr, observation, stackedOn } = input;
   const stage = pr === null ? null : stageFor(prLifecycle(pr), pr, stackedOn);
   const target = prTarget(input.prUrl);
   const turn = input.authored && pr ? yourTurn(pr, input.reasons, input.hold !== null) : null;
   return {
     prUrl: input.prUrl, repo: target?.slug ?? "", number: target?.number ?? 0,
-    title: displayTitle(pr?.title ?? input.read?.title ?? ""), authored: input.authored,
+    title: displayTitle(pr?.title ?? ""), authored: input.authored,
     reviewers: { requested: pr?.reviewRequests ?? [], reviewed: (pr?.latestReviews ?? []).filter((review) => review.state !== "PENDING") },
-    stage, status: managed ? managedLabel(managed) : pr && stage ? blockerFor(pr, stage, input.hold, stackedOn, input.stale).label
-      : input.read ? "Not polled; read by its roster" : "Not read yet",
+    stage, status: pr && stage ? blockerFor(pr, stage, input.hold, stackedOn, input.stale).label : "Not read yet",
     stackedOn,
-    draft: pr?.isDraft ?? input.read?.isDraft ?? null, head: pr?.headRefOid ?? (input.read?.headOid || null),
+    draft: pr?.isDraft ?? null, head: pr?.headRefOid ?? null,
     feedbackFingerprint: pr?.approvalFeedback?.fingerprint ?? null,
     attention: [...input.reasons],
     yourTurn: turn, dismissed: dismissed(input.dismissal, pr?.headRefOid ?? null, turn),
@@ -134,7 +127,6 @@ export function inventoryRow(input: InventoryRowInput): InventoryRow {
     failure: observation?.failedAt ? { at: observation.failedAt, error: observation.error ?? null } : null,
     stale: input.stale, hold: input.hold,
     threads: rowThreads(input), addressing: input.addressing ?? null, sent: input.sent ?? null,
-    managed: managed && { effortId: managed.effortId, effortName: managed.effortName, n: managed.n, label: managedLabel(managed) },
     suggestedReviewers: [...input.suggestedReviewers], confirmation: input.confirmation ?? null,
     lastAction: input.lastAction && { at: input.lastAction.at, action: input.lastAction.action, ok: input.lastAction.ok, detail: input.lastAction.detail,
       reviewers: input.lastAction.reviewers },
@@ -177,7 +169,6 @@ export function inventoryText(view: InventoryView, now: number): string {
       lines.push(`  ${[`${row.repo} #${row.number}`, row.title || "—", reviewers, row.status, ...steps,
         row.failure ? `read failed ${relativeTime(row.failure.at, now)}${row.failure.error ? `: ${row.failure.error}` : ""}` : `checked ${relativeTime(row.checkedAt, now)}`,
         ...row.hold ? [row.hold.reason ? `held: ${row.hold.reason}` : "held"] : [],
-        ...row.managed ? [`roster ${row.managed.effortName}${row.managed.n === null ? "" : ` #${row.managed.n}`}`] : [],
         ...row.lastAction ? [`last ${row.lastAction.action}${row.lastAction.ok ? "" : " refused"} ${relativeTime(new Date(row.lastAction.at).toISOString(), now)}`] : []].join(" · ")}`);
     }
   }

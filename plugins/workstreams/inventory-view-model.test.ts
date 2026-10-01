@@ -342,10 +342,10 @@ describe("the PR inventory screen view model", () => {
     const teammate = find("folio #301", withRow("folio #301", { authored: false, attention: [] }));
     expect(teammate).toMatchObject({ authored: false, steps: [], primary: null });
     expect(teammate.actions.map((item) => item.id)).toEqual(["refresh", "thread"]);
-    // A teammate's PR with a checkout refreshes here; one nothing on the board reads would only fail, so Refresh says where it reads instead.
+    // A teammate's PR with a checkout refreshes here; one nothing on the board reads would only fail, so Refresh says why instead.
     expect(action(teammate, "refresh")!.enabled).toBe(true);
     const unread = find("folio #301", withRow("folio #301", { authored: false, attention: [], stage: null, status: "Not read yet" }));
-    expect(action(unread, "refresh")).toMatchObject({ enabled: false, why: "The board doesn't read this teammate's PR; refresh it from its effort's roster" });
+    expect(action(unread, "refresh")).toMatchObject({ enabled: false, why: "The board reads a teammate's PR only from its checkout" });
   });
 
   it("waits out GitHub's rate limit: writes explain until when, Refresh stays, and the notice names the reset", () => {
@@ -479,9 +479,7 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Nudge")).toContain("Your turn offers none");
   });
 
-  it("names the roster a v2 effort runs a row from, and each effort's group, with No effort last", () => {
-    const managed = find("folio #340", withRow("folio #340", { managed: { effortId: INVENTORY_EFFORTS.shelf.id, effortName: "Shelf order", n: 3, label: "Ready" } }));
-    expect(managed.managed).toEqual({ effortId: INVENTORY_EFFORTS.shelf.id, n: 3, label: "Shelf order roster #3" });
+  it("names each effort's group, with No effort last", () => {
     expect(screen().groups.map((group) => [group.label, group.effort?.id ?? null])).toEqual([["Shelf order", INVENTORY_EFFORTS.shelf.id],
       ["Store pickup", INVENTORY_EFFORTS.pickup.id], ["No effort", null]]);
   });

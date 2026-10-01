@@ -116,16 +116,6 @@ describe("Assigning PRs to an effort", () => {
       .toMatchObject({ ok: true, effort: { name: "Footer refresh" } });
   });
 
-  // Undo removes a new effort only while nothing has made it real since: a v2 roster of its own keeps it.
-  it("keeps a new effort that has moved to its roster when you undo its creation", async () => {
-    const env = await setup(authored);
-    const created = await env.call("classify_new_effort", { name: "Footer refresh", goal: "", prUrls: [url(316)], requestId: "77777777-7777-4777-8777-777777777777" });
-    env.bb.storage.database().prepare("INSERT INTO effort_execution (effort_id, mode, revision, updated_at) VALUES (?, 'v2', 1, 0)").run(created.effort.id);
-    expect(await env.call("classify_undo", { actionId: created.actionId })).toEqual({ ok: true });
-    expect(env.efforts.get(created.effort.id)).toMatchObject({ name: "Footer refresh", members: { prUrls: [] } });
-    expect(await env.grouped()).toMatchObject({ "No effort": [313, 316, 321] });
-  });
-
   it("creates no effort when the name is taken or a PR has an owner", async () => {
     const env = await setup(authored);
     const count = () => env.efforts.listAll().length;
@@ -322,22 +312,6 @@ describe("Standing rules", () => {
     await env.refresh();
     await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Vault audits": [311, 324] }));
     expect((await env.grouped())["No effort"]).toEqual([313, 316, 322]);
-  });
-
-  // A v2 roster changes only through explicit membership, so no rule adds to it, even by following a stacked base.
-  it("never places a PR onto a v2 roster, and refuses a rule that names one", async () => {
-    const env = await setupRules();
-    for (const rule of [{ kind: "ticket-prefix", value: "OPS", effortKey: env.vault.key }, { kind: "stack", value: "", effortKey: null },
-      { kind: "branch", value: "reader/shelf-*", effortKey: env.shelf.key }]) expect(await env.call("classify_rule_add", { ...rule, now: false })).toMatchObject({ ok: true });
-    env.bb.storage.database().prepare("INSERT INTO effort_execution (effort_id, mode, revision, updated_at) VALUES (?, 'v2', 1, 0)").run(env.vault.id);
-    env.authored.push({ ...pr(322, "Rotate reader tokens"), headRefName: "reader/ops-44-rotate", createdAt: later() },
-      { ...pr(323, "Audit key expiry"), baseRefName: "ops-40-keys", createdAt: later() }, { ...pr(326, "Shelf tags"), headRefName: "reader/shelf-tags", createdAt: later() });
-    await env.refresh();
-    // Shelf order's rule ran on the same pass.
-    await vi.waitFor(async () => expect(await env.grouped()).toMatchObject({ "Shelf order": [314, 326] }));
-    expect((await env.grouped())["No effort"]).toEqual([313, 316, 322, 323]);
-    expect(await env.call("classify_rule_add", { kind: "repo", value: "folio", effortKey: env.vault.key, now: false }))
-      .toEqual({ ok: false, error: "Its roster runs v2 work, so a rule can't add to it." });
   });
 
   it("files a stacked PR with its base's effort under a stack rule", async () => {

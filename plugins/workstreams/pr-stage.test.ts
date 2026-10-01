@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { prSchema, type Pr } from "./contract.js";
 import { checkConclusions } from "./gh.js";
-import { blockerFor, managedLabel, stageFor, type ManagedPr } from "./pr-stage.js";
+import { blockerFor, stageFor } from "./pr-stage.js";
 import { prLifecycle, type Lifecycle } from "./workstreams.js";
 
 function pr(number: number, patch: Partial<Pr> = {}): Pr {
@@ -43,17 +43,5 @@ describe("PR stage and blocker", () => {
       approvalFeedback: undefined, approvalFeedbackVerified: false, approvalFeedbackVerification: "unknown" }))).toEqual(["review", "Awaiting review"]);
     expect(shown(pr(22, { reviewDecision: null, reviewRequests: ["flasd"], unresolvedReviewThreads: 2, approvalFeedback: undefined }))[1]).toBe("2 open threads");
     expect(shown(pr(23, { unresolvedReviewThreads: null }))[1]).toBe("Status unknown");
-  });
-
-  it("names a roster's state in its own words: who a wait is on, and a step a dry run only plans", () => {
-    const managed = (patch: Partial<ManagedPr> = {}): ManagedPr => ({ effortId: "e-shelving", effortName: "Shelving entry", n: 5, state: "waiting", owner: "ci", modifiers: [], ...patch });
-    const states: [Partial<ManagedPr>, string][] = [
-      [{ state: "doing", owner: "v2-attempt" }, "Doing"], [{ state: "waiting", owner: "ci" }, "Waiting on CI"], [{ state: "waiting", owner: "reviewer" }, "Waiting on review"],
-      [{ state: "waiting", owner: "pr" }, "Waiting on another PR"], [{ state: "waiting", owner: "legacy-job" }, "Waiting on legacy Advance"],
-      [{ state: "waiting", owner: "user" }, "Waiting on you"], [{ state: "waiting", owner: null, modifiers: ["plan only"] }, "Planned · execution off"],
-      [{ state: "decision", owner: "user" }, "Decision"], [{ state: "ready", owner: "user" }, "Ready"], [{ state: "issue", owner: "user" }, "System issue"],
-      [{ state: "done", owner: null }, "Done"], [{ state: "not-in-instruction", owner: null }, "Not in instruction"],
-    ];
-    expect(states.map(([patch]) => managedLabel(managed(patch)))).toEqual(states.map(([, label]) => label));
   });
 });

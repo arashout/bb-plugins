@@ -1,6 +1,6 @@
 // Legacy Advance's saved batches. Nothing starts or rechecks a job any more: the
-// batches are history that thread links, the v2 roster, and every writer's fence
-// read, in the shape the removed engine wrote them.
+// batches are history that thread links, All PRs, and every writer's fence read,
+// in the shape the removed engine wrote them.
 import { z } from "zod";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
 import { canonicalPrUrl } from "./pr-holds.js";

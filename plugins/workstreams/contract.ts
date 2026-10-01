@@ -3,7 +3,6 @@
 // schemas below are the single definition of what a scan returns.
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { advanceInspectionSchema, advanceWorkspaceInputSchema, advanceWorkspaceSchema, checkoutInspectionInputSchema, checkoutInspectionSchema } from "./advance-contract.js";
 import { approvalFeedbackSchema } from "./approval-feedback.js";
 import { approvalHandlingSchema } from "./approval-evidence.js";
 import { prAttentionSchema } from "./pr-attention.js";
@@ -272,9 +271,8 @@ export const prWriteSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("update-branch"), prUrl: z.string().max(500) }).strict(),
-  /** v2's lifecycle and check actions: each names the head it was confirmed on. */
+  /** Mark ready names the head it was confirmed on. */
   z.object({ kind: z.literal("ready"), prUrl: z.string().max(500), headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
-  z.object({ kind: z.literal("rerun-failed"), prUrl: z.string().max(500), headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
   z
     .object({
       kind: z.literal("nudge"),
@@ -292,10 +290,6 @@ export const hostContract = defineRpcContract({
     input: z.object({}).strict(),
     output: z.object({ path: z.string().min(1) }).strict(),
   },
-  advanceInspect: {
-    input: z.object({ prUrl: z.string().max(500) }).strict(),
-    output: advanceInspectionSchema,
-  },
   /** Read-only: an approval's notes and what since shows them handled, for the confirm. */
   approvalHandling: {
     input: z.object({ prUrl: z.string().max(500) }).strict(),
@@ -309,9 +303,6 @@ export const hostContract = defineRpcContract({
       z.object({ ok: z.literal(false) }).strict(),
     ]),
   },
-  advanceWorkspace: { input: advanceWorkspaceInputSchema, output: advanceWorkspaceSchema },
-  /** Read-only: a candidate checkout's HEAD, cleanliness, and relation to the PR head, before v2 chooses where work runs. */
-  inspectCheckout: { input: checkoutInspectionInputSchema, output: checkoutInspectionSchema },
   /** Read-only: when GitHub's exhausted rate limits reset, in epoch ms; the read doesn't count against them. */
   githubRateLimit: { input: z.object({}).strict(), output: z.object({ resetAt: z.number().nullable() }).strict() },
   authoredPrs: {
@@ -351,7 +342,7 @@ export const hostContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
     ]),
   },
-  /** The only GitHub writes. Each runs only after the user confirmed its dialog, or an effort's instruction granted it. */
+  /** The only GitHub writes. Each runs only after the user confirmed its dialog. */
   prWrite: { input: prWriteSchema, output: writeResultSchema },
   scan: {
     input: z.object({ roots: z.array(z.string().max(1_000)).max(50) }).strict(),

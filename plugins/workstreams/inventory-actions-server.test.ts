@@ -2,7 +2,6 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr, RawUnit } from "./contract.js";
 import { createEffortStore } from "./effort-store.js";
-import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
 import { inventoryLine } from "./inventory-view-model.js";
@@ -64,7 +63,6 @@ async function setup() {
       if (request.kind === "ready") current.set(313, { ...current.get(313)!, isDraft: false });
       return { ok: true, detail: `Wrote ${request.kind}.` };
     }
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     if (method === "approvalHandling") {
       const facts = current.get(Number((input as { prUrl: string }).prUrl.split("/").pop()))!;
       return { ok: true, headOid: facts.headRefOid, fingerprint: facts.approvalFeedback!.fingerprint, evidence: notes.evidence,
@@ -99,18 +97,6 @@ describe("inventory actions on the server", () => {
     expect(await env.row(313)).toMatchObject({ draft: false, attention: [{ question: "missing-reviewer" }],
       lastAction: { action: "mark-ready", ok: true, detail: "Wrote ready." } });
     expect(env.spawn).not.toHaveBeenCalled();
-  });
-
-  it("tells a roster that numbers the PR what the click's read-back saw, since the roster shows the same PR", async () => {
-    const env = await setup();
-    const effort = createEffortStore(env.db).establish({ sourceKey: "pr:313", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
-      coordinatorState: "none", members: { tickets: [], prUrls: [url(313)] } });
-    await env.rpc("effort_roster_get", { effortId: effort.id });
-    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
-    const signals = () => env.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "effort-roster-changed").map((signal) => signal.payload);
-    const before = signals().length;
-    expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: true, detail: "Wrote ready." });
-    expect(signals().slice(before)).toEqual([{ effortId: effort.id }]);
   });
 
   it("refuses on the facts its row showed, even after a board read already stored newer ones", async () => {
@@ -152,24 +138,13 @@ describe("inventory actions on the server", () => {
     expect(after().find((call) => call.method === "prWrite")?.input).toEqual({ kind: "nudge", prUrl: url(318), reviewers: ["otto"], comment: null });
   });
 
-  it("refuses under a hold or an active v2 claim, writes nothing, and says why on the row", async () => {
+  it("refuses under a hold, writes nothing, and says why on the row", async () => {
     const env = await setup();
     await env.rpc("pr_hold_set", { prUrl: url(313), held: true, reason: "Store layout first" });
     const held = env.since();
     expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: false, error: "On hold: Store layout first. Release the hold first; nothing was written." });
     expect(held()).toEqual([]);
-    const body: AttemptBody = { instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
-      start: { headOid: HEAD, baseOid: "d".repeat(40), fingerprint: null, sourceIds: [] },
-      resource: { kind: "spawn", threadId: null, path: null, hostId: HOST, projectId: "project-folio", reason: null, workspace: null },
-      mode: "spawn", marker: "[Workstreams attempt A-1 · inkwell/folio#314 · instruction r1]", settledAt: Date.now(), uncertainAt: null,
-      emptyReadbackAt: null, failure: null, error: null, releasedReason: null };
-    createEffortWorkStore(env.db).claim({ id: "A-1", target: url(314), effortId: "effort-shelf", instructionId: "I-effort-shelf-r1", launchKey: "key-A-1",
-      threadId: null, hostId: HOST, path: null, body });
-    const claimed = env.since();
-    expect(await env.rpc("inventory_request_review", { prUrl: url(314), logins: ["mira"], shown: { requested: [], reviewed: [] } }))
-      .toMatchObject({ ok: false, error: expect.stringContaining("A worker from the effort-shelf roster is writing this PR") });
-    expect(claimed()).toEqual([]);
-    expect(await env.row(314)).toMatchObject({ lastAction: { action: "request-review", ok: false } });
+    expect(await env.row(313)).toMatchObject({ lastAction: { action: "mark-ready", ok: false } });
   });
 
   it("holds every PR of an effort you put on hold: no row action, merge preview, or merge writes to one until you resume it", async () => {
@@ -257,7 +232,7 @@ describe("inventory actions on the server", () => {
     const signals = env.harness.inspection.realtimeSignals.length;
     expect(await confirm()).toEqual({ ok: true, detail: `Confirmed the approval's comments handled on ${HEAD.slice(0, 7)}: 1 reply since this approval.` });
     expect(after().map((call) => call.method)).toEqual(["inspectPrs", "approvalHandling"]);
-    // The board, roster, and deck panes gate on the record, so they're told after it's saved, not only by the read before it.
+    // The board and deck panes gate on the record, so they're told after it's saved, not only by the read before it.
     expect(env.harness.inspection.realtimeSignals.slice(signals).map((signal) => signal.channel).slice(-3))
       .toEqual(["board-changed", "inventory-changed", "deck-changed"]);
     expect(stored().map((row) => JSON.parse((row as { body: string }).body))).toMatchObject([{ prUrl: url(319), headOid: HEAD,

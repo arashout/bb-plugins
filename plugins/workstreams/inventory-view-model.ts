@@ -90,7 +90,6 @@ export type InventoryLine = {
   actions: LineAction[];
   threads: { id: string; title: string; active: boolean; role: "working" | "started" }[];
   checked: { text: string; title: string; failed: boolean; stale: boolean };
-  managed: { effortId: string; n: number | null; label: string } | null;
   /** What the last action on the PR did, or why it was refused. */
   last: { text: string; ok: boolean } | null;
   /** A person's feedback that waits on you, as the server found it, and how long it has waited. */
@@ -257,8 +256,8 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
     context.running !== null ? "Another action on this PR is running" : null));
   if (mergeable(row)) actions.push(action("merge", `Open a fresh merge preview of ${target}; only a click or ⌘↵ there merges`, null));
   else if (inOrder(row, parents)) actions.push(action("merge", `Merges after #${row.stackedOn}`, `Merge #${row.stackedOn} first; this one follows it`));
-  // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither has only its roster's reads.
-  const unread = !row.authored && row.stage === null ? "The board doesn't read this teammate's PR; refresh it from its effort's roster" : null;
+  // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither goes unread.
+  const unread = !row.authored && row.stage === null ? "The board reads a teammate's PR only from its checkout" : null;
   actions.push(action("refresh", `Read ${target} from GitHub now`, unread ?? (context.running === "refresh" ? "Reading GitHub now" : null)));
   actions.push(action("thread", thread ? `Open "${thread.title}"` : `Open ${target}'s thread`, thread ? null : "No thread is linked to this PR yet",
     { threadId: thread?.id ?? null }));
@@ -338,8 +337,6 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
     actions: rowActions(row, parents, { now, limitedUntil: context.limitedUntil, running: context.running ?? null, effortPile, turn }),
     threads,
     checked: checked(row, now),
-    managed: row.managed && { effortId: row.managed.effortId, n: row.managed.n,
-      label: `${row.managed.effortName} roster${row.managed.n === null ? "" : ` #${row.managed.n}`}` },
     last: lastOf(row, context.outcome, now),
     yourTurn, dismissed: row.dismissed, addressing, sent,
     depth: 0, branch: null,

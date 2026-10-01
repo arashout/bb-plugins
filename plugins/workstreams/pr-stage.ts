@@ -1,8 +1,6 @@
 // A PR's stage and leading blocker, as All PRs shows them. GitHub and checkout facts remain the source of truth.
 import type { Pr } from "./contract.js";
-import type { UserState } from "./effort-work-store.js";
 import type { PrHold } from "./pr-holds.js";
-import { STATE_LABEL } from "./roster-shared.js";
 import type { Lifecycle } from "./workstreams.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
 import { FEEDBACK_LABEL, feedbackToAddress } from "./feedback-to-address.js";
@@ -10,25 +8,6 @@ import { FEEDBACK_LABEL, feedbackToAddress } from "./feedback-to-address.js";
 export const PIPELINE_STAGES = ["build", "review", "feedback", "ready", "merged", "released"] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 export type PipelineBlocker = { label: string; tone: "bad" | "warn" | "wait" | "clear" };
-/**
- * A PR a v2 effort's roster manages, as its effort_pr_work row stands: the row's user state, the owner of its wait, and its
- * modifiers. A member no instruction includes has no current row.
- */
-export type ManagedPr = { effortId: string; effortName: string; n: number | null; state: UserState | "not-in-instruction"; owner: string | null;
-  modifiers: readonly string[] };
-
-/** The roster's own state words, so an All PRs row and its roster row never name a state differently. */
-const MANAGED_STATE: Record<ManagedPr["state"], string> = STATE_LABEL;
-/** Who a roster wait is on, by its row's owner kind. */
-const WAITING_ON: Record<string, string> = { ci: "CI", reviewer: "review", pr: "another PR", github: "GitHub", thread: "another writer", "legacy-job": "legacy Advance",
-  "v2-attempt": "a v2 worker slot", user: "you" };
-/** A managed PR's state in the roster's words: a wait names who it is on, and a step a dry run only plans says so. */
-export function managedLabel(managed: Pick<ManagedPr, "state" | "owner" | "modifiers">): string {
-  if (managed.state !== "waiting") return MANAGED_STATE[managed.state];
-  if (managed.modifiers.includes("plan only")) return "Planned · execution off";
-  return managed.owner ? `Waiting on ${WAITING_ON[managed.owner] ?? managed.owner}` : MANAGED_STATE.waiting;
-}
-
 /** Lifecycle owns position. A draft and an active rebase stay in Build even with bad checks. */
 export function stageFor(lifecycle: Lifecycle, pr: Pr | null, behind: number | null = null): PipelineStage {
   if (lifecycle === "shipped") return "released";

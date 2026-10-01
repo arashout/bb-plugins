@@ -3,7 +3,7 @@
 // handled. Each click authorizes one write on the facts the row showed, which
 // the click sends back: a GitHub write, or for a confirmation, a verification
 // recorded as yours. Before writing, it reads the PR again, and it refuses
-// under a hold (the PR's or its effort's), a v2 claim or another writer, and
+// under a hold (the PR's or its effort's) or another writer, and
 // when the facts the step depends on changed since the row was shown. A
 // confirmation also reads what came after the approval, and without evidence
 // that its notes were handled it records only when you confirm anyway. Asking
@@ -34,7 +34,7 @@ export type InventoryActionDeps = {
   hold(prUrl: string): PrHold | null;
   /** Why the PR's effort stops it: you put the effort on hold, completed it, or archived it, until you resume, reopen, or restore it. Null otherwise. */
   effortHold(prUrl: string): Promise<string | null>;
-  /** Why another writer holds the PR or a checkout of it (a v2 claim, a legacy batch, a launching board action), or null. */
+  /** Why another writer holds the PR or a checkout of it (a legacy batch, a launching board action), or null. */
   writer(prUrl: string): string | null;
   /** Take the PR's board-action lock, or null when another action holds it; the result releases it. */
   lock(prUrl: string): (() => void) | null;

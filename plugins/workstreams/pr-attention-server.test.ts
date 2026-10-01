@@ -51,7 +51,7 @@ describe("PR attention on the board", () => {
       pr(314, "ABC-341 Group shelves by genre"),
       pr(315, "ABC-342 Sort shelves by author"),
     ]);
-    // Owned through its ticket, not a PR link, exactly as the roster reads ownership.
+    // Owned through its ticket, not a PR link.
     const effort = createEffortStore(env.db).establish({ sourceKey: "ticket:ABC-340", name: "Shelf order", goal: "Keep shelves in order",
       projectId: "project-folio", coordinatorState: "none", members: { tickets: ["ABC-340"], prUrls: [] } });
     createPrHoldStore(env.db).set(url(315), true, "Waiting on the store layout review");

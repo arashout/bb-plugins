@@ -8,7 +8,6 @@ import type { BatchItem, DeckBatch } from "./deck-batch.js";
 import { startAddress } from "./deck-flow.js";
 import type { DeckView } from "./deck.js";
 import { createEffortStore } from "./effort-store.js";
-import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { PR_THREADS_RULE } from "./effort-recipes.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
@@ -113,7 +112,6 @@ async function setup() {
       return { entries: prUrls.map((prUrl) => ({ repo: REPO, pr: current.get(Number(prUrl.split("/").pop()))! })), closed: [], failed: [], warnings: [] };
     })();
     if (method === "contextWorkspace") return { path: "/synthetic/workstreams/context/batch" };
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host call ${method}`);
   } });
   await plugin(bb);
@@ -152,17 +150,9 @@ const orders = (env: Env) => new Map(spawned(env)[0]!.prompt.split("\n").filter(
 /** A checkout the scan found with no PR linked. */
 const worktree = (path: string, githubRepo: string, branch: string): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: githubRepo, githubRepo, branch,
   dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
-/** Manuscript review's v2 roster claims #43 and its checkout. */
-function claimV2(env: Env) {
-  const body: AttemptBody = { instructionRevision: 1, recipes: ["address_review_feedback"], role: "code", retryEpoch: 0, retryIndex: 0,
-    start: { headOid: HEAD, baseOid: "c".repeat(40), fingerprint: null, sourceIds: [] },
-    resource: { kind: "spawn", threadId: null, path: PATH, hostId: HOST, projectId: PROJECT, reason: null, workspace: null },
-    mode: "spawn", marker: "[Workstreams attempt A-1 · inkwell/folio#43 · instruction r1]", settledAt: Date.now(), uncertainAt: null,
-    emptyReadbackAt: null, failure: null, error: null, releasedReason: null };
-  const work = createEffortWorkStore(env.bb.storage.database() as never);
-  work.claim({ id: "A-1", target: url(43), effortId: env.effort.id, instructionId: `I-${env.effort.id}-r1`, launchKey: "key-A-1", threadId: null, hostId: HOST, path: PATH, body });
-  return { work, body };
-}
+/** An agent goes to work in #43's checkout, in the board's run record, on no PR of its own. */
+const deskAt43 = (env: Env) => createRunStore(env.bb.storage.database() as never).begin({ path: PATH, ticket: null, prUrl: null, prNumber: null,
+  action: "address-review", mode: "new", threadId: "thr-desk" });
 /** An agent on this PR in its own thread, in the board's run record. */
 const runOn = (env: Env, number: number) => createRunStore(env.bb.storage.database() as never).begin({ path: "", ticket: null, prUrl: url(number), prNumber: number,
   action: "address-review", mode: "new", threadId: `thr-${number}` });
@@ -221,7 +211,7 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect(args!.prompt).toContain("Reply to each reviewer's note on the PR");
     expect(args!.prompt).toContain("Do not merge, deploy, mark ready, request review, or start another thread.");
     // Nothing here writes to GitHub, and nothing merges.
-    expect(env.hostCalls.filter((method) => !["scan", "inspectPaths", "authoredPrs", "inspectPrs", "contextWorkspace", "advanceInspect"].includes(method))).toEqual([]);
+    expect(env.hostCalls.filter((method) => !["scan", "inspectPaths", "authoredPrs", "inspectPrs", "contextWorkspace"].includes(method))).toEqual([]);
 
     // Each PR in it reads Working, In flight on the deck, and stays on Your turn where you sent it from; the thread shows on the card.
     await env.refresh();
@@ -325,25 +315,20 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect(await env.turn()).toEqual([42, 43, 45, 46]);
   });
 
-  // What the listing leaves out, it names with why: a hold, a held effort, a v2 claim, or an agent already on the PR or its checkout.
-  it("leaves out a held PR, a held effort's PR, a v2 claim, and a PR an agent is on, each with why", async () => {
+  // What the listing leaves out, it names with why: a hold, a held effort, or an agent already on the PR or its checkout.
+  it("leaves out a held PR, a held effort's PR, and a PR an agent is on or in its checkout, each with why", async () => {
     const env = await setup();
     await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
     expect(await env.rpc("effort_hold", { effortKey: env.spine.id, reason: "Labels later" })).toMatchObject({ ok: true });
-    const { work, body } = claimV2(env);
     runOn(env, 44);
     env.threads.set("thr-42", { ...env.threads.get("thr-42")!, status: "active" });
+    env.add("thr-desk", { title: "Desk tidy", status: "active", environmentPath: PATH });
     await env.refresh();
     const plan = await env.plan([42, 43, 44, 45, 46].map(url));
     expect([plan.batchId, plan.items]).toEqual([null, []]);
     expect(plan.skipped.map((skip) => `${skip.ref}: ${skip.reason}`)).toEqual(["folio #42: An agent is already working on it.",
-      "folio #43: A v2 roster worker holds it.", "folio #44: An agent is already working on it.", "folio #45: On hold. Release it first.",
+      "folio #43: An agent is working in its checkout.", "folio #44: An agent is already working on it.", "folio #45: On hold. Release it first.",
       "folio #46: Its effort is on hold."]);
-    // With the claim ended, an active thread in #43's checkout still keeps it out.
-    work.recordAttempt("A-1", ["launching"], { status: "completed", body });
-    env.add("thr-desk", { title: "Desk tidy", status: "active", environmentPath: PATH });
-    await env.refresh();
-    expect((await env.plan([url(43)])).skipped).toEqual([{ prUrl: url(43), ref: "folio #43", reason: "An agent is working in its checkout." }]);
     expect(env.spawn).not.toHaveBeenCalled();
   });
 
@@ -417,17 +402,17 @@ describe("addressing Your turn PRs in one batch thread", () => {
 describe("the checks a batch thread's claims pass as it starts", () => {
   // What the listing checked, the start checks again before it reads GitHub. #42 has no checkout, so only its own thread going to work
   // shows an agent on it.
-  it("leaves out, unread, a PR that got a hold, a v2 claim, or an agent in the Undo window, even one only in the PR's own thread", async () => {
+  it("leaves out, unread, a PR that got a hold or an agent in the Undo window, even one only in the PR's own thread", async () => {
     const env = await setup();
     const plan = await env.plan([42, 43, 44, 45].map(url));
     expect(plan.items).toHaveLength(4);
     expect(await confirm(env, plan.batchId, async () => {
       await activate(env, "thr-42");
-      claimV2(env);
+      deskAt43(env);
       runOn(env, 44);
       await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
     })).toEqual(["folio #42: refused: An agent is already working on it.",
-      "folio #43: refused: A worker from the Manuscript review roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.",
+      "folio #43: refused: An agent is already working on it.",
       "folio #44: refused: An agent is already working on it.", "folio #45: refused: On hold: Counter redesign. Release the hold before advancing or merging this PR."]);
     expect(env.reads.urls).toEqual([]);
     expect([claims(env), env.spawn.mock.calls.length]).toEqual([[], 0]);
@@ -455,13 +440,13 @@ describe("the checks a batch thread's claims pass as it starts", () => {
         env.efforts.recordWorker(env.effort.id, "thr-42-again", url(42), "pr");
         env.add("thr-42-again", { title: "Order fixes, again" });
         await activate(env, "thr-42-again");
-        claimV2(env);
+        deskAt43(env);
         runOn(env, 44);
         await env.rpc("pr_hold_set", { prUrl: url(45), held: true, reason: "Counter redesign" });
         await env.rpc("effort_hold", { effortKey: env.spine.id, reason: "Labels later" });
       };
     })).toEqual(["folio #42: refused: An agent is already working on it.",
-      "folio #43: refused: A worker from the Manuscript review roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.",
+      "folio #43: refused: An agent is already working on it.",
       "folio #44: refused: An agent is already working on it.", "folio #45: refused: On hold: Counter redesign. Release the hold before advancing or merging this PR.",
       "folio #46: refused: Its effort is on hold. Resume it first; nothing was written."]);
     expect(env.reads.urls).toEqual([42, 43, 44, 45, 46].map(url));

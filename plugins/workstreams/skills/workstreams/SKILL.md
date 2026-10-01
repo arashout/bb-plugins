@@ -113,10 +113,9 @@ Precedence runs top to bottom in that table. Key distinctions:
   genuinely stuck.
 - `approved-with-note` means a reviewer wrote a note with approval. It is
   distinct from `approved-with-comments`, which has unresolved inline comments.
-  A v2 worker checks each current review point against the code and records
-  its evidence, including justified decisions that need no code change; your
-  confirmation records yours. The record applies only to the matching review
-  and head commit. The row reads
+  Your confirmation records that the notes are handled; older records may hold
+  a worker's evidence for each review point instead. The record applies only
+  to the matching review and head commit. The row reads
   ready when that evidence is verified, GitHub still reports approval, checks
   pass, no review threads remain open, and the merge state permits it. The
   approval gate requires no additional reviewer approval or formulaic PR reply.
@@ -426,8 +425,7 @@ The inventory lists every open PR you author, and every open PR an unarchived
 effort names as a member, grouped by the effort that owns it (as a member or
 through its ticket), with "No effort" last. A background read refreshes your
 authored PRs every `inventoryPollSeconds`. PRs you don't author show their
-checkout's facts or their roster's last read, until the board's latest read
-finds them merged or closed.
+checkout's facts until the board's latest read finds them merged or closed.
 
 The Workstreams panel shows this inventory as **All PRs**, one tab from the
 effort deck it opens on. Map and Efforts admin sit under
@@ -438,7 +436,7 @@ bb workstreams inventory [--attention draft|reviewer|nudge] [--json]
 ```
 
 Each row gives the PR, its requested and past reviewers, its state in the
-board's words (its roster's when a v2 roster manages it), the PR of yours it is
+board's words, the PR of yours it is
 stacked on (`stackedOn`, whose row it files under), and each attention
 reason with its next step, owner, and age. It also gives when GitHub last
 answered for the PR, its last failed read and why, any hold, and the thread the
@@ -503,7 +501,7 @@ your own confirmation, however old and even while the PR or its effort is
 held, with an audit row; a worker's evidence is never revoked. The notes then
 need you again. Each row's `confirmation` says when you confirmed, whether it
 still covers this head and these notes, and whether evidence backed it. Each of the four reads the PR again
-first. It refuses under a hold, a v2 claim, or another writer, and when the
+first. It refuses under a hold or another writer, and when the
 facts the step depends on differ from what the row showed. The row's `lastAction` records
 each outcome, refusals included. **Merge** opens `action_merge_preview`, and
 nothing merges outside it.
@@ -515,8 +513,7 @@ Every unarchived effort sits on one pile: active, on hold, or done.
 `effort_complete`, `effort_resume`, and `effort_reopen` move one effort, and
 only when the user asks. A move never changes members, threads, or the effort
 itself. `effort_complete` returns the effort's open PRs and active threads. A
-resumed or reopened effort joins the end of the active pile (`since`). A v2
-effort returns to legacy before it is held or completed.
+resumed or reopened effort joins the end of the active pile (`since`).
 Archiving and merging work as before.
 
 ## Classifying PRs
@@ -560,7 +557,7 @@ any of them has an owner now.
 Each action returns an `actionId` and `added`, the number of PRs it moved, and
 the audit records one row per PR or ticket it added. `classify_undo` reverses the action while its effort still
 owns everything it added. Undoing a new effort also removes the effort, unless
-it has since gained other work, a coordinator, or a v2 roster.
+it has since gained other work or a coordinator.
 
 Standing rules are the only automatic placement, and only the user adds them.
 `classify_rule_add` takes a `kind` and `value`: `ticket-prefix` (`OPS` matches
@@ -571,9 +568,8 @@ stacked PR with its base's effort. After each read, a rule places PRs no effort
 owns that were opened after the rule was added, one audited action per rule and
 effort. `now` also places every PR the rule matches today, and
 `classify_rule_preview` lists those PRs before the rule is added. When matching
-rules name different efforts, nothing moves. Rules never place a PR onto a v2
-roster, which changes only through explicit membership, and a rule can't name a
-v2 effort. A PR whose rule placement was undone stays where the undo left it.
+rules name different efforts, nothing moves. A PR whose rule placement was
+undone stays where the undo left it.
 `classify_get` lists the rules with the PRs each placed in the last 7 days, and
 `classify_rule_remove` removes one and leaves its PRs in place.
 
@@ -594,7 +590,7 @@ one section by the move its inventory row leads with: `merge`, `confirm`,
 `nudge`, `request`, `ready`, or `work` (fixed in its thread) is the user's;
 `flight` needs no one yet (a review not yet due a nudge, running checks, or
 code work a thread is doing); `blocked` waits on something else, named in
-`waitsOn`: the PR it is stacked on or an open v2 decision; `held` is a PR on
+`waitsOn`: the PR it is stacked on; `held` is a PR on
 hold, with its `hold` reason and since when, and in no other section. A
 stacked PR in an approved stack is a merge, since the preview merges the stack
 in order.
@@ -636,10 +632,8 @@ open PRs first.
 
 Each card gives a one-line `status`; `stats` (open PRs, ready to merge, merged
 in the last 7 days, median PR age, and the oldest wait); `progress` (merges a
-read saw against open PRs, and how many of the active v2 instruction's "done
-when" criteria hold); up to three `next` steps (the unmet "done when"
-criteria, else the oldest moves of the user's, then the oldest waits, never a
-held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
+read saw against open PRs); up to three `next` steps (the oldest moves of the
+user's, then the oldest waits, never a held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
 tickets (`known` 0 means no Linear data); `people` (reviewers the user waits
 on, and reviewers whose requested changes wait on the user); its parent and PR
 `threads`, read-only; the week's merges, reviews, and pushes; its rows by
@@ -669,7 +663,7 @@ until the view marks it seen. `release` covers the effort's held PRs: it lifts
 each hold after the same window and writes nothing to GitHub, so it runs on any
 pile, and Advance never includes it. `ask` takes one PR in `prUrls` whose
 approval notes wait on the user, and sends its thread (the one working on it,
-else the one it started in) the approval-feedback recipe; it confirms nothing.
+else the one it started in) a request to address the approval's notes; it confirms nothing.
 A PR with no thread gets a new one in its checkout, beneath its effort's
 repository controller (or its repository's parent when no effort owns it),
 only when that parent already exists: Ask never stores an effort or starts a
@@ -687,7 +681,7 @@ never includes it. `address` takes the selected Your turn PRs, with `mode`
 batch, `where` it's worked: its checkout, or for a PR with none, a new
 worktree from a local checkout of its repository ("No checkout: a new
 worktree from folio"); `skipped` names why a PR stays out: a hold, a held
-or done effort, a v2 roster or claim, an agent or open run on the PR or its
+or done effort, an agent or open run on the PR or its
 checkout, no feedback waiting, a write just sent, or, for a batch, no local
 checkout of its repository to add a worktree from. A batch plan returns its
 `thread`: the project, and the effort parent it starts under when every PR
@@ -696,10 +690,10 @@ every PR still waiting in the run record (one `address-feedback` run per PR)
 with nothing awaited between the last check and the last claim, and starts one
 worker titled by its PRs ("Address feedback: quill #210, #211 · folio #301", with
 "+N more" past 80 characters) on the code-work model. The worker
-follows the `address_review_feedback` recipe per PR, in its checkout or in a
+addresses each PR's review feedback in turn, in its checkout or in a
 worktree it adds with `git worktree add` beside that repository checkout
 (reusing one already on the head branch, never a fresh clone), replies to each note,
-never merges, and ends with one `Workstreams result v1` line per PR. Agent
+never merges, and ends with a plain report per PR. Agent
 and thread starts refuse a PR or checkout a claim holds; the claims end when
 the thread finishes, and each PR's result is kept on its run. A result clears
 nothing: only a reply on the PR or your Confirm does. `each` sends Ask or Fix
@@ -710,7 +704,7 @@ PRs is on the active pile (a release needn't be). The batch sends 8 seconds late
 unless `deck_batch_undo` cancels it first. Its rows show `acted` as `queued`,
 with its `batchId`, while it waits. Each item then runs the inventory action
 for its kind, with the facts the plan bound: the action reads the PR again
-first, and refuses under a hold, a v2 claim, or another writer, or when those
+first, and refuses under a hold or another writer, or when those
 facts changed. A PR whose effort is held, done, or archived by then, or that
 left its effort, is refused too, except for a release. A refusal refuses that PR only.
 `deck_batch_get` returns each PR's result: `sent`, `refused` with why, or
@@ -718,71 +712,6 @@ left its effort, is refused too, except for a release. A refusal refuses that PR
 restart keeps a waiting batch's window and its cancel. A batch more than a
 minute past its window when the plugin loads sends nothing more: each PR it
 hadn't reached is `refused`.
-
-## Effort rosters (v2)
-
-An effort can move to its v2 roster: one permanently numbered row per PR the
-effort owns or its instruction includes, and one current state per PR. Legacy
-Advance jobs and v2 attempts stay history. The roster's `history` counts them,
-so the roster's rows, Advance's job rows, and the board's row runs explain one
-another instead of disagreeing.
-
-```
-bb workstreams roster <effort> [--json]     # n · repo #num · reviewer · summary · state · next
-bb workstreams recipes [--json]             # the action recipes v2 composes into work orders
-bb workstreams v2 preview <effort> [--json] # what moving the effort to its roster changes
-bb workstreams v2 set <effort> --mode v2|legacy --revision <n> (--parent <threadId> | --new-parent)
-```
-
-Moving an effort to its roster never changes membership or reparents a thread.
-From then on, repairs and agent runs refuse its PRs with
-"Managed by the <effort> roster; instruct there." `board_get` lists those PRs
-under `v2Managed` with their roster state.
-
-Each row is one of:
-
-- **Doing**: a v2 worker, a code action, or a read is running.
-- **Waiting**: names who it waits on (CI, a reviewer, a parent PR, legacy
-  Advance, GitHub, or you) and when it looks again.
-- **Decision**: one numbered decision per real choice, such as `D1`,
-  shared by every PR that asks it.
-- **Ready**: a verified merge candidate on a fresh GitHub read, with no
-  feedback to address. A worker's evidence verifies feedback but doesn't
-  answer it, so a row whose reviewer saw neither your reply on the PR nor your
-  confirmation waits on you first. Merging is never part of an instruction; it
-  stays a separate action with its own preview.
-- **Done**: merged or closed.
-
-A **system issue** is separate from these and names its recovery, such as
-`retry N`.
-
-Commands use the numbers of the roster the user read. The command is the
-authorization boundary: a command that is ambiguous is clarified and admits
-nothing.
-
-- `move 1-6 forward, leave 3 alone` adds work; `only move 7-9 forward` replaces
-  the included set; `drop N` removes a PR; `cancel` ends the instruction.
-- `fix ci N`, `rebase N`, and `address review N` name one kind of work;
-  `mark N ready` and `request review N from @login` grant those actions.
-- `hold N because …` and `release N`: a hold outlasts every instruction.
-- `refresh N`, `recheck N`, `reset N` (`reset N release` when a launch's outcome
-  is uncertain), `retry N`, `stop N`, and `recheck launches`.
-- `outcome: …`, `done when 2: …`, and `drop c1` correct the evidence contract.
-- `D1 <option>` answers a decision.
-
-A command naming PRs that other efforts own admits nothing and returns one
-command for each owning effort.
-
-Only the user sends commands. Don't call `effort_command` yourself, even to pass
-on words that the user typed: the roster records each command it receives as the
-user's own action from the roster panel, and commands such as `move … forward`,
-`retry N`, and `reset N release` carry the user's authority. Tell the user which
-command fits, and leave sending it to them.
-
-The `v2Execution` setting is `dry-run` by default: v2 plans each PR's next step
-and where it would run, and claims, starts, messages, and writes nothing. `on`
-runs the work the instruction authorizes, at most `workerConcurrency` (default 2)
-worker turns at a time.
 
 ## Grouping signals
 

@@ -1,7 +1,7 @@
 // The app bundle runs in BB's browser, where node:* builtins don't exist and
 // the SDK root's server helpers can't load. One runtime import of a server
-// module anywhere under app.tsx breaks the whole plugin UI, as importing
-// effort-command.ts once did through node:crypto (plan amendment A12.1).
+// module anywhere under app.tsx breaks the whole plugin UI, as one import of
+// a module that reached node:crypto once did (plan amendment A12.1).
 // Type-only imports are erased and never reach the bundle, so they're fine.
 import { build, type Metafile } from "esbuild";
 import { builtinModules } from "node:module";
@@ -10,8 +10,8 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const BUILTINS = [...builtinModules, ...builtinModules.map((name) => `node:${name}`)];
-/** Server modules the browser must never run: the RPC contract, and the modules that compute roster state. */
-const SERVER_ONLY = ["contract.ts", "server.ts", "effort-command.ts", "effort-roster.ts", "effort-v2-server.ts", "effort-phase.ts"];
+/** Server modules the browser must never run: the RPC contract and the server. */
+const SERVER_ONLY = ["contract.ts", "server.ts"];
 
 /** Every import in the bundle built from `entry` that the browser can't or mustn't run, naming the file that imports it. */
 async function serverReach(entry: { file: string } | { contents: string }): Promise<string[]> {
@@ -38,12 +38,12 @@ describe("browser bundle", () => {
   }, 30_000);
 
   it("names the file behind each kind of server import", async () => {
-    const reach = await serverReach({ contents: `import "./effort-command"; import "@get-bb/plugin-sdk"; import "node:path";` });
+    const reach = await serverReach({ contents: `import "./contract"; import "./ghactions"; import "@get-bb/plugin-sdk"; import "node:path";` });
     expect(reach).toEqual(expect.arrayContaining([
-      "<stdin> imports effort-command.ts",
+      "<stdin> imports contract.ts",
       "<stdin> imports the SDK root",
       "<stdin> imports node:path",
-      // The break A12.1 reproduced: effort-command.ts reaches node:crypto through its GitHub helpers.
+      // The break A12.1 reproduced: the GitHub helpers reach node:crypto.
       "ghactions.ts imports node:crypto",
       "contract.ts imports the SDK root",
     ]));

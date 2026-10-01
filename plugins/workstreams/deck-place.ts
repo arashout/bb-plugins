@@ -139,7 +139,7 @@ export type ViewPlace = { anchor: Anchor | null; scrollTop: number; focus: strin
 export type Place = { view: "deck" | "prs"; cur: string | null; order: string[]; views: Record<string, ViewPlace> };
 export const EMPTY_VIEW: ViewPlace = { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [], filter: null };
 export const PLACE_KEY = "bb-workstreams:deck-place";
-/** What each view last marked seen, and when you last marked each PR's row seen, which outlast the session like the roster's. */
+/** What each view last marked seen, and when you last marked each PR's row seen, which outlast the session. */
 export const SEEN_KEY = "bb-workstreams:deck-seen";
 export type Seen = { rows: Record<string, SettledRow[]>; at: Record<string, number> };
 

@@ -2,9 +2,9 @@
 // selection, or Advance first plans: each PR's one write, bound to the facts
 // its row showed, and why any PR is left out. You confirm that plan; it sends
 // 8 seconds later unless you Undo. Dispatch runs exactly the planned items,
-// each through the inventory action's own guards (a fresh read, a hold, a v2
-// claim or another writer, and facts changed since the row), so a refusal
-// refuses that PR only. Advance plans every safe batch in an effort: nudges,
+// each through the inventory action's own guards (a fresh read, a hold,
+// another writer, and facts changed since the row), so a refusal refuses that
+// PR only. Advance plans every safe batch in an effort: nudges,
 // review requests, and mark ready, never a merge, a thread's work, or a
 // confirmation of review notes, which is yours to make one PR at a time after
 // reading them. A PR whose effort you hold or complete after confirming, or
@@ -118,15 +118,14 @@ export const deckBatchContract = {
 };
 
 /** A deck row with its pile, when you last marked it seen, and the facts its write binds to, as the row showed them. */
-export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold"> &
-    Partial<Pick<DeckRow, "managed">>;
+export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title" | "section" | "suggested" | "nudge" | "notes" | "acted" | "hold">;
   pile: DeckPile; seenAt?: number; head: string | null; fingerprint: string | null; shown: ShownReviewers;
   /** Ask's destination, as the listing names it ("Ask “Spine labels”", "Start a thread under Store pickup"), or why it has none. */
   ask?: { to: string } | { why: string };
   /** A fix's destination, named as Ask's is, with what its PR needs now; or why it has none. */
   fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string };
   /**
-   * Address: the feedback that waits on you, as its listing names it, or null when none does; why an agent, a v2 roster, or its claim keeps
+   * Address: the feedback that waits on you, as its listing names it, or null when none does; why an agent or its claim keeps
    * it; and its checkout's name, or null without one; without one, the name of a local checkout of its repository its worktree is added
    * from, or null with none. `confirm`: approval notes you answered wait only on your Confirm, which no batch gives. Each PR in its own
    * thread takes its Ask or Fix above, from its thread alone.
@@ -216,7 +215,7 @@ function planFix(rows: readonly PlanRow[], selected: boolean): ReturnType<typeof
 
 /**
  * Address: each chosen PR whose feedback waits on you, bound to the head its row showed, and why any other is left out: a hold, a paused
- * effort, a v2 roster, an agent or claim already on it, or a write just sent. One batch thread takes every PR, in its checkout or a new
+ * effort, an agent or claim already on it, or a write just sent. One batch thread takes every PR, in its checkout or a new
  * worktree from a local checkout of its repository, never a fresh clone; each PR's own thread takes its Ask or Fix, only where it has a thread.
  */
 function planAddress(rows: readonly PlanRow[], mode: AddressMode): ReturnType<typeof planBatch> {
@@ -227,7 +226,6 @@ function planAddress(rows: readonly PlanRow[], mode: AddressMode): ReturnType<ty
     const skip = (reason: string) => skipped.push({ prUrl: row.prUrl, ref, reason });
     if (row.hold) { skip("On hold. Release it first."); continue; }
     if (pile !== "active") { skip(PILE_WHY[pile]!); continue; }
-    if (row.managed) { skip("Its v2 roster runs it."); continue; }
     if (address?.busy) { skip(address.busy); continue; }
     if (!address?.feedback) { skip(address?.confirm ? "Answered. Confirm it yourself." : "No feedback waits on you."); continue; }
     if (!counted(row, seenAt)) { skip("A write on it is waiting or just ran."); continue; }

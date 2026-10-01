@@ -20,17 +20,16 @@ import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
-import type { Criterion } from "./outcome-evidence.js";
 import { sentSchema, yourTurnSchema } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
 const WEEK_MS = 7 * 86_400_000;
 
 const waitSchema = z.object({
-  kind: z.enum(["parent", "decision", "hold"]),
-  /** Who or what it waits on: the PR it's stacked on, the decision, or you, for a hold. */
+  kind: z.enum(["parent", "hold"]),
+  /** Who or what it waits on: the PR it's stacked on, or you, for a hold. */
   on: z.string(),
-  /** What, in a few words: the parent merging first, the decision's question, or the hold's reason. */
+  /** What, in a few words: the parent merging first, or the hold's reason. */
   what: z.string(),
   since: z.number().nullable(),
 }).strict();
@@ -57,8 +56,6 @@ export const deckRowSchema = z.object({
   /** Where the last Address batch sent it, and how that stands, with the thread's link however it ended. */
   sent: sentSchema.nullable(),
   hold: z.object({ reason: z.string(), since: z.number() }).strict().nullable(),
-  /** The v2 roster that manages it. */
-  managed: z.string().nullable(),
   /** When GitHub last answered for it; `failed` when its last read didn't, and `stale` when the last full read didn't list it or couldn't read it. */
   checkedAt: z.string().nullable(), failed: z.boolean(), stale: z.boolean(),
   /** Your confirmation of its review notes, at any age, which Revoke takes back; `current` while it covers this head and these notes. */
@@ -85,12 +82,9 @@ export const deckCardSchema = z.object({
   needsYou: z.number(),
   stats: z.object({ open: z.number(), ready: z.number(), mergedWeek: z.number(), medianAgeMs: z.number().nullable(),
     oldestWait: z.object({ prUrl: z.string(), ref: z.string(), text: z.string(), since: z.number() }).strict().nullable() }).strict(),
-  /** Merged PRs a read saw against open ones, and how many of the active instruction's "done when" criteria hold. */
-  progress: z.object({ merged: z.number(), open: z.number(), criteria: z.object({ validated: z.number(), needed: z.number() }).strict().nullable() }).strict(),
-  /**
-   * Up to three: the instruction's unmet "done when" criteria when it has some, else the oldest moves of yours, then the oldest waits. A
-   * held row is none of these until you release it.
-   */
+  /** Merged PRs a read saw against open ones. */
+  progress: z.object({ merged: z.number(), open: z.number() }).strict(),
+  /** Up to three: the oldest moves of yours, then the oldest waits. A held row is none of these until you release it. */
   next: z.array(nextSchema),
   /** Every row waiting on someone or something else, oldest first; a held row waits on you, under Held. */
   blocked: z.array(waitSchema.extend({ prUrl: z.string(), ref: z.string() }).strict()),
@@ -150,8 +144,6 @@ export type DeckRowInput = InventoryRow & {
   /** What GitHub last said of it, for the dates its waits start; null for a teammate's PR the board doesn't read. */
   pr: Pick<Pr, "createdAt" | "headCommittedAt" | "reviewRequestedAt" | "approvalFeedback"> | null;
   tickets: readonly string[];
-  /** The open v2 decision it waits on, and when it was asked. */
-  decision: { n: number; question: string; since: number | null } | null;
   acted: RowActed | null;
 };
 export type DeckEffortInput = {
@@ -161,8 +153,6 @@ export type DeckEffortInput = {
   parentThreadId: string | null;
   /** Tickets it owns by name. */
   tickets: readonly string[];
-  /** Its active instruction's criteria; null without one. */
-  criteria: readonly Criterion[] | null;
   /** Its notes; none yet when left out. */
   notes?: EffortNotes;
 };
@@ -199,13 +189,12 @@ const oldest = (a: number | null, b: number | null) => (a ?? Number.POSITIVE_INF
 
 /**
  * The section a row files under, and what it waits on when that isn't you. A hold outranks everything, as it does every write, and files
- * the row under Held alone. Only a parent or a decision blocks: a review not yet due a nudge, running checks, code work a thread is
+ * the row under Held alone. Only a parent blocks: a review not yet due a nudge, running checks, code work a thread is
  * doing, and feedback a batch thread's claim holds are in flight.
  */
 function place(row: DeckRowInput, primary: ActionId | null, owner: string | null): { section: DeckSection; waitsOn: DeckRow["waitsOn"] } {
   const blocked = (waitsOn: NonNullable<DeckRow["waitsOn"]>) => ({ section: "blocked" as const, waitsOn });
   if (row.hold) return { section: "held", waitsOn: { kind: "hold", on: "you", what: row.hold.reason ? `On hold: ${row.hold.reason}` : "On hold", since: row.hold.heldAt } };
-  if (row.decision) return blocked({ kind: "decision", on: `D${row.decision.n}`, what: row.decision.question, since: row.decision.since });
   if (row.addressing) return { section: "flight", waitsOn: null };
   const move = primary && MOVES[primary];
   if (move && !(move === "work" && row.threads.executor?.active)) return { section: move, waitsOn: null };
@@ -230,7 +219,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing, sent: row.sent,
     hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
-    managed: row.managed?.label ?? null, checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
+    checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
   };
 }
 
@@ -275,14 +264,9 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     const since = row.waitsOn?.since ?? row.step?.since ?? null;
     return since === null ? [] : [{ prUrl: row.prUrl, ref: refOf(row), text: row.waitsOn?.what ?? row.step!.text, since }];
   }).sort((a, b) => a.since - b.since);
-  // "Done when" is what you wrote. The gates and tickets the roster also checks are the rows' own facts, which the sections already show.
-  const criteria = effort.criteria?.filter((item) => item.source === "user") ?? [];
-  const next = criteria.length
-    ? criteria.filter((item) => item.status !== "satisfied").slice(0, 3).map((item) => ({ text: item.label, owner: item.next?.owner ?? null,
-      prUrl: item.affected[0]?.target ?? null }))
-    : all.filter((row) => !parked(row)).sort((a, b) => DECK_SECTIONS.indexOf(a.section) - DECK_SECTIONS.indexOf(b.section) ||
-      oldest(a.waitsOn?.since ?? a.step?.since ?? null, b.waitsOn?.since ?? b.step?.since ?? null)).slice(0, 3)
-      .map((row) => ({ text: row.waitsOn?.what ?? row.step?.text ?? row.status, owner: row.waitsOn?.on ?? row.step?.owner ?? null, prUrl: row.prUrl }));
+  const next = all.filter((row) => !parked(row)).sort((a, b) => DECK_SECTIONS.indexOf(a.section) - DECK_SECTIONS.indexOf(b.section) ||
+    oldest(a.waitsOn?.since ?? a.step?.since ?? null, b.waitsOn?.since ?? b.step?.since ?? null)).slice(0, 3)
+    .map((row) => ({ text: row.waitsOn?.what ?? row.step?.text ?? row.status, owner: row.waitsOn?.on ?? row.step?.owner ?? null, prUrl: row.prUrl }));
   const tickets = [...new Set([...effort.tickets, ...rows.flatMap(({ input: row }) => row.tickets)])].sort();
   const details = tickets.flatMap((ticket) => input.linear.get(ticket) ?? []);
   const threads = new Map<string, DeckCard["threads"][number]>();
@@ -321,8 +305,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     needsYou: needs,
     stats: { open: rows.length, ready: inSection("merge").length, mergedWeek: merges.filter((merge) => recent(merge.at)).length,
       medianAgeMs: ages.length ? ages[Math.floor(ages.length / 2)]! : null, oldestWait: waits[0] ?? null },
-    progress: { merged: merges.length, open: rows.length,
-      criteria: criteria.length ? { validated: criteria.filter((item) => item.status === "satisfied").length, needed: criteria.length } : null },
+    progress: { merged: merges.length, open: rows.length },
     next, blocked,
     linear: { tickets: tickets.length, known: details.length,
       projects: tallies(details.flatMap((detail) => detail.project ? [detail.project.name] : [])).map((item) => ({ ...item,
@@ -356,7 +339,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
 
 /** A card no stored effort backs, as the effort it stands in for: always active, and never held, completed, or given a goal to meet. */
 const standIn = (id: string, name: string, goal: string): DeckEffortInput => ({ id, key: id, name, goal, oneOff: false, archived: false,
-  pile: { effortId: id, pile: "active", reason: "", since: 0 }, parentThreadId: null, tickets: [], criteria: null });
+  pile: { effortId: id, pile: "active", reason: "", since: 0 }, parentThreadId: null, tickets: [] });
 const serviceEffort = (repo: string) => standIn(serviceId(repo), serviceName(repo), serviceGoal(repo));
 
 /** Every row as the deck draws it, with the facts it came from, its card, and its card's pile: a PR no effort owns is on its repository's service card. */

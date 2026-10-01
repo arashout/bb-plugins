@@ -75,15 +75,11 @@ describe("effort piles over RPC", () => {
     expect(await env.call("effort_reopen", { effortKey: env.pickup.key })).toMatchObject({ ok: true, pile: { pile: "active", reason: "" } });
   });
 
-  it("leaves archived efforts out, and holds or completes a v2 effort only after it returns to legacy", async () => {
+  it("leaves archived efforts out, and holds none until it is restored", async () => {
     const env = await setup();
     env.efforts.setArchived(env.pickup.id, true);
     expect([...(await env.piles()).keys()]).toEqual([env.shelf.id]);
     expect(await env.call("effort_hold", { effortKey: env.pickup.key })).toEqual({ ok: false, error: "Restore this effort first." });
-    env.bb.storage.database().prepare("INSERT INTO effort_execution (effort_id, mode, revision, updated_at) VALUES (?, 'v2', 1, 0)").run(env.shelf.id);
-    for (const method of ["effort_hold", "effort_complete"]) expect(await env.call(method, { effortKey: env.shelf.key }))
-      .toMatchObject({ ok: false, error: expect.stringContaining("Switch it back to legacy") });
-    expect((await env.piles()).get(env.shelf.id)).toMatchObject({ pile: "active" });
     expect(await env.call("effort_resume", { effortKey: env.shelf.key })).toEqual({ ok: false, error: "This effort is already active." });
   });
 });

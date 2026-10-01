@@ -66,10 +66,10 @@ const STACKED_CONDITION = "Approving, on the understanding that series-aware ord
 /** Everything each view shows for one PR, computed as the server and the deck compose it. */
 function views({ pr, record, since }: Shape) {
   const { reasons } = prAttention(pr, { holds: {}, effort: null, since }, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 });
-  const row = inventoryRow({ prUrl: pr.url, pr, authored: true, stale: false, read: null, reasons, hold: null, observation: null, managed: null, stackedOn: null,
-    links: [], attemptThread: null, threads: new Map(), suggestedReviewers: [], lastAction: null, confirmation: null });
+  const row = inventoryRow({ prUrl: pr.url, pr, authored: true, stale: false, reasons, hold: null, observation: null, stackedOn: null,
+    links: [], threads: new Map(), suggestedReviewers: [], lastAction: null, confirmation: null });
   const line = inventoryLine(row, new Map(), { now: NOW, limitedUntil: null });
-  const [deck] = deckRows({ now: NOW, efforts: [], rows: [{ ...row, effort: null, pr, tickets: [], decision: null, acted: null }] });
+  const [deck] = deckRows({ now: NOW, efforts: [], rows: [{ ...row, effort: null, pr, tickets: [], acted: null }] });
   const live: LiveMergeFacts = { state: "OPEN", isDraft: false, reviewDecision: pr.reviewDecision, mergeStateStatus: pr.mergeStateStatus as LiveMergeFacts["mergeStateStatus"],
     headRefOid: pr.headRefOid ?? null, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0,
     approvalNotesComplete: true, approvalFeedback: pr.approvalFeedback!, reviewFeedback: pr.reviewFeedback };

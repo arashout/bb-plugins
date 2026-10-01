@@ -69,13 +69,13 @@ describe("inventory actions", () => {
     expect(env.records).toEqual([{ at: 1_000, prUrl: URL, action: "mark-ready", ok: true, detail: "Done.", reviewers: [] }]);
   });
 
-  it("refuses under a hold, a v2 claim, or another action without reading or writing, and records the refusal", async () => {
+  it("refuses under a hold, another writer, or another action without reading or writing, and records the refusal", async () => {
     const held = setup({ fresh: draft });
     held.hold({ reason: "Store layout first", heldAt: 0 });
     expect(await held.actions.markReady(URL, HEAD)).toEqual({ ok: false, error: "On hold: Store layout first. Release the hold first; nothing was written." });
     const claimed = setup({ fresh: draft });
-    claimed.writer("A worker from the Shelf order roster is writing this PR or checkout.");
-    expect(await claimed.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
+    claimed.writer("A batch or another action owns this PR; nothing was written.");
+    expect(await claimed.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("A batch or another action owns this PR") });
     // Holding its effort holds the PR too, as the Hold dialog promises.
     const effortHeld = setup({ fresh: draft });
     effortHeld.effortHold("Its effort is on hold. Resume it first; nothing was written.");
@@ -96,10 +96,10 @@ describe("inventory actions", () => {
     const env = setup({ fresh: draft });
     (env.deps.read as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
       env.log.push("read");
-      env.writer("A worker from the Shelf order roster is writing this PR or checkout.");
+      env.writer("A batch or another action owns this PR; nothing was written.");
       return { ok: true, pr: draft };
     });
-    expect(await env.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
+    expect(await env.actions.markReady(URL, HEAD)).toMatchObject({ ok: false, error: expect.stringContaining("A batch or another action owns this PR") });
     expect(env.log).toEqual(["read"]);
     const effortHeld = setup({ fresh: draft });
     (effortHeld.deps.read as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
@@ -201,14 +201,14 @@ describe("inventory actions", () => {
     expect([...failed.confirmed, ...moved.confirmed]).toEqual([]);
   });
 
-  it("refuses to confirm under a hold or a v2 claim, or once the head, the comments, their verification, or what else the row showed moved", async () => {
+  it("refuses to confirm under a hold or another writer, or once the head, the comments, their verification, or what else the row showed moved", async () => {
     const held = setup({ fresh: commented() });
     held.hold({ reason: "Store layout first", heldAt: 0 });
     expect(await held.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toEqual({ ok: false,
       error: "On hold: Store layout first. Release the hold first; nothing was written." });
     const claimed = setup({ fresh: commented() });
-    claimed.writer("A worker from the Shelf order roster is writing this PR or checkout. Nothing was written.");
-    expect(await claimed.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("Shelf order roster") });
+    claimed.writer("A batch or another action owns this PR; nothing was written.");
+    expect(await claimed.actions.confirmHandled(URL, HEAD, FEEDBACK.fingerprint)).toMatchObject({ ok: false, error: expect.stringContaining("A batch or another action owns this PR") });
     for (const env of [held, claimed]) expect(env.log).toEqual([]);
     const moved: [Pr, string][] = [
       [commented({ headRefOid: "b".repeat(40) }), "New commits landed since the row was shown. Review them and try again; nothing was written."],

@@ -20,11 +20,10 @@ const threads = new Map<string, ThreadRef>([
   ["thr-origin", { title: "Plan shelf order", titleFallback: null, status: "idle", updatedAt: 1 }],
   ["thr-legacy-old", { title: "Advance worker", titleFallback: null, status: "idle", updatedAt: 5 }],
   ["thr-legacy-busy", { title: "Advance worker", titleFallback: null, status: "active", updatedAt: 2 }],
-  ["thr-v2", { title: "Roster worker", titleFallback: null, status: "idle", updatedAt: 3 }],
 ]);
 const input = (number: number, extra: Partial<InventoryRowInput> = {}): InventoryRowInput => ({ prUrl: url(number), pr: pr(number), authored: true, stale: false,
-  read: null, reasons: [], hold: null, observation: { checkedAt: "2026-09-28T21:00:00.000Z", failedAt: null, error: null },
-  managed: null, stackedOn: null, links: [], attemptThread: null, threads, suggestedReviewers: [], lastAction: null, ...extra });
+  reasons: [], hold: null, observation: { checkedAt: "2026-09-28T21:00:00.000Z", failedAt: null, error: null },
+  stackedOn: null, links: [], threads, suggestedReviewers: [], lastAction: null, ...extra });
 const META = { checkedAt: "2026-09-28T21:00:00.000Z", attemptedAt: "2026-09-28T21:00:00.000Z", refreshing: false, rateLimitedUntil: null, warnings: [] };
 const shelf = { id: "effort-shelf", name: "Shelf order" }, atlas = { id: "effort-atlas", name: "Atlas maps" };
 
@@ -46,26 +45,21 @@ describe("the PR inventory", () => {
     expect(drafts.counts).toEqual(all.counts);
   });
 
-  it("names the thread the work started in, and the one working on it: a v2 attempt first, then a busy legacy worker over a newer idle one", () => {
+  it("names the thread the work started in, and the one working on it: a busy legacy worker over a newer idle one", () => {
     const links = [link("thr-legacy-old", ["advance"]), link("thr-legacy-busy", ["advance"]), link("thr-origin", ["cluster"]), link("thr-gone", ["metadata"])];
     expect(inventoryRow(input(1, { links })).threads).toEqual({ origin: { id: "thr-origin", title: "Plan shelf order", active: false },
       executor: { id: "thr-legacy-busy", title: "Advance worker", active: true } });
-    expect(inventoryRow(input(1, { links, attemptThread: "thr-v2" })).threads.executor).toEqual({ id: "thr-v2", title: "Roster worker", active: false });
     // A thread linked only by its path isn't where the work started, and a thread BB no longer lists is no one's.
     expect(inventoryRow(input(1, { links: [link("thr-origin", ["cluster"], "paths"), link("thr-gone", ["advance"])] })).threads).toEqual({ origin: null, executor: null });
   });
 
-  it("shows each PR's state in the board's words, its roster's when a v2 roster manages it, and says when nothing read it", () => {
+  it("shows each PR's state in the board's words, and says when nothing read it", () => {
     expect(inventoryRow(input(1)).status).toBe("No reviewer");
     // A stacked PR waits on its parent, and names it, so its row files under the parent's.
     expect(inventoryRow(input(2, { stackedOn: 1 }))).toMatchObject({ stackedOn: 1, status: "Behind #1" });
     expect(inventoryRow(input(1, { pr: pr(1, { reviewRequests: [{ login: "mira" }] }) })).reviewers).toEqual({ requested: ["mira"], reviewed: [] });
     expect(inventoryRow(input(1, { hold: { reason: "Store layout first", heldAt: 0 } })).status).toBe("On hold");
-    expect(inventoryRow(input(1, { managed: { effortId: "effort-shelf", effortName: "Shelf order", n: 3, state: "waiting", owner: "reviewer", modifiers: [] } })))
-      .toMatchObject({ status: "Waiting on review", managed: { effortName: "Shelf order", n: 3, label: "Waiting on review" } });
-    expect(inventoryRow(input(1, { pr: null, authored: false, read: { title: "ABC-1 Shelve sequels", isDraft: true, headOid: "b".repeat(40) } })))
-      .toMatchObject({ title: "ABC-1 Shelve sequels", status: "Not polled; read by its roster", draft: true, head: "b".repeat(40), stage: null });
-    expect(inventoryRow(input(1, { pr: null, authored: false, observation: null })).status).toBe("Not read yet");
+    expect(inventoryRow(input(1, { pr: null, authored: false, observation: null }))).toMatchObject({ status: "Not read yet", draft: null, head: null, stage: null });
     expect(inventoryRow(input(1, { observation: { checkedAt: null, failedAt: "2026-09-28T21:01:00.000Z", error: "HTTP 502" } })).failure)
       .toEqual({ at: "2026-09-28T21:01:00.000Z", error: "HTTP 502" });
   });

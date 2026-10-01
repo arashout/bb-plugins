@@ -491,11 +491,12 @@ describe("what the keys act on", () => {
 
   // The number on "N blocked" is a promise about what clicking it shows, so both count the rows as drawn until Mark seen.
   it("counts Blocked as drawn, so a row a read moved in or out doesn't make the header's number and its rows disagree", () => {
-    const decided = (number: number) => inkwellDeck({}, (row) => row.number === number ? { decision: { n: 1, question: "Which counter?", since: null } } : {});
+    // A row stacked on a PR that isn't ready to merge waits on it, in Blocked.
+    const decided = (number: number) => inkwellDeck({}, (row) => row.number === number ? { stackedOn: 999, status: "Behind #999", attention: [], yourTurn: null } : {});
     const seenAs = (view: DeckView) => ({ rows: { [PICKUP]: cardSnapshot(view.active.find((item) => item.id === PICKUP)!) }, at: {} });
     const header = (screen: CardScreen) => [screen.counts.find((part) => part.key === "blocked")?.text,
       filterSections(screen, rowFilter(screen, "blocked")).flatMap((section) => section.lines.map((line) => line.ref))];
-    // quill #211 is blocked on a decision now; it waits in Work in threads until you mark the card seen.
+    // quill #211 is blocked on a parent now; it waits in Work in threads until you mark the card seen.
     expect(header(card(decided(211), PICKUP, seenAs(inkwellDeck())))).toEqual(["2 blocked", ["quill #212", "spine #156"]]);
     // quill #210 isn't blocked now; it waits in Blocked until you mark the card seen.
     expect(header(card(inkwellDeck(), PICKUP, seenAs(decided(210))))).toEqual(["3 blocked", ["quill #210", "quill #212", "spine #156"]]);

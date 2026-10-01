@@ -290,7 +290,6 @@ function Details({ line, run, busy, leaves }: { line: DeckLine; run: Run; busy: 
     ["Reviewers", row.reviewers.length ? row.reviewers.map((review) => `@${review.login} ${review.state === "requested" ? "asked" : review.state}`).join(", ") : "nobody asked"],
     ["Tickets", row.tickets.join(", ") || "none"],
     ...row.hold ? [["Held", row.hold.reason || "no reason given"] as [string, string]] : [],
-    ...row.managed ? [["Roster", row.managed] as [string, string]] : [],
     ["Checked", row.failed ? "last read failed" : row.checkedAt ? new Date(row.checkedAt).toLocaleString() : "not yet"],
   ];
   return <div data-deck-details={line.prUrl} className="mb-1.5 ml-9 mr-1.5 grid gap-1.5 border-t border-border/50 px-2 py-1.5 text-[12px]">
@@ -481,10 +480,7 @@ export function Card({ screen, tiles, run, on, keyless, notes, markdown, filter 
       </div>
     </div>
     {bare ? <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">{threadsTile}</div> : <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">
-      <Tile id="next" title="Next steps" open={open("next")} more={false} run={run} className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-5"
-        note={screen.next.criteria ? <span className="inline-flex items-center gap-1.5"><span aria-hidden className="inline-flex gap-0.5">{Array.from({ length: screen.next.criteria.needed },
-          (_, index) => <i key={index} className={cn("inline-block size-2 rounded-full border", index < screen.next.criteria!.validated ? "border-transparent bg-emerald-500/60" : "border-border")} />)}</span>
-          {screen.next.criteria.validated} of {screen.next.criteria.needed} done</span> : null}>
+      <Tile id="next" title="Next steps" open={open("next")} more={false} run={run} className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-5">
         {screen.next.items.length ? <ul className="grid gap-px">{screen.next.items.map((item, index) => <li key={`${item.text}-${index}`} className="flex min-h-[22px] items-center gap-2 text-[12px]">
           <span aria-hidden className="w-3 text-center text-muted-foreground">○</span><span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}</span>
           {item.prUrl && item.ref ? <button type="button" onClick={() => run({ kind: "jump", prUrl: item.prUrl! })} title={`Show ${item.ref}`}
@@ -897,12 +893,10 @@ function DialogButtons({ busy, label, onOk, onCancel, disabled }: { busy: boolea
 /** Complete: what is still open first. Its PRs and threads stay with it on the Done pile. */
 export function CompleteBody({ screen, busy, error, onComplete, onCancel }: { screen: CardScreen; busy: boolean; error: string | null; onComplete(): void; onCancel(): void }) {
   const active = screen.threads.filter((thread) => thread.status === "active");
-  const criteria = screen.next.criteria;
   return <div className="grid gap-3 text-[12.5px]">
     <ul className="grid gap-1.5">
       <li><b className="font-medium">{plural(screen.card.stats.open, "open PR")}</b> <span className="text-muted-foreground">{screen.needsYou} need you</span></li>
       {active.length ? <li><b className="font-medium">{plural(active.length, "active thread")}</b> <span className="text-muted-foreground">{active.map((thread) => thread.title).join(", ")}</span></li> : null}
-      {criteria && criteria.validated < criteria.needed ? <li><b className="font-medium">{criteria.needed - criteria.validated} “done when” not met</b></li> : null}
     </ul>
     <p className="text-[12px] text-muted-foreground">Its PRs and threads stay with it on the Done pile, and stop counting. Reopen puts it back.</p>
     {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}

@@ -22,7 +22,7 @@ function history(saved: { id: string; createdAt: number; jobs: AdvanceJob[]; che
 }
 
 describe("legacy Advance history", () => {
-  it("lists every saved batch newest first, as the board and roster read it, and writes nothing", () => {
+  it("lists every saved batch newest first, as the board and All PRs read it, and writes nothing", () => {
     const { advance, rows } = history([{ id: "batch-1", createdAt: 1_000, jobs: [job(12, { status: "merged" })] },
       { id: "batch-2", createdAt: 2_000, jobs: [job(14, { threadId: "thr-worker", path: "/worktrees/batch-2/job-14" })] }]);
     const before = rows();

@@ -1,8 +1,6 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AdvanceFacts } from "./advance-contract.js";
 import type { Pr, RawUnit } from "./contract.js";
-import { createPrFactsStore } from "./effort-roster-store.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
@@ -20,12 +18,6 @@ const listing = (prs: Pr[], extra: Partial<InventoryResult> = {}): InventoryResu
   discoveryComplete: true, repositories: prs.length ? [{ repo: "inkwell/folio", complete: true }] : [], complete: true, warnings: [], ...extra });
 const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githubRepo: "inkwell/folio", branch: "abc-42-shelves", dirty: false,
   ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
-/** A full read of an open PR, as the roster keeps it. */
-const advanceFacts = (number: number): AdvanceFacts => ({ prUrl: url(number), number, title: pr(number).title, repo: "inkwell/folio",
-  headRefName: `abc-${number}-shelves`, baseRefName: "main", headOid: HEAD, baseOid: "d".repeat(40), state: "OPEN", isDraft: false, isCrossRepository: false,
-  reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "needs-attention",
-  detail: "Needs a review", unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
-  approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] } });
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
@@ -55,7 +47,6 @@ async function setup() {
     if (method === "pollAuthoredPrs") return state.polled;
     if (method === "inspectPrs") return state.inspection((input as { prUrls: string[] }).prUrls);
     if (method === "githubRateLimit") return { resetAt: state.resetAt };
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host method ${method}`);
   } });
   await plugin(bb);
@@ -74,10 +65,8 @@ async function setup() {
 }
 
 describe("the inventory poll", () => {
-  it("writes one batched read through the board's stores, so the inventory, checkouts, and roster agree, and never writes", async () => {
+  it("writes one batched read through the board's stores, so the inventory, checkouts, and All PRs agree, and never writes", async () => {
     const env = await setup();
-    const effort = createEffortStore(env.db).establish({ sourceKey: "pr:42", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
-      coordinatorState: "none", members: { tickets: [], prUrls: [url(42)] } });
     const checkedAt = (await env.board()).prObservations[url(42)]?.checkedAt;
     const failing = pr(42, { headRefOid: NEXT, statusCheckRollup: [{ conclusion: "FAILURE" }] });
     env.state.polled = listing([failing, pr(43)]);
@@ -89,25 +78,10 @@ describe("the inventory poll", () => {
     expect(board.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units)).find((unit) => unit.path === UNIT.path)?.pr)
       .toMatchObject({ headRefOid: NEXT, checkConclusions: ["FAILURE"] });
     expect(board.prObservations[url(42)]?.checkedAt).not.toBe(checkedAt);
-    const roster = await env.harness.callRpc("effort_roster_get", { effortId: effort.id }) as { rows: { number: number; checks: string | null; head: string | null }[] };
-    expect(roster.rows).toMatchObject([{ number: 42, checks: "failed", head: NEXT }]);
+    const rows = (await env.harness.callRpc("inventory_get", {}) as InventoryView).groups.flatMap((group) => group.rows);
+    expect(rows.find((row) => row.number === 42)).toMatchObject({ status: "CI failing", head: NEXT });
     expect(env.spawn).not.toHaveBeenCalled();
     expect(env.send).not.toHaveBeenCalled();
-  });
-
-  it("tells a roster when a poll reads a change to one of its PRs, so its pane needn't refetch on every board signal, and says nothing when a poll finds none", async () => {
-    const env = await setup();
-    const effort = createEffortStore(env.db).establish({ sourceKey: "pr:42", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
-      coordinatorState: "none", members: { tickets: [], prUrls: [url(42)] } });
-    await env.harness.callRpc("effort_roster_get", { effortId: effort.id });
-    const signals = () => env.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "effort-roster-changed").map((signal) => signal.payload);
-    await env.poll();
-    const before = signals().length;
-    await env.poll();
-    expect(signals().length).toBe(before);
-    env.state.polled = listing([pr(42, { statusCheckRollup: [{ conclusion: "FAILURE" }] }), pr(43)]);
-    await env.poll();
-    expect(signals().slice(before)).toEqual([{ effortId: effort.id }]);
   });
 
   it("reads a PR the search stopped listing before letting it go, since the search index can lag", async () => {
@@ -159,12 +133,11 @@ describe("the inventory poll", () => {
     expect(board.prObservations[url(43)]).toMatchObject({ failedAt: expect.any(String), error: "inkwell/folio #43: PR refresh failed: HTTP 502" });
   });
 
-  it("leaves a PR the poll found closed out of the inventory view, though its checkout and its roster's last read still say open", async () => {
+  it("leaves a PR the poll found closed out of the inventory view, though its checkout still says open", async () => {
     const env = await setup();
     createEffortStore(env.db).establish({ sourceKey: "pr:42", name: "Shelf order", goal: "Keep shelves in order", projectId: "project-folio",
       coordinatorState: "none", members: { tickets: [], prUrls: [url(42), url(43)] } });
-    // The roster read #43 an hour ago, while it was open; the poll rescans no checkout, so #42's still says open until the next scan.
-    createPrFactsStore(env.db).full(url(43), { facts: advanceFacts(43), fullAt: Date.now() - 3_600_000, signature: null, cheapAt: null });
+    // The poll rescans no checkout, so #42's still says open until the next scan.
     env.state.polled = listing([]);
     env.state.inspection = (urls) => ({ entries: [], closed: urls, failed: [], warnings: [] });
     expect(await env.poll()).toEqual(["pollAuthoredPrs", "inspectPrs"]);
@@ -188,6 +161,34 @@ describe("the inventory poll", () => {
     controller.abort();
     await done;
     expect(env.calls.slice(before)).toEqual([]);
+  });
+
+  // A secondary limit names no reset, so the poll backs off on its own: longer after each limit in a row, and from the start again
+  // once a read goes through, so one bad minute doesn't hold every later read for 15.
+  it("backs off a secondary rate limit longer each time, until a read GitHub doesn't limit", async () => {
+    const env = await setup();
+    const limited = listing([], { complete: false, discoveryComplete: false,
+      warnings: ["Authored PR poll failed: HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again."] });
+    const waits = async () => (await env.harness.callRpc("inventory_get", {}) as InventoryView).rateLimitedUntil! - Date.now();
+    const start = Date.now();
+    const at = (ms: number) => vi.spyOn(Date, "now").mockReturnValue(start + ms);
+    try {
+      at(0);
+      env.state.polled = limited;
+      // GitHub names no reset for a secondary limit, so nothing asks it for one.
+      expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
+      expect(await waits()).toBe(60_000);
+      at(61_000);
+      expect(await env.poll()).toEqual(["pollAuthoredPrs"]);
+      expect(await waits()).toBe(2 * 60_000);
+      at(182_000);
+      env.state.polled = listing([pr(42), pr(43)]);
+      await env.poll();
+      at(183_000);
+      env.state.polled = limited;
+      await env.poll();
+      expect(await waits()).toBe(60_000);
+    } finally { vi.restoreAllMocks(); }
   });
 });
 

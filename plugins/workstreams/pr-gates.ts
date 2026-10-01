@@ -1,33 +1,5 @@
-// Gates a PR must pass before v2 calls it prepared. Each gate reads live
-// preparation facts and stores, never readAdvancePr's readiness or detail, so a
-// wait, a repair, and a decision stay distinguishable instead of one attention
-// bucket. `null` means the facts cannot decide the gate yet: observe again.
-import type { AdvanceFacts } from "./advance-contract.js";
-import { feedbackVerificationState, userConfirmation, type ApprovalFeedbackRecord } from "./approval-feedback.js";
-import { feedbackToAddress, type FeedbackItem } from "./feedback-to-address.js";
-import type { Pr } from "./contract.js";
-
-export const GATE_IDS = [
-  "open", "unheld", "fresh", "not-fork", "no-conflict", "base-current", "checks-settled", "checks-green",
-  "threads-resolved", "feedback-verified", "changes-addressed", "rereview-requested", "review-requested",
-  "approved", "not-draft", "parent-merged", "merge-clean",
-] as const;
-export type GateId = (typeof GATE_IDS)[number];
-export type Gates = Record<GateId, boolean | null>;
-
-/** A full read older than this is stale for gating. */
-export const FRESH_MS = 120_000;
-
-export type GateInput = {
-  facts: AdvanceFacts;
-  /** When the full read that produced `facts` finished. */
-  observedAt: number;
-  now: number;
-  held: boolean;
-  feedback: ApprovalFeedbackRecord | null;
-  /** The board's cheap read of reviewers; null when nothing has observed them. */
-  reviewers: Pick<Pr, "reviewRequests" | "latestReviews"> | null;
-};
+// What GitHub's facts say about a PR's merge state and its reviewers, as All PRs' attention, Your turn, and a thread's fixes read them.
+// `null` means the facts cannot decide yet: read again.
 
 type MergeFacts = { mergeable: string | null; mergeStateStatus: string };
 type ReviewerFacts<T> = { reviewRequests: readonly string[]; latestReviews: readonly T[] };
@@ -67,44 +39,4 @@ export function awaitingRerequest<T extends { login: string; state: string }>(re
 export function answeredSince(review: { submittedAt?: string }, facts: { headCommittedAt?: string; reviewFeedback?: { repliedAt: string | null } }): boolean {
   const at = Date.parse(review.submittedAt ?? "");
   return [facts.headCommittedAt, facts.reviewFeedback?.repliedAt].some((answer) => answer != null && Date.parse(answer) > at);
-}
-
-export function prGates({ facts, observedAt, now, held, feedback, reviewers }: GateInput): Gates {
-  const approved = facts.reviewDecision === "APPROVED";
-  const feedbackState = feedbackVerificationState(facts.approvalFeedback, facts.headOid || null, feedback);
-  return {
-    open: facts.state === "OPEN",
-    unheld: !held,
-    fresh: now - observedAt <= FRESH_MS,
-    "not-fork": !facts.isCrossRepository,
-    "no-conflict": !conflicted(facts),
-    "base-current": facts.mergeStateStatus !== "BEHIND",
-    // Unknown results wait like pending ones; only a known failure asks for a check fix.
-    "checks-settled": facts.checks === "passed" || facts.checks === "failed",
-    "checks-green": facts.checks === "passed",
-    "threads-resolved": facts.unresolvedThreads === 0 && facts.threadsComplete,
-    "feedback-verified": feedbackState === "unknown" ? null : feedbackState === "none" || feedbackState === "verified",
-    "changes-addressed": changesAddressed(facts),
-    "rereview-requested": approved || (reviewers === null ? null : awaitingRerequest(reviewers).length === 0),
-    "review-requested": approved || (reviewers === null ? null : reviewEngaged(reviewers)),
-    approved,
-    "not-draft": !facts.isDraft,
-    "parent-merged": facts.basePrNumber === null,
-    "merge-clean": mergeClean(facts),
-  };
-}
-
-/**
- * Feedback to address on this read (feedback-to-address.ts), which no gate names: a worker's evidence verifies feedback, but only your
- * reply on the PR or your confirmation answers it, so this holds Ready and waits on you instead of launching work. Null when the read
- * didn't say who spoke last, which proves no answer.
- */
-export function unansweredFeedback(facts: Pick<AdvanceFacts, "approvalFeedback" | "reviewFeedback" | "headOid">, feedback: ApprovalFeedbackRecord | null): FeedbackItem[] | null {
-  if (facts.reviewFeedback === undefined) return null;
-  return feedbackToAddress(facts, userConfirmation(feedback, facts.approvalFeedback, facts.headOid || null)?.current === true);
-}
-
-/** What a PR short of merge-clean waits on: branch protection, or any other unmet requirement. */
-export function mergeWait(facts: Pick<AdvanceFacts, "mergeStateStatus">): "merge-blocked" | "merge-requirements" {
-  return facts.mergeStateStatus === "BLOCKED" ? "merge-blocked" : "merge-requirements";
 }

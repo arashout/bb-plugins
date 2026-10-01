@@ -18,12 +18,11 @@ import {
   parsePrList,
   repoFromRemote,
 } from "./gh.js";
-import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runRerunFailed, runUpdateBranch, type GhRunner } from "./ghactions.js";
+import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runUpdateBranch, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
-import { readAdvancePr, readEqualHeadTrees } from "./advance-host.js";
-import { inspectCheckout, prepareAdvanceWorkspace } from "./advance-workspace.js";
+import { readEqualHeadTrees } from "./advance-host.js";
 
 const GIT_TIMEOUT_MS = 10_000;
 const GH_TIMEOUT_MS = 20_000;
@@ -563,16 +562,12 @@ export default experimental_defineHostEntry({
       await mkdir(path, { recursive: true, mode: 0o700 });
       return { path: await realpath(path) };
     },
-    advanceInspect: ({ prUrl }, context) => readAdvancePr(ghRunner(context.signal), prUrl),
     approvalHandling: async ({ prUrl }, context) => {
       const target = prTarget(prUrl);
       return target === null ? { ok: false as const, error: "That is not a pull request URL." } : readApprovalHandling(ghRunner(context.signal), target);
     },
     equalHeadTrees: ({ prUrl, priorHeadOid, currentHeadOid }, context) =>
       readEqualHeadTrees(ghRunner(context.signal), prUrl, priorHeadOid, currentHeadOid),
-    advanceWorkspace: (input, context) => prepareAdvanceWorkspace(
-      (args, cwd) => run("git", args, cwd, GH_WRITE_TIMEOUT_MS, context.signal), ghRunner(context.signal), input),
-    inspectCheckout: (input, context) => inspectCheckout((args, cwd) => run("git", args, cwd, GIT_TIMEOUT_MS, context.signal), input),
     githubRateLimit: async (_input, context) => ({ resetAt: await readRateLimitReset(ghRunner(context.signal)) }),
     authoredPrs: ({ owners }, context) => readAuthoredPrs(ghRunner(context.signal), owners),
     inspectPrs: ({ prUrls }, context) => readInventoryPrs(ghRunner(context.signal), prUrls),
@@ -636,8 +631,6 @@ export default experimental_defineHostEntry({
           return runNudge(gh, target, request.reviewers, request.comment);
         case "ready":
           return runReady(gh, target, request.headOid);
-        case "rerun-failed":
-          return runRerunFailed(gh, target, request.headOid);
       }
     },
     linkbacks: async ({ prUrls }, context) => {

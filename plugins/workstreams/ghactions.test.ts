@@ -6,7 +6,6 @@ import {
   commentArgv,
   githubRateLimit,
   HEAD_MOVED,
-  headRunsArgv,
   mergeArgv,
   parseReviewRequests,
   prTarget,
@@ -16,14 +15,11 @@ import {
   readyArgv,
   reviewFeedbackOf,
   rerequestArgv,
-  rerunFailedArgv,
   runMerge,
   runNudge,
   runReady,
-  runRerunFailed,
   runUpdateBranch,
   threadsArgv,
-  writeFailure,
   type GhRunner,
   type Run,
 } from "./ghactions.js";
@@ -569,19 +565,16 @@ describe("writes", () => {
   });
 });
 
-describe("v2's lifecycle and check writes", () => {
+describe("mark ready", () => {
   const view = (patch: Record<string, unknown>) => ({ ok: true as const, stdout: JSON.stringify({ state: "OPEN", isDraft: true, headRefOid: SHA, ...patch }) });
 
-  it("builds each argv from the PR's repo and number, a full head sha, and a numeric run id, so nothing from GitHub or a title becomes a flag", () => {
+  it("builds its argv from the PR's repo and number, so nothing from GitHub or a title becomes a flag", () => {
     expect(readyArgv(TARGET)).toEqual(["pr", "ready", "47", "--repo", "inkwell/folio"]);
-    expect(headRunsArgv(TARGET, SHA)).toEqual(["run", "list", "--repo", "inkwell/folio", "--commit", SHA, "--json", "databaseId,attempt,status,conclusion", "--limit", "100"]);
-    expect(rerunFailedArgv(TARGET, 9_001)).toEqual(["run", "rerun", "9001", "--failed", "--repo", "inkwell/folio"]);
-    expect(() => headRunsArgv(TARGET, `--jq=${HOSTILE}`)).toThrow();
-    for (const id of [0, -3, 1.5, Number.NaN, 2 ** 60]) expect(() => rerunFailedArgv(TARGET, id)).toThrow();
-    // The host's contract takes a v2 write only with the exact head it was confirmed on, and nothing more.
+    // The host's contract takes it only with the exact head it was confirmed on, and nothing more.
     expect(prWriteSchema.safeParse({ kind: "ready", prUrl: "https://github.com/inkwell/folio/pull/47", headOid: SHA }).success).toBe(true);
-    expect(prWriteSchema.safeParse({ kind: "rerun-failed", prUrl: "https://github.com/inkwell/folio/pull/47", headOid: "abc" }).success).toBe(false);
+    expect(prWriteSchema.safeParse({ kind: "ready", prUrl: "https://github.com/inkwell/folio/pull/47", headOid: "abc" }).success).toBe(false);
     expect(prWriteSchema.safeParse({ kind: "ready", prUrl: "https://github.com/inkwell/folio/pull/47", headOid: SHA, comment: "PTAL" }).success).toBe(false);
+    expect(prWriteSchema.safeParse({ kind: "rerun-failed", prUrl: "https://github.com/inkwell/folio/pull/47", headOid: SHA }).success).toBe(false);
   });
 
   it("marks a draft ready only on the head it was confirmed on, and leaves a PR that is already ready alone", async () => {
@@ -594,30 +587,6 @@ describe("v2's lifecycle and check writes", () => {
     expect(await runReady(already.run, TARGET, SHA)).toMatchObject({ ok: true, detail: expect.stringContaining("already ready") });
     // Neither a moved head nor a PR already ready is written to.
     expect([...moved.calls, ...already.calls].map((call) => call.args[1])).toEqual(["view", "view"]);
-  });
-
-  it("reruns only the failed jobs of the head's failed runs, and never twice on one head", async () => {
-    const runs = (list: unknown[]) => fakeGh((args) => args[1] === "list" ? { ok: true, stdout: JSON.stringify(list) } : { ok: true, stdout: "" });
-    const failed = runs([{ databaseId: 11, attempt: 1, status: "completed", conclusion: "failure" }, { databaseId: 12, attempt: 1, status: "completed", conclusion: "success" },
-      { databaseId: 13, attempt: 1, status: "completed", conclusion: "timed_out" }]);
-    expect(await runRerunFailed(failed.run, TARGET, SHA)).toMatchObject({ ok: true, detail: expect.stringContaining("2 GitHub Actions runs") });
-    expect(failed.calls.slice(1).map((call) => call.args)).toEqual([rerunFailedArgv(TARGET, 11), rerunFailedArgv(TARGET, 13)]);
-    // Any run on the head already rerun, by v2 or anyone, means no second rerun.
-    const rerun = runs([{ databaseId: 11, attempt: 2, status: "completed", conclusion: "failure" }]);
-    expect(await runRerunFailed(rerun.run, TARGET, SHA)).toMatchObject({ ok: true, detail: expect.stringContaining("already rerun") });
-    const none = runs([{ databaseId: 12, attempt: 1, status: "completed", conclusion: "success" }]);
-    expect(await runRerunFailed(none.run, TARGET, SHA)).toMatchObject({ ok: true, detail: expect.stringContaining("nothing to rerun") });
-    const unreadable = fakeGh(() => ({ ok: true, stdout: "{}" }));
-    expect(await runRerunFailed(unreadable.run, TARGET, SHA)).toMatchObject({ ok: false });
-    expect([...rerun.calls, ...none.calls, ...unreadable.calls].map((call) => call.args[1])).toEqual(["list", "list", "list"]);
-  });
-
-  it("tells a write GitHub refused from one whose answer is unclear, so only an unclear one is read back before writing again", () => {
-    expect(writeFailure("GraphQL: API rate limit exceeded for user ID 1001.")).toBe("rate-limited");
-    for (const error of ["gh stopped before it finished: Command failed", "HTTP 502: Bad Gateway", "Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout",
-      "read tcp: connection reset by peer", HEAD_MOVED]) expect(writeFailure(error)).toBe("unclear");
-    for (const error of ["HTTP 422: Reviews may only be requested from collaborators.", "GraphQL: Resource not accessible by integration (addPullRequestReviewers)",
-      "GitHub refused to rerun run 11: HTTP 403"]) expect(writeFailure(error)).toBe("refused");
   });
 });
 

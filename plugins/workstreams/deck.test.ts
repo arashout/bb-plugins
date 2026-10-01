@@ -6,13 +6,12 @@ import { inkwellDeck, inkwellInventory, inkwellInventoryPrs, inkwellThreads, INV
 import type { InventoryView } from "./inventory-view.js";
 import { inventoryScreen, onYourTurn } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
-import type { Criterion } from "./outcome-evidence.js";
 import type { AttentionReason } from "./pr-attention.js";
 
 const DAY = 86_400_000;
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const effort = (key: keyof typeof INVENTORY_EFFORTS, patch: Partial<DeckEffortInput> = {}): DeckEffortInput => ({ ...INVENTORY_EFFORTS[key], key, goal: "",
-  oneOff: false, archived: false, pile: { effortId: INVENTORY_EFFORTS[key].id, pile: "active", reason: "", since: 1 }, parentThreadId: null, tickets: [], criteria: null,
+  oneOff: false, archived: false, pile: { effortId: INVENTORY_EFFORTS[key].id, pile: "active", reason: "", since: 1 }, parentThreadId: null, tickets: [],
   ...patch });
 const ONE_OFFS = { id: "effort-one-offs", name: "One-offs" };
 /**
@@ -23,7 +22,7 @@ const ONE_OFFS = { id: "effort-one-offs", name: "One-offs" };
 function input(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Partial<DeckRowInput> = () => ({})): DeckInput {
   const prs = new Map(inkwellInventoryPrs().map((pr) => [pr.url, pr]));
   const rows = inkwellInventory().groups.flatMap((group) => group.rows.map((entry): DeckRowInput => {
-    const base: DeckRowInput = { ...entry, effort: group.effort, pr: prs.get(entry.prUrl) ?? null, tickets: entry.title.match(/ABC-\d+/gu) ?? [], decision: null,
+    const base: DeckRowInput = { ...entry, effort: group.effort, pr: prs.get(entry.prUrl) ?? null, tickets: entry.title.match(/ABC-\d+/gu) ?? [],
       acted: null };
     return { ...base, ...row(base) };
   }));
@@ -117,27 +116,25 @@ describe("the effort deck", () => {
     expect(cardOf(deckView(input({}, old)), INVENTORY_EFFORTS.shelf.id).needsYou).toBe(5);
   });
 
-  it("pauses a held effort, files a PR a decision holds under what it waits on, and a PR you hold under Held alone", () => {
+  it("pauses a held effort, files a stacked PR under what it waits on, and a PR you hold under Held alone", () => {
     const view = deckView(input({ efforts: [effort("shelf", { pile: { effortId: INVENTORY_EFFORTS.shelf.id, pile: "held", reason: "Design review", since: 9 } }),
-      effort("pickup")] }, (row) => row.number === 210 ? { hold: { reason: "Waiting on the counter redesign", heldAt: INVENTORY_NOW - DAY } }
-      : row.number === 211 ? { decision: { n: 2, question: "Print slips per hold or per visit?", since: INVENTORY_NOW - 2 * DAY } } : {}));
+      effort("pickup")] }, (row) => row.number === 210 ? { hold: { reason: "Waiting on the counter redesign", heldAt: INVENTORY_NOW - DAY } } : {}));
     expect(view.active.filter((card) => card.kind === "effort").map((card) => card.name)).toEqual(["Store pickup"]);
     expect(view.held).toMatchObject([{ name: "Shelf order", needsYou: 0, status: { tone: "held", text: "On hold: Design review" } }]);
-    // Store pickup's one move of yours, and the seven on service cards.
-    expect(view.counts).toMatchObject({ needsYou: 1 + 7, held: 1 });
+    // Store pickup's two moves of yours, and the seven on service cards.
+    expect(view.counts).toMatchObject({ needsYou: 2 + 7, held: 1 });
     const pickup = cardOf(view, INVENTORY_EFFORTS.pickup.id);
-    // Oldest wait first: the stacked PRs since their push 3 days ago, then the decision.
+    // Oldest wait first: the stacked PRs since their push 3 days ago.
     expect(pickup.blocked.map(({ ref, kind, on, what, since }) => [ref, kind, on, what, since])).toEqual([
       ["quill #212", "parent", "quill #210", "Merges after quill #210", INVENTORY_NOW - 3 * DAY],
-      ["spine #156", "parent", "spine #155", "Merges after spine #155", INVENTORY_NOW - 3 * DAY],
-      ["quill #211", "decision", "D2", "Print slips per hold or per visit?", INVENTORY_NOW - 2 * DAY]]);
+      ["spine #156", "parent", "spine #155", "Merges after spine #155", INVENTORY_NOW - 3 * DAY]]);
     // The hold is in no other section, no next step, and not the oldest wait: it's parked until you release it, and Held says since when.
     expect(pickup.sections.filter((section) => section.rows.some((row) => row.number === 210)).map((section) => section.key)).toEqual(["held"]);
     expect(pickup.sections.find((section) => section.key === "held")!.rows.map((row) => [row.number, row.hold, row.waitsOn?.since]))
       .toEqual([[210, { reason: "Waiting on the counter redesign", since: INVENTORY_NOW - DAY }, INVENTORY_NOW - DAY]]);
     expect(pickup.next.some((item) => item.prUrl === url("quill", 210))).toBe(false);
     expect(pickup.stats.oldestWait?.ref).not.toBe("quill #210");
-    expect(pickup.status.text).toBe("1 need you · 3 blocked · 1 held");
+    expect(pickup.status.text).toBe("2 need you · 2 blocked · 1 held");
   });
 
   it("keeps a PR you hold out of the next steps and the oldest wait, even as its card's oldest or only row", () => {
@@ -206,8 +203,8 @@ describe("the effort deck", () => {
     // Every PR here opened 6 days ago; the stacked PRs have waited since their push 3 days ago, longer than any of your moves is dated.
     expect(card.stats).toEqual({ open: 5, ready: 0, mergedWeek: 1, medianAgeMs: 6 * DAY,
       oldestWait: { prUrl: url("quill", 212), ref: "quill #212", text: "Merges after quill #210", since: INVENTORY_NOW - 3 * DAY } });
-    expect(card.progress).toEqual({ merged: 2, open: 5, criteria: null });
-    // Without an instruction: your moves first, oldest first, then what waits on others.
+    expect(card.progress).toEqual({ merged: 2, open: 5 });
+    // Your moves first, oldest first, then what waits on others.
     expect(card.next).toEqual([{ text: "Resolve the conflicts", owner: "you", prUrl: url("quill", 210) },
       { text: "Address the requested changes", owner: "you", prUrl: url("quill", 211) }, { text: "Address the requested changes", owner: "you", prUrl: url("spine", 155) }]);
     expect(card.people).toEqual({ youWaitOn: [], waitOnYou: [
@@ -219,19 +216,6 @@ describe("the effort deck", () => {
     expect(card.activity.filter((item) => item.kind === "merged")).toEqual([{ kind: "merged", prUrl: url("quill", 200), ref: "quill #200", who: null, at: INVENTORY_NOW - DAY }]);
     expect(card.activity.map((item) => item.kind)).toEqual(["merged", "changes", "changes", "changes", "approved", "approved", "pushed", "pushed", "pushed",
       "pushed", "pushed"]);
-  });
-
-  it("names the next steps from the active instruction's unmet criteria, with the PR that carries each, and counts those that hold", () => {
-    const criterion = (id: string, status: Criterion["status"], target: string | null, source: Criterion["source"] = "user"): Criterion => ({ id, source,
-      label: `Criterion ${id}`, status, affected: target ? [{ target, n: 1 }] : [], next: status === "satisfied" ? null : { action: "validate", owner: "worker",
-        wake: "next pass" } });
-    // The roster checks gates and tickets too, but those are the rows' own facts: "done when" is what you wrote.
-    const view = deckView(input({ efforts: [effort("shelf", { criteria: [criterion("checks", "missing", url("folio", 330), "gate"),
-      criterion("ticket:ABC-300", "satisfied", null, "ticket"), criterion("c1", "satisfied", null), criterion("c2", "missing", url("folio", 340)),
-      criterion("c3", "blocked", url("folio", 330)), criterion("c4", "missing", null), criterion("c5", "missing", null)] })] }));
-    expect(cardOf(view, INVENTORY_EFFORTS.shelf.id)).toMatchObject({ progress: { criteria: { validated: 1, needed: 5 } }, next: [
-      { text: "Criterion c2", owner: "worker", prUrl: url("folio", 340) }, { text: "Criterion c3", owner: "worker", prUrl: url("folio", 330) },
-      { text: "Criterion c4", owner: "worker", prUrl: null }] });
   });
 
   it("rolls up only the Linear details the board stores, and says so when it stores none", () => {

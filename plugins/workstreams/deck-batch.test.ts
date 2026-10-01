@@ -115,7 +115,7 @@ describe("planning Address for Your turn PRs", () => {
     next = 800;
     const rows = [row("work", {}, feedback("Changes requested by @otto")), row("confirm", {}, feedback("Approval comment from @mira", { checkout: null, source: "folio" })),
       row("work", { hold: { reason: "Counter redesign", since: 1 } }, feedback("2 open threads")), row("work", {}, { pile: "held", ...feedback("2 open threads") }),
-      row("work", {}, { pile: "done", ...feedback("2 open threads") }), row("work", { managed: "Shelf order roster #2" }, feedback("2 open threads")),
+      row("work", {}, { pile: "done", ...feedback("2 open threads") }),
       row("work", {}, feedback("2 open threads", { busy: "An agent is already working on it." })), row("nudge", {}, feedback(null)),
       row("work", { acted: { kind: "address", state: "queued", at: 1, batchId: "b" } }, feedback("2 open threads")),
       row("work", {}, { head: null, ...feedback("2 open threads") }), row("work", {}, feedback("2 open threads", { checkout: null }))];
@@ -124,9 +124,9 @@ describe("planning Address for Your turn PRs", () => {
       ["address", "quill #800", "Batch thread", "Changes requested by @otto", "In folio-abc-42", HEAD],
       ["address", "quill #801", "Batch thread", "Approval comment from @mira", "No checkout: a new worktree from folio", HEAD]]);
     expect(brief(plan).skipped).toEqual(["quill #802: On hold. Release it first.", "quill #803: Its effort is on hold.", "quill #804: Its effort is done.",
-      "quill #805: Its v2 roster runs it.", "quill #806: An agent is already working on it.", "quill #807: No feedback waits on you.",
-      "quill #808: A write on it is waiting or just ran.", "quill #809: Not read in full yet. Refresh it first.",
-      "quill #810: No local checkout of its repository to add a worktree from."]);
+      "quill #805: An agent is already working on it.", "quill #806: No feedback waits on you.",
+      "quill #807: A write on it is waiting or just ran.", "quill #808: Not read in full yet. Refresh it first.",
+      "quill #809: No local checkout of its repository to add a worktree from."]);
     // Never Advance, and never a merge.
     expect(planBatch("advance", rows, { selected: false }).items.map((item) => item.kind)).toEqual(["nudge"]);
   });

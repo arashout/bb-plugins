@@ -1,6 +1,7 @@
-// Guidance a v2 preparation worker follows. Moved byte-for-byte out of legacy
-// Advance's preparationPrompt; its test pins each segment to the captured
-// legacy prompts, so an edit here is on purpose or not at all.
+// Guidance a thread follows when Workstreams asks it to fix or address a PR.
+// Moved byte-for-byte out of legacy Advance's preparationPrompt; its test pins
+// each segment to the captured legacy prompts, so an edit here is on purpose or
+// not at all.
 
 /** Branch work: integrate the base, or only verify the checkout when integration wasn't authorized. */
 export const BRANCH_WORK = {

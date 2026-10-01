@@ -36,15 +36,9 @@ import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposa
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS,
   ONE_OFFS_SOURCE, type AssignmentSource } from "./effort-assignments.js";
-import { cheapSignature, createEffortRosterStore, createPrFactsStore, EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
-import { createEffortRunner, type AttemptSignal, type V2Execution } from "./effort-runner.js";
-import { createEffortV2, EFFORT_ROSTER_CHANGED, effortV2Contract, type ParentCandidate, type ResourceParts } from "./effort-v2-server.js";
-import { createEffortWorkStore, EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS,
-  currentRow, USER_STATES, type V2Target } from "./effort-work-store.js";
-import type { ResourceThread } from "./effort-resources.js";
-import type { CheckoutInspection } from "./advance-contract.js";
-import { rosterTargets, settledOffBoard } from "./effort-roster.js";
-import { currentLegacyAttempts } from "./legacy-history.js";
+import { EFFORT_ROSTER_MIGRATIONS, PR_FACTS_MIGRATION } from "./effort-roster-store.js";
+import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION_MIGRATIONS, EFFORT_INSTRUCTION_MIGRATIONS, EFFORT_JOURNAL_MIGRATIONS }
+  from "./effort-work-store.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
 import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
@@ -334,9 +328,6 @@ const boardSchema = z.object({
   health: z.object({ refreshMinutes: z.number(), enrichment: enrichmentSchema.nullable() }),
   /** Open runs and the last day's, newest first: what the rows, the Agents strip and How this works report. */
   runs: z.array(runSchema),
-  /** PRs a v2 roster manages, by PR key, as their roster rows stand: their legacy cards show the roster's state and start no legacy work. */
-  v2Managed: z.record(z.string(), z.object({ effortId: z.string(), effortName: z.string(), n: z.number().nullable(),
-    state: z.enum([...USER_STATES, "not-in-instruction"]), owner: z.string().nullable(), modifiers: z.array(z.string()) })).default({}),
 });
 
 /** What the lens control remembers across a reload. */
@@ -408,7 +399,7 @@ export const rpcContract = defineRpcContract({
   /** Read-only: every open PR you author and every PR an effort names, by owning effort, with what needs attention. */
   inventory_get: { input: z.object({ attention: z.enum(INVENTORY_QUESTIONS).optional() }).strict(), output: inventoryViewSchema },
   /**
-   * One click, one write, on facts read again first: refused under a hold, a v2 claim, or another writer, and when the facts it depends on
+   * One click, one write, on facts read again first: refused under a hold or another writer, and when the facts it depends on
    * changed since the row was shown. Each sends those facts back from its row: mark ready its `head`, a request its `reviewers`, a nudge
    * the reviewers its attention reason names, and a confirmation its `head` and `feedbackFingerprint`. A confirmation writes nothing to
    * GitHub: it records the approval's comments verified on that head, as yours, and without a commit, reply, or resolved thread since the
@@ -539,7 +530,6 @@ export const rpcContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: z.string() }),
     ]),
   },
-  ...effortV2Contract,
   ...effortPilesContract,
   ...effortNotesContract,
   ...classifyContract,
@@ -766,21 +756,6 @@ export default async function plugin(bb: BbPluginApi) {
       experimental_schema: modelSettingSchema,
       default: "codex/gpt-6-sol/medium",
     },
-    v2Execution: {
-      type: "select",
-      label: "v2 execution",
-      description:
-        "Whether efforts on their v2 roster run work. A dry run plans each PR's next step and where it would run, and claims, starts, messages, and writes nothing. On lets the roster claim a PR and launch the work its instruction authorizes.",
-      options: ["dry-run", "on"],
-      default: "dry-run",
-    },
-    workerConcurrency: {
-      type: "number",
-      label: "v2 worker concurrency",
-      description: "The most v2 worker turns that run at once. A launch whose outcome is uncertain keeps its claim but takes no slot.",
-      experimental_schema: z.number().int().min(1).max(8),
-      default: 2,
-    },
     draftIdleDays: {
       type: "number",
       label: "Forgotten draft after (days)",
@@ -815,11 +790,6 @@ export default async function plugin(bb: BbPluginApi) {
     return parseModelSetting(role === "code" ? codeModel : planningModel);
   };
   const models = async () => ({ code: await modelFor("code"), planning: await modelFor("planning") });
-  /** Whether v2 runs work at all, and how many of its worker turns run at once. */
-  const v2Settings = async (): Promise<{ execution: V2Execution; concurrency: number }> => {
-    const { v2Execution, workerConcurrency } = await settings.get();
-    return { execution: v2Execution === "on" ? "on" : "dry-run", concurrency: workerConcurrency };
-  };
 
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
@@ -834,22 +804,10 @@ export default async function plugin(bb: BbPluginApi) {
     return hold ? `On hold${hold.reason ? `: ${hold.reason}` : ""}. Release the hold before advancing or merging this PR.` : null;
   };
   const effortStore = createEffortStore(db);
-  const effortWork = createEffortWorkStore(db);
   const piles = createEffortPileStore(db);
   const effortNotes = createEffortNotesStore(db);
   const assignments = createAssignmentStore(db, effortStore);
   const seeds = createSeedStore(db);
-  /** The pointer every legacy launcher returns for an effort that runs on its v2 roster; null for a legacy effort. */
-  const v2Pointer = (effortId: string | null | undefined): string | null => {
-    const effort = effortId ? effortStore.get(effortId) : null;
-    return effort && effortWork.execution(effort.id).mode === "v2" ? `Managed by the ${effort.name} roster; instruct there.` : null;
-  };
-  const v2Managed = (prUrl: string): string | null => v2Pointer(effortWork.managedBy(prUrl));
-  /** The refusal every writer outside v2 gets while a v2 attempt claims this PR or checkout: launching, running, or uncertain. */
-  const v2Claimed = (prUrl: string | null | undefined, path: string | null | undefined): string | null => {
-    const claim = effortWork.claimOn(prUrl ?? null, path ?? null);
-    return claim ? `A worker from the ${effortStore.get(claim.effortId)?.name ?? claim.effortId} roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.` : null;
-  };
   const host = bb.hosts.experimental_client({ contract: hostContract });
 
   async function contextWorkspace(hostId: string): Promise<{ type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } }> {
@@ -1003,7 +961,7 @@ export default async function plugin(bb: BbPluginApi) {
   // Every deck row is an inventory row, so the deck changes with it.
   const inventoryChanged = () => { bb.realtime.publish(INVENTORY_CHANGED, { refreshing: inventoryRefreshing || inventoryTargeting }); deckChanged(); };
   /**
-   * A roster Refresh skips the scan lock, so a scan read that began before it
+   * A single-PR read skips the scan lock, so a scan read that began before it
    * can land after it. Reads are numbered as they begin, and a scan's older read
    * never overwrites the inventory facts a later Refresh saw: the PR open as that
    * Refresh read it (null once it left the open list).
@@ -1047,16 +1005,12 @@ export default async function plugin(bb: BbPluginApi) {
       const began = ++githubReads;
       const listed = await host.call("authoredPrs", { owners }, { hostId, signal, timeoutMs: SCAN_TIMEOUT_MS });
       // GitHub's rate limit holds the poll and the next forced read until its reset, as the poll's own does.
-      const said = listed.warnings.join("\n");
-      if (githubRateLimit(said)) pollLimitedUntil = await effortV2.reconciler.rateLimitedUntil(said) ?? pollLimitedUntil;
+      pollLimitedUntil = await rateLimitedUntil(listed.warnings.join("\n")) ?? pollLimitedUntil;
       const result = { ...listed, entries: listed.entries.flatMap((entry) => {
         const pr = refreshedAfter(entry.pr.url, began);
         return pr === undefined ? [entry] : pr === null ? [] : [{ ...entry, pr }];
       }) };
       await writeAuthored(result, hostId);
-      effortV2.reconciler.observed(result.entries.map((entry) => entry.pr.url));
-      // The whole list: a PR it no longer lists changed too.
-      rosterObserved();
       return result.complete;
     } catch (error) {
       if (!signal.aborted) {
@@ -1094,8 +1048,6 @@ export default async function plugin(bb: BbPluginApi) {
     for (const entry of result.entries) await carryEquivalentFeedback(entry.pr, hostId);
     inventory.inspect(result);
     intentEvidenceVersion++;
-    effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...result.closed]);
-    rosterObserved([...result.entries.map((entry) => entry.pr.url), ...result.closed, ...result.failed]);
     writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
     // Fetch the checkout too: it distinguishes merged/release-tagged from closed.
     const closed = new Set(result.closed.map((url) => url.toLowerCase()));
@@ -1107,9 +1059,24 @@ export default async function plugin(bb: BbPluginApi) {
   let forcedRead: Promise<boolean> | null = null;
   /** GitHub's rate limit holds the poll until then. */
   let pollLimitedUntil: number | null = null;
+  /** Secondary rate limits in a row: each backs reads off longer, 1, 2, 4, 8, then 15 minutes, until a read GitHub doesn't limit. */
+  let secondaryLimits = 0;
+  /**
+   * When reads may run again after a read that said this, or null when GitHub didn't rate-limit it. A primary limit holds them until
+   * the reset GitHub reports, plus 30 seconds, or a minute when it reports none; a secondary limit names no reset, so reads back off.
+   */
+  async function rateLimitedUntil(said: string): Promise<number | null> {
+    const kind = githubRateLimit(said);
+    if (kind === null) { secondaryLimits = 0; return null; }
+    if (kind === "secondary") return Date.now() + [1, 2, 4, 8, 15][Math.min(secondaryLimits++, 4)]! * 60_000;
+    const hostId = (await bb.sdk.system.config()).primaryHostId;
+    const resetAt = hostId === null ? null : await host.call("githubRateLimit", {}, { hostId, signal: disposal.signal, timeoutMs: 60_000 })
+      .then((read) => read.resetAt, () => null);
+    return (resetAt ?? Date.now() + 60_000) + 30_000;
+  }
   /**
    * The inventory poll, every `inventoryPollSeconds`: one batched GitHub read of every open PR you author, written through the stores a
-   * full refresh writes, so the board, roster, and inventory agree. A PR the search stopped listing is read on its own before it leaves, since
+   * full refresh writes, so the board and inventory agree. A PR the search stopped listing is read on its own before it leaves, since
    * the search index can lag a close or an open; so is a PR whose reviews moved since its review threads were read. It only reads: it
    * rescans no checkout, and writes nothing to GitHub or BB. Like every board write, it lets thread intents catch up afterward. A rate limit holds it until GitHub's reset, which each PR's failure names.
    */
@@ -1144,7 +1111,7 @@ export default async function plugin(bb: BbPluginApi) {
         const unconfirmed = new Set(unread.map((entry) => entry.repo));
         const warnings = [...listed.warnings, ...read?.warnings ?? [],
           ...followUp.length > 100 ? [`${followUp.length - 100} PRs wait for the next poll to be read on their own.`] : []].slice(0, 50);
-        const rateLimit = githubRateLimit(warnings.join("\n")) ? await effortV2.reconciler.rateLimitedUntil(warnings.join("\n")) : null;
+        const rateLimit = await rateLimitedUntil(warnings.join("\n"));
         if (rateLimit !== null) {
           pollLimitedUntil = rateLimit;
           warnings.unshift(`GitHub's rate limit was reached; the next read waits until ${new Date(rateLimit).toISOString()}.`);
@@ -1161,9 +1128,6 @@ export default async function plugin(bb: BbPluginApi) {
         if (read?.closed.length) inventory.inspect({ entries: [], closed: read.closed, failed: [], warnings: [], merged: read.merged });
         writeCheckoutPrs(new Map(result.entries.map((entry) => [entry.pr.url.toLowerCase(), entry.pr])));
         recordTransitions(readUnits());
-        effortV2.reconciler.observed([...result.entries.map((entry) => entry.pr.url), ...vanished.map((entry) => entry.pr.url)]);
-        // The whole list: a PR it no longer lists changed too.
-        rosterObserved();
       } catch (error) {
         if (!signal.aborted) {
           inventory.apply({ owners, entries: [], repositories: [], complete: false, discoveryComplete: false,
@@ -1349,7 +1313,6 @@ export default async function plugin(bb: BbPluginApi) {
       recordTransitions(result.units);
       const observedPrs = result.units.flatMap((unit) => unit.pr === null || refreshedAfter(unit.pr.url, began) !== undefined ? [] : [unit.pr]);
       inventory.observe(observedPrs);
-      rosterObserved(observedPrs.map((pr) => pr.url));
       await refreshInventory(signal);
       warnings.push(...result.warnings);
 
@@ -2045,24 +2008,7 @@ export default async function plugin(bb: BbPluginApi) {
         enrichment: enrichmentSchema.nullable().catch(null).parse((await bb.storage.kv.get<unknown>("lastEnrichment")) ?? null),
       },
       runs: runs.recent(Date.now() - ROW_RUN_MS),
-      v2Managed: v2ManagedPrs(established),
     };
-  }
-  /**
-   * Every PR a v2 roster manages, as its roster row stands, the fences' own ownership: legacy cards show the roster's state in place of
-   * their own. A member no instruction includes, or one the instruction let go, is not in the instruction.
-   */
-  function v2ManagedPrs(efforts: readonly EstablishedEffort[]): Board["v2Managed"] {
-    const names = new Map(efforts.map((effort) => [effort.id, effort.name]));
-    return Object.fromEntries(effortWork.managed().flatMap(({ target, effortId }) => {
-      const effortName = names.get(effortId);
-      if (effortName === undefined || effortWork.execution(effortId).mode !== "v2") return [];
-      const row = effortWork.row(target);
-      const mine = row?.effortId === effortId ? row : null;
-      const current = mine && currentRow(mine) ? mine : null;
-      return [[target, { effortId, effortName, n: mine?.body.n ?? null, state: current?.body.userState ?? "not-in-instruction",
-        owner: current?.body.owner?.kind ?? null, modifiers: current?.body.modifiers ?? [] }]];
-    }));
   }
 
   // ---- BB threads: read, link, open. Only row actions write to them. -----
@@ -2416,16 +2362,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   const onThreadError = (error: unknown) =>
     bb.log.warn(`thread event handling failed: ${String(error).slice(0, 300)}`);
-  /**
-   * A thread signal is recorded on the v2 attempt that holds the thread, if any, and only makes rows due: that attempt's row,
-   * and, when the thread went idle, failed, or went away, rows waiting on it. The reconciler acts on its next tick.
-   */
-  const v2Signal = (threadId: string, signal: AttemptSignal | null, settled = false) => {
-    void (signal ? runner.signal(threadId, signal) : Promise.resolve(null)).then((heard) => {
-      if (settled) effortV2.reconciler.threadChanged(threadId, heard);
-      else if (heard) effortV2.reconciler.due([heard.target]);
-    }).catch(onThreadError);
-  };
   bb.events.on("thread.created", ({ thread }) => {
     onThreadChanged(thread, false).catch(onThreadError);
   });
@@ -2435,7 +2371,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
-    v2Signal(thread.id, { kind: "idle" }, true);
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
       if (hasIntent(thread.id)) void reconcileThreadIntent(thread.id).catch(onThreadError);
@@ -2443,7 +2378,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     signalRuns(thread.id, { kind: "failed", text: null, error });
-    v2Signal(thread.id, null, true);
     onThreadChanged(thread, true).catch(onThreadError);
   });
   bb.events.on("thread.unarchived", ({ thread }) => {
@@ -2451,7 +2385,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.archived", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
-    v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2459,7 +2392,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.deleted", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
-    v2Signal(thread.id, { kind: "gone" }, true);
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2468,20 +2400,12 @@ export default async function plugin(bb: BbPluginApi) {
   // A pending interaction IS an event: the agent is waiting on the user.
   bb.events.on("interaction.pending", ({ thread }) => {
     signalRuns(thread.id, { kind: "pending" });
-    v2Signal(thread.id, { kind: "interaction" });
-  });
-  // A failed turn: v2 asks BB to retry its worker's turn, within a bound. Core's own retries are left to run.
-  bb.events.on("turn.failed", ({ threadId, requestId, rateLimits }) => { v2Signal(threadId, { kind: "turn-failed", requestId, rateLimits }); });
-  // You deleted a queued message: when it was a v2 work order, its attempt is released and its row pauses.
-  bb.events.on("message.cancelled", ({ entry }) => {
-    v2Signal(entry.threadId, { kind: "cancelled", text: entry.content.map((part) => part.type === "text" ? part.text : "").join("\n") });
   });
   // There is no "interaction answered" event, and the event DTO carries no
   // pending flag. The thread's event sequence does advance when the user
   // answers, so a waiting run re-reads that one thread's interactions then.
   // Core coalesces this to at most once a second per thread; no polling.
   bb.events.on("experimental_thread.events", ({ thread }) => {
-    v2Signal(thread.id, { kind: "events" });
     if (thread.status !== "active" || !runs.openIn(thread.id).some((run) => run.status === "needs-you")) return;
     bb.sdk.threads.interactions.list({ threadId: thread.id }).then(
       (pending) => {
@@ -2517,7 +2441,6 @@ export default async function plugin(bb: BbPluginApi) {
       recordTransitions(readUnits());
       const observedPrs = result.units.flatMap((unit) => unit.pr === null ? [] : [unit.pr]);
       inventory.observe(observedPrs);
-      rosterObserved(observedPrs.map((pr) => pr.url));
       prFreshnessLinks.add("");
       for (const warning of result.warnings) bb.log.warn(`rescan: ${warning}`);
       bb.log.info(`rescanned ${paths.length} checkout(s) after row actions finished`);
@@ -3501,14 +3424,13 @@ export default async function plugin(bb: BbPluginApi) {
       prFreshnessLinks.add("");
       announceThreads();
     }
-    // An effort the change created goes again, unless it has since gained work, threads, or a roster of its own.
-    if (undo.created && effortWork.execution(undo.created).revision === 0) effortStore.discard(undo.created);
+    // An effort the change created goes again, unless it has since gained work or threads.
+    if (undo.created) effortStore.discard(undo.created);
     intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
     threadUndos.delete(threadId);
     intentClaims.set(threadId, (intentClaims.get(threadId) ?? []).filter((claim) => claim.at < undo.at));
     bb.realtime.publish(BOARD_CHANGED, { scanning });
     deckChanged();
-    await syncV2Targets();
     return threadEffortContext(threadId);
   }
 
@@ -3555,13 +3477,6 @@ export default async function plugin(bb: BbPluginApi) {
     const urls = confirmedThreadPrUrls({ metadata, recordedUrls, environmentPath: environment?.path ?? null,
       scanned: scanned.filter((unit) => unit.observed?.pr === true), knownUrls: [...work.keys()] });
     const cohorts = confirmedPrCohorts(urls, [...work.values()]);
-    // A v2 roster changes only through explicit membership, so linked work is suggested, never claimed.
-    if (v2Pointer(effort.id)) {
-      const suggested = cohorts.flatMap(({ members }) => [...members.tickets.filter((ticket) => !effortStore.owner("ticket", ticket)),
-        ...members.prUrls.filter((url) => !effortStore.owner("prUrl", url))]);
-      note(suggested.length ? `This effort runs on its roster, so linked work is not added automatically. Add it to the effort to put it on the roster: ${suggested.slice(0, 10).join(", ")}${suggested.length > 10 ? ", …" : ""}.` : null);
-      return;
-    }
     let claimed = false;
     let conflicts = 0;
     for (const cohort of cohorts) {
@@ -3576,18 +3491,16 @@ export default async function plugin(bb: BbPluginApi) {
     if (claimed) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      await syncV2Targets();
     }
   }
 
-  /** Runs after every board sync, so it also brings v2 targets up to date with membership and board facts. */
+  /** Runs after every board sync. */
   async function reconcileAllThreadIntents(): Promise<void> {
     for (const threadId of intentIds()) {
       if (disposal.signal.aborted) break;
       try { await reconcileThreadIntent(threadId); }
       catch (error) { bb.log.warn(`thread ${threadId}: effort inheritance failed: ${String(error).slice(0, 200)}`); }
     }
-    await syncV2Targets();
   }
 
   /** Unarchived coordinator threads this plugin started for an effort, found by their metadata. */
@@ -3662,15 +3575,13 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
 
-  /** A pile move never touches the effort's record. A v2 roster would keep working a held or done effort, so it stops first. */
+  /** A pile move never touches the effort's record. */
   function movePile(effortKey: string, move: PileMove, reason?: string) {
     const effort = adminRecord(effortKey);
     if (!effort || effort.mergedInto) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
     if ((move === "hold" || move === "complete") && effortStore.sourceKey(effort.id) === ONE_OFFS_SOURCE)
       return { ok: false as const, error: "One-offs stays active: each one-off merges on its own." };
-    if ((move === "hold" || move === "complete") && effortWork.execution(effort.id).mode === "v2")
-      return { ok: false as const, error: "Its roster runs v2 work. Switch it back to legacy before you hold or complete it." };
     try {
       const pile = piles.move(effort, move, reason);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -3694,7 +3605,7 @@ export default async function plugin(bb: BbPluginApi) {
     const carried = new Set(keys.flatMap((url) => { const pr = inventory.get(url)?.pr; return pr ? prTickets(pr, pattern) : []; }));
     const foreign = tickets.filter((ticket) => !carried.has(ticket));
     if (foreign.length) return { ok: false as const, error: `These PRs don't carry ${foreign.join(", ")}.` };
-    const work = readWorkContext(await board(), pattern, false, prFacts.reads());
+    const work = readWorkContext(await board(), pattern);
     const effort = destination();
     if (!effort) return { ok: false as const, error: "The effort changed. Refresh the deck." };
     if (effort.archivedAt) return { ok: false as const, error: "Restore this effort first." };
@@ -3712,7 +3623,6 @@ export default async function plugin(bb: BbPluginApi) {
       const { actionId, effort: updated, added } = assignments.assign({ effortId: effort.id, source, prUrls: keys, tickets, ruleId });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       inventoryChanged();
-      await syncV2Targets();
       return { ok: true as const, actionId, effort: { id: updated.id, key: updated.key, name: updated.name }, added };
     } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
   }
@@ -3730,18 +3640,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (effortStore.sourceKey(from.id) === ONE_OFFS_SOURCE) return { ok: false as const, error: "These are in One-offs already." };
     const keys = [...new Set(prUrls.map(prWorkItemKey))];
     const label = (url: string) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; };
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
     const elsewhere = keys.filter((url) => work.ownerForPr(url)?.id !== from.id).map(label);
     if (elsewhere.length) return { ok: false as const, error: `${elsewhere.join(", ")} ${elsewhere.length === 1 ? "isn't" : "aren't"} in ${from.name} now. Refresh and try again.` };
-    const writing = keys.map((url) => v2Claimed(url, null)).find(Boolean);
-    if (writing) return { ok: false as const, error: writing };
     const existed = effortStore.source(ONE_OFFS_SOURCE) !== null;
     const oneOffs = oneOffsEffort();
     try {
       const { actionId, effort, added } = assignments.move({ effortId: oneOffs.id, source: "one-off", prUrls: keys });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       inventoryChanged();
-      await syncV2Targets();
       return { ok: true as const, actionId, effort: { id: effort.id, key: effort.key, name: effort.name }, added };
     } catch (error) {
       if (!existed) effortStore.discard(oneOffs.id);
@@ -3753,7 +3660,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function classifyGet(read?: Board) {
     const current = read ?? await board();
     const pattern = compilePattern((await settings.get()).ticketPattern);
-    const work = readWorkContext(current, pattern, false, prFacts.reads());
+    const work = readWorkContext(current, pattern);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
     const units = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units));
     const areas = new Map(units.flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), [...new Set(unit.changedPaths
@@ -3838,9 +3745,9 @@ export default async function plugin(bb: BbPluginApi) {
     return { ok: true as const, created, skipped };
   }
 
-  /** Rules place only into an effort that takes work, and never onto a v2 roster, which changes only through explicit membership. */
+  /** Rules place only into an effort that takes work. */
   const rulesPlaceInto = (effortId: string) => { const effort = effortStore.get(effortId);
-    return !!effort && !effort.archivedAt && piles.get(effort).pile !== "done" && !v2Pointer(effort.id); };
+    return !!effort && !effort.archivedAt && piles.get(effort).pile !== "done"; };
   /** One pass of rules over open PRs of yours that no effort owns, batched by rule and effort. `all` places PRs opened before a rule too. */
   async function ruleBatches(rules: readonly Rule[], all: boolean, undone: ReadonlySet<string>) {
     const owners = new Map((await inventoryGet()).groups.flatMap((group) => group.rows.map((row) => [row.prUrl, group.effort?.id ?? null] as const)));
@@ -3868,7 +3775,6 @@ export default async function plugin(bb: BbPluginApi) {
     // A Linear project keeps its name as you typed it; it matches in any case.
     const normalized = kind === "ticket-prefix" ? value.trim().toUpperCase() : kind === "linear-project" ? value.trim().replace(/\s+/gu, " ") : value.trim().toLowerCase();
     const error = kind === "stack" ? (effort || normalized ? "A stack rule names no effort or value: a stacked PR joins its base's effort." : null)
-      : effort && v2Pointer(effort.id) ? "Its roster runs v2 work, so a rule can't add to it."
       : !effort || !rulesPlaceInto(effort.id) ? "Choose an effort that isn't archived or done."
       : kind === "ticket-prefix" && !/^[A-Z]{2,10}$/u.test(normalized) ? "Enter a ticket prefix such as ABC."
       : kind === "branch" && !/^[\w./*-]{1,100}$/u.test(normalized) ? "Enter part of a branch name, with * for any text."
@@ -3966,15 +3872,6 @@ export default async function plugin(bb: BbPluginApi) {
           blockers.push(`Finish pending thread sync for merged effort ${row.sourceId} before merging again.`);
       }
       if (!retry && (source.archivedAt || destination.archivedAt)) blockers.push("Restore archived efforts before merging them.");
-      // Combining efforts must not combine their authorizations: each instruction ends first.
-      if (!retry) for (const effort of [source, destination]) if (effortWork.instruction(effort.id))
-        blockers.push(`${effort.name} has an active instruction. Cancel it, or let it complete, before merging.`);
-      // A worker can outlive its instruction: a cancelled or completed one drains its running turn first.
-      if (!retry) for (const effort of [source, destination]) if (effortWork.claims(effort.id).length)
-        blockers.push(`${effort.name} has a v2 worker launching, running, or uncertain. Let it finish, or release it from the roster, before merging.`);
-      // A merge never lifts a fence: a v2 effort's PRs may join only another v2 roster.
-      if (!retry && effortWork.execution(source.id).mode === "v2" && effortWork.execution(destination.id).mode === "legacy")
-        blockers.push(`${source.name} runs on its roster and ${destination.name} does not. Move ${source.name} back to legacy launchers, or ${destination.name} to its roster, before merging.`);
       if (!retry && [source.coordinatorState, destination.coordinatorState].includes("creating"))
         blockers.push("A coordinator launch is unresolved. Inspect it before merging.");
       if (!retry && [...sourceControllers, ...destinationControllers].some((controller) => controller.state === "creating"))
@@ -4020,8 +3917,7 @@ export default async function plugin(bb: BbPluginApi) {
       actions.set(threadId, { ...actions.get(threadId), threadId, ...patch });
     for (const thread of threads) if (thread.workIntent) add(thread.id, { workEffortId: destination.id,
       expectedWorkEffortId: thread.metadataWorkEffortId });
-    // A v2 effort's threads keep their parents: merging never moves a controller under a roster's parent.
-    const coordinatorId = v2Pointer(source.id) || v2Pointer(destination.id) ? null : destination.coordinatorThreadId ?? source.coordinatorThreadId;
+    const coordinatorId = destination.coordinatorThreadId ?? source.coordinatorThreadId;
     if (!destination.coordinatorThreadId && source.coordinatorThreadId) {
       const thread = threads.find((item) => item.id === source.coordinatorThreadId);
       if (thread) add(thread.id, { effortId: destination.id, expectedEffortId: thread.metadataEffortId,
@@ -4106,9 +4002,6 @@ export default async function plugin(bb: BbPluginApi) {
     const effort = effortStore.source(scope.key) ?? effortStore.establish({ sourceKey: scope.key,
       name: scope.name, goal: scope.goal, projectId, members: scope.members, coordinatorState: "none" });
     if (effort.archivedAt) throw new Error("Restore this effort before placing new work under it.");
-    // A v2 roster reuses existing threads and checkouts; it never creates a coordinator or controller.
-    const managed = v2Pointer(effort.id);
-    if (managed) throw new Error(managed);
     if (scope.establishedId && scope.establishedId !== effort.id) throw new Error("The effort changed before placement. Refresh the action.");
     return { parentThreadId: repo ? (await ensureRepoController(effort, repo, projectId, hostId)).threadId!
       : (await coordinators.ensureExisting(effort.id, projectId)).coordinatorThreadId!, effort };
@@ -4140,8 +4033,6 @@ export default async function plugin(bb: BbPluginApi) {
   const pendingPrThreads = new Map<string, { id: string; startedAt: number }>();
   async function withPrWriter<T>(path: string, prUrl: string | undefined, action: () => Promise<T>): Promise<T | { ok: false; error: string }> {
     const key = prUrl?.toLowerCase();
-    const claimed = v2Claimed(prUrl, path);
-    if (claimed) return { ok: false, error: claimed };
     if (advance.reserved(key ?? "", path) || (key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
     // A batch thread's claim holds the PR and its checkout until the thread finishes: no second agent starts beside it.
     if (openRunOn(prUrl ?? null, path, ADDRESS_RUN)) return { ok: false, error: ADDRESSING };
@@ -4248,9 +4139,6 @@ export default async function plugin(bb: BbPluginApi) {
     // A PR's own hold stops only its merge; its effort's pile stops every write.
     const held = prUrl ? (action === "merge" ? holdMessage(prUrl) : null) ?? await effortStop(prUrl, action === "merge") : null;
     if (held) return { ok: false, error: held };
-    // Merging a Ready row stays allowed: Ready means no v2 worker holds it.
-    const claimed = v2Claimed(prUrl, unit?.path);
-    if (claimed) return { ok: false, error: claimed };
     if (prUrl && (advance.reserved(prUrl, unit?.path ?? null) || manualPrWrites.has(prUrl.toLowerCase()))) return { ok: false, error: "A batch or another action owns this PR." };
     if (prUrl) manualPrWrites.add(prUrl.toLowerCase());
     try {
@@ -4263,393 +4151,21 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  const prFacts = createPrFactsStore(db);
-  /**
-   * Refresh one roster PR now, without waiting for the scan lock: rescan its
-   * checkouts, re-read the threads working in them, then read GitHub. The cheap
-   * read goes through the board's own stores when the board tracks the PR; the
-   * full read, which alone tells merged from closed, is kept in pr_facts. A
-   * failed read keeps the last success.
-   */
-  async function observePr(prUrl: string, paths: readonly string[]): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
-    // Its caller, a refresh or a command, tells the roster itself.
-    refreshingPrs.add(prWorkItemKey(prUrl));
-    try { return await observeNow(prUrl, paths); }
-    finally { refreshingPrs.delete(prWorkItemKey(prUrl)); }
-  }
-  async function observeNow(prUrl: string, paths: readonly string[]): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
-    const failed = (error: string) => {
-      prFacts.failed(prUrl, error, Date.now());
-      return { status: "failed" as const, error };
-    };
-    const hostId = (await bb.sdk.system.config()).primaryHostId;
-    if (hostId === null) return failed("No primary BB host is available to read GitHub.");
-    // During a full scan this does nothing; the scan rescans every checkout itself.
-    if (paths.length > 0) await rescanPaths([...paths]);
-    const checkouts = new Set(paths.map((path) => path.replace(/\/+$/u, "")));
-    for (const thread of [...threadFacts.values()]) if (thread.environmentPath !== null && checkouts.has(thread.environmentPath.replace(/\/+$/u, ""))) {
-      try { await onThreadChanged(await bb.sdk.threads.get({ threadId: thread.id }), false); }
-      catch (error) { bb.log.warn(`thread ${thread.id}: refresh failed: ${String(error).slice(0, 200)}`); }
-    }
-    try {
-      const began = ++githubReads;
-      const cheapAt = Date.now();
-      const cheap = await host.call("inspectPrs", { prUrls: [prUrl] }, { hostId, signal: disposal.signal, timeoutMs: 60_000 });
-      const read = cheap.entries[0]?.pr ?? (cheap.closed.length > 0 ? null : undefined);
-      if (read !== undefined) refreshes.set(prUrl, { began, pr: read });
-      if (knownPrUrl(prUrl) !== null) {
-        await applyInspection(cheap, hostId);
-        recordTransitions(readUnits());
-        bb.realtime.publish(BOARD_CHANGED, { scanning });
-        inventoryChanged();
-      }
-      if (read !== undefined) cheapReads.set(prWorkItemKey(prUrl), { signature: cheapSignature(read), at: cheapAt });
-      return await fullRead(prUrl, hostId);
-    } catch (error) {
-      return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
-    }
-  }
-  /** What each roster PR showed when an observation last read it: its board read's signature, its full read, and its read failures. */
-  const rosterSeen = new Map<string, string>();
-  /** PRs a refresh or command is reading now; it tells their rosters itself. */
-  const refreshingPrs = new Set<string>();
-  /**
-   * After an observation: tell each effort whose roster numbers a PR that changed, once. A change is a new cheap signature, full read,
-   * or read failure, so a read that finds nothing new tells no one. The first read of a PR after a start tells its rosters too, since a
-   * pane may have read it before the start. Without `prUrls`, every numbered PR is checked, for a read of the whole list.
-   */
-  function rosterObserved(prUrls?: readonly string[]): void {
-    const numbered = rosterStore.numbered();
-    const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
-    const changed = new Set<string>();
-    for (const target of prUrls ? new Set(prUrls.map(prWorkItemKey)) : numbered.keys()) {
-      const efforts = numbered.get(target);
-      if (!efforts) continue;
-      const stored = prFacts.get(target);
-      const seen = JSON.stringify([cheapSignature(inventory.get(target)?.pr ?? scanned.get(target) ?? null), stored?.facts ?? null, stored?.failedAt ?? null,
-        inventory.observation(target)?.failedAt ?? null]);
-      const before = rosterSeen.get(target);
-      rosterSeen.set(target, seen);
-      if (before !== seen && !refreshingPrs.has(target)) for (const effortId of efforts) changed.add(effortId);
-    }
-    for (const effortId of changed) bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId });
-  }
-  /** The newest cheap read of each PR here: a full read that follows it is kept with its signature, so a later cheap read that differs supersedes it. */
-  const cheapReads = new Map<string, { signature: string; at: number }>();
-  /**
-   * When v2 last wrote each PR to GitHub. A cheap read from before that write no longer describes the PR, so a full read after it keeps no
-   * signature, and the next cheap read counts as a change even if it shows the PR as it was before the write, such as checks failing again.
-   */
-  const v2WroteAt = new Map<string, number>();
-  /** One full read of a PR, kept in pr_facts; a failure keeps the last success. A board-tracked PR whose facts moved is refreshed on the board too. */
-  async function fullRead(prUrl: string, hostId: string): Promise<{ status: "checked" } | { status: "failed"; error: string }> {
-    const failed = (error: string) => {
-      prFacts.failed(prUrl, error, Date.now());
-      rosterObserved([prUrl]);
-      return { status: "failed" as const, error };
-    };
-    try {
-      const full = await host.call("advanceInspect", { prUrl }, { hostId, signal: disposal.signal, timeoutMs: 60_000 });
-      if (!full.ok) return failed(full.error);
-      if (full.facts.approvalFeedback.status === "present" && full.facts.headOid) {
-        await carryEquivalentFeedback({ url: prUrl, headRefOid: full.facts.headOid, approvalFeedback: full.facts.approvalFeedback }, hostId);
-      }
-      const previous = prFacts.get(prUrl)?.facts;
-      // The newest cheap read, here or the board's own, which the roster compares a later cheap read with.
-      const board = inventory.get(prUrl);
-      const boardAt = Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0;
-      const read = cheapReads.get(prWorkItemKey(prUrl));
-      const cheap = board && boardAt >= (read?.at ?? 0) ? { signature: cheapSignature(board.pr), at: boardAt } : read;
-      const current = cheap && cheap.at > (v2WroteAt.get(prWorkItemKey(prUrl)) ?? -Infinity) ? cheap : null;
-      prFacts.full(prUrl, { facts: full.facts, fullAt: Date.now(), signature: current?.signature ?? null, cheapAt: cheap?.at ?? null });
-      rosterObserved([prUrl]);
-      if (knownPrUrl(prUrl) !== null && previous && JSON.stringify(previous) !== JSON.stringify(full.facts)) scheduleInventoryUrls([prUrl]);
-      return { status: "checked" };
-    } catch (error) {
-      return failed(`GitHub read failed: ${String(error).slice(0, 300)}`);
-    }
-  }
-  /**
-   * The reconciler's cheap read: one inspectPrs call per 100 PRs. The board's own stores take what the board tracks, exactly as
-   * its refresh writes them, so the board and the roster read the same facts; for the rest only the signature is kept. Returns
-   * the PRs whose signature differs from their last full read's, including any that left the open list.
-   */
-  async function v2CheapRead(prUrls: readonly string[]): Promise<{ changed: string[]; error: string | null }> {
-    const hostId = (await bb.sdk.system.config()).primaryHostId;
-    if (hostId === null) return { changed: [], error: "No primary BB host is available to read GitHub." };
-    const changed: string[] = [];
-    const errors: string[] = [];
-    for (let offset = 0; offset < prUrls.length; offset += 100) {
-      const at = Date.now();
-      let result: InventoryInspection;
-      try { result = await host.call("inspectPrs", { prUrls: prUrls.slice(offset, offset + 100) }, { hostId, signal: disposal.signal, timeoutMs: 60_000 }); }
-      catch (error) { errors.push(`GitHub read failed: ${String(error).slice(0, 300)}`); continue; }
-      const known = (url: string) => knownPrUrl(url) !== null;
-      const tracked = { ...result, entries: result.entries.filter((entry) => known(entry.pr.url)), closed: result.closed.filter(known), failed: result.failed.filter(known) };
-      if (tracked.entries.length || tracked.closed.length || tracked.failed.length) {
-        await applyInspection(tracked, hostId);
-        recordTransitions(readUnits());
-        bb.realtime.publish(BOARD_CHANGED, { scanning });
-        inventoryChanged();
-      }
-      for (const [url, pr] of [...result.entries.map((entry) => [entry.pr.url, entry.pr] as const), ...result.closed.map((url) => [url, null] as const)]) {
-        const signature = cheapSignature(pr);
-        if (prFacts.get(url)?.signature !== signature) changed.push(url);
-        cheapReads.set(prWorkItemKey(url), { signature, at });
-        prFacts.cheap(url, signature, at);
-      }
-      if (result.failed.length) errors.push(result.warnings.join("; ") || `GitHub couldn't read ${result.failed.length} PRs.`);
-    }
-    return { changed, error: errors.join("; ") || null };
-  }
-  /** Where a v2 launch could run: scanned checkouts and legacy worktrees read in place on the primary host, and the threads in them. */
-  async function v2Resources(target: string, facts: { repo: string; headOid: string }, attempt: { path: string | null } | null): Promise<ResourceParts> {
-    const hostId = (await bb.sdk.system.config()).primaryHostId ?? "";
-    const projects = await bb.sdk.projects.list();
-    const units = readUnits().map((unit) => {
-      const project = projectForPath(projects, unit.path);
-      return { path: unit.path, githubRepo: unit.githubRepo ?? null, branch: unit.branch, prUrl: unit.pr?.url ?? null, projectId: project?.projectId ?? null, hostId: project?.hostId ?? null };
-    });
-    const legacy = currentLegacyAttempts(advance.list()).get(target) ?? null;
-    const paths = [...new Set([attempt?.path ?? null, legacy?.reusable?.path ?? null, ...units.filter((unit) => unit.hostId === hostId
-      && unit.githubRepo?.toLowerCase() === facts.repo.toLowerCase()).map((unit) => unit.path)].filter((path) => path !== null))];
-    const inspections = new Map<string, CheckoutInspection>();
-    for (const path of paths) {
-      try { inspections.set(path, await host.call("inspectCheckout", { path, expectedHeadOid: facts.headOid }, { hostId, signal: disposal.signal, timeoutMs: 60_000 })); }
-      catch (error) { inspections.set(path, { ok: false, error: String(error).slice(0, 800) }); }
-    }
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-    const normal = (path: string) => path.replace(/\/+$/u, "");
-    const inPaths = new Set(paths.map(normal));
-    const threads: ResourceThread[] = [];
-    for (const known of [...threadFacts.values()]) if (known.environmentPath !== null && inPaths.has(normal(known.environmentPath))) {
-      try {
-        const thread = await bb.sdk.threads.get({ threadId: known.id, include: "environment" });
-        // BB not reporting context is no reason to pass a thread over.
-        const usage = await bb.sdk.threads.context({ threadId: known.id }).then((context) => context.usage, () => null);
-        threads.push({ id: thread.id, providerId: thread.providerId, status: thread.status, archived: thread.archivedAt !== null || thread.deletedAt !== null,
-          projectId: thread.projectId, hostId: "environment" in thread ? thread.environment?.hostId ?? null : null, environmentPath: known.environmentPath,
-          updatedAt: thread.updatedAt, contextUsed: usage ? usage.usedTokens / usage.modelContextWindow : null });
-      } catch { /* A thread that can't be read isn't a candidate. */ }
-    }
-    return { hostId, units, inspections, threads, linked: work.directThreadIds(target),
-      origin: work.linksForPr(target, false).find((link) => link.tier === "started")?.threadId ?? null };
-  }
-
-  /** Each v2 effort's roster PRs, from the same ownership the roster reads: explicit PR members and PRs whose ticket it alone owns. */
-  async function v2Targets(): Promise<(effortId: string) => V2Target[]> {
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-    return (effortId) => {
-      const effort = effortStore.get(effortId);
-      if (effort?.id !== effortId) return [];
-      const explicit = new Set(effort.members.prUrls.map(prWorkItemKey));
-      return rosterTargets(effort, work).map((target) => ({ target, source: explicit.has(target) ? "pr" : "ticket" }));
-    };
-  }
-  /** Target writes run one at a time, each from a fresh read, so the last one reflects the latest membership. */
-  let targetWrites: Promise<unknown> = Promise.resolve();
-  function writeV2Targets<T>(write: (targetsOf: (effortId: string) => V2Target[]) => T): Promise<T> {
-    const run = targetWrites.then(async () => write(await v2Targets()));
-    targetWrites = run.catch(() => undefined);
-    return run;
-  }
-  async function syncV2Targets(): Promise<void> {
-    if (!effortWork.active()) return;
-    try { await writeV2Targets((targetsOf) => effortWork.rewriteTargets(targetsOf)); }
-    catch (error) { bb.log.warn(`v2 targets: rewrite failed: ${String(error).slice(0, 300)}`); }
-  }
-  /** The coordinator, the thread that created the effort, and idle threads linked to its PRs, when they run on the planning provider. */
-  async function parentCandidates(effort: EstablishedEffort, targets: readonly string[]): Promise<ParentCandidate[]> {
-    const planning = await modelFor("planning");
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-    const origin = /^thread-created:([^:]+):/u.exec(effortStore.sourceKey(effort.id) ?? "")?.[1] ?? null;
-    // An unresolved launch cleared the pointer; a thread it started is found by its metadata and linked, never started twice.
-    const launched = effort.coordinatorState === "creating" ? await coordinatorThreads(effort.id, effort.projectId) : [];
-    const reasons = new Map<string, ParentCandidate["reason"]>();
-    for (const [threadId, reason] of [[effort.coordinatorThreadId, "coordinator"], ...launched.map((id) => [id, "coordinator"] as const), [origin, "origin"],
-      ...targets.flatMap((target) => work.directThreadIds(target).map((id) => [id, "linked"] as const))] as const) {
-      if (threadId && !reasons.has(threadId) && reasons.size < 20) reasons.set(threadId, reason);
-    }
-    const taken = new Set(effortStore.list().flatMap((other) => other.id !== effort.id && other.coordinatorThreadId ? [other.coordinatorThreadId] : []));
-    const candidates: ParentCandidate[] = [];
-    for (const [threadId, reason] of reasons) {
-      if (taken.has(threadId)) continue;
-      try {
-        const thread = await bb.sdk.threads.get({ threadId });
-        if (thread.archivedAt !== null || thread.deletedAt !== null || configuredProviderError(thread, planning) !== null ||
-          (threadId !== effort.coordinatorThreadId && thread.status !== "idle")) continue;
-        candidates.push({ threadId, title: (thread.title ?? thread.titleFallback ?? threadId).slice(0, 200), reason, canSpawnChild: thread.canSpawnChild });
-      } catch { /* A thread that cannot be read is not a candidate. */ }
-    }
-    return candidates;
-  }
-
-  const rosterStore = createEffortRosterStore(db, effortStore);
-  const effortV2 = createEffortV2({
-    efforts: effortStore,
-    numbers: rosterStore.numbers,
-    snapshots: rosterStore,
-    work: effortWork,
-    holds: { set: prHolds.set, changed: () => bb.realtime.publish(BOARD_CHANGED, { scanning }) },
-    models: async () => ({ code: await modelFor("code"), planning: await modelFor("planning") }),
-    authored: (prUrl) => inventory.get(prUrl) !== undefined,
-    observe: observePr,
-    realtime: bb.realtime,
-    launches: { execution: async () => (await v2Settings()).execution, admission: () => runner.admission(), recover: (attemptId) => runner.recover(attemptId),
-      launching: (target) => runner.launching(target), recheck: (target, fresh) => runner.recheck(target, fresh), launch: (input) => runner.launch(input),
-      code: (input) => runner.code(input), adopt: (target, legacy, facts) => runner.adopt(target, legacy, facts), advance: (attemptId) => runner.advance(attemptId) },
-    reconciler: {
-      now: Date.now,
-      cheapAt: (prUrl) => Math.max(Date.parse(inventory.observation(prUrl)?.checkedAt ?? "") || 0, prFacts.get(prUrl)?.cheapAt ?? 0) || null,
-      cheap: v2CheapRead,
-      full: async (prUrl) => {
-        const hostId = (await bb.sdk.system.config()).primaryHostId;
-        return hostId === null ? { status: "failed", error: "No primary BB host is available to read GitHub." } : fullRead(prUrl, hostId);
-      },
-      rateLimitReset: async () => {
-        const hostId = (await bb.sdk.system.config()).primaryHostId;
-        try { return hostId === null ? null : (await host.call("githubRateLimit", {}, { hostId, signal: disposal.signal, timeoutMs: 60_000 })).resetAt; }
-        catch { return null; }
-      },
-      resources: v2Resources,
-      // Advance no longer runs, so an uncertain legacy job never settles; after its rechecks the roster names it a system issue.
-      recheckLegacy: async () => {},
-      warn: (message) => bb.log.warn(message),
-    },
-    execution: {
-      get: (effortId) => effortWork.execution(effortId),
-      set: async (effortId, mode, expectedRevision) => {
-        const execution = await writeV2Targets((targetsOf) => effortWork.setMode(effortId, mode, expectedRevision, targetsOf));
-        bb.realtime.publish(BOARD_CHANGED, { scanning });
-        return execution;
-      },
-    },
-    parent: {
-      candidates: parentCandidates,
-      adopt: (effortId, threadId) => coordinators.adopt(effortId, threadId),
-      start: (effortId, prompt) => coordinators.start(effortId, prompt),
-    },
-    legacy: {
-      jobs: () => advance.list().flatMap((batch) => batch.jobs.map((job) => ({ batchId: batch.id, job }))),
-      // Legacy batches are read-only history now.
-      cancelQueued: () => false,
-    },
-    async sources() {
-      const current = await board();
-      const { ticketPattern, refreshMinutes } = await settings.get();
-      const work = readWorkContext(current, compilePattern(ticketPattern), false, prFacts.reads());
-      const scanned = new Map(readUnits().flatMap((unit) => unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []));
-      return {
-        now: Date.now(), work,
-        facts: (prUrl) => inventory.get(prUrl)?.pr ?? scanned.get(prUrl) ?? null,
-        full: prFacts.get,
-        observation: (prUrl) => inventory.observation(prUrl),
-        feedback: (prUrl) => approvalFeedback.get(prUrl),
-        holds: prHolds.list(),
-        legacy: currentLegacyAttempts(advance.list()),
-        runs: runs.recent(Number.MAX_SAFE_INTEGER),
-        threads: [...threadFacts.values()],
-        tickets: (ids) => new Map([...linear.read(ids)].map(([id, detail]) => [id, { title: detail.title, url: detail.url }])),
-        groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !effortStore.get(group.key)),
-        refreshMs: refreshMinutes * 60_000,
-      };
-    },
-  });
-  /**
-   * v2 launches and their readback. Nothing here schedules a launch: the reconciler's ticks do, after pass 0 reads every
-   * unfinished launch back. Every thread it starts or messages uses the configured model for its role.
-   */
-  const runner = createEffortRunner({
-    now: Date.now,
-    work: effortWork,
-    settings: v2Settings,
-    models,
-    // Every legacy writer the Advance fences read, read again here synchronously inside the claim's transaction.
-    writer: (prUrl, path) => {
-      const key = canonicalPrUrl(prUrl) ?? prUrl.toLowerCase();
-      const touches = (url: string | null, at: string | null) => (url !== null && (canonicalPrUrl(url) ?? url.toLowerCase()) === key) || (path !== null && at === path);
-      if (advance.reserved(prUrl, path)) {
-        const owner = advance.list().flatMap((batch) => batch.jobs.map((job) => ({ batch, job })))
-          .find(({ job }) => (job.uncertain || ["queued", "launching", "running", "verifying"].includes(job.status)) && touches(job.prUrl, job.path));
-        return { owner: "legacy-job", ref: owner ? `${owner.batch.id}/${owner.job.id}` : "reservation", path: null };
-      }
-      const pending = pendingPrThreads.get(key);
-      if (manualPrWrites.has(key) || pending) return { owner: "manual", ref: pending?.id ?? "a board action", path: null };
-      if (path !== null && launchingCheckouts.has(path)) return { owner: "manual", ref: "a launching board action", path: null };
-      const run = runs.recent(Number.MAX_SAFE_INTEGER).find((entry) => ["running", "needs-you"].includes(entry.status) && touches(entry.prUrl, entry.path));
-      return run ? { owner: "run", ref: String(run.id), path: null } : null;
-    },
-    threadStatus: (threadId) => threadFacts.get(threadId)?.status ?? null,
-    plan: (effortId, target, change) => effortV2.planRow(effortId, target, change),
-    settle: (effortId, target) => effortV2.settle(effortId, "launch", new Set([prWorkItemKey(target)])),
-    workspace: (input, hostId) => host.call("advanceWorkspace", input, { hostId, timeoutMs: SCAN_TIMEOUT_MS, signal: disposal.signal }),
-    spawn: (args) => bb.sdk.threads.spawn(args),
-    send: (args, role) => sendForRole(args, role),
-    spawned: async (projectId, attemptId) => {
-      const matches: string[] = [];
-      for (let offset = 0; ; offset += 100) {
-        const rows = await bb.sdk.threads.list({ projectId, originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
-        for (const thread of rows) if ((await bb.sdk.threads.getPluginMetadata({ threadId: thread.id })).workAttemptId === attemptId) matches.push(thread.id);
-        if (rows.length < 100) return matches;
-      }
-    },
-    marked: async (threadId, marker) => {
-      const requested = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "50" });
-      if (requested.some((event) => JSON.stringify(event).includes(marker))) return true;
-      return (await bb.sdk.threads.queuedMessages.list({ threadId })).some((queued) => JSON.stringify(queued).includes(marker));
-    },
-    turn: async (threadId) => {
-      const thread = await bb.sdk.threads.get({ threadId });
-      const requested = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "50" });
-      const [last] = await bb.sdk.threads.events.list({ threadId, order: "desc", limit: "1" });
-      return { status: thread.status, requests: requested.map((event) => ({ seq: event.seq, id: event.type === "client/turn/requested" ? event.data.requestId : null,
-        text: JSON.stringify(event.data) })), lastSeq: last?.seq ?? null,
-        output: thread.status === "idle" ? (await bb.sdk.threads.output({ threadId })).output : null };
-    },
-    interactions: async (threadId) => (await bb.sdk.threads.interactions.list({ threadId })).length,
-    retrying: async (threadId, requestId) => {
-      if ((await bb.sdk.threads.queuedMessages.list({ threadId })).some((queued) => queued.payload.kind === "retry")) return true;
-      const [newest] = await bb.sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "desc", limit: "1" });
-      return requestId !== null && newest?.type === "client/turn/requested" && newest.data.requestId !== requestId;
-    },
-    retry: (args) => bb.sdk.threads.retry(args),
-    stop: (threadId) => bb.sdk.threads.stop({ threadId }),
-    // Within the reconciler's budget of full reads, and never while GitHub's rate limit holds reads.
-    read: async (prUrl) => await effortV2.reconciler.readFull(prUrl) ? prFacts.get(prUrl)?.facts ?? null : null,
-    feedback: (prUrl, threadId, report) => { approvalFeedback.save(prUrl, threadId, report, Date.now()); },
-    requested: async (prUrl) => {
-      const hostId = (await bb.sdk.system.config()).primaryHostId;
-      if (hostId === null) throw new Error("No primary BB host is available to read GitHub.");
-      const live = await reviewersOf(hostId)(prUrl);
-      if (!live.ok) throw new Error(live.error);
-      return live.reviewers;
-    },
-    // No primary host is no answer from GitHub: the write stays pending and is read back once a host is available.
-    write: async (request) => {
-      const hostId = (await bb.sdk.system.config()).primaryHostId;
-      if (hostId === null) throw new Error("No primary BB host is available to write to GitHub.");
-      v2WroteAt.set(prWorkItemKey(request.prUrl), Date.now());
-      return writeOf(hostId)(request);
-    },
-    rateLimit: (error) => effortV2.reconciler.rateLimitedUntil(error),
-    publish: (effortId) => bb.realtime.publish(EFFORT_ROSTER_CHANGED, { effortId }),
-  });
-
   /**
    * The PR inventory: every open PR you author, and every open PR an unarchived effort names as a member, grouped by the effort that owns
-   * it, explicitly or through its ticket. It reads only what the board keeps: the inventory's reads, checkouts, and the roster's reads.
+   * it, explicitly or through its ticket. It reads only what the board keeps: the inventory's reads and checkouts.
    */
   async function inventoryGet(only?: InventoryQuestion, read?: Board): Promise<InventoryView> {
     const current = read ?? await board();
-    const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
     const claims = addressClaims();
     const sentOf = addressSent();
     const dismissals = await dismissed();
-    const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds), managed: current.v2Managed[prWorkItemKey(prUrl)] ?? null,
+    const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds),
       addressing: claims.get(prWorkItemKey(prUrl)) ?? null, sent: sentOf(prUrl), dismissal: dismissals.get(prWorkItemKey(prUrl)) ?? null,
       confirmation: userConfirmation(approvalFeedback.get(prUrl), pr?.approvalFeedback, pr?.headRefOid ?? null),
-      links: work.linksForPr(prUrl, false), attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null, threads: threadFacts });
+      links: work.linksForPr(prUrl, false), threads: threadFacts });
     const entries = current.prInventory.entries;
     const scannedPrs = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [{ repo: unit.githubRepo ?? "", pr: unit.pr }] : [])));
     const actions = await actionRecords();
@@ -4657,7 +4173,7 @@ export default async function plugin(bb: BbPluginApi) {
     const rows = entries.map((entry) => {
       const effort = entry.attention?.effort ?? owner(entry.pr.url);
       const repository = [...entries, ...scannedPrs].filter((other) => other.repo.toLowerCase() === entry.repo.toLowerCase() && other.pr.url !== entry.pr.url);
-      return { effort, ...inventoryRow({ prUrl: prWorkItemKey(entry.pr.url), pr: entry.pr, authored: true, stale: entry.stale, read: null,
+      return { effort, ...inventoryRow({ prUrl: prWorkItemKey(entry.pr.url), pr: entry.pr, authored: true, stale: entry.stale,
         reasons: entry.attention?.reasons ?? [], observation: inventory.observation(entry.pr.url), stackedOn: stackParent(entry, entries)?.pr.number ?? null,
         suggestedReviewers: suggestReviewers(entry.pr, repository.map((other) => other.pr)), lastAction: lastAction(prWorkItemKey(entry.pr.url)),
         ...shared(entry.pr.url, entry.pr) }) };
@@ -4665,21 +4181,21 @@ export default async function plugin(bb: BbPluginApi) {
     const listed = new Set(rows.map((row) => row.prUrl));
     const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
       unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []))));
-    const legacy = currentLegacyAttempts(advance.list());
+    // Each PR's job in the newest legacy Advance batch that has it: one that saw the PR merge or close settles a PR no board read holds.
+    const legacy = new Map<string, string>();
+    for (const batch of advance.list()) for (const job of batch.jobs) if (!legacy.has(prWorkItemKey(job.prUrl))) legacy.set(prWorkItemKey(job.prUrl), job.status);
     for (const prUrl of new Set(current.efforts.filter((effort) => !effort.archivedAt).flatMap((effort) => effort.members.prUrls.map(prWorkItemKey)))) {
       if (listed.has(prUrl)) continue;
       const pr = scanned.get(prUrl) ?? null;
-      const kept = prFacts.get(prUrl);
-      const observation = inventory.observation(prUrl) ?? (kept && { checkedAt: kept.fullAt === null ? null : new Date(kept.fullAt).toISOString(),
-        failedAt: kept.failedAt === null ? null : new Date(kept.failedAt).toISOString(), error: kept.error });
-      // When no board read holds its facts, the roster's rule settles it: its kept full read, or a newer legacy Advance job that saw it merge or close.
-      const state = pr?.state ?? settledOffBoard(prUrl, { full: prFacts.get, legacy })?.state ?? kept?.facts?.state ?? null;
+      const observation = inventory.observation(prUrl);
+      const ended = legacy.get(prUrl);
+      const state = pr?.state ?? (ended === "merged" ? "MERGED" : ended === "closed" ? "CLOSED" : null);
       // Only open PRs; one read and then dropped has closed or left, and one never read may still be open. The board's newest read
-      // finding it merged or closed settles it over an older checkout or roster read that still says open.
+      // finding it merged or closed settles it over an older checkout read that still says open.
       if (inventory.closed(prUrl) || (state === null ? observation?.checkedAt : state !== "OPEN")) continue;
       const effort = owner(prUrl);
       rows.push({ effort, ...inventoryRow({ prUrl, pr, authored: false, stale: false, reasons: [], observation, stackedOn: null, suggestedReviewers: [], lastAction: null,
-        read: kept?.facts ? { title: kept.facts.title, isDraft: kept.facts.isDraft, headOid: kept.facts.headOid } : null, ...shared(prUrl, pr) }) });
+        ...shared(prUrl, pr) }) });
     }
     // Each group says its effort's pile, so All PRs offers no write on a held, done, or archived effort's PRs.
     const pileOfEffort = (id: string) => { const effort = effortStore.get(id); return !effort ? "active" as const : effort.archivedAt ? "archived" as const : piles.get(effort).pile; };
@@ -4731,19 +4247,13 @@ export default async function plugin(bb: BbPluginApi) {
     const view = await inventoryGet(undefined, current);
     const pattern = compilePattern((await settings.get()).ticketPattern);
     const merges = inventory.merges();
-    // A merged PR's title and branch still place it by ticket, as a kept read places a PR the board no longer lists.
-    const work = readWorkContext(current, pattern, false, [...prFacts.reads(), ...merges.map((merge) => ({ prUrl: merge.url, title: merge.title,
-      headRefName: merge.headRefName ?? "" }))]);
+    // A merged PR's title and branch still place it by ticket after the board no longer lists it.
+    const work = readWorkContext(current, pattern, false, merges.map((merge) => ({ prUrl: merge.url, title: merge.title, headRefName: merge.headRefName ?? "" })));
     // An archived effort still owns its PRs, so the deck lists it with the done efforts rather than lose them.
     const efforts = current.efforts.filter((effort) => !effort.mergedInto);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
     const scanned = new Map(current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units.flatMap((unit) =>
       unit.pr ? [[prWorkItemKey(unit.pr.url), unit.pr] as const] : []))));
-    const decisions = new Map(efforts.flatMap((effort) => {
-      const asked = effortWork.asked(effort.id);
-      return effortWork.decisions(effort.id).flatMap((decision) => decision.body.targets.map((target) => [prWorkItemKey(target.target),
-        { n: decision.n, question: decision.body.question, since: asked.get(decision.id) ?? null }] as const));
-    }));
     const batches = deckBatches.acted();
     const rows = view.groups.flatMap((group) => group.rows.map((row) => {
       const pr = inventory.get(row.prUrl)?.pr ?? scanned.get(row.prUrl) ?? null;
@@ -4754,7 +4264,7 @@ export default async function plugin(bb: BbPluginApi) {
       const found = batches.get(row.prUrl) ?? null;
       // A started Address batch marks its PRs only while its claim holds them: then they're yours again, and Sent keeps the thread's link.
       const batched = found?.kind === "address" && found.state === "sent" && !row.addressing ? null : found;
-      return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [], decision: decisions.get(row.prUrl) ?? null,
+      return { ...row, effort: group.effort, pr, tickets: pr ? prTickets(pr, pattern) : [],
         acted: batched && (!clicked || batched.at >= clicked.at) ? batched : clicked };
     }));
     const { groups, oneOffsId } = await classifyGet(current);
@@ -4766,7 +4276,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { now: Date.now(), rows, classify: { groups, oneOffsId }, gone,
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
-        parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, criteria: effortV2.criteria(effort.id, work), notes: effortNotes.get(effort.id) })),
+        parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, notes: effortNotes.get(effort.id) })),
       merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id }] : []; }),
       linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
@@ -4794,7 +4304,7 @@ export default async function plugin(bb: BbPluginApi) {
     const to = (route: Exclude<AskRoute, { kind: "none" }>) => route.kind === "thread" ? `Ask “${route.title}”` : `Start a thread under ${route.under}`;
     const route = kind === "ask" ? await askRoute(prWorkItemKey(prUrls![0]!)) : null;
     const ask = route && (route.kind === "none" ? { why: route.why } : { to: to(route) });
-    const work = kind === "fix" ? readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads()) : null;
+    const work = kind === "fix" ? readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern)) : null;
     // Each fix keeps where its listing said it goes, so it's refused rather than sent anywhere else.
     const fixes = new Map(work ? await Promise.all(rows.filter(({ row }) => row.section === "work").map(async ({ row }): Promise<[string, NonNullable<PlanRow["fix"]>]> => {
       const pr = inventory.get(row.prUrl)?.pr;
@@ -4868,16 +4378,15 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
   /**
-   * What Address lists of each row: the feedback waiting on it, what keeps it (a v2 claim, or an agent on it or its checkout), and its
+   * What Address lists of each row: the feedback waiting on it, what keeps it (an agent on it or its checkout), and its
    * checkout, or without one the checkout of its repository its worktree is added from; for Each PR in its own thread, that thread's Ask or
    * Fix, and only a thread it has.
    */
   async function addressFacts(rows: ReturnType<typeof deckRows>, each: boolean): Promise<Map<string, Pick<PlanRow, "address" | "ask" | "fix">>> {
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
     return new Map(await Promise.all(rows.map(async ({ row, input }): Promise<[string, Pick<PlanRow, "address" | "ask" | "fix">]> => {
       const path = prCheckout(row.prUrl);
-      const busy = v2Claimed(row.prUrl, path) ? "A v2 roster worker holds it." : input.threads.executor?.active ? "An agent is already working on it."
-        : agentOn(row.prUrl, path);
+      const busy = input.threads.executor?.active ? "An agent is already working on it." : agentOn(row.prUrl, path);
       const source = path ? null : repoCheckout(row.prUrl);
       const address = { feedback: input.yourTurn?.why ?? null, busy, checkout: path && (path.split("/").at(-1) ?? path),
         source: source && (source.split("/").at(-1) ?? source), confirm: input.attention.some((reason) => reason.kind === "approval-comments") };
@@ -4916,7 +4425,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   /**
    * One batch thread for a confirmed Address listing. Each PR is read again first and must still show feedback waiting on you, on the head
-   * its row showed, with no hold, paused effort, v2 claim, or agent on it or in its own thread. Then every PR left is checked again and
+   * its row showed, with no hold, paused effort, or agent on it or in its own thread. Then every PR left is checked again and
    * claimed in the board's run record, which every other writer reads, in one step with nothing awaited, before one worker starts on the
    * code-work model in the listed project and parent. Its claims end when the thread finishes; a failed start drops them. A claim answers no
    * feedback: only your reply on the PR does.
@@ -4929,16 +4438,15 @@ export default async function plugin(bb: BbPluginApi) {
     const hostId = (await bb.sdk.system.config()).primaryHostId;
     if (hostId === null) return all("No primary BB host is available; nothing was started.");
     /**
-     * What keeps a PR out, as a check that awaits nothing once read: a hold, its effort stopped, a v2 claim, the thread its row names at work
+     * What keeps a PR out, as a check that awaits nothing once read: a hold, its effort stopped, the thread its row names at work
      * (planning reads the same; a PR with no checkout shows no other sign of one), or an agent on it or its checkout. With it, the threads
      * its row names, from the same read.
      */
     const stops = async () => {
       const stopped = await effortStops(false);
-      const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
-      const threads = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
-        attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null });
-      return { threads, why: (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl) ?? v2Claimed(prUrl, path)
+      const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
+      const threads = (prUrl: string) => rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts });
+      return { threads, why: (prUrl: string, path: string | null) => holdMessage(prUrl) ?? stopped(prUrl)
         ?? (threads(prUrl).executor?.active ? "An agent is already working on it." : null) ?? agentOn(prUrl, path) };
     };
     let stop = await stops();
@@ -5024,7 +4532,7 @@ export default async function plugin(bb: BbPluginApi) {
   let recording: Promise<unknown> = Promise.resolve();
   /** The effort that owns each PR now, from one read. */
   const ownerEfforts = async () => {
-    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern), false, prFacts.reads());
+    const work = readWorkContext(await board(), compilePattern((await settings.get()).ticketPattern));
     return (prUrl: string) => { const owner = work.ownerForPr(prUrl); return owner ? effortStore.get(owner.id) : null; };
   };
   /** Each PR's pile now, as the deck files it: an archived effort's PRs pause with the done efforts', and one no effort owns is on its always active service card. */
@@ -5067,9 +4575,8 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function askRoute(prUrl: string, read?: ReturnType<typeof readWorkContext>): Promise<AskRoute> {
     const pattern = compilePattern((await settings.get()).ticketPattern);
-    const work = read ?? readWorkContext(await board(), pattern, false, prFacts.reads());
-    const { executor, origin } = rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts,
-      attemptThread: effortWork.attempts(prUrl).find((attempt) => attempt.threadId)?.threadId ?? null });
+    const work = read ?? readWorkContext(await board(), pattern);
+    const { executor, origin } = rowThreads({ links: work.linksForPr(prUrl, false), threads: threadFacts });
     const thread = executor ?? origin;
     if (thread) return { kind: "thread", id: thread.id, title: thread.title };
     const known = knownPr(prUrl);
@@ -5150,7 +4657,6 @@ export default async function plugin(bb: BbPluginApi) {
     effortHold: (prUrl) => effortStop(prUrl, false),
     writer: (prUrl) => {
       const paths = readUnits().flatMap((unit) => unit.pr && prWorkItemKey(unit.pr.url) === prWorkItemKey(prUrl) ? [unit.path] : []);
-      for (const path of [null, ...paths]) { const claimed = v2Claimed(prUrl, path); if (claimed) return `${claimed} Nothing was written.`; }
       return [null, ...paths].some((path) => advance.reserved(prUrl, path) || (path !== null && launchingCheckouts.has(path)))
         ? "A batch or another action owns this PR; nothing was written." : null;
     },
@@ -5167,7 +4673,7 @@ export default async function plugin(bb: BbPluginApi) {
       return hostId === null ? { ok: false, error: "No primary BB host is available to write to GitHub." } : writeOf(hostId)(request);
     },
     handling: (prUrl) => approvalHandling(prUrl),
-    // The board and the roster panes, which read on board-changed, gate on this record.
+    // The board's panes, which read on board-changed, gate on this record.
     confirm: (prUrl, headOid, feedback, evidence) => {
       const record = approvalFeedback.confirm(prUrl, feedback, headOid, Date.now(), evidence);
       auditConfirmation(prUrl, "confirm", { headOid, fingerprint: record.fingerprint, evidence });
@@ -5210,14 +4716,11 @@ export default async function plugin(bb: BbPluginApi) {
     return { ok: true, detail };
   }
 
-  /** Hold or release a PR: the board and every view hear of it, and a v2 row pauses on the hold, or resumes on its release, now. */
+  /** Hold or release a PR: the board and every view hear of it. */
   async function setHold(prUrl: string, held: boolean, reason?: string) {
     const holds = prHolds.set(prUrl, held, reason);
     bb.realtime.publish(BOARD_CHANGED, { scanning });
     inventoryChanged();
-    // A hold outlasts every instruction: a v2 row pauses on it, or resumes on release, now.
-    const row = effortWork.row(prUrl);
-    if (row) await effortV2.settle(row.effortId, "hold", new Set([row.target]));
     return holds;
   }
   /** A release the deck confirmed: one someone lifted in the meantime is done already. */
@@ -5244,7 +4747,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.onDispose(() => clearTimeout(addressRecovery));
 
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
-    ...effortV2.handlers,
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
     pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
@@ -5255,7 +4757,6 @@ export default async function plugin(bb: BbPluginApi) {
       if (effortStore.source(input.groupKey)?.archivedAt) return { ok: false as const, error: "Restore this effort before coordinating it." };
       const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
       bb.realtime.publish(BOARD_CHANGED, { scanning });
-      await syncV2Targets();
       return result;
     },
     effort_admin_list: () => {
@@ -5317,8 +4818,6 @@ export default async function plugin(bb: BbPluginApi) {
       const effort = effortStore.setArchived(record.id, archived);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      // Archiving pauses a v2 effort's rows and restoring resumes them; running work drains, nothing is cancelled.
-      await effortV2.settle(record.id, archived ? "archive" : "restore");
       return { ok: true as const, effort };
     },
     effort_admin_merge_preview: ({ sourceKey, destinationKey }) => adminMergePreview(sourceKey, destinationKey),
@@ -5343,10 +4842,6 @@ export default async function plugin(bb: BbPluginApi) {
             effortStore.repoControllers(freshSource.id), effortStore.repoControllers(freshDestination.id),
             result.threadDetails.map((thread) => JSON.stringify([thread.id, thread.status, thread.parentThreadId, thread.metadataEffortId, thread.metadataWorkEffortId]))) !== expectedScope)
             throw new Error("Effort ownership or controller bindings changed. Reopen the merge preview.");
-          if (effortWork.instruction(freshSource.id) || effortWork.instruction(freshDestination.id))
-            throw new Error("An instruction became active for these efforts. Reopen the merge preview.");
-          if (effortWork.claims(freshSource.id).length || effortWork.claims(freshDestination.id).length)
-            throw new Error("A v2 worker claimed work for these efforts. Reopen the merge preview.");
           const paths = new Set([...(freshSource.members.checkoutPaths ?? []), ...(freshDestination.members.checkoutPaths ?? [])]);
           const prs = new Set([...freshSource.members.prUrls, ...freshDestination.members.prUrls].map((url) => canonicalPrUrl(url) ?? url));
           const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
@@ -5361,7 +4856,6 @@ export default async function plugin(bb: BbPluginApi) {
         })();
         bb.realtime.publish(BOARD_CHANGED, { scanning });
         deckChanged();
-        await syncV2Targets();
         const { pending, notice } = await syncMergedThreadIntents(result.preview.source.id, result.preview.destination.id);
         return { ok: true as const, effort, pendingThreadSync: pending, notice };
       } catch (error) { return { ok: false as const, error: `Effort merge could not finish: ${String(error).slice(0, 300)}. Reopen the preview or retry the merge.` }; }
@@ -5433,12 +4927,11 @@ export default async function plugin(bb: BbPluginApi) {
     classify_undo: async ({ actionId }) => {
       try {
         const { effortId, source } = assignments.undo(actionId);
-        // Undoing a new or seeded effort removes it, unless it has since gained work, threads, or a roster of its own.
-        if ((source === "new-effort" || source === "seed") && effortWork.execution(effortId).revision === 0 && effortStore.discard(effortId)) seeds.remove(effortId);
+        // Undoing a new or seeded effort removes it, unless it has since gained work or threads.
+        if ((source === "new-effort" || source === "seed") && effortStore.discard(effortId)) seeds.remove(effortId);
       } catch (error) { return { ok: false as const, error: (error as Error).message }; }
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       inventoryChanged();
-      await syncV2Targets();
       return { ok: true as const };
     },
     effort_reopen: ({ effortKey }) => movePile(effortKey, "reopen"),
@@ -5547,7 +5040,6 @@ export default async function plugin(bb: BbPluginApi) {
         next = effort.id;
         intentEpoch.set(threadId, (intentEpoch.get(threadId) ?? 0) + 1);
         db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
-        if (!established) await syncV2Targets();
       }
       const undoId = offerUndo(threadId, { at, intent: { prior, next } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -5592,7 +5084,6 @@ export default async function plugin(bb: BbPluginApi) {
         .map(([ownerId, members]) => ({ ownerId, members })) }, ...established ? {} : { created: moved.id } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      await syncV2Targets();
       if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
       return withUndo(await threadEffortContext(threadId), undoId);
     },
@@ -5686,8 +5177,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const held = holdMessage(canonical);
       if (held) return { ok: false as const, error: held };
-      const claimed = v2Claimed(canonical, known.path);
-      if (claimed) return { ok: false as const, error: claimed };
       // A batch thread's claim holds the PR from before its thread exists, which the owners below can't name yet, until it finishes.
       if (openRunOn(canonical, known.path, ADDRESS_RUN)) return { ok: false as const, error: ADDRESSING };
       if (manualPrWrites.has(canonical)) return { ok: false as const, error: "Another action owns this PR." };
@@ -5771,9 +5260,6 @@ export default async function plugin(bb: BbPluginApi) {
       const verdict = mergeVerdict(read.live, approvalFeedback.get(target.prUrl));
       const held = holdMessage(target.prUrl) ?? await effortStop(target.prUrl, true);
       if (held) verdict.refusals.unshift(held);
-      // The merge refuses while a v2 worker claims the PR or its checkout, so the preview never offers it.
-      const claimed = v2Claimed(target.prUrl, directUnit(input)?.path);
-      if (claimed) verdict.refusals.unshift(claimed);
       return {
         ok: true as const,
         live: read.live,
@@ -5835,8 +5321,6 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: false as const, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
       }
       const found = await scannedUnit(path);
-      const managed = found?.raw.pr ? v2Managed(found.raw.pr.url) : null;
-      if (managed) return { ok: false as const, error: managed };
       const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : found ? await checkoutScope(path) : null;
       const repo = found?.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found?.raw.githubRepo ?? null;
       const parentId = storedPlacementParent(repo, scope);
@@ -5987,7 +5471,6 @@ export default async function plugin(bb: BbPluginApi) {
       name: "workstreams",
       summary: "Read the workstream board and name ticket clusters",
       commands: {
-        ...effortV2.commands,
         inventory: cliCommand({
           summary: "List every open PR you author, and each PR an effort owns, by effort, with what needs your attention",
           options: {
@@ -6084,9 +5567,6 @@ export default async function plugin(bb: BbPluginApi) {
   );
 
   // ---- background refresh ---------------------------------------------
-
-  // The only v2 scheduler: pass 0, then a tick every 15 seconds or at the next event. Nothing in the UI schedules v2 work.
-  bb.background.service("effort-v2", { start: (signal) => effortV2.reconciler.run(signal) });
 
   // Reads only: every open PR you author, into the board's stores. It starts, messages, and writes nothing.
   bb.background.service("inventory-poll", {

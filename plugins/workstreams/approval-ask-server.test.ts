@@ -61,7 +61,6 @@ async function setup(options: { checkout?: boolean; threads?: { id: string; titl
       discoveryComplete: true, repositories: [{ repo: REPO, complete: true }], complete: true, warnings: [] };
     if (method === "inspectPrs") return { entries: (input as { prUrls: string[] }).prUrls.map((prUrl) => ({ repo: REPO,
       pr: prUrl === url(42) ? current : approved(43, NONE) })), closed: [], failed: [], warnings: [] };
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     throw new Error(`Unexpected host call ${method}`);
   } });
   await plugin(bb);

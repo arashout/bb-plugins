@@ -1,125 +1,46 @@
 import { describe, expect, it } from "vitest";
-import type { AdvanceFacts } from "./advance-contract.js";
-import { advanceChecks } from "./advance-host.js";
-import type { ApprovalFeedbackRecord } from "./approval-feedback.js";
-import { FRESH_MS, GATE_IDS, mergeWait, prGates, unansweredFeedback, type GateId, type GateInput, type Gates } from "./pr-gates.js";
+import { awaitingRerequest, changesAddressed, conflicted, mergeClean, reviewEngaged } from "./pr-gates.js";
 
-const head = "a".repeat(40);
-const url = "https://github.com/inkwell/folio/pull/42";
-const fingerprint = "f".repeat(64);
-// Approved, green, clean, and its approval note verified on this head: every gate passes.
-const facts: AdvanceFacts = {
-  prUrl: url, number: 42, title: "ABC-42 Keep shelf order on reload", repo: "inkwell/folio",
-  headRefName: "abc-42-shelf-order", baseRefName: "main", headOid: head, baseOid: "b".repeat(40),
-  state: "OPEN", isDraft: false, isCrossRepository: false, reviewDecision: "APPROVED",
-  mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", needsPreparation: false, readiness: "ready",
-  detail: "Approved, review feedback clear, checks passed, and branch ready to merge.",
-  unresolvedThreads: 0, threadsComplete: true, checks: "passed", basePrNumber: null,
-  approvalFeedback: { status: "present", fingerprint, sourceIds: ["approval-42"] },
-};
-const feedback: ApprovalFeedbackRecord = {
-  attemptId: "attempt-42", headOid: head, fingerprint, blockers: [], prUrl: url, threadId: "thr_worker", verifiedAt: 1,
-  findings: [{ sourceId: "approval-42", resolution: "fixed", evidence: "Shelf order now survives a reload.",
-    validation: { outcome: "passed", detail: "npm test -- shelf" } }],
-};
-const now = 1_000_000;
-const base: GateInput = { facts, observedAt: now - 30_000, now, held: false, feedback,
-  reviewers: { reviewRequests: [], latestReviews: [{ login: "mira", state: "APPROVED" }] } };
-
-function gates(change: Partial<Omit<GateInput, "facts">> & { facts?: Partial<AdvanceFacts> } = {}): Gates {
-  return prGates({ ...base, ...change, facts: { ...facts, ...change.facts } });
-}
-const flipped = (result: Gates) => GATE_IDS.filter((id) => result[id] !== true);
-
-describe("PR gates", () => {
-  it("passes every gate for a verified merge candidate", () => {
-    expect(flipped(gates())).toEqual([]);
+describe("PR merge and review predicates", () => {
+  // Each row changes one merge fact from a clean PR. If a predicate starts or stops reading a fact, its row fails, so the attention
+  // All PRs shows and the fixes a thread is asked for can't drift from GitHub's own words.
+  it.each<[string, { mergeable: string; mergeStateStatus: string }, boolean, boolean | null]>([
+    ["clean", { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }, false, true],
+    ["clean with hooks", { mergeable: "MERGEABLE", mergeStateStatus: "HAS_HOOKS" }, false, true],
+    ["conflicting", { mergeable: "CONFLICTING", mergeStateStatus: "CLEAN" }, true, false],
+    ["dirty", { mergeable: "MERGEABLE", mergeStateStatus: "DIRTY" }, true, false],
+    ["behind its base", { mergeable: "MERGEABLE", mergeStateStatus: "BEHIND" }, false, false],
+    ["blocked by branch protection", { mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }, false, false],
+    ["unstable", { mergeable: "MERGEABLE", mergeStateStatus: "UNSTABLE" }, false, false],
+    // Mergeability GitHub hasn't computed yet is neither a conflict nor clean: read again.
+    ["still computing mergeability", { mergeable: "UNKNOWN", mergeStateStatus: "CLEAN" }, false, null],
+    ["of unknown merge state", { mergeable: "MERGEABLE", mergeStateStatus: "UNKNOWN" }, false, null],
+  ])("reads a PR that is %s as conflicted only on a reported conflict, and clean only when GitHub would merge it", (_name, facts, conflict, clean) => {
+    expect([conflicted(facts), mergeClean(facts)]).toEqual([conflict, clean]);
   });
 
-  // Each row changes one input fact. If a gate starts or stops reading a fact,
-  // its row fails, so a readiness rule cannot drift silently.
-  it.each<[string, Parameters<typeof gates>[0], GateId[]]>([
-    ["closed", { facts: { state: "CLOSED" } }, ["open"]],
-    ["held", { held: true }, ["unheld"]],
-    ["read too long ago", { observedAt: now - FRESH_MS - 1 }, ["fresh"]],
-    ["a fork", { facts: { isCrossRepository: true } }, ["not-fork"]],
-    ["conflicting", { facts: { mergeable: "CONFLICTING" } }, ["no-conflict", "merge-clean"]],
-    ["dirty", { facts: { mergeStateStatus: "DIRTY" } }, ["no-conflict", "merge-clean"]],
-    ["behind its base", { facts: { mergeStateStatus: "BEHIND" } }, ["base-current", "merge-clean"]],
-    ["blocked by branch protection", { facts: { mergeStateStatus: "BLOCKED" } }, ["merge-clean"]],
-    ["unstable", { facts: { mergeStateStatus: "UNSTABLE" } }, ["merge-clean"]],
-    ["still computing mergeability", { facts: { mergeable: "UNKNOWN" } }, ["merge-clean"]],
-    ["waiting on checks", { facts: { checks: "pending" } }, ["checks-settled", "checks-green"]],
-    ["missing check results", { facts: { checks: "unknown" } }, ["checks-settled", "checks-green"]],
-    ["failing checks", { facts: { checks: "failed" } }, ["checks-green"]],
-    ["left with an unresolved thread", { facts: { unresolvedThreads: 1 } }, ["threads-resolved"]],
-    ["missing thread pages", { facts: { threadsComplete: false } }, ["threads-resolved"]],
-    ["pushed after verification", { facts: { headOid: "c".repeat(40) } }, ["feedback-verified"]],
-    ["given new approval feedback", { facts: { approvalFeedback: { status: "present", fingerprint: "e".repeat(64), sourceIds: ["approval-42"] } } }, ["feedback-verified"]],
-    ["never verified", { feedback: null }, ["feedback-verified"]],
-    ["no longer approved", { facts: { reviewDecision: "REVIEW_REQUIRED" } }, ["approved"]],
-    ["asked for changes", { facts: { reviewDecision: "CHANGES_REQUESTED" } }, ["changes-addressed", "approved"]],
-    ["a draft", { facts: { isDraft: true } }, ["not-draft"]],
-    ["stacked on an open parent", { facts: { basePrNumber: 41 } }, ["parent-merged"]],
-    // Display text and derived hints never gate; neither do reviewers once approved.
-    ["labeled for attention by legacy text", { facts: { readiness: "needs-attention", detail: "Needs attention", needsPreparation: true } }, []],
-    ["approved with unobserved reviewers", { reviewers: null }, []],
-  ])("a PR that is %s fails exactly the gates that read that fact", (_name, change, expected) => {
-    expect(flipped(gates(change))).toEqual(expected);
-  });
-
-  it("keeps a running check with an empty conclusion unsettled", () => {
-    const checks = advanceChecks([{ status: "COMPLETED", conclusion: "SUCCESS" }, { status: "IN_PROGRESS", conclusion: "" }]);
-    expect(gates({ facts: { checks } })).toMatchObject({ "checks-settled": false, "checks-green": false });
-  });
-
-  it("names a protected-branch block as its own wait and observes an unknown merge state", () => {
-    expect(gates({ facts: { mergeStateStatus: "HAS_HOOKS" } })["merge-clean"]).toBe(true);
-    expect(gates({ facts: { mergeStateStatus: "UNSTABLE" } })["merge-clean"]).toBe(false);
-    expect(mergeWait({ mergeStateStatus: "UNSTABLE" })).toBe("merge-requirements");
-    expect(gates({ facts: { mergeStateStatus: "BLOCKED" } })["merge-clean"]).toBe(false);
-    expect(mergeWait({ mergeStateStatus: "BLOCKED" })).toBe("merge-blocked");
-    expect(gates({ facts: { mergeStateStatus: "UNKNOWN" } })["merge-clean"]).toBeNull();
-  });
-
-  it("observes unknown feedback history instead of treating it as work", () => {
-    const result = gates({ facts: { approvalFeedback: { status: "unknown", fingerprint: null, sourceIds: [] } } });
-    expect(result["feedback-verified"]).toBeNull();
-    expect(GATE_IDS.filter((id) => result[id] === false)).toEqual([]);
+  it("counts requested changes addressed once GitHub stops asking, or the author's verified follow-up answers them", () => {
+    expect(changesAddressed({ reviewDecision: "APPROVED" })).toBe(true);
+    expect(changesAddressed({ reviewDecision: "CHANGES_REQUESTED" })).toBe(false);
+    expect(changesAddressed({ reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true })).toBe(true);
   });
 
   it("asks again only reviewers who requested changes or had their review dismissed", () => {
-    const changes = { reviewDecision: "CHANGES_REQUESTED", reviewFollowupPosted: true };
     const latestReviews = [{ login: "Mira", state: "CHANGES_REQUESTED" }, { login: "otto", state: "COMMENTED" }];
-    expect(gates({ facts: changes, reviewers: { reviewRequests: [], latestReviews } })["rereview-requested"]).toBe(false);
-    expect(gates({ facts: changes, reviewers: { reviewRequests: ["otto"], latestReviews } })["rereview-requested"]).toBe(false);
-    expect(gates({ facts: changes, reviewers: { reviewRequests: ["mira"], latestReviews } })["rereview-requested"]).toBe(true);
+    expect(awaitingRerequest({ reviewRequests: [], latestReviews })).toEqual([{ login: "Mira", state: "CHANGES_REQUESTED" }]);
+    expect(awaitingRerequest({ reviewRequests: ["otto"], latestReviews })).toHaveLength(1);
+    // Logins match in any case.
+    expect(awaitingRerequest({ reviewRequests: ["mira"], latestReviews })).toEqual([]);
     const dismissed = [{ login: "otto", state: "DISMISSED" }];
-    const pending = { reviewDecision: "REVIEW_REQUIRED" };
-    expect(gates({ facts: pending, reviewers: { reviewRequests: [], latestReviews: dismissed } })["rereview-requested"]).toBe(false);
-    expect(gates({ facts: pending, reviewers: { reviewRequests: ["otto"], latestReviews: dismissed } })["rereview-requested"]).toBe(true);
-    // An approval only has to stay true; nobody is asked to review again.
-    expect(gates({ reviewers: { reviewRequests: [], latestReviews: dismissed } })["rereview-requested"]).toBe(true);
+    expect(awaitingRerequest({ reviewRequests: [], latestReviews: dismissed })).toEqual(dismissed);
+    expect(awaitingRerequest({ reviewRequests: ["otto"], latestReviews: dismissed })).toEqual([]);
   });
 
   it("finds a PR nobody has been asked to review", () => {
-    const pending = { reviewDecision: "REVIEW_REQUIRED" };
-    expect(gates({ facts: pending, reviewers: { reviewRequests: [], latestReviews: [] } })["review-requested"]).toBe(false);
-    expect(gates({ facts: pending, reviewers: { reviewRequests: [], latestReviews: [{ login: "me", state: "PENDING" }] } })["review-requested"]).toBe(false);
-    expect(gates({ facts: pending, reviewers: { reviewRequests: ["mira"], latestReviews: [] } })["review-requested"]).toBe(true);
-    expect(gates({ facts: pending, reviewers: { reviewRequests: [], latestReviews: [{ login: "otto", state: "COMMENTED" }] } })["review-requested"]).toBe(true);
-    expect(gates({ facts: pending, reviewers: null })).toMatchObject({ "review-requested": null, "rereview-requested": null });
-  });
-
-  // No gate names feedback to address, since stored rows keep only these gates; decide() and the roster read it beside them. A worker's
-  // evidence passes feedback-verified but answers no one: only a reply on the PR or your own confirmation on this head does.
-  it("reads feedback to address beside the gates: a worker's evidence doesn't answer it, your confirmation does", () => {
-    const quiet = { openThreads: 0, comment: null, repliedAt: null, noteAt: "2026-09-28T09:00:00Z", followUpAt: null };
-    expect(gates()["feedback-verified"]).toBe(true);
-    expect(unansweredFeedback({ ...facts, reviewFeedback: quiet }, feedback)).toEqual([{ kind: "approval", login: null, since: Date.parse(quiet.noteAt) }]);
-    expect(unansweredFeedback({ ...facts, reviewFeedback: quiet }, { ...feedback, provenance: { kind: "user" } })).toEqual([]);
-    expect(unansweredFeedback({ ...facts, reviewFeedback: { ...quiet, repliedAt: "2026-09-28T10:00:00Z" } }, feedback)).toEqual([]);
-    expect(unansweredFeedback({ ...facts, headOid: "c".repeat(40), reviewFeedback: quiet }, { ...feedback, provenance: { kind: "user" } })).toHaveLength(1);
-    expect(unansweredFeedback(facts, feedback)).toBeNull();
+    expect(reviewEngaged({ reviewRequests: [], latestReviews: [] })).toBe(false);
+    // Your own pending review asks nobody.
+    expect(reviewEngaged({ reviewRequests: [], latestReviews: [{ state: "PENDING" }] })).toBe(false);
+    expect(reviewEngaged({ reviewRequests: ["mira"], latestReviews: [] })).toBe(true);
+    expect(reviewEngaged({ reviewRequests: [], latestReviews: [{ state: "COMMENTED" }] })).toBe(true);
   });
 });

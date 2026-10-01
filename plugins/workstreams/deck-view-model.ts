@@ -32,7 +32,7 @@ export const SECTIONS: Record<DeckSection, SectionMeta> = {
   ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
   work: { title: "Work in threads", tone: "amber", action: "fix", button: "Ask threads to fix", help: "Conflicts, failing checks, and review feedback waiting on you. Each is fixed in its PR's thread; o opens it. Ask threads to fix sends each its own fix, or starts a worker for one with no thread, after 8 s with Undo. Nothing merges." },
   flight: { title: "In flight", tone: "gray", action: null, button: null, fold: true, help: "In review under a business day, checks running, or a thread working on it. Nothing for you yet." },
-  blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR or an open decision." },
+  blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR." },
   held: { title: "Held", tone: "gray", action: "release", button: "Release…", help: "PRs you held, with why and for how long. Nothing acts on one until you release it; Release lists each one first, then waits 8 s with Undo." },
 };
 /** The batch each act key plans. */
@@ -228,7 +228,7 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
     const repo = id.slice(SERVICE_PREFIX.length);
     return { id, key: id, name: serviceName(repo), goal: serviceGoal(repo), kind: "service", repo, oneOff: false, pile: "active", reason: "", since: 0,
       status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, medianAgeMs: null, oldestWait: null },
-      progress: { merged: 0, open: 0, criteria: null }, next: [], blocked: [],
+      progress: { merged: 0, open: 0 }, next: [], blocked: [],
       linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [] },
       people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [], notes: null };
   });
@@ -268,7 +268,7 @@ export type CardScreen = {
   needsYou: number; advance: string[]; changed: number; settleable: boolean;
   /** Its PRs on hold now, which its header's Held chip counts and jumps to. */
   held: number;
-  next: { criteria: { validated: number; needed: number } | null; items: { text: string; owner: string | null; prUrl: string | null; ref: string | null }[] };
+  next: { items: { text: string; owner: string | null; prUrl: string | null; ref: string | null }[] };
   blocked: { prUrl: string; ref: string; on: string; what: string; age: string | null; dot: boolean }[];
   stats: { open: number; mergedWeek: number; median: string; oldest: { text: string; title: string } | null; bar: { key: string; label: string; count: number; tone: Tone }[] };
   threads: { id: string; title: string; ref: string; status: string; age: string | null; dot: boolean }[];
@@ -382,7 +382,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     // suggestions you moved from here.
     settleable: shown.some((line) => line.row?.acted?.state === "sent" && !counted(line.row, seen.at[line.prUrl]))
       || shown.some((line) => line.ghost && !line.dot) || suggest.some((group) => group.accepted),
-    next: { criteria: card.progress.criteria, items: card.next.map((item) => {
+    next: { items: card.next.map((item) => {
       const row = item.prUrl ? current.find((candidate) => candidate.prUrl === item.prUrl) : undefined;
       return { text: item.text, owner: item.owner, prUrl: row ? item.prUrl : null, ref: row ? refOf(row) : null };
     }) },

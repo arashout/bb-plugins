@@ -4,7 +4,6 @@ import type { Pr, RawUnit } from "./contract.js";
 import type { BatchItem, DeckBatch } from "./deck-batch.js";
 import type { DeckView } from "./deck.js";
 import { createEffortStore } from "./effort-store.js";
-import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js";
 import { parsePrList } from "./gh.js";
 import plugin from "./server.js";
 
@@ -62,7 +61,6 @@ async function setup() {
         reviewRequestedAt: request.reviewers!.map((reviewer) => ({ reviewer, at: new Date().toISOString() })) });
       return { ok: true, detail: `Wrote ${request.kind}.` };
     }
-    if (method === "advanceInspect") return { ok: false, error: "Not read in this test." };
     // #504's note is in mira's approval body, and nothing came after it: no commit, reply, or thread.
     if (method === "approvalHandling") return { ok: true, headOid: HEAD, fingerprint: FEEDBACK.fingerprint, sources: [],
       evidence: { since: daysAgo(2), commits: 0, replies: 0, threads: { total: 0, resolved: 0 }, complete: true } };
@@ -150,25 +148,18 @@ describe("deck batches on the server", () => {
     expect(await env.rpc("deck_batch_start", { batchId: done.batchId })).toEqual({ ok: false, error: "folio #501: Its effort is done. Review the batch again." });
   });
 
-  it("refuses only the PR a hold or a v2 claim reached during the Undo window, and sends the rest", async () => {
+  it("refuses only the PR a hold reached during the Undo window, and sends the rest", async () => {
     const env = await setup();
     const planned = await plan(env, { kind: "advance" });
     expect(await env.rpc("deck_batch_start", { batchId: planned.batchId })).toMatchObject({ ok: true });
     await env.rpc("pr_hold_set", { prUrl: url(503), held: true, reason: "Store layout first" });
-    const body: AttemptBody = { instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
-      start: { headOid: HEAD, baseOid: "d".repeat(40), fingerprint: null, sourceIds: [] },
-      resource: { kind: "spawn", threadId: null, path: null, hostId: HOST, projectId: "project-folio", reason: null, workspace: null },
-      mode: "spawn", marker: "[Workstreams attempt A-1 · inkwell/folio#502 · instruction r1]", settledAt: Date.now(), uncertainAt: null,
-      emptyReadbackAt: null, failure: null, error: null, releasedReason: null };
-    createEffortWorkStore(env.db).claim({ id: "A-1", target: url(502), effortId: env.effort.id, instructionId: `I-${env.effort.id}-r1`, launchKey: "key-A-1",
-      threadId: null, hostId: HOST, path: null, body });
     await vi.advanceTimersByTimeAsync(8_000);
     await settled(env, planned.batchId);
     expect((await env.batch(planned.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
       ["folio #503", "refused", "On hold: Store layout first. Release the hold first; nothing was written."],
-      ["folio #502", "refused", expect.stringContaining("is writing this PR")],
+      ["folio #502", "sent", "Wrote nudge."],
       ["folio #501", "sent", "Wrote ready."]]);
-    expect(env.writes).toEqual([{ kind: "ready", prUrl: url(501), headOid: HEAD }]);
+    expect(env.writes).toEqual([{ kind: "nudge", prUrl: url(502), reviewers: ["mira"], comment: null }, { kind: "ready", prUrl: url(501), headOid: HEAD }]);
   });
 
   it("sends nothing once you Undo inside the window, and says so when an Undo comes too late", async () => {

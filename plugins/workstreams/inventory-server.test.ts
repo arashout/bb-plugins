@@ -4,7 +4,6 @@ import type { Pr, RawUnit } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import plugin, { type Board } from "./server.js";
 import { createApprovalFeedbackStore } from "./approval-feedback.js";
-import { createEffortWorkStore } from "./effort-work-store.js";
 
 const URL = "https://github.com/inkwell/folio/pull/42";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -170,23 +169,6 @@ describe("authored backlog server actions", () => {
     expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
     await env.harness.callRpc("pr_hold_set", { prUrl: URL, held: false });
     expect((await env.board()).prHolds).toEqual({});
-  });
-  it("lists a v2 worker's claim among the merge preview's refusals, since the merge itself refuses while it holds the PR", async () => {
-    const env = await setup({ local: true });
-    const work = createEffortWorkStore(env.db);
-    work.claim({ id: "A-folio-42", target: URL, effortId: "shelving", instructionId: "I-shelving-r1", launchKey: "key-42", threadId: "thr_worker", hostId: "host-inkwell",
-      path: UNIT.path, body: { instructionRevision: 1, recipes: ["integrate_base"], role: "code", retryEpoch: 0, retryIndex: 0,
-        start: { headOid: SHA, baseOid: SHA, fingerprint: null, sourceIds: [] },
-        resource: { kind: "reuse", threadId: "thr_worker", path: UNIT.path, hostId: "host-inkwell", projectId: "project-folio", reason: null, workspace: null },
-        mode: "send", marker: "[Workstreams attempt]", settledAt: null, uncertainAt: null, emptyReadbackAt: null, failure: null, error: null, releasedReason: null } });
-    const claimed = "A worker from the shelving roster is writing this PR or checkout. Wait for it to finish, or instruct it from the roster.";
-    for (const target of [{ prUrl: URL }, { path: UNIT.path }]) {
-      expect(await env.harness.callRpc("action_merge_preview", target)).toMatchObject({ ok: true, refusals: [claimed] });
-      expect(await env.harness.callRpc("action_merge", { ...target, sha: SHA, acknowledgeUnresolved: false })).toEqual({ ok: false, error: claimed });
-    }
-    work.recordAttempt("A-folio-42", ["launching"], { status: "released", body: { releasedReason: "no-worker" } });
-    expect(await env.harness.callRpc("action_merge_preview", { prUrl: URL })).toMatchObject({ ok: true, refusals: [] });
-    expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
   });
   it("refuses a merge when a hold arrives after preview or during the final live read", async () => {
     const env = await setup();

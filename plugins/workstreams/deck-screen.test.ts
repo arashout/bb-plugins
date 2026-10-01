@@ -460,11 +460,12 @@ describe("the effort deck's markup", () => {
   });
 
   it("sizes rows, the hint bar, and the top bar by the pane's width, never the window's, so a narrow pane on a wide screen keeps its titles", () => {
-    const view = inkwellDeck({}, (row) => row.number === 210 ? { decision: { n: 1, question: "Vendor first?", since: NOW - 3_600_000 } } : {});
+    // quill #211 stacked on a PR that isn't ready to merge makes Store pickup's third wait.
+    const view = inkwellDeck({}, (row) => row.number === 211 ? { stackedOn: 999, status: "Behind #999", attention: [], yourTurn: null } : {});
     const html = pane(view, INVENTORY_EFFORTS.pickup.id);
     expect(html).not.toMatch(/(?:^|[\s"])(?:sm|md|lg|xl):/u);
     expect(html).toMatch(/data-deck-scroller="true" class="@container/u);
-    expect(section(html, "blocked")).toMatch(/<span title="Vendor first\?" class="min-w-0 truncate text-\[11\.5px\][^"]*">Vendor first\?<\/span>/u);
+    expect(section(html, "blocked")).toMatch(/<span title="Merges after quill #210" class="min-w-0 truncate text-\[11\.5px\][^"]*">Merges after quill #210<\/span>/u);
     // What a fix needs stays at every width; who approved a merge drops below 720 px.
     const shelf = pane(inkwellDeck(), SHELF);
     expect(section(shelf, "work")).toMatch(/class="min-w-16 flex-1 cursor-pointer truncate @min-\[900px\]:min-w-0/u);
