@@ -9,14 +9,17 @@
 // shows those links as evidence instead. A push alone answers nothing, and
 // none of it depends on CI, a draft, conflicts, or merge state. While any
 // waits, the PR never reads ready and never merges. Bots (deploy previews,
-// trackers, CI, and code-review apps) never count. This module imports only
-// zod, so the browser can use it (A12.1).
+// trackers, CI, and code-review apps) never count: a code-review app's notes
+// are bot notes (your-turn.ts), which a batch addresses too but which never
+// wait on you as a person's do. This module imports only zod, so the browser
+// can use it (A12.1).
 import { z } from "zod";
 
 /**
- * What a PR's own review read shows of feedback on it (ghactions.ts): open threads someone else started, the newest comment from someone
- * else that no later approval of theirs covers, its author's newest reply, when the approval's newest note was left, and when a follow-up
- * last linked it, which answers nothing. `noteAt` and `followUpAt` are absent on a read that predates them.
+ * What a PR's own review read shows of feedback on it (ghactions.ts): open threads a person other than you started, the newest comment from
+ * someone else that no later approval of theirs covers, its author's newest reply, when the approval's newest note was left, and when a
+ * follow-up last linked it, which answers nothing. `noteAt` and `followUpAt` are absent on a read that predates them. Stored and strict:
+ * a bot's open threads stay out of `openThreads` rather than in a field of their own, so a build that predates bot notes still reads it.
  */
 export const reviewFeedbackSchema = z.object({
   openThreads: z.number().int().min(0).max(2_000),
@@ -27,9 +30,12 @@ export const reviewFeedbackSchema = z.object({
 }).strict();
 export type ReviewFeedback = z.infer<typeof reviewFeedbackSchema>;
 
-/** Apps some reads name as users: deploy previews, issue trackers, CI, and code-review bots. GitHub's own Bot type catches the rest. */
+/**
+ * Apps some reads name as users: deploy previews, issue trackers, CI, and code-review apps (Claude, Codex, Copilot, and the rest), with or
+ * without "[bot]". GitHub's own Bot type catches the rest.
+ */
 const BOTS = new Set(["vercel", "linear", "github-actions", "dependabot", "renovate", "codecov", "netlify", "sonarcloud", "sonarqubecloud", "coderabbitai",
-  "copilot-pull-request-reviewer", "chatgpt-codex-connector", "greptile-apps", "graphite-app", "gemini-code-assist"]);
+  "copilot", "copilot-pull-request-reviewer", "claude", "codex", "openai-codex", "chatgpt-codex-connector", "greptile-apps", "graphite-app", "gemini-code-assist"]);
 export function isBot(login: string, typename?: unknown): boolean {
   return typename === "Bot" || /(?:\[bot\]|-bot)$/iu.test(login) || BOTS.has(login.toLowerCase());
 }

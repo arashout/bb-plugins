@@ -12,7 +12,7 @@ import { createEffortWorkStore, type AttemptBody } from "./effort-work-store.js"
 import { PR_THREADS_RULE, RESULT_PREFIX } from "./effort-recipes.js";
 import { parsePrList } from "./gh.js";
 import type { InventoryView } from "./inventory-view.js";
-import { yourTurnRows } from "./inventory-view-model.js";
+import { commentsOnly, inventoryScreen, onYourTurn, yourTurnRows } from "./inventory-view-model.js";
 import { createRunStore } from "./runstore.js";
 import plugin from "./server.js";
 
@@ -134,7 +134,11 @@ async function setup() {
     card: async () => (await env.rpc("deck_get", {}) as DeckView).active.find((item) => item.id === effort.id)!,
     rows: async () => new Map((await env.card()).sections.flatMap((section) => section.rows).map((row) => [row.number, row])),
     /** All PRs' Your turn, by PR number. */
-    turn: async () => yourTurnRows(await env.rpc("inventory_get", {}) as InventoryView, Date.now()).map((line) => line.number).sort(),
+    /** The PRs Address takes: Your turn's real follow-ups and Comments only's alike. */
+    turn: async () => inventoryScreen(await env.rpc("inventory_get", {}) as InventoryView, { now: Date.now(), filter: null }).groups.flatMap((group) => group.lines)
+      .filter((line) => onYourTurn(line) || commentsOnly(line)).map((line) => line.number).sort(),
+    /** Your turn's alone, which the badge counts. */
+    followUps: async () => yourTurnRows(await env.rpc("inventory_get", {}) as InventoryView, Date.now()).map((line) => line.number).sort(),
     /** Restart the plugin on the same database, as a host reload does. */
     restart: async () => { const next = await env.harness.lifecycle.reload(plugin); env.harness = next.harness; env.bb = next.bb; },
   };
@@ -193,6 +197,8 @@ describe("addressing Your turn PRs in one batch thread", () => {
   it("lists each PR's feedback and where it runs, then after the window starts one worker under the effort's parent that claims them all until it finishes", async () => {
     const env = await setup();
     expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
+    // 44 and 46 wait only on comments, so the badge leaves them out; Address takes them all the same.
+    expect(await env.followUps()).toEqual([42, 43, 45]);
     const plan = await env.plan([42, 43, 44].map(url));
     // The listing is exactly what the thread gets.
     expect(plan.items.map((item) => [item.ref, item.kind, item.feedback, item.where, item.headOid])).toEqual([

@@ -1,7 +1,7 @@
-// All PRs: Your turn, your PRs where a reviewer's feedback waits on you (onYourTurn), by effort, above every other open PR
-// you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
-// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. Your turn rows select (x, a click, Shift
-// for a range, ⇧X or the list's box for all), and Address selected, or b, starts one batch thread for them at once, with 8 s to Undo. Each
+// All PRs: Your turn, your PRs where a real follow-up waits on you (onYourTurn), by effort, then Comments only, collapsed, where only
+// comments and bot notes wait (commentsOnly), above every other open PR you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
+// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. Your turn and Comments only rows select
+// (x, a click, Shift for a range; ⇧X or the list's box for all of Your turn), and Address selected, or b, starts one batch thread for them at once, with 8 s to Undo. Each
 // PR it sent stays on Your turn with one state chip that opens its thread, until GitHub shows its feedback cleared; what it left out, or
 // why nothing started, shows on the rows and the selection bar. f on a row opens the deck's listing confirm for the PR's own thread. It
 // shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for the
@@ -12,7 +12,7 @@ import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
-import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, yourTurnRows, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
+import { actionCall, askKind, commentsOnly, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
@@ -22,19 +22,24 @@ import { DeckDialog, useBatchConfirm, useRegistryKeys, workingLabel, type LiveIt
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
 
-/** Your turn above every other open PR, each by effort; a PR shows in only one. */
-export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; other: SimpleGroup[] } {
+/** Your turn, then Comments only, above every other open PR, each by effort; a PR shows in only one. */
+export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; comments: SimpleGroup[]; other: SimpleGroup[] } {
   const turn: SimpleGroup[] = [];
+  const comments: SimpleGroup[] = [];
   const other: SimpleGroup[] = [];
   for (const group of screen.groups) {
     const identity = { key: group.key, label: group.label, effortId: group.effort?.id ?? null };
     const mine = group.lines.filter(onYourTurn);
-    const rest = group.lines.filter((line) => !onYourTurn(line));
+    const noted = group.lines.filter(commentsOnly);
+    const rest = group.lines.filter((line) => !onYourTurn(line) && !commentsOnly(line));
     if (mine.length) turn.push({ ...identity, lines: mine });
+    if (noted.length) comments.push({ ...identity, lines: noted });
     if (rest.length) other.push({ ...identity, lines: rest });
   }
-  return { turn, other };
+  return { turn, comments, other };
 }
+/** The rows Address can take, in drawn order: Your turn's, then Comments only's. */
+const addressable = (split: ReturnType<typeof splitInventory>) => [...split.turn, ...split.comments].flatMap((group) => group.lines).filter(sendable);
 
 /** The shared header, with this read's freshness; ⌘K and ? open the deck's palette and key sheet. */
 function Header({ read, onView, onPalette, onHelp }: { read: HeaderProps["read"]; onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void }) {
@@ -76,7 +81,7 @@ function SelectionBar({ count, refusal, working, onAddress, onClear }: { count: 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenRoster(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
-  /** Your turn rows selected for Address, by PR; a row's checkbox, the list's box for all or none, Address selected, and Clear. */
+  /** Your turn and Comments only rows selected for Address, by PR; a row's checkbox, Your turn's box for all or none, Address selected, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
   /** Why the last Address started nothing, and why it left each PR out, by PR; and a batch's Undo from its row. */
   refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void;
@@ -84,14 +89,18 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   working?: Working | null; live?: LiveItems;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
-  const { turn, other } = splitInventory(props.screen);
+  const split = splitInventory(props.screen);
+  const { turn, comments, other } = split;
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
     onOpenRoster: props.onOpenRoster, onNudge: props.onNudge };
-  // Address takes only rows nothing it sent is still working on.
+  // Address takes only rows nothing it sent is still working on; Your turn's box takes only Your turn's.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
-  const picked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
+  const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
+  const picked = addressable(split).filter((line) => props.selected?.has(line.prUrl)).length;
   const listed = turn.reduce((sum, group) => sum + group.lines.length, 0);
+  const noted = comments.reduce((sum, group) => sum + group.lines.length, 0);
+  const rows = { ...callbacks, selected: props.selected, onSelect: props.onSelect, notes: props.notes, onUndo: props.onUndo, working: props.working?.prUrls, live: props.live };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
@@ -107,15 +116,20 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
       </div> : null}
       <section className="mt-5" aria-label="Your turn">
         <h2 className="mb-2 flex items-center gap-2 px-4 text-[14px] font-semibold">
-          {turnLines.length && props.onSelectAll ? <input type="checkbox" data-inventory-select-all checked={picked === turnLines.length}
-            ref={(element) => { if (element) element.indeterminate = picked > 0 && picked < turnLines.length; }}
-            aria-label={picked === turnLines.length ? "Clear the selection" : "Select every Your turn PR"} onChange={() => props.onSelectAll!(picked < turnLines.length)}
+          {turnLines.length && props.onSelectAll ? <input type="checkbox" data-inventory-select-all checked={turnPicked === turnLines.length}
+            ref={(element) => { if (element) element.indeterminate = turnPicked > 0 && turnPicked < turnLines.length; }}
+            aria-label={turnPicked === turnLines.length ? "Clear the selection" : "Select every Your turn PR"} onChange={() => props.onSelectAll!(turnPicked < turnLines.length)}
             className="size-3.5 shrink-0 accent-sky-600" /> : null}
           Your turn <span className="font-normal tabular-nums text-muted-foreground">{listed}</span></h2>
-        {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...callbacks} selected={props.selected} onSelect={props.onSelect} notes={props.notes}
-          onUndo={props.onUndo} working={props.working?.prUrls} live={props.live} />
-          : <p className="px-4 text-[12px] text-muted-foreground">No feedback waits on you.</p>}
+        {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...rows} />
+          : <p className="px-4 text-[12px] text-muted-foreground">No follow-ups wait on you.</p>}
       </section>
+      {/* Only comments and bot notes wait here: Address takes them, but nothing counts them, so the list stays closed until opened. */}
+      {noted ? <details className="mt-5" data-inventory-comments aria-label="Comments only">
+        <summary className={cn("mx-4 w-fit rounded-sm text-[13px] font-semibold text-muted-foreground hover:text-foreground", FOCUS)}>
+          Comments only <span className="font-normal tabular-nums">{noted}</span></summary>
+        <div className="pt-2"><SimpleInventoryList groups={comments} kind="comments" {...rows} /></div>
+      </details> : null}
       <section className="mt-7" aria-label="Other open PRs">
         <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.lines.length, 0)}</span></h2>
         {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
@@ -191,7 +205,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   // A selected row Address can't take now (a batch took it, or you answered it) stays unselected if it comes back.
   useEffect(() => {
     if (!view) return;
-    const live = new Set(yourTurnRows(view, Date.now()).filter(sendable).map((line) => line.prUrl));
+    const live = new Set(addressable(splitInventory(inventoryScreen(view, { now: Date.now(), filter: null }))).map((line) => line.prUrl));
     setPicked((current) => [...current].every((prUrl) => live.has(prUrl)) ? current : new Set([...current].filter((prUrl) => live.has(prUrl))));
   }, [view]);
   const opener = useRef<HTMLElement | null>(null);
@@ -223,17 +237,20 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
   const fix = focused && askKind(focused) === "fix";
-  // Your turn in its drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row that leaves it is no longer selected.
-  const turnLines = screen ? splitInventory(screen).turn.flatMap((group) => group.lines).filter(sendable) : [];
-  const selected = turnLines.filter((line) => picked.has(line.prUrl));
+  // Your turn then Comments only in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row
+  // that leaves them is no longer selected. ⇧X takes Your turn's alone.
+  const split = screen ? splitInventory(screen) : null;
+  const turnLines = split ? split.turn.flatMap((group) => group.lines).filter(sendable) : [];
+  const selectable = split ? addressable(split) : [];
+  const selected = selectable.filter((line) => picked.has(line.prUrl));
   const toggle = (line: InventoryLine, shift: boolean) => {
-    setPicked(pickRows(turnLines.map((item) => item.prUrl), picked, line.prUrl, shift, anchor.current));
+    setPicked(pickRows(selectable.map((item) => item.prUrl), picked, line.prUrl, shift, anchor.current));
     anchor.current = line.prUrl;
   };
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
     prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...fix ? ["fix" as const] : []]),
-      selectable: !!focused && turnLines.includes(focused), turn: turnLines.length, picked: selected.length } };
-  /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
+      selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
+  /** Address the selected Your turn and Comments only rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
   const undoBatch = async (batchId: string) => {
     const undone = await rpc.call("deck_batch_undo", { batchId }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));
@@ -263,7 +280,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       case "fix": if (focused && fix) ask(focused); return;
       // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
-      case "select": if (focused && turnLines.includes(focused)) toggle(focused, false); return;
+      case "select": if (focused && selectable.includes(focused)) toggle(focused, false); return;
       case "select-section": setPicked(new Set(turnLines.map((line) => line.prUrl))); say(`Selected ${turnLines.length} on Your turn.`); return;
       case "clear": setPicked(new Set()); return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
@@ -284,7 +301,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
-      selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? turnLines.map((line) => line.prUrl) : []))} onAddress={address}
+      selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : []))} onAddress={address}
       onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} working={batch.working} live={batch.live}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
       : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}

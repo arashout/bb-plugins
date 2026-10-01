@@ -26,32 +26,61 @@ const approval = pr({ reviewDecision: "APPROVED", latestReviews: [{ login: "mira
 const threads = pr({ reviewFeedback: { openThreads: 2, comment: null, repliedAt: null } });
 const comments = pr({ latestReviews: [{ login: "theo-k", state: "COMMENTED", submittedAt: at(12) }],
   reviewFeedback: { openThreads: 0, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
+/** Codex's review with its threads: the review read leaves its threads out of the open threads a person started. */
+const codex = { login: "chatgpt-codex-connector", state: "COMMENTED", submittedAt: at(12) };
+const botOnly = pr({ latestReviews: [codex], reviewFeedback: { openThreads: 0, comment: null, repliedAt: null } });
 
 describe("Your turn", () => {
+  // Only an approval with comments or a person's change request is a real follow-up, which Your turn and the badge count. A bot's review,
+  // a person's comment, and a person's open threads still wait, as Comments only, which a batch addresses but nothing counts; drop the
+  // split and the badge would count every Codex or Copilot drive-by.
+  it("makes only an approval with comments or a person's change request a real follow-up, and the rest Comments only", () => {
+    expect([changes, approval].map((facts) => turn(facts)?.followUp)).toEqual(["Changes requested by @otto-v", "Approved with comments"]);
+    for (const facts of [threads, comments]) expect(turn(facts)).toMatchObject({ followUp: null });
+    // The follow-up leads; comments and bot notes follow it.
+    const busy = pr({ ...approval, latestReviews: [...approval.latestReviews, codex], reviewFeedback: { ...approval.reviewFeedback!, comment: { login: "theo-k", at: at(12) } } });
+    expect(turn(busy)).toMatchObject({ kinds: ["approval", "comments", "bots"], text: "Approved with comments · New comments from @theo-k · 1 bot note",
+      followUp: "Approved with comments" });
+  });
+
+  // A code-review app's review, Claude's, Codex's, or Copilot's, is a bot note: it waits until you reply on the PR after it, but alone it
+  // never makes the PR a follow-up, and its change request is never a person's.
+  it("keeps a bot-only PR off Your turn, in Comments only until you reply after its review", () => {
+    expect(turn(botOnly)).toEqual({ kinds: ["bots"], text: "1 bot note", followUp: null, since: Date.parse(at(12)) });
+    const two = pr({ ...botOnly, latestReviews: [codex, { login: "claude", state: "CHANGES_REQUESTED", submittedAt: at(13) }], reviewDecision: "CHANGES_REQUESTED" });
+    expect(turn(two)).toEqual({ kinds: ["bots"], text: "2 bot notes", followUp: null, since: Date.parse(at(12)) });
+    // Your reply after it answers it; one before it, a push, or a PR that links it doesn't.
+    expect(turn({ ...botOnly, reviewFeedback: { ...botOnly.reviewFeedback!, repliedAt: at(13) } })).toBeNull();
+    expect(turn({ ...botOnly, reviewFeedback: { ...botOnly.reviewFeedback!, repliedAt: at(11), followUpAt: at(14) }, headCommittedAt: at(14) })?.kinds).toEqual(["bots"]);
+    // A bot's approval says nothing to address, and a draft waits only for feedback to address.
+    expect(turn(pr({ latestReviews: [{ login: "copilot-pull-request-reviewer", state: "APPROVED", submittedAt: at(12) }] }))).toBeNull();
+    expect(turn({ ...botOnly, isDraft: true })).toBeNull();
+  });
+
   it("lists each kind of feedback that waits on you, with who and since when", () => {
-    expect(turn(changes)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
-    expect(turn(approval)).toEqual({ kinds: ["approval"], text: "Approval comment to address", since: Date.parse(at(11)) });
-    expect(turn(threads)).toEqual({ kinds: ["threads"], text: "2 open threads", since: null });
-    expect(turn(comments)).toEqual({ kinds: ["comments"], text: "New comments from @theo-k", since: Date.parse(at(12)) });
+    expect(turn(changes)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
+    expect(turn(approval)).toEqual({ kinds: ["approval"], text: "Approved with comments", followUp: "Approved with comments", since: Date.parse(at(11)) });
+    expect(turn(threads)).toEqual({ kinds: ["threads"], text: "2 open threads", followUp: null, since: null });
+    expect(turn(comments)).toEqual({ kinds: ["comments"], text: "New comments from @theo-k", followUp: null, since: Date.parse(at(12)) });
   });
 
   it("names every kind a PR has, oldest feedback first for its age", () => {
     const both = pr({ ...changes, reviewFeedback: { openThreads: 1, comment: { login: "theo-k", at: at(12) }, repliedAt: null } });
     expect(turn(both)).toEqual({ kinds: ["changes", "threads", "comments"],
-      text: "Changes requested by @otto-v · 1 open thread · New comments from @theo-k", since: Date.parse(at(10)) });
+      text: "Changes requested by @otto-v · 1 open thread · New comments from @theo-k", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
   // A change request is a review, and so a comment: the reviewer it names isn't named again for it.
   it("names a reviewer's change request once, not again as new comments", () => {
     const requested = pr({ ...changes, reviewFeedback: { openThreads: 0, comment: { login: "otto-v", at: at(10) }, repliedAt: null } });
-    expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", since: Date.parse(at(10)) });
+    expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
   // Once you answered the change request (a verified follow-up, pushed since), the reviewer owes nothing and you owe the re-request: Your
   // turn says so, rather than asking for changes that are made. A push alone answers nothing, so it keeps asking for them.
   it("says an answered change request waits on your re-request, and keeps asking for changes nothing answered", () => {
     const answered = pr({ ...changes, headCommittedAt: at(13), reviewFollowupPosted: true });
-    expect(turn(answered)).toEqual({ kinds: ["changes"], text: "Answered @otto-v · re-request review", since: Date.parse(at(10)) });
+    expect(turn(answered)).toEqual({ kinds: ["changes"], text: "Answered @otto-v · re-request review", followUp: "Answered @otto-v · re-request review", since: Date.parse(at(10)) });
     expect(turn(pr({ ...changes, headCommittedAt: at(13) }))?.text).toBe("Changes requested by @otto-v");
     // Another reviewer's change request that nothing answered keeps its own words beside it.
     const mixed = pr({ ...answered, latestReviews: [...changes.latestReviews, { login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: at(14) }] });
@@ -84,14 +113,14 @@ describe("Your turn", () => {
     for (const checks of [["PENDING"], ["FAILURE"]]) {
       expect(turn({ ...approval, checkConclusions: checks, mergeStateStatus: "UNSTABLE" })?.kinds).toEqual(["approval"]);
     }
-    expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approval comment to address");
+    expect(turn({ ...approval, approvalFeedbackVerified: true })?.text).toBe("Approved with comments");
   });
 
   // The live case: a conditional approval, then the rest of its stack mentioned the PR hours later. Those links date a follow-up, but the
   // reviewer saw no reply, so it stays yours until you reply on the PR; then only notes a worker verified are off your turn.
   it("keeps an approval comment on Your turn when a PR that mentions it lands later, until you reply on the PR", () => {
     const mentioned = { ...approval, approvalFeedbackVerified: true, reviewFeedback: { ...approval.reviewFeedback!, followUpAt: at(14) } };
-    expect(turn(mentioned)).toEqual({ kinds: ["approval"], text: "Approval comment to address", since: Date.parse(at(11)) });
+    expect(turn(mentioned)).toEqual({ kinds: ["approval"], text: "Approved with comments", followUp: "Approved with comments", since: Date.parse(at(11)) });
     expect(turn({ ...mentioned, reviewFeedback: { ...mentioned.reviewFeedback, repliedAt: at(13) } })).toBeNull();
   });
 
@@ -117,10 +146,10 @@ describe("Your turn", () => {
     expect(summary).toBe("Approval comment from @mira-l · 3 open threads");
     expect(turnSummary(turn(changes)!, changes.latestReviews)).toBe("Changes requested by @otto-v");
     // With no approver read, it says what Your turn says.
-    expect(turnSummary(turn(approval)!, [])).toBe("Approval comment to address");
+    expect(turnSummary(turn(approval)!, [])).toBe("Approved with comments");
     // The re-request's part holds a " · " of its own, which must not shift the approval's part out of place.
-    const asked = { text: "Answered @otto-v · re-request review · Approval comment to address · 2 open threads" };
-    expect(turnSummary(asked, approval.latestReviews)).toBe("Answered @otto-v · re-request review · Approval comment from @mira-l · 2 open threads");
+    const asked = { text: "Answered @otto-v · re-request review · Approved with comments · 2 open threads · 3 bot notes" };
+    expect(turnSummary(asked, approval.latestReviews)).toBe("Answered @otto-v · re-request review · Approval comment from @mira-l · 2 open threads · 3 bot notes");
   });
 });
 

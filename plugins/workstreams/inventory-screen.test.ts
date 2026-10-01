@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
-import { actionCall, inventoryScreen, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
+import { actionCall, commentsOnly, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./roster-merge-dialog.js";
 import type { Sent } from "./your-turn.js";
@@ -51,6 +51,33 @@ describe("simple All PRs list", () => {
     expect(yourTurnRows(VIEW, NOW)).toHaveLength(5);
   });
 
+  // Only a real follow-up counts: a PR where only comments and bot notes wait sits in Comments only, closed under Your turn with its own
+  // count, out of Your turn and the badge, yet Address takes it as it takes Your turn's, with the same box and chips.
+  it("keeps Comments only out of Your turn and the badge, closed under it with its count, its rows selectable for Address", () => {
+    const noted = { kinds: ["comments" as const, "bots" as const], text: "New comments from @theo-k · 2 bot notes", followUp: null, since: NOW - 3_600_000 };
+    const view = patched((row) => row.number === 96 ? { yourTurn: noted } : null);
+    const screen = inventoryScreen(view, { now: NOW, filter: null });
+    const parts = splitInventory(screen);
+    expect(refs(parts.comments)).toEqual([["No effort", ["inkwell/catalog#96"]]]);
+    expect(refs(parts.turn)).toEqual(refs(splitInventory(SCREEN).turn));
+    expect(yourTurnRows(view, NOW)).toHaveLength(5);
+    const catalog = parts.comments[0]!.lines[0]!;
+    expect([onYourTurn(catalog), commentsOnly(catalog), sendable(catalog)]).toEqual([false, true, true]);
+    const html = renderToStaticMarkup(createElement(InventoryPane, { screen, error: null, ...CALLBACKS, selected: new Set([catalog.prUrl]), onSelect: noop }));
+    expect(html).toMatch(/<details[^>]*data-inventory-comments="true"[^>]*>/u);
+    expect(html).not.toMatch(/<details[^>]*data-inventory-comments="true"[^>]*open/u);
+    expect(text(html)).toContain("Your turn 5 ");
+    expect(text(html)).toContain("Comments only 1 ");
+    const row = rowOf(html, "inkwell/catalog#96");
+    expect(row).toContain('aria-label="Select inkwell/catalog#96"');
+    expect(text(row)).toContain("New comments from @theo-k · 2 bot notes · 1h");
+    expect(text(html)).toContain("Address selected (1)");
+    // A follow-up's row leads with it; its comments and bot notes follow, quieter.
+    const busy = { kinds: ["approval" as const, "bots" as const], text: "Approved with comments · 2 bot notes", followUp: "Approved with comments", since: null };
+    const lead = rowOf(pane(patched((row) => row.number === 96 ? { yourTurn: busy } : null)), "inkwell/catalog#96");
+    expect(lead).toMatch(/>Approved with comments<span data-inventory-rest="true" class="[^"]*"> · 2 bot notes<\/span>/u);
+  });
+
   // The deck files a PR a thread is fixing now In flight, and a held effort's PRs wait with it, so neither asks anything of you yet: the list
   // and the badge leave both out until the thread stops or you resume the effort.
   it("leaves out a PR a thread is working on and a held effort's PRs, in the list and the badge alike", () => {
@@ -66,7 +93,7 @@ describe("simple All PRs list", () => {
   it("says why it's your turn and since when, with no Open thread or Ask its thread competing on the row", () => {
     const html = pane();
     expect(text(rowOf(html, "inkwell/quill#210"))).toContain("ABC-370 Hold books at the counter Changes requested by @otto-v · 1d");
-    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approval comment to address · 2d");
+    expect(text(rowOf(html, "inkwell/folio#301"))).toContain("ABC-350 Show spine labels on shelf cards Approved with comments · 2d");
     for (const ref of ["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]) {
       expect([ref, rowOf(html, ref).match(/Open thread|Ask its thread/u)]).toEqual([ref, null]);
     }
@@ -77,7 +104,7 @@ describe("simple All PRs list", () => {
   });
 
   it("says when no feedback waits on you", () => {
-    expect(text(pane(patched(() => ({ yourTurn: null }))))).toContain("Your turn 0 No feedback waits on you.");
+    expect(text(pane(patched(() => ({ yourTurn: null }))))).toContain("Your turn 0 No follow-ups wait on you.");
   });
 
   it("offers Nudge only where the inventory action is enabled", () => {
@@ -90,7 +117,7 @@ describe("simple All PRs list", () => {
   // The button is the row's own action: a reviewer who hasn't answered is nudged only off Your turn, and an answered change request reads
   // Re-request, so the word on the button says what the click sends.
   it("draws no Nudge on a Your turn row for a reviewer who hasn't answered, and Re-request where you've answered", () => {
-    const waiting = { kinds: ["threads" as const], text: "5 open threads", since: null };
+    const waiting = { kinds: ["approval" as const, "threads" as const], text: "Approved with comments · 5 open threads", followUp: "Approved with comments", since: null };
     const turn = rowOf(pane(patched((row) => row.number === 96 ? { yourTurn: waiting } : null)), "inkwell/catalog#96");
     expect(turn).toContain("5 open threads");
     expect(turn).not.toContain('data-inventory-action="nudge"');
@@ -141,7 +168,7 @@ describe("simple All PRs list", () => {
   it("lists an approval with comments as your turn, with no Confirm handled or Merge… here", () => {
     for (const ref of ["inkwell/folio#301", "inkwell/folio#318"]) {
       const row = rowOf(pane(), ref);
-      expect(text(row)).toContain("Approval comment to address · 2d");
+      expect(text(row)).toContain("Approved with comments · 2d");
       expect(row).not.toContain('data-inventory-action="confirm-handled"');
       expect(row).not.toContain('data-inventory-action="merge"');
     }

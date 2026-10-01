@@ -6188,7 +6188,7 @@ export default async function plugin(bb: BbPluginApi) {
     // The recipe goes to the thread the PR's row names through the guarded thread send; only a PR with no thread gets a new one, and only
     // beneath a parent that already exists. See askRoute.
     ask: async (prUrl, { headOid, feedback }) => {
-      const message = approvalFeedbackAsk({ headOid, notes: feedback.sourceIds.length });
+      const message = approvalFeedbackAsk({ prUrl, headOid, notes: feedback.sourceIds.length });
       const route = await askRoute(prUrl);
       if (route.kind === "none") return { ok: false, error: `${route.why} Open a thread for it first; nothing was sent.` };
       if (route.kind === "new") return startPrThread(prUrl, message, route, "to address the notes");
@@ -6198,7 +6198,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Each fix goes to the thread the PR's row names, as an ask does; only a PR with no thread gets a worker of its own, and only beneath a
     // parent that already exists. Either way, only where its listing said: a thread that appeared or went away since refuses it.
     fix: async (prUrl, { headOid, fixes, headBranch, route: listed }) => {
-      const message = fixThreadAsk({ fixes, headOid, headBranch });
+      const message = fixThreadAsk({ prUrl, fixes, headOid, headBranch });
       const words = `to ${fixes.map((kind) => FIX_WORDS[kind]).join(", ")}`;
       const route = await askRoute(prUrl);
       if (route.kind === "none") return { ok: false, error: `${route.why} Open a thread for it first; nothing was sent.` };

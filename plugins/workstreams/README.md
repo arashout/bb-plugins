@@ -185,13 +185,18 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   the move each needs. Every GitHub write lists each PR in a confirm, then
   waits with Undo, and a merge runs only from the fresh merge preview.
 - **All PRs:** Every open PR you author and every open PR an effort names, in
-  two lists. **Your turn** comes first: your PRs where a reviewer's
-  feedback waits on you, by effort, with **No effort** last. Select Your turn
-  rows (x, a click, Shift for a range, or ⇧X for all) and **Address selected**
-  (b) starts one batch thread for them at once, with no listing: it waits 8 s
-  for Undo, then starts on the code-work model, under the effort's parent when
-  every PR shares one. It holds each PR until it finishes, replies to each
-  reviewer's note, and never merges. Each PR it sent stays on Your turn with one
+  three lists. **Your turn** comes first: your PRs where a real follow-up waits
+  on you, an approval with comments or changes a person requested, by effort,
+  with **No effort** last. Only these count on the badge. **Comments only**
+  follows, closed until you open it: PRs where only a person's comments or open
+  threads, or bot notes from review apps such as Claude, Codex, or Copilot,
+  wait. Select rows in either (x, a click, Shift for a range, or ⇧X for all of
+  Your turn) and **Address selected** (b) starts one batch thread for them at
+  once, with no listing: it waits 8 s for Undo, then starts on the code-work
+  model, under the effort's parent when every PR shares one. Its prompt opens
+  with a link to each PR, as its first reply and its report do. It holds each
+  PR until it finishes, addresses every comment, bot notes included, replies to
+  each reviewer's note, and never merges. Each PR it sent stays on Your turn with one
   state chip that opens the thread: Sending, Working, Needs you, Done, Blocked,
   Ended without a report, or Not sent, until GitHub shows its feedback cleared.
   A PR it left out says why on its row. The deck's selection offers the same.

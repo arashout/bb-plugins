@@ -289,7 +289,7 @@ describe("the PR inventory screen view model", () => {
   // The live case: a reviewer approved and left open threads while another was asked over a business day ago. You owe answers first, and a
   // Nudge to the slow one leaves them waiting; it returns once the feedback clears and the row leaves Your turn.
   it("offers no Nudge for a reviewer who hasn't answered on a Your turn row, and still does where Your turn doesn't list it", () => {
-    const threads = { kinds: ["threads" as const], text: "5 open threads", since: null };
+    const threads = { kinds: ["approval" as const, "threads" as const], text: "Approved with comments · 5 open threads", followUp: "Approved with comments", since: null };
     const turn = find("catalog #96", withRow("catalog #96", { yourTurn: threads }));
     expect(onYourTurn(turn)).toBe(true);
     expect(rowOf("catalog #96").attention.map((item) => [item.kind, item.action])).toEqual([["review-waiting", "nudge"]]);
@@ -404,7 +404,7 @@ describe("the PR inventory screen view model", () => {
 
   // Feedback the state word doesn't name is still yours, and a thread's to address, so the deck files it under Work in threads.
   it("leads a Your turn row the state word doesn't explain with the review feedback, which its thread addresses", () => {
-    const commented = withRow("catalog #96", { attention: [], yourTurn: { kinds: ["comments"], text: "New comments from @theo-k", since: NOW - 3_600_000 } });
+    const commented = withRow("catalog #96", { attention: [], yourTurn: { kinds: ["comments"], text: "New comments from @theo-k", followUp: null, since: NOW - 3_600_000 } });
     expect(find("catalog #96", commented)).toMatchObject({ steps: [{ text: "Address the review feedback", owner: { kind: "you" } }], primary: "thread",
       yourTurn: { text: "New comments from @theo-k", age: "1h" } });
     // A read that left it unknown asks for a read first.
@@ -416,7 +416,7 @@ describe("the PR inventory screen view model", () => {
   // Merging, or nudging someone else, leaves Your turn's feedback waiting on you, so the row leads with the move that answers it, or with the
   // feedback itself, and the deck files it where Your turn lists it: never under Merge or Nudge reviewers while the feedback waits.
   it("leads a Your turn row with the move that answers its feedback, or the feedback, before a merge or another reviewer's nudge", () => {
-    const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", since: NOW - 3_600_000 };
+    const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", followUp: null, since: NOW - 3_600_000 };
     const merge = reason({ kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [] });
     expect(find("folio #340", withRow("folio #340", { attention: [merge], yourTurn: comments }))).toMatchObject({ primary: "thread",
       steps: [{ text: "Address the review feedback", age: "1h", since: NOW - 3_600_000 }, { text: "Merge" }] });

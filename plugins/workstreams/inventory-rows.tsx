@@ -7,13 +7,14 @@ import { cn } from "./lib/utils";
 export type SimpleGroup = { key: string; label: string; effortId: string | null; lines: InventoryLine[] };
 export type SimpleRowsProps = {
   groups: SimpleGroup[];
-  kind: "turn" | "other";
+  /** Your turn and Comments only rows show their feedback, select, and carry Address's chips; other rows their state. */
+  kind: "turn" | "comments" | "other";
   busyKey: string | null;
   onOpenPr(url: string): void;
   onOpenThread(id: string): void;
   onOpenRoster(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void;
-  /** Your turn rows you selected for Address, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. */
+  /** Your turn and Comments only rows you selected for Address, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. */
   selected?: ReadonlySet<string>;
   onSelect?(line: InventoryLine, shift: boolean): void;
   /** Why the last Address left a PR out, or dispatch refused it, by PR. */
@@ -50,10 +51,11 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
         {group.lines.map((line) => {
           const nudge = line.actions.find((action) => action.id === "nudge" && action.enabled);
           const next = line.steps[0];
-          const turn = props.kind === "turn" ? line.yourTurn : null;
-          const info = turn ? `${turn.text}${turn.age ? ` · ${turn.age}` : ""}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
+          const turn = props.kind !== "other" ? line.yourTurn : null;
+          const age = turn?.age ? ` · ${turn.age}` : "";
+          const info = turn ? `${turn.text}${age}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
           const picked = !!turn && !!props.selected?.has(line.prUrl);
-          // A Your turn row: its feedback, and one thing beside it: why the last Address left it out, what Address made of it, or its re-request.
+          // A Your turn or Comments only row: its feedback, and one thing beside it: why the last Address left it out, what Address made of it, or its re-request.
           const note = turn ? props.notes?.get(line.prUrl) ?? null : null;
           const sent = turn && !note ? line.sent : null;
           const live = turn ? props.live?.get(line.prUrl) ?? null : null;
@@ -72,7 +74,9 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                   <span className="min-w-0 truncate">{line.slug}</span><span className="shrink-0">#{line.number}</span></button>
                 <span className="min-w-0 truncate font-medium" title={line.title}>{line.title}</span>
               </div>
-              <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>
+              {/* The follow-up leads; the comments and bot notes beside it stay quiet. */}
+              <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{turn ? <>{turn.tag}
+                {turn.rest ? <span data-inventory-rest className="text-muted-foreground/60"> · {turn.rest}</span> : null}{age}</> : info}</p>
               {line.last ? <p role="status" className={cn("text-[11px]", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
             </div>
             {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>

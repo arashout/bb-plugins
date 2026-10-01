@@ -63,4 +63,10 @@ describe("feedback to address", () => {
     expect(isBot("press-helper", "Bot")).toBe(true);
     for (const login of ["theo-k", "mira-l", "robotta"]) expect(isBot(login, "User")).toBe(false);
   });
+
+  // Claude's, Codex's, and Copilot's review apps leave bot notes, never a person's feedback, however a read names them.
+  it("knows Claude, Codex, and Copilot's review apps, with or without [bot]", () => {
+    for (const login of ["claude", "claude[bot]", "Claude", "codex", "openai-codex", "chatgpt-codex-connector", "chatgpt-codex-connector[bot]", "copilot",
+      "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]"]) expect([login, isBot(login)]).toEqual([login, true]);
+  });
 });

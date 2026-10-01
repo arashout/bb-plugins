@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EFFECTS, VERBS, WORK_RECIPES, type Effect } from "./effort-command.js";
-import { addressBatchPrompt, addressBatchTitle, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, PR_THREADS_RULE, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
+import { ADDRESS_ALL_RULE, addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, ATTEMPT_CONDITIONS, authorityNeed, buildWorkOrder, CODE_RESULTS, fixesFor, fixThreadAsk, PR_THREADS_RULE, RECIPES, recipe, REPLY_RULE, RESULT_PREFIX, WORKER_RESULTS, type WorkerRecipe,
   type WorkOrderInput }
   from "./effort-recipes.js";
 import { GATE_IDS } from "./pr-gates.js";
@@ -172,13 +172,13 @@ describe("asking a PR's thread to fix it", () => {
   });
 
   it("tells the thread each fix's guidance for this PR's head alone, and never to merge", () => {
-    const text = fixThreadAsk({ fixes: ["conflicts", "checks", "threads"], headOid: "b".repeat(40), headBranch: "abc-210-holds" });
+    const text = fixThreadAsk({ prUrl: URL_210, fixes: ["conflicts", "checks", "threads"], headOid: "b".repeat(40), headBranch: "abc-210-holds" });
     expect(text).toContain(`Fix this PR so it can move toward merge: resolve conflicts, fix CI, resolve threads. expectedHead: ${"b".repeat(40)}; headBranch: abc-210-holds.`);
     expect(text).toContain(`1. ${BRANCH_WORK.integrate}\n2. ${CHECKS_WORK}\n3. ${FEEDBACK_WORK.address}`);
     expect(text).toContain(`${PUSH_RULES} ${DRAFT_RULE}`);
     expect(text).toContain("Do not merge, deploy, or start another PR.");
     // Only the guidance its fixes need.
-    const checks = fixThreadAsk({ fixes: ["checks"], headOid: "b".repeat(40), headBranch: null });
+    const checks = fixThreadAsk({ prUrl: URL_210, fixes: ["checks"], headOid: "b".repeat(40), headBranch: null });
     expect([checks.includes(CHECKS_WORK), checks.includes(BRANCH_WORK.integrate), checks.includes(FEEDBACK_WORK.address)]).toEqual([true, false, false]);
   });
 
@@ -190,13 +190,13 @@ describe("asking a PR's thread to fix it", () => {
     expect(fixesFor(commented)).toEqual(["threads", "comments"]);
     expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, followUpAt: "2026-09-29T11:00:00Z" } })).toEqual(["threads", "comments"]);
     expect(fixesFor({ ...commented, reviewFeedback: { ...commented.reviewFeedback!, openThreads: 0, repliedAt: "2026-09-29T11:00:00Z" } })).toEqual([]);
-    const text = fixThreadAsk({ fixes: ["comments"], headOid: "b".repeat(40), headBranch: "abc-96-series" });
+    const text = fixThreadAsk({ prUrl: URL_210, fixes: ["comments"], headOid: "b".repeat(40), headBranch: "abc-96-series" });
     expect(text).toContain("Fix this PR so it can move toward merge: answer comments.");
     expect(text).toContain(`1. ${FEEDBACK_WORK.address}`);
     // A thread that fixes the code without a reply leaves the comment waiting, and Your turn would ask the same thread again.
     const reply = "Answer each comment with one reply on the PR that says what changed or why nothing needs to.";
     expect(text).toContain(reply);
-    expect(fixThreadAsk({ fixes: ["threads"], headOid: "b".repeat(40), headBranch: "abc-96-series" })).not.toContain(reply);
+    expect(fixThreadAsk({ prUrl: URL_210, fixes: ["threads"], headOid: "b".repeat(40), headBranch: "abc-96-series" })).not.toContain(reply);
   });
 });
 
@@ -234,7 +234,7 @@ describe("one batch thread for Your turn feedback", () => {
   it("asks for each PR's feedback by the recipe, a reply to every note, and never a merge", () => {
     const text = addressBatchPrompt(prs);
     for (const pr of prs) {
-      const line = text.split("\n").find((item) => item.includes(pr.prUrl))!;
+      const line = text.split("\n").find((item) => item.startsWith("{") && item.includes(pr.prUrl))!;
       expect(JSON.parse(line)).toEqual({ attemptId: pr.attemptId, pr: `${pr.repo}#${pr.number}`, title: pr.title, url: pr.prUrl, expectedHead: pr.headOid,
         headBranch: pr.headBranch, base: pr.baseBranch, checkout: pr.checkout, waiting: pr.feedback, threads: pr.threads });
     }
@@ -261,4 +261,29 @@ describe("one batch thread for Your turn feedback", () => {
     expect(text).toContain("for each PR: feedback addressed, feedback unresolved or deferred and why, files changed, and test results");
     expect(text).toContain(`one line per PR, each beginning ${RESULT_PREFIX}`);
   });
+
+  // The thread opens on its PRs: links first, from the PRs themselves rather than the model, so a reader of the thread list or the
+  // transcript reaches each PR in one click; the worker opens its first reply and its report the same way.
+  it("leads with each PR's link, in order, before anything else, and asks the first reply and the report to lead with them too", () => {
+    const text = addressBatchPrompt(prs);
+    expect(text.split("\n")[0]).toBe("[folio #42](https://github.com/inkwell/folio/pull/42) · [quill #9](https://github.com/inkwell/quill/pull/9)");
+    expect(text).toContain("Open your first reply with the links above, in the same order.");
+    expect(text).toContain("open your report with the same links");
+    // One PR's own asks lead with its link too.
+    expect(fixThreadAsk({ prUrl: URL_210, fixes: ["checks"], headOid: "b".repeat(40), headBranch: null }).split("\n")[0]).toBe(`[quill #210](${URL_210})`);
+    expect(approvalFeedbackAsk({ prUrl: URL_210, headOid: "b".repeat(40), notes: 2 }).split("\n")[0]).toBe(`[quill #210](${URL_210})`);
+  });
+
+  // Every comment is addressed, a bot's too: the work order names bot notes beside a person's, and tells the worker to fix what's valid,
+  // decline briefly what isn't, and resolve what it addressed, while each person's note still gets its own reply.
+  it("names bot notes among what waits and asks every comment addressed, automated reviewers' included", () => {
+    const text = addressBatchPrompt([{ ...prs[0]!, feedback: "Approval comment from @mira · New comments from @otto · 3 bot notes" }]);
+    expect(text).toContain('"waiting":"Approval comment from @mira · New comments from @otto · 3 bot notes"');
+    expect(text).toContain("an approval note, changes requested, comments from people, or bot notes");
+    expect(text).toContain(ADDRESS_ALL_RULE);
+    for (const words of ["including automated reviewers' (Claude, Codex, Copilot", "fix what's valid", "reply briefly where you disagree or it doesn't apply",
+      "resolve the threads you addressed", "A person's note still needs a reply each."]) expect(ADDRESS_ALL_RULE).toContain(words);
+  });
 });
+
+const URL_210 = "https://github.com/inkwell/quill/pull/210";

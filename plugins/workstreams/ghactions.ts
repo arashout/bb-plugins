@@ -396,12 +396,12 @@ function followUpsOf(pr: { timelineItems?: unknown; baseRefName?: unknown }, me:
 }
 
 /**
- * What one review read shows of feedback waiting on the PR's author (feedback-to-address.ts): unresolved threads someone else started;
- * the newest comment from a person other than the author, as a non-empty review body, a thread comment, or a conversation comment, that
- * neither the approval's notes nor a later approval of that person's own covers; the author's newest review or comment, the only answer;
- * when the approval's newest note was left; and when a follow-up last linked this one, which answers nothing. Bots never count. Undefined
- * without the PR's author or its reviews: without them, it can't tell your reply from a reviewer's comment. Conversation comments and
- * links come only with the follow-up read; without them, the note and link dates stay absent.
+ * What one review read shows of feedback waiting on the PR's author (feedback-to-address.ts): unresolved threads a person other than the
+ * author started, a bot's being a bot note; the newest comment from a person other than the author, as a non-empty review body, a thread
+ * comment, or a conversation comment, that neither the approval's notes nor a later approval of that person's own covers; the author's
+ * newest review or comment, the only answer; when the approval's newest note was left; and when a follow-up last linked this one, which
+ * answers nothing. Bots never count. Undefined without the PR's author or its reviews: without them, it can't tell your reply from a
+ * reviewer's comment. Conversation comments and links come only with the follow-up read; without them, the note and link dates stay absent.
  */
 export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comments?: unknown; timelineItems?: unknown; baseRefName?: unknown },
   threads: readonly unknown[], notes: ApprovalNotesRead | null = null): ReviewFeedback | undefined {
@@ -443,9 +443,10 @@ export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comm
   }
   const newest = (dates: string[]) => dates.reduce<string | null>((best, at) => best === null || Date.parse(at) > Date.parse(best) ? at : best, null);
   const last = said.reduce<{ who: string; at: string } | null>((best, item) => best === null || Date.parse(item.at) > Date.parse(best.at) ? item : best, null);
+  // A bot's open thread is a bot note, never a person's open thread (your-turn.ts).
   const openThreads = threads.map(nodeOf).filter((thread) => {
-    const first = nodesOf(thread.comments)[0];
-    return thread.isResolved === false && loginOf(nodeOf(first).author) !== me;
+    const first = nodeOf(nodesOf(thread.comments)[0]), who = loginOf(first.author);
+    return thread.isResolved === false && who !== me && !(who !== null && isBot(who, first.author?.__typename));
   }).length;
   const followed = Array.isArray(pr.comments !== null && typeof pr.comments === "object" ? (pr.comments as { nodes?: unknown }).nodes : undefined);
   return { openThreads: Math.min(openThreads, 2_000), comment: last && { login: last.who.slice(0, 140), at: last.at }, repliedAt: newest(replies),

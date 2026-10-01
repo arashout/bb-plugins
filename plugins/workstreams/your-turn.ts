@@ -1,27 +1,34 @@
 // Your turn: your open PRs where a reviewer's feedback waits on your move,
-// from facts the inventory already keeps. Feedback to address, whatever CI
-// says: an approval that said something, as attention's approval-note reason
-// names it, and another person's comment, that neither your reply on the PR
-// nor your confirmation answered. Then changes someone asked for that you
-// haven't asked them to review again, review threads someone else opened
-// that are still open, and notes you answered that attention asks you to
-// confirm. A push answers none of it, and neither does an issue or a PR that
-// mentions this one. A PR you hold, and one waiting only on CI or on
-// reviewers, are not your turn; a draft is only for its feedback to address.
-// Pure: the server computes it per row; the badge and the list only count
-// and show it.
+// from facts the inventory already keeps. A real follow-up, which only the
+// badge and Your turn count: an approval that said something, as attention's
+// approval-note reason names it, or notes you answered that attention asks
+// you to confirm; and changes a person asked for that you haven't asked them
+// to review again. The rest waits too, quietly, as Comments only: review
+// threads a person opened that are still open, another person's comment that
+// neither your reply on the PR nor your confirmation answered, and bot notes,
+// a code-review app's review (Claude, Codex, Copilot) that no reply of yours
+// followed, change requests included. A batch addresses all of it; a bot's
+// note alone never makes it a follow-up and never clears anything. A push
+// answers none of it, and neither does an issue or a PR that mentions this
+// one. A PR you hold, and one waiting only on CI or on reviewers, are not
+// your turn; a draft is only for its feedback to address. Pure: the server
+// computes it per row; the badge and the list only count and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
-import { feedbackToAddress } from "./feedback-to-address.js";
+import { feedbackToAddress, isBot } from "./feedback-to-address.js";
 import { awaitingRerequest } from "./pr-gates.js";
 
-export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments"] as const;
+export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments", "bots"] as const;
 export type YourTurnKind = (typeof YOUR_TURN_KINDS)[number];
+/** The kinds that are a real follow-up, which Your turn counts; the rest alone are Comments only. */
+const FOLLOW_UPS: ReadonlySet<YourTurnKind> = new Set(["changes", "approval"]);
 export const yourTurnSchema = z.object({
   kinds: z.array(z.enum(YOUR_TURN_KINDS)).min(1),
-  /** Each kind in a few words, first kind first: "Changes requested by @mira · 2 open threads", or "Answered @mira · re-request review" once you have. */
+  /** Each kind in a few words, follow-ups first: "Changes requested by @mira · 2 open threads · 1 bot note", or "Answered @mira · re-request review" once you have. */
   text: z.string(),
+  /** The real follow-up's words, which lead `text`: "Approved with comments"; null when only comments and bot notes wait, which is Comments only. */
+  followUp: z.string().nullable(),
   /** When the oldest feedback it names arrived, in epoch ms; null when nothing dates it. */
   since: z.number().nullable(),
 }).strict();
@@ -30,25 +37,25 @@ export type YourTurn = z.infer<typeof yourTurnSchema>;
 export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback">;
 
 /** The approval's part as yourTurn words it: a listing finds it by these words, since another part holds a " · " of its own. */
-const APPROVAL_NOTE = "Approval comment to address";
-const APPROVAL_COMMENTS = "Approved with comments";
+const APPROVED = "Approved with comments";
 
 const time = (value: string | null | undefined): number | null => {
   const at = value ? Date.parse(value) : Number.NaN;
   return Number.isNaN(at) ? null : at;
 };
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
  * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention: its approval-note reason asks whatever CI says,
- * and its approval-comments reason, for notes you answered, only once nothing else holds the merge. `held`: you hold the PR, which parks it
- * until you release it.
+ * its approval-comments reason asks your confirm of notes you answered, and its rereview-needed reason names change requests you answered.
+ * `held`: you hold the PR.
  */
 export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since" | "reviewers">[], held: boolean): YourTurn | null {
   if (held || pr.state !== "OPEN") return null;
   const parts: { kind: YourTurnKind; text: string; since: number | null }[] = [];
-  // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours.
-  const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED");
+  // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours. A bot's change request is a bot note.
+  const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED" && !isBot(review.login));
   // A change request you answered, which attention says to ask again, waits on your re-request, not on changes.
   const asking = new Set(reasons.filter((reason) => reason.kind === "rereview-needed").flatMap((reason) => reason.reviewers.map((login) => login.toLowerCase())));
   const answered = changes.filter((review) => asking.has(review.login.toLowerCase()));
@@ -56,18 +63,26 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   if (changes.length) parts.push({ kind: "changes", since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)),
     text: [...unanswered.length ? [`Changes requested by ${mentions(unanswered.map((review) => review.login))}`] : [],
       ...answered.length ? [`Answered ${mentions(answered.map((review) => review.login))} · re-request review`] : []].join(" · ") });
-  const note = reasons.find((reason) => reason.kind === "approval-note");
-  const approval = note ?? reasons.find((reason) => reason.kind === "approval-comments");
-  if (approval) parts.push({ kind: "approval", text: note ? APPROVAL_NOTE : APPROVAL_COMMENTS, since: approval.since });
-  const open = pr.isDraft ? 0 : pr.reviewFeedback?.openThreads ?? 0;
-  if (open > 0) parts.push({ kind: "threads", text: `${open} open ${open === 1 ? "thread" : "threads"}`, since: null });
+  const approval = reasons.find((reason) => reason.kind === "approval-note") ?? reasons.find((reason) => reason.kind === "approval-comments");
+  if (approval) parts.push({ kind: "approval", text: APPROVED, since: approval.since });
+  const read = pr.reviewFeedback;
+  // The review read leaves a bot's open threads out: these are a person's.
+  const open = pr.isDraft ? 0 : read?.openThreads ?? 0;
+  if (open > 0) parts.push({ kind: "threads", text: count(open, "open thread", "open threads"), since: null });
   // Another person's comment that no reply on the PR answered; a push or a PR that mentions this one never does.
-  const comment = feedbackToAddress({ reviewFeedback: pr.reviewFeedback }, false).find((item) => item.kind === "comment");
+  const comment = feedbackToAddress({ reviewFeedback: read }, false).find((item) => item.kind === "comment");
   // A reviewer whose change request it names already has their say there: their review is a comment too, and naming it twice says nothing.
   if (comment && !changes.some((review) => review.login === comment.login)) parts.push({ kind: "comments", text: `New comments from @${comment.login}`, since: comment.since });
+  // A code-review app's review, its threads with it, waits as a note until you reply on the PR after it, as a person's comment does.
+  const replied = time(read?.repliedAt);
+  const bots = pr.isDraft ? [] : pr.latestReviews.filter((review) => isBot(review.login) && (review.state === "COMMENTED" || review.state === "CHANGES_REQUESTED") &&
+    !(replied !== null && replied > (time(review.submittedAt) ?? Number.NEGATIVE_INFINITY)));
+  if (bots.length) parts.push({ kind: "bots", text: count(bots.length, "bot note", "bot notes"),
+    since: Math.min(...bots.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
   if (!parts.length) return null;
   const dated = parts.flatMap((part) => part.since !== null && Number.isFinite(part.since) ? [part.since] : []);
-  return { kinds: parts.map((part) => part.kind), text: parts.map((part) => part.text).join(" · "), since: dated.length ? Math.min(...dated) : null };
+  const followUp = parts.filter((part) => FOLLOW_UPS.has(part.kind)).map((part) => part.text).join(" · ") || null;
+  return { kinds: parts.map((part) => part.kind), text: parts.map((part) => part.text).join(" · "), followUp, since: dated.length ? Math.min(...dated) : null };
 }
 
 /**
@@ -76,7 +91,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
  */
 export function turnSummary(turn: Pick<YourTurn, "text">, reviewed: readonly { login: string; state: string }[]): string {
   const approvers = reviewed.filter((review) => review.state.toUpperCase() === "APPROVED").map((review) => review.login);
-  return turn.text.split(" · ").map((part) => approvers.length && (part === APPROVAL_NOTE || part === APPROVAL_COMMENTS) ? `Approval comment from ${mentions(approvers)}` : part).join(" · ");
+  return turn.text.split(" · ").map((part) => approvers.length && part === APPROVED ? `Approval comment from ${mentions(approvers)}` : part).join(" · ");
 }
 
 /**

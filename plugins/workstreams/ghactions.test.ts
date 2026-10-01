@@ -301,6 +301,14 @@ describe("review feedback to address", () => {
       .toBe(1);
   });
 
+  // A code-review app's open thread is a bot note, which Your turn names apart: counted as a person's, every Codex or Claude pass would
+  // read as people waiting on you.
+  it("leaves a bot's open threads out of the open threads a person started", () => {
+    const threads = [thread(false, said("chatgpt-codex-connector", 9, "Bot")), thread(false, said("claude[bot]", 9)), thread(false, said("copilot", 9)),
+      thread(false, said("otto-v", 10), said("claude", 11))];
+    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9), review("otto-v", "COMMENTED", 10)], threads)?.openThreads).toBe(1);
+  });
+
   // A bot's word is a deploy preview, a tracker link, a CI report, or a code-review app's pass: none waits on your answer.
   it("never counts a bot, by GitHub's type or its login", () => {
     expect(read([review("chatgpt-codex-connector", "COMMENTED", 9, "Possible issue")], [thread(false, said("press-helper", 10, "Bot"))],
