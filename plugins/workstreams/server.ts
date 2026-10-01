@@ -462,7 +462,7 @@ export const rpcContract = defineRpcContract({
     output: writeResult },
   inventory_nudge: { input: prUrlInput.extend({ reviewers: z.array(z.string().max(140)).min(1).max(20) }).strict(), output: writeResult },
   /** Hide a PR from Your turn until its head moves or a person says something newer (`head` is the head its row showed), or show it again. */
-  inventory_dismiss: { input: prUrlInput.extend({ head: z.string().regex(/^[0-9a-f]{40}$/u).nullable() }).strict(), output: z.object({ ok: z.literal(true) }) },
+  inventory_dismiss: { input: prUrlInput.extend({ head: z.string().regex(/^[0-9a-f]{40}$/u).nullable(), latest: z.number().nullable() }).strict(), output: z.object({ ok: z.literal(true) }) },
   /**
    * Read-only, for the confirm: the approval's notes (review bodies and the threads it opened) and what came after the newest, read from
    * GitHub now, with the thread Ask would send the approval-feedback recipe to.
@@ -6717,9 +6717,9 @@ export default async function plugin(bb: BbPluginApi) {
     inventory_mark_ready: ({ prUrl, headOid }) => inventoryActions.markReady(prWorkItemKey(prUrl), headOid),
     inventory_request_review: ({ prUrl, logins, shown }) => inventoryActions.requestReview(prWorkItemKey(prUrl), logins, shown),
     inventory_nudge: ({ prUrl, reviewers }) => inventoryActions.nudge(prWorkItemKey(prUrl), reviewers),
-    inventory_dismiss: async ({ prUrl, head }) => {
+    inventory_dismiss: async ({ prUrl, head, latest }) => {
       const key = `${DISMISSED}${prWorkItemKey(prUrl)}`;
-      if (head) await bb.storage.kv.set(key, { head, at: Date.now() } satisfies Dismissal); else await bb.storage.kv.delete(key);
+      if (head) await bb.storage.kv.set(key, { head, latest } satisfies Dismissal); else await bb.storage.kv.delete(key);
       inventoryChanged();
       return { ok: true as const };
     },

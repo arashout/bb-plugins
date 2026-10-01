@@ -115,21 +115,23 @@ describe("the PR inventory read model", () => {
     expect(await turns()).toEqual([[315, "Changes requested by @otto-v"], [316, "Changes requested by @otto-v"]]);
   });
 
-  // Dismiss, as Reviews dismisses: one plugin KV key per PR and no table, so a rollback reads nothing new. It holds on the head it saw;
-  // a new head brings the PR back. Drop the head check and a dismissed PR never returns.
-  it("hides a dismissed PR from Your turn on the head it saw, kept in plugin KV, until the head moves or you bring it back", async () => {
+  // Dismiss, as Reviews dismisses: one plugin KV key per PR and no table, so a rollback reads nothing new. It holds on the head and the
+  // newest word its row showed; a new head, or a word newer than that, brings the PR back. Drop the head check and it never returns.
+  it("hides a dismissed PR from Your turn on the head and word it saw, kept in plugin KV, until either moves or you bring it back", async () => {
     const env = await setup();
-    const shown = async () => { const view = await env.get();
-      return [yourTurnRows(view, Date.now()).map((line) => line.number), view.groups.flatMap((group) => group.rows).find((row) => row.number === 316)!.dismissed]; };
-    expect(await shown()).toEqual([[316], false]);
-    expect(await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40) })).toEqual({ ok: true });
+    const row = async () => (await env.get()).groups.flatMap((group) => group.rows).find((item) => item.number === 316)!;
+    const shown = async () => [yourTurnRows(await env.get(), Date.now()).map((line) => line.number), (await row()).dismissed];
+    const latest = (await row()).yourTurn!.latest;
+    expect([await shown(), latest]).toEqual([[[316], false], expect.any(Number)]);
+    expect(await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40), latest })).toEqual({ ok: true });
     expect(await shown()).toEqual([[], true]);
     expect(await env.bb.storage.kv.list("yourTurnDismissed:")).toEqual([`yourTurnDismissed:${url(316)}`]);
-    // Dismissed on an older head: the PR moved since, so it's back.
-    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "b".repeat(40) });
+    // Dismissed on an older head, or before the reviewer's word: the PR moved since, so it's back.
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "b".repeat(40), latest });
     expect(await shown()).toEqual([[316], false]);
-    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40) });
-    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: null });
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: "a".repeat(40), latest: latest! - 1 });
+    expect(await shown()).toEqual([[316], false]);
+    await env.harness.callRpc("inventory_dismiss", { prUrl: url(316), head: null, latest: null });
     expect([await shown(), await env.bb.storage.kv.list("yourTurnDismissed:")]).toEqual([[[316], false], []]);
   });
 

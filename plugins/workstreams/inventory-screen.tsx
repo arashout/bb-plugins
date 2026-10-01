@@ -258,9 +258,10 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
   /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
-  /** Dismiss a row on the head it shows, or bring it back. */
+  /** Dismiss a row on the head and the newest word it shows, or bring it back. */
   const dismiss = (line: InventoryLine, on: boolean) => {
-    void rpc.call("inventory_dismiss", { prUrl: line.prUrl, head: on ? rows.get(line.prUrl)?.head ?? null : null }).then(load, (cause: unknown) => say(message(cause)));
+    const row = on ? rows.get(line.prUrl) : undefined;
+    void rpc.call("inventory_dismiss", { prUrl: line.prUrl, head: row?.head ?? null, latest: row?.yourTurn?.latest ?? null }).then(load, (cause: unknown) => say(message(cause)));
   };
   const undoBatch = async (batchId: string) => {
     const undone = await rpc.call("deck_batch_undo", { batchId }).catch((cause: unknown) => ({ ok: false as const, error: message(cause) }));

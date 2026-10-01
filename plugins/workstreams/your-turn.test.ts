@@ -101,14 +101,15 @@ describe("Your turn", () => {
 });
 
 // Dismiss hides a row from Your turn on the head it saw, like Reviews' dismissed items: a new head or a person's newer word brings it back.
+// It keeps the newest word the row showed, not the click's time: a comment written before the click but read after it was never seen.
 describe("Dismiss", () => {
   const head = base.headRefOid!;
-  const seen = { head, at: Date.parse(at(13)) };
-  it("hides until the head moves or a person says something newer", () => {
+  const seen = { head, latest: turn(comments)!.latest };
+  it("hides until the head moves or a person says something newer than the row showed", () => {
     expect(dismissed(seen, head, turn(comments))).toBe(true);
     expect(dismissed(seen, "d".repeat(40), turn(comments))).toBe(false);
-    const newer = pr({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, comment: { login: "theo-k", at: at(14) } } });
-    expect(dismissed(seen, head, turn(newer))).toBe(false);
+    const unseen = pr({ ...comments, reviewFeedback: { ...comments.reviewFeedback!, comment: { login: "theo-k", at: "2026-09-29T12:55:00.000Z" } } });
+    expect(dismissed(seen, head, turn(unseen))).toBe(false);
     expect(dismissed(seen, head, turn(pr({ ...changes, latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(14) }] })))).toBe(false);
     // Nothing waiting, or never dismissed, is nothing to hide.
     expect(dismissed(seen, head, null)).toBe(false);

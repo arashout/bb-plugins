@@ -54,12 +54,12 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   return { why: parts.map((part) => part.text).join(" · "), since: oldest.length ? Math.min(...oldest) : null, latest: newest.length ? Math.max(...newest) : null };
 }
 
-/** A Dismiss, kept per PR: the head it saw and when. */
-export const dismissalSchema = z.object({ head: z.string(), at: z.number() }).strict();
+/** A Dismiss, kept per PR: the head and the newest word its row showed, so a word read after the click still brings it back. */
+export const dismissalSchema = z.object({ head: z.string(), latest: z.number().nullable() }).strict();
 export type Dismissal = z.infer<typeof dismissalSchema>;
-/** Dismissed holds until the head moves or a person says something newer than the Dismiss. */
+/** Dismissed holds until the head moves or a person says something newer than the row showed. */
 export const dismissed = (dismissal: Dismissal | null | undefined, head: string | null, turn: Pick<YourTurn, "latest"> | null): boolean =>
-  !!dismissal && !!turn && dismissal.head === head && (turn.latest ?? 0) <= dismissal.at;
+  !!dismissal && !!turn && dismissal.head === head && (turn.latest ?? 0) <= (dismissal.latest ?? 0);
 
 /**
  * Where the newest Address batch sent a PR, and how its thread stands now: waiting out its Undo window, refused by dispatch, or its
