@@ -106,25 +106,27 @@ describe("planning a fix", () => {
 
 describe("planning Address for Your turn PRs", () => {
   const feedback = (text: string | null, patch: Partial<NonNullable<PlanRow["address"]>> = {}) =>
-    ({ address: { feedback: text, busy: null, checkout: "folio-abc-42", ...patch } });
+    ({ address: { feedback: text, busy: null, checkout: "folio-abc-42", source: null, ...patch } });
 
   // One batch thread takes every PR whose feedback waits on you, and the listing says why each other one stays out, so what it lists is
-  // exactly what the thread gets.
+  // exactly what the thread gets. A PR with no checkout is worked in a new worktree from its repository's checkout, never a fresh clone,
+  // so one with neither stays out.
   it("lists each PR one batch thread takes, with its feedback and where it's worked, and why any other stays out", () => {
     next = 800;
-    const rows = [row("work", {}, feedback("Changes requested by @otto")), row("confirm", {}, feedback("Approval comment from @mira", { checkout: null })),
+    const rows = [row("work", {}, feedback("Changes requested by @otto")), row("confirm", {}, feedback("Approval comment from @mira", { checkout: null, source: "folio" })),
       row("work", { hold: { reason: "Counter redesign", since: 1 } }, feedback("2 open threads")), row("work", {}, { pile: "held", ...feedback("2 open threads") }),
       row("work", {}, { pile: "done", ...feedback("2 open threads") }), row("work", { managed: "Shelf order roster #2" }, feedback("2 open threads")),
       row("work", {}, feedback("2 open threads", { busy: "An agent is already working on it." })), row("nudge", {}, feedback(null)),
       row("work", { acted: { kind: "address", state: "queued", at: 1, batchId: "b" } }, feedback("2 open threads")),
-      row("work", {}, { head: null, ...feedback("2 open threads") })];
+      row("work", {}, { head: null, ...feedback("2 open threads") }), row("work", {}, feedback("2 open threads", { checkout: null }))];
     const plan = planBatch("address", rows, { selected: true });
     expect(plan.items.map((item) => [item.kind, item.ref, item.what, item.feedback, item.where, item.headOid])).toEqual([
       ["address", "quill #800", "Batch thread", "Changes requested by @otto", "In folio-abc-42", HEAD],
-      ["address", "quill #801", "Batch thread", "Approval comment from @mira", "No checkout: a clean clone", HEAD]]);
+      ["address", "quill #801", "Batch thread", "Approval comment from @mira", "No checkout: a new worktree from folio", HEAD]]);
     expect(brief(plan).skipped).toEqual(["quill #802: On hold. Release it first.", "quill #803: Its effort is on hold.", "quill #804: Its effort is done.",
       "quill #805: Its v2 roster runs it.", "quill #806: An agent is already working on it.", "quill #807: No feedback waits on you.",
-      "quill #808: A write on it is waiting or just ran.", "quill #809: Not read in full yet. Refresh it first."]);
+      "quill #808: A write on it is waiting or just ran.", "quill #809: Not read in full yet. Refresh it first.",
+      "quill #810: No local checkout of its repository to add a worktree from."]);
     // Never Advance, and never a merge.
     expect(planBatch("advance", rows, { selected: false }).items.map((item) => item.kind)).toEqual(["nudge"]);
   });
@@ -251,7 +253,8 @@ describe("sending a deck batch", () => {
         return new Map(items.map((item) => [item.prUrl, { ok: true as const, detail: "Started “Address feedback on 2 PRs”." }]));
       } };
     const address = (load: ReturnType<typeof createDeckBatches>) => load.plan("address", null, planBatch("address",
-      [row("work", {}, { address: { feedback: "2 open threads", busy: null, checkout: null } }), row("confirm", {}, { address: { feedback: "Approval comment from @mira", busy: null, checkout: null } })],
+      [row("work", {}, { address: { feedback: "2 open threads", busy: null, checkout: null, source: "folio" } }),
+        row("confirm", {}, { address: { feedback: "Approval comment from @mira", busy: null, checkout: null, source: "folio" } })],
       { selected: true }), { projectId: "proj-inkwell", parentThreadId: null, under: null }).batchId!;
     const load = createDeckBatches(deps);
     const undone = address(load), sent = address(load);

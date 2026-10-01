@@ -948,16 +948,21 @@ needed on the head the row showed, and only where the listing said: a PR whose
 thread appeared or went away since is refused. It never merges, and Advance
 never includes it. `address` takes the selected Your turn PRs, with `mode`
 `batch` (the default) or `each`. Each item names its `feedback` and, for a
-batch, `where` it's worked; `skipped` names why a PR stays out: a hold, a held
+batch, `where` it's worked: its checkout, or for a PR with none, a new
+worktree from a local checkout of its repository ("No checkout: a new
+worktree from folio"); `skipped` names why a PR stays out: a hold, a held
 or done effort, a v2 roster or claim, an agent or open run on the PR or its
-checkout, no feedback waiting, or a write just sent. A batch plan returns its
+checkout, no feedback waiting, a write just sent, or, for a batch, no local
+checkout of its repository to add a worktree from. A batch plan returns its
 `thread`: the project, and the effort parent it starts under when every PR
 shares that effort, else none. When it sends, it reads each PR again, claims
 every PR still waiting in the run record (one `address-feedback` run per PR)
 with nothing awaited between the last check and the last claim, and starts one
 worker titled by its PRs ("Address feedback: quill #210, #211 · folio #301", with
 "+N more" past 80 characters) on the code-work model. The worker
-follows the `address_review_feedback` recipe per PR, replies to each note,
+follows the `address_review_feedback` recipe per PR, in its checkout or in a
+worktree it adds with `git worktree add` beside that repository checkout
+(reusing one already on the head branch, never a fresh clone), replies to each note,
 never merges, and ends with one `Workstreams result v1` line per PR. Agent
 and thread starts refuse a PR or checkout a claim holds; the claims end when
 the thread finishes, and each PR's result is kept on its run. A result clears

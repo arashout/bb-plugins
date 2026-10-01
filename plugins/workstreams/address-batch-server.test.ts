@@ -53,8 +53,9 @@ async function setup() {
   ]);
   const raw: RawUnit = { path: PATH, dirName: "folio-abc-43", repo: REPO, githubRepo: REPO, branch: "abc-43-order", dirty: false, ahead: 0, behind: 0,
     lastCommitAt: null, defaultBranch: "main", pr: current.get(43)!, shipped: null, changedPaths: [], observed: { status: true, pr: true } };
-  /** More checkouts the scan finds, with no PR it linked. */
+  /** More checkouts the scan finds, with no PR it linked. `linked`: whether it still finds #43's. */
   const units: RawUnit[] = [];
+  const scan = { linked: true };
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const metadata = new Map<string, Record<string, unknown>>();
   const add = (id: string, patch: Record<string, unknown> = {}) => {
@@ -102,7 +103,7 @@ async function setup() {
     },
   }, experimental_callHostRpc: ({ method, input }) => {
     hostCalls.push(method);
-    if (method === "scan" || method === "inspectPaths") return { units: [{ ...raw, pr: current.get(43)! }, ...units], warnings: [] };
+    if (method === "scan" || method === "inspectPaths") return { units: [...scan.linked ? [{ ...raw, pr: current.get(43)! }] : [], ...units], warnings: [] };
     if (method === "authoredPrs") return { owners: ["inkwell"], entries: [...current.values()].map((entry) => ({ repo: REPO, pr: entry })),
       discoveryComplete: true, repositories: [{ repo: REPO, complete: true }], complete: true, warnings: [] };
     if (method === "inspectPrs") return (async () => {
@@ -124,7 +125,7 @@ async function setup() {
   efforts.recordWorker(effort.id, "thr-42", url(42), "pr");
   add("thr-coordinator", { title: "🧭 Manuscript review" });
   efforts.save({ ...efforts.get(effort.id)!, coordinatorThreadId: "thr-coordinator", coordinatorState: "ready" });
-  const env = { harness, bb, current, units, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls, reads, lists,
+  const env = { harness, bb, current, units, scan, send, spawn, hang, output, effort, spine, efforts, threads, add, metadata, hostCalls, reads, lists,
     rpc: (method: string, value: unknown) => env.harness.callRpc(method as never, value as never),
     refresh: async () => expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0),
     batch: async (batchId: string) => await env.rpc("deck_batch_get", { batchId }) as DeckBatch,
@@ -147,7 +148,7 @@ const spawned = (env: Env) => env.spawn.mock.calls.map(([args]) => args as unkno
   providerId: string; model: string; reasoningLevel: string; environment: unknown; pluginMetadata: { role: string; runIds: number[] } });
 /** The batch thread's work order, each PR's line by its number. */
 const orders = (env: Env) => new Map(spawned(env)[0]!.prompt.split("\n").filter((line) => line.startsWith('{"pr"'))
-  .map((line) => JSON.parse(line) as { url: string; checkout: string | null; threads: unknown }).map((order) => [Number(order.url.split("/").pop()), order]));
+  .map((line) => JSON.parse(line) as { url: string; checkout: string | null; worktreeFrom: string | null; threads: unknown }).map((order) => [Number(order.url.split("/").pop()), order]));
 /** A checkout the scan found with no PR linked. */
 const worktree = (path: string, githubRepo: string, branch: string): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: githubRepo, githubRepo, branch,
   dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
@@ -194,9 +195,9 @@ describe("addressing Your turn PRs in one batch thread", () => {
     const plan = await env.plan([42, 43, 44].map(url));
     // The listing is exactly what the thread gets.
     expect(plan.items.map((item) => [item.ref, item.kind, item.feedback, item.where, item.headOid])).toEqual([
-      ["folio #42", "address", "Approval comment from @mira", "No checkout: a clean clone", HEAD],
+      ["folio #42", "address", "Approval comment from @mira", "No checkout: a new worktree from folio-abc-43", HEAD],
       ["folio #43", "address", "Changes requested by @otto", "In folio-abc-43", HEAD],
-      ["folio #44", "address", "Comment from @ines · 2 open threads", "No checkout: a clean clone", HEAD]]);
+      ["folio #44", "address", "Comment from @ines · 2 open threads", "No checkout: a new worktree from folio-abc-43", HEAD]]);
     expect([plan.skipped, plan.thread]).toEqual([[], { projectId: PROJECT, parentThreadId: "thr-coordinator", under: "🧭 Manuscript review" }]);
     expect(await env.rpc("deck_batch_start", { batchId: plan.batchId })).toMatchObject({ ok: true });
     await vi.advanceTimersByTimeAsync(7_900);
@@ -231,8 +232,9 @@ describe("addressing Your turn PRs in one batch thread", () => {
     expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
   });
 
-  // A PR the scan linked no checkout to still works where its branch already is, so the thread neither clones again nor works on a stale
-  // copy; a worktree on another branch, in another repository, or on the default branch a fork's head can share a name with is not it.
+  // A PR the scan linked no checkout to still works where its branch already is, so the thread neither adds another worktree nor works on
+  // a stale copy; a worktree on another branch, in another repository, or on the default branch a fork's head can share a name with is not
+  // it. Each other one gets a new worktree from a checkout of its own repository, never one of another repository.
   it("lists and sends a PR without a scanned checkout in its repository's worktree on its head branch, and no other", async () => {
     const env = await setup();
     env.current.set(46, { ...env.current.get(46)!, headRefName: "main" });
@@ -240,10 +242,26 @@ describe("addressing Your turn PRs in one batch thread", () => {
       worktree("/p/quill-abc-45", "inkwell/quill", "abc-45-order"), worktree("/p/folio", REPO, "main"));
     await env.refresh();
     const plan = await env.plan([42, 44, 45, 46].map(url));
-    expect(plan.items.map((item) => [item.ref, item.where])).toEqual([["folio #42", "No checkout: a clean clone"], ["folio #44", "In folio-wt-44"],
-      ["folio #45", "No checkout: a clean clone"], ["folio #46", "No checkout: a clean clone"]]);
+    expect(plan.items.map((item) => [item.ref, item.where])).toEqual([["folio #42", "No checkout: a new worktree from folio"], ["folio #44", "In folio-wt-44"],
+      ["folio #45", "No checkout: a new worktree from folio"], ["folio #46", "No checkout: a new worktree from folio"]]);
     await confirm(env, plan.batchId);
-    expect([...orders(env)].map(([number, order]) => [number, order.checkout])).toEqual([[42, null], [44, "/p/folio-wt-44"], [45, null], [46, null]]);
+    expect([...orders(env)].map(([number, order]) => [number, order.checkout, order.worktreeFrom])).toEqual([[42, null, "/p/folio"],
+      [44, "/p/folio-wt-44", null], [45, null, "/p/folio"], [46, null, "/p/folio"]]);
+  });
+
+  // The thread never clones: a PR with neither a checkout of its own nor a local checkout of its repository to add a worktree from has
+  // nowhere to be worked, so the start refuses it when that checkout went during the Undo window, and the next listing leaves it out.
+  it("starts nothing for a PR with no local checkout of its repository, and the next listing says why", async () => {
+    const env = await setup();
+    const plan = await env.plan([42, 44].map(url));
+    expect(plan.items.map((item) => item.where)).toEqual(["No checkout: a new worktree from folio-abc-43", "No checkout: a new worktree from folio-abc-43"]);
+    // Folio's only checkout is removed during the window.
+    expect(await confirm(env, plan.batchId, async () => { env.scan.linked = false; await env.refresh(); })).toEqual([42, 44].map((number) =>
+      `folio #${number}: refused: No local checkout of its repository to add a worktree from; nothing was started.`));
+    expect([env.spawn.mock.calls.length, claims(env)]).toEqual([0, []]);
+    const again = await env.plan([42, 44].map(url));
+    expect([again.items, again.skipped.map((item) => `${item.ref}: ${item.reason}`)]).toEqual([[], [42, 44].map((number) =>
+      `folio #${number}: No local checkout of its repository to add a worktree from.`)]);
   });
 
   // The PR's earlier threads hold what was decided and why; the batch thread may read them, but they never steer it and it never writes there.

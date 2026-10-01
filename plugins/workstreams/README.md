@@ -198,6 +198,10 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   with a link to each PR, as its first reply and its report do. It holds each
   PR until it finishes, addresses every comment, bots' included, replies to
   each reviewer's note, never merges, and ends with a plain report per PR.
+  It works in each PR's checkout; a PR with none gets one worktree, added
+  from a local checkout of its repository and named after its head branch,
+  next to the other checkouts, so later scans reuse it. It never clones, so a
+  PR whose repository has no local checkout stays out.
   Each sent PR links its thread with BB's status for it: Working, Needs you,
   or Idle. The link stays while the PR is open, on Other open PRs once it
   leaves Your turn. A PR it didn't send says why in one line. The deck's
