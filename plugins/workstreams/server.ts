@@ -4353,7 +4353,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { threads, why: (prUrl: string, path: string | null, owes: boolean) => {
         const held = holdMessage(prUrl) ?? stopped(prUrl);
         if (held) return held;
-        const turn = turnOf({ owes, hold: false, pile: "active", dismissed: false, executorActive: !!threads(prUrl).executor?.active, sent: null }).addressable;
+        const turn = turnOf({ owes, hold: false, pile: "active", dismissed: false, executor: threads(prUrl).executor, batchThread: null, sent: null }).addressable;
         return turn === true ? agentOn(prUrl, path) : turn;
       } };
     };

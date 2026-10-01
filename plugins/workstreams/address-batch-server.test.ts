@@ -14,6 +14,7 @@ import type { InventoryView } from "./inventory-view.js";
 import { yourTurnRows } from "./inventory-view-model.js";
 import { createRunStore } from "./runstore.js";
 import plugin from "./server.js";
+import { sentText } from "./your-turn.js";
 
 const HOST = "host-inkwell";
 const PROJECT = "proj-inkwell";
@@ -693,6 +694,37 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     await drain();
     expect(claims(env)).toEqual([[43, "running"]]);
     expect((await env.rows()).get(43)?.addressing?.threadId).toBe("thr-batch-1");
+  });
+
+  // From the click to its batch thread at work, each sent row stays on Your turn, Sending and then Working, with BB listing the thread at
+  // work before its start returns. A row that took its own batch's thread for another agent's left Your turn until Sent read Working.
+  it("keeps each sent PR on Your turn from the click through its thread's start, reading Sending then Working", async () => {
+    const env = await setup();
+    let answer = () => undefined as void;
+    env.hang.until = new Promise<void>((resolve) => { answer = resolve; });
+    const where = async () => {
+      const [rows, turn] = [await env.rows(), await env.turn()];
+      return [42, 43].map((number) => { const row = rows.get(number)!; return [row.turn.list, turn.includes(number), row.sent && sentText(row.sent)]; });
+    };
+    const plan = await env.plan([42, 43].map(url));
+    expect(await where()).toEqual([["turn", true, null], ["turn", true, null]]);
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    expect(await where()).toEqual([["turn", true, "Sending"], ["turn", true, "Sending"]]);
+    // The Undo window ends; GitHub is read again and the claims are written as the start goes out.
+    await vi.advanceTimersByTimeAsync(8_100);
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    expect(await where()).toEqual([["turn", true, "Sending"], ["turn", true, "Sending"]]);
+    // BB makes the thread and says it's at work before the start returns.
+    env.metadata.set("thr-batch-1", spawned(env)[0]!.pluginMetadata);
+    env.add("thr-batch-1", { title: "Address feedback: folio #42, #43", status: "idle", parentThreadId: "thr-coordinator" });
+    await env.harness.emitThreadEvent("thread.created", { thread: env.threads.get("thr-batch-1")! });
+    await activate(env, "thr-batch-1");
+    expect(await where()).toEqual([["turn", true, "Sending"], ["turn", true, "Sending"]]);
+    answer();
+    await env.settled(plan.batchId!);
+    expect(await where()).toEqual([["turn", true, "Working"], ["turn", true, "Working"]]);
+    await env.refresh();
+    expect(await where()).toEqual([["turn", true, "Working"], ["turn", true, "Working"]]);
   });
 });
 

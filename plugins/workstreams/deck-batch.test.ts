@@ -9,7 +9,7 @@ let next = 600;
 const row = (section: DeckSection, patch: Partial<PlanRow["row"]> = {}, facts: Partial<Omit<PlanRow, "row">> = {}): PlanRow => {
   const number = next++;
   // Its turn as deckRow reads it: the feedback Address names waits on you, under the row's hold and its card's pile.
-  const turn = turnOf({ owes: !!facts.address?.feedback, hold: !!patch.hold, pile: facts.pile ?? "active", dismissed: false, executorActive: false, sent: null });
+  const turn = turnOf({ owes: !!facts.address?.feedback, hold: !!patch.hold, pile: facts.pile ?? "active", dismissed: false, executor: null, batchThread: null, sent: null });
   return { row: { prUrl: `https://github.com/inkwell/quill/pull/${number}`, repo: "inkwell/quill", number, title: `ABC-${number} Print hold slips`, section,
     suggested: ["kai"], nudge: section === "nudge" ? ["mira"] : [], notes: section === "confirm" ? 1 : 0, acted: null, hold: null, turn, ...patch },
   pile: "active", head: HEAD, fingerprint: section === "confirm" ? "f".repeat(64) : null, shown: { requested: [], reviewed: [{ login: "otto", state: "COMMENTED" }] },

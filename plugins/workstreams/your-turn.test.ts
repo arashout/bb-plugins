@@ -123,18 +123,22 @@ describe("Dismiss", () => {
 // reads facts, never the button a row leads with: a re-request leading the row once dropped Address (756e943). A thread at work has the PR
 // instead of you, unless it's the batch thread its own Address started, whose state the row keeps showing; a hold or a held effort parks it.
 describe("where a PR lists", () => {
-  const ready: TurnFacts = { owes: true, hold: false, pile: "active", dismissed: false, executorActive: false, sent: null };
+  const ready: TurnFacts = { owes: true, hold: false, pile: "active", dismissed: false, executor: null, batchThread: null, sent: null };
   const sent = (state: Sent["state"]) => ({ state });
+  /** A thread at work on the PR now. */
+  const busy = (id = "thr-other") => ({ executor: { id, active: true } });
   const BUSY = "An agent is already working on it.";
   it("lists each PR once by its facts, and says why Address can't take it", () => {
     const table: [Partial<TurnFacts>, Turn["list"], Turn["addressable"]][] = [
       [{}, "turn", true],
       [{ owes: false }, "other", "No feedback waits on you."],
-      [{ owes: false, hold: true, executorActive: true, dismissed: true }, "other", "No feedback waits on you."],
-      [{ executorActive: true }, "in-flight", BUSY],
+      [{ owes: false, hold: true, ...busy(), dismissed: true }, "other", "No feedback waits on you."],
+      [{ ...busy() }, "in-flight", BUSY],
+      // The thread that worked on it last, now idle, keeps nothing.
+      [{ executor: { id: "thr-other", active: false } }, "turn", true],
       // The batch's thread ended and another took the PR: that one has it, not you.
-      [{ executorActive: true, sent: sent("idle") }, "in-flight", BUSY],
-      [{ executorActive: true, sent: sent("working") }, "turn", BUSY],
+      [{ ...busy(), batchThread: "thr-batch", sent: sent("idle") }, "in-flight", BUSY],
+      [{ ...busy(), sent: sent("working") }, "turn", BUSY],
       [{ sent: sent("needs-you") }, "turn", BUSY],
       [{ sent: sent("sending") }, "turn", "A write on it is waiting or just ran."],
       [{ sent: sent("idle") }, "turn", true],
@@ -147,7 +151,30 @@ describe("where a PR lists", () => {
       [{ pile: "archived" }, "turn", "Its effort is archived."],
       [{ dismissed: true }, "dismissed", "You dismissed it from Your turn."],
       [{ dismissed: true, hold: true }, "held", "On hold. Release it first."],
-      [{ dismissed: true, executorActive: true }, "in-flight", BUSY],
+      [{ dismissed: true, ...busy() }, "in-flight", BUSY],
+    ];
+    expect(table.map(([facts]) => { const turn = turnOf({ ...ready, ...facts }); return [facts, turn.list, turn.addressable]; })).toEqual(table);
+  });
+
+  // From the moment its Address's batch thread starts, that thread at work is the row's own, whatever Sent reads yet: taken for another
+  // agent's, the row left Your turn and came back once Sent read Working.
+  it("keeps a row on Your turn while its own batch thread works, whatever Sent reads", () => {
+    const own = { ...busy("thr-batch"), batchThread: "thr-batch" };
+    const table: [Partial<TurnFacts>, Turn["list"], Turn["addressable"]][] = [
+      [{ ...own, sent: null }, "turn", BUSY],
+      [{ ...own, sent: sent("idle") }, "turn", BUSY],
+      [{ ...own, sent: sent("sending") }, "turn", "A write on it is waiting or just ran."],
+      [{ ...own, sent: sent("working") }, "turn", BUSY],
+    ];
+    expect(table.map(([facts]) => { const turn = turnOf({ ...ready, ...facts }); return [facts, turn.list, turn.addressable]; })).toEqual(table);
+  });
+
+  it("parks a row for any other thread at work, whatever its batch thread is", () => {
+    const other = busy("thr-other");
+    const table: [Partial<TurnFacts>, Turn["list"], Turn["addressable"]][] = [
+      [{ ...other, batchThread: "thr-batch", sent: null }, "in-flight", BUSY],
+      [{ ...other, batchThread: "thr-batch", sent: sent("idle") }, "in-flight", BUSY],
+      [{ ...other, batchThread: null, sent: null }, "in-flight", BUSY],
     ];
     expect(table.map(([facts]) => { const turn = turnOf({ ...ready, ...facts }); return [facts, turn.list, turn.addressable]; })).toEqual(table);
   });

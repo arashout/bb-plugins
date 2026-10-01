@@ -347,7 +347,7 @@ export function inventoryLine(row: InventoryRow, parents: ReadonlyMap<string, In
 
 /** Where a row lists and whether Address takes it, from its facts on its effort's pile: All PRs and the deck both read it so. */
 export const rowTurn = (row: InventoryRow, pile: TurnFacts["pile"]): Turn => turnOf({ owes: row.yourTurn !== null, hold: row.hold !== null, pile,
-  dismissed: row.dismissed, executorActive: !!row.threads.executor?.active, sent: row.sent });
+  dismissed: row.dismissed, executor: row.threads.executor, batchThread: row.sent?.threadId ?? null, sent: row.sent });
 /** On Your turn. A PR an Address batch sent stays, with its state, until GitHub shows its feedback cleared. */
 export const onYourTurn = (line: Pick<InventoryLine, "turn">): boolean => line.turn.list === "turn";
 /** A Your turn row Address can take now: nothing it sent is still under way, and its effort is active. */

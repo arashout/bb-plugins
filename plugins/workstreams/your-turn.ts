@@ -70,8 +70,10 @@ export type TurnFacts = {
   pile: "active" | "held" | "done" | "archived";
   /** You dismissed it on this head, and no person has said more since. */
   dismissed: boolean;
-  /** A thread linked to it is at work now: its own, or its Address's batch thread. */
-  executorActive: boolean;
+  /** The thread working on it now or last, and whether it's at work now: its own, or its Address's batch thread. */
+  executor: { id: string; active: boolean } | null;
+  /** Its newest Address batch thread, by id, once that thread's start links it. */
+  batchThread: string | null;
   /** Where its newest Address sent it. */
   sent: Pick<Sent, "state"> | null;
 };
@@ -81,13 +83,16 @@ const BUSY = "An agent is already working on it.";
 const PAUSED = { held: "Its effort is on hold.", done: "Its effort is done.", archived: "Its effort is archived." } as const;
 /**
  * Where a PR lists, first that applies: nothing waits on you; a thread at work has it, unless it's the batch thread its own Address
- * started, whose state its row keeps showing on Your turn; your hold or its effort's parks it; you dismissed it. Address takes only a Your
- * turn PR that nothing it sent still owns and whose effort is active. Never the button a row leads with.
+ * started, known by its id from the moment it starts, whose state its row keeps showing on Your turn; your hold or its effort's parks it;
+ * you dismissed it. Address takes only a Your turn PR that nothing it sent still owns and whose effort is active. Never the button a row
+ * leads with.
  */
 export function turnOf(facts: TurnFacts): Turn {
-  const batch = facts.sent !== null && OWNED.has(facts.sent.state);
+  const working = facts.executor?.active ? facts.executor.id : null;
+  // Its own batch thread at work is the batch's, whatever Sent reads before BB's word on that thread and its link agree.
+  const batch = (facts.sent !== null && OWNED.has(facts.sent.state)) || (working !== null && working === facts.batchThread);
   const [list, why]: [Turn["list"], string | null] = !facts.owes ? ["other", "No feedback waits on you."]
-    : facts.executorActive && !batch ? ["in-flight", BUSY]
+    : working !== null && !batch ? ["in-flight", BUSY]
     : facts.hold ? ["held", "On hold. Release it first."]
     : facts.pile === "held" ? ["held", PAUSED.held]
     : facts.dismissed ? ["dismissed", "You dismissed it from Your turn."]
