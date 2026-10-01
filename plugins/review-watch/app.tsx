@@ -40,16 +40,32 @@ function ruleLabel(rule: Rule): string {
   return SECTIONS.find((section) => section.rule === rule)?.title ?? rule;
 }
 
-// Workstreams' visual vocabulary, copied so the two lists read alike.
+// Workstreams' deck vocabulary, copied so the two lists read alike.
 /** The 2px accent ring every control shows on keyboard focus. */
 const RING = "outline-none focus-visible:ring-2 focus-visible:ring-sky-500";
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
 const TONE = {
-  blue: "bg-sky-500/10 text-sky-800 dark:text-sky-200",
-  amber: "bg-amber-500/10 text-amber-800 dark:text-amber-200",
-  gray: "bg-foreground/[0.05] text-muted-foreground",
+  blue: { chip: "bg-sky-500/10 text-sky-800 dark:text-sky-200", edge: "bg-sky-500/70" },
+  amber: { chip: "bg-amber-500/10 text-amber-800 dark:text-amber-200" },
+  gray: { chip: "bg-foreground/[0.05] text-muted-foreground" },
 } as const;
-const CHECKBOX = "size-3.5 shrink-0 accent-sky-600";
+const BUTTON = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 text-[12px] disabled:opacity-45 aria-disabled:opacity-45", RING);
+const GHOST = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING);
+/** The centered column the content and the docked selection bar sit in. */
+const COLUMN = "mx-auto max-w-3xl";
+/** That column's scrolling content: gutters that widen in a wide pane, and its top and bottom spacing. */
+const CONTENT = cn(COLUMN, "px-2 pb-10 pt-3 @min-[720px]:px-4");
+/** The scroller under the header, a container so the column widens its gutters in a wide pane. */
+const SCROLLER = "@container min-h-0 flex-1 overflow-y-auto overscroll-contain";
+/** A section's heading line, which its colored bar, title, and count sit in. */
+const SECTION_HEAD = "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1";
+/** A section's count badge; the caller adds its tone. */
+const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums";
+/** One review's row: a single line, its height, padding, and type. */
+const ROW = "flex h-[30px] items-center gap-2 pl-2 pr-1.5 text-[12.5px]";
+/** A row's checkbox: faint until you point at the row. */
+const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
+const EMPTY = "py-8 text-center text-[12px] text-muted-foreground";
 /** Preflight leaves native controls on the arrow cursor; this scopes the pointer to the page. */
 const POINTER_CURSORS = "[&_button:not(:disabled)]:cursor-pointer [&_summary]:cursor-pointer [&_a[href]]:cursor-pointer [&_input[type=checkbox]:not(:disabled)]:cursor-pointer";
 
@@ -58,6 +74,24 @@ const RULE_CHIP: Record<Rule, { text: string; tone: keyof typeof TONE }> = {
   "review-requested": { text: "Review", tone: "blue" },
   "review-followup": { text: "Follow-up", tone: "amber" },
 };
+
+/**
+ * A PR's repository, muted, and its number, bold, in a fixed column so rows
+ * line up. A long repository name truncates first, so the number never does.
+ * UrlLink opens it through the client's own BB browser preference.
+ */
+function PrRef({ repo, number, href, strong }: { repo: string; number: number; href: string; strong: boolean }) {
+  return (
+    <UrlLink
+      href={href}
+      title={`${repo} #${number}`}
+      className={cn("flex w-[124px] shrink-0 justify-start gap-1 whitespace-nowrap rounded-sm text-muted-foreground hover:underline @min-[720px]:w-[156px]", RING)}
+    >
+      <span className="min-w-0 truncate">{repo}</span>
+      <b className={cn("shrink-0 font-medium", strong ? "text-foreground" : "text-foreground/80")}>#{number}</b>
+    </UrlLink>
+  );
+}
 
 /** The spinner a control shows while it works; still under reduced motion. */
 const Spin = () => <span aria-hidden className="inline-block leading-none motion-safe:animate-spin">↻</span>;
@@ -218,68 +252,69 @@ function ReviewRow({
   const navigate = useBbNavigate();
   const threadId = item.threadId;
   const rule = RULE_CHIP[item.rule];
-  const info = `${item.author} · ${item.reason} · ${age(Date.parse(item.updatedAt), now)} ago`;
+  const active = isActiveItem(item);
+  const updated = `${age(Date.parse(item.updatedAt), now)} ago`;
+  // The rule chip already says why; the reason stays in the tooltip.
   return (
-    <li className={cn("group flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]")}>
-      {onPick === undefined ? null : canBatchReview(item) ? (
-        <input
-          type="checkbox"
-          checked={picked}
-          disabled={busy}
-          aria-label={`Select ${item.repo}#${item.number}`}
-          onChange={() => undefined}
-          onClick={(event) => onPick(event.shiftKey)}
-          className={CHECKBOX}
-        />
-      ) : <span aria-hidden className="size-3.5 shrink-0" />}
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          {/* UrlLink opens through the client's own BB browser preference. A
-              long repo name truncates first; the number never does. */}
-          <UrlLink
-            href={item.url}
-            title={`${item.repo}#${item.number}`}
-            className={cn("flex min-w-0 max-w-full rounded-sm font-mono text-[11px] text-muted-foreground hover:underline", RING)}
+    <li className={cn("group ml-7 min-w-0 rounded-md hover:bg-foreground/[0.03]", picked && "bg-sky-500/[0.07]")}>
+      <div className={ROW}>
+        {onPick === undefined ? null : canBatchReview(item) ? (
+          <input
+            type="checkbox"
+            checked={picked}
+            disabled={busy}
+            aria-label={`Select ${item.repo}#${item.number}`}
+            onChange={() => undefined}
+            onClick={(event) => onPick(event.shiftKey)}
+            className={CHECKBOX}
+          />
+        ) : <span aria-hidden className="size-3.5 shrink-0" />}
+        <PrRef repo={item.repo} number={item.number} href={item.url} strong={active} />
+        <span
+          className={cn("min-w-16 flex-1 truncate @min-[900px]:min-w-0", active ? "text-foreground" : "text-foreground/80")}
+          title={item.title}
+        >
+          {item.title}
+        </span>
+        <span
+          className="min-w-0 truncate text-[11.5px] text-muted-foreground"
+          title={`${item.author} · ${item.reason} · ${updated}`}
+        >
+          {item.author} · {updated}
+        </span>
+        <span className={cn(CHIP, TONE[rule.tone].chip)}>{rule.text}</span>
+        {item.state === "started" ? <span className={cn(CHIP, TONE.amber.chip)}>Review not sent</span> : null}
+        {threadId !== undefined ? (
+          <button
+            type="button"
+            onClick={() => navigate.toThread(threadId)}
+            title="Open its review thread"
+            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
           >
-            <span className="min-w-0 truncate">{item.repo}</span>
-            <span className="shrink-0">#{item.number}</span>
-          </UrlLink>
-          <span className="min-w-0 truncate font-medium" title={item.title}>{item.title}</span>
-        </div>
-        <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>
-      </div>
-      <span className={cn(CHIP, TONE[rule.tone])}>{rule.text}</span>
-      {item.state === "started" ? <span className={cn(CHIP, TONE.amber)}>Review not sent</span> : null}
-      {threadId !== undefined ? (
-        <button
-          type="button"
-          onClick={() => navigate.toThread(threadId)}
-          title="Open its review thread"
-          className={cn(CHIP, TONE.gray, "hover:underline", RING)}
-        >
-          Open<span aria-hidden>↗</span>
-        </button>
-      ) : item.state === "queued" ? (
+            Open<span aria-hidden>↗</span>
+          </button>
+        ) : item.state === "queued" ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onStart}
+            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
+          >
+            Start
+          </button>
+        ) : (
+          <span className={cn(CHIP, TONE.gray.chip)}>Thread unavailable</span>
+        )}
         <button
           type="button"
           disabled={busy}
-          onClick={onStart}
-          className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", RING)}
+          onClick={onDismiss}
+          aria-label={`Dismiss ${item.repo}#${item.number}`}
+          className={cn("shrink-0 rounded px-1 text-[11.5px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
         >
-          Start
+          Dismiss
         </button>
-      ) : (
-        <span className={cn(CHIP, TONE.gray)}>Thread unavailable</span>
-      )}
-      <button
-        type="button"
-        disabled={busy}
-        onClick={onDismiss}
-        aria-label={`Dismiss ${item.repo}#${item.number}`}
-        className={cn("shrink-0 rounded px-1 text-[11px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
-      >
-        Dismiss
-      </button>
+      </div>
     </li>
   );
 }
@@ -309,7 +344,7 @@ function ScopeCheckbox({
       ref={(element) => { if (element) element.indeterminate = count > 0 && !full; }}
       aria-label={full ? `Clear ${label}` : `Select ${label}`}
       onChange={() => onPick(keys, !full)}
-      className={CHECKBOX}
+      className="size-3.5 shrink-0 accent-sky-600"
     />
   );
 }
@@ -456,92 +491,98 @@ function ReviewsPage() {
           </span>
         </button>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
-        {pollError === null && error === null && (lastPoll === null || lastPoll.ok) ? null : (
-          <div className="grid gap-1 px-4 pt-3 text-[12px]">
-            {pollError === null && error === null ? null : (
-              <p role="alert" className="text-destructive">{pollError ?? error}</p>
-            )}
-            <SyncFailureNotice lastPoll={lastPoll} />
-          </div>
-        )}
-        {items === null ? (
-          <p role="status" className="px-4 pt-4 text-[12px] text-muted-foreground">Reading the queue…</p>
-        ) : (
-          <section className="mt-4" aria-label="Waiting on you">
-            <h2 className="mb-2 flex items-center gap-3 px-4 text-[14px] font-semibold">
-              <ScopeCheckbox keys={selectable} picked={picked} label="every review waiting on you" onPick={pickScope} />
-              <span>Waiting on you <span className="font-normal tabular-nums text-muted-foreground">{activeItems.length}</span></span>
-            </h2>
-            {areas.length === 0 ? (
-              <p className="px-4 text-[12px] text-muted-foreground">Nothing waiting on you.</p>
-            ) : (
-              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
-                {areas.map((area) => (
-                  <section key={area.key} className="min-w-0" aria-label={area.label}>
-                    <h3 className="mb-1 flex min-w-0 items-center gap-3 px-4 text-[11px] font-medium text-muted-foreground">
-                      <ScopeCheckbox
-                        keys={area.items.filter(canBatchReview).map((item) => item.key)}
-                        picked={picked}
-                        label={area.label}
-                        onPick={pickScope}
-                      />
-                      <span className="min-w-0 truncate">
-                        {area.label}
-                        {area.repos.join(", ") === area.label ? null : (
-                          <span className="font-normal text-muted-foreground/70"> · {area.repos.join(", ")}</span>
-                        )}
-                      </span>
-                      <span className="font-normal tabular-nums">{area.items.length}</span>
-                    </h3>
-                    <ul className="min-w-0 divide-y divide-border/50 border-y border-border/50">
-                      {area.items.map((item) => (
-                        <ReviewRow
-                          key={item.key}
-                          {...rowProps(item)}
-                          picked={picked.has(item.key)}
-                          onPick={(shift) => pick(item.key, shift)}
-                        />
-                      ))}
-                    </ul>
-                  </section>
-                ))}
+      <div className={SCROLLER}>
+        <div className={CONTENT}>
+          {pollError === null && error === null && (lastPoll === null || lastPoll.ok) ? null : (
+            <div className="grid gap-1 px-2 pb-3 text-[12px]">
+              {pollError === null && error === null ? null : (
+                <p role="alert" className="text-destructive">{pollError ?? error}</p>
+              )}
+              <SyncFailureNotice lastPoll={lastPoll} />
+            </div>
+          )}
+          {items === null ? (
+            <p role="status" className={EMPTY}>Reading the queue…</p>
+          ) : (
+            <section aria-label="Waiting on you">
+              <div className={SECTION_HEAD}>
+                <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE.blue.edge)} />
+                <ScopeCheckbox keys={selectable} picked={picked} label="every review waiting on you" onPick={pickScope} />
+                <h2 className="truncate text-[12.5px] font-semibold">Waiting on you</h2>
+                <span className={cn(COUNT, activeItems.length ? cn("font-semibold", TONE.blue.chip) : "text-muted-foreground")}>
+                  {activeItems.length}
+                </span>
               </div>
-            )}
-            {archivedItems.length > 0 ? (
-              <details className="mt-4">
-                <summary className={cn("mx-4 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>
-                  {archivedItems.length} archived · show
-                </summary>
-                <ul className="mt-2 min-w-0 divide-y divide-border/50 border-y border-border/50 opacity-70">
-                  {archivedItems.map((item) => <ReviewRow key={item.key} {...rowProps(item)} />)}
-                </ul>
-              </details>
-            ) : null}
-          </section>
-        )}
+              {areas.length === 0 ? (
+                <p className={EMPTY}>Nothing waiting on you.</p>
+              ) : (
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] pb-1.5 pt-0.5">
+                  {areas.map((area) => (
+                    <section key={area.key} className="min-w-0" aria-label={area.label}>
+                      {/* ml-9 puts the box over the rows' boxes (ml-7 plus the row's
+                          pl-2), and gap-2 puts the label over their PR column. */}
+                      <h3 className="ml-9 flex min-w-0 items-center gap-2 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
+                        <ScopeCheckbox
+                          keys={area.items.filter(canBatchReview).map((item) => item.key)}
+                          picked={picked}
+                          label={area.label}
+                          onPick={pickScope}
+                        />
+                        <span className="min-w-0 truncate">
+                          {area.label}
+                          {area.repos.join(", ") === area.label ? null : (
+                            <span className="font-normal text-muted-foreground/70"> · {area.repos.join(", ")}</span>
+                          )}
+                        </span>
+                        <span className="font-normal tabular-nums">{area.items.length}</span>
+                      </h3>
+                      <ul className="min-w-0 list-none">
+                        {area.items.map((item) => (
+                          <ReviewRow
+                            key={item.key}
+                            {...rowProps(item)}
+                            picked={picked.has(item.key)}
+                            onPick={(shift) => pick(item.key, shift)}
+                          />
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              )}
+              {archivedItems.length > 0 ? (
+                <details className="pb-1.5">
+                  <summary className={cn("ml-9 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>
+                    {archivedItems.length} archived · show
+                  </summary>
+                  <ul className="grid min-w-0 list-none grid-cols-[minmax(0,1fr)] pb-1.5 pt-0.5 opacity-70">
+                    {archivedItems.map((item) => <ReviewRow key={item.key} {...rowProps(item)} />)}
+                  </ul>
+                </details>
+              ) : null}
+            </section>
+          )}
+        </div>
       </div>
       {selection.length === 0 ? null : (
-        <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
-          <b className="mr-1 font-semibold">{selection.length} selected</b>
-          <button
-            type="button"
-            disabled={starting || busyKey !== null}
-            aria-busy={starting || undefined}
-            onClick={review}
-            title={selection.length === 1 ? "Start a review thread for it" : "Start one thread that reviews them together"}
-            className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background disabled:opacity-45", RING)}
-          >
-            {starting ? <><Spin />Starting…</> : <>Review {selection.length}<Kbd inverted>b</Kbd></>}
-          </button>
-          <span className="flex-1" />
-          <button
-            type="button"
-            onClick={clear}
-            className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", RING)}
-          >
-            Clear<Kbd>esc</Kbd>
-          </button>
+        <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
+          <div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>
+            <b className="mr-1 font-semibold">{selection.length} selected</b>
+            <button
+              type="button"
+              disabled={starting || busyKey !== null}
+              aria-busy={starting || undefined}
+              onClick={review}
+              title={selection.length === 1 ? "Start a review thread for it" : "Start one thread that reviews them together"}
+              className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background", starting && "disabled:opacity-100")}
+            >
+              {starting ? <><Spin />Starting…</> : <>Review {selection.length}<Kbd inverted>b</Kbd></>}
+            </button>
+            <span className="flex-1" />
+            <button type="button" onClick={clear} className={GHOST}>
+              Clear<Kbd>esc</Kbd>
+            </button>
+          </div>
         </div>
       )}
     </div>
