@@ -551,7 +551,7 @@ function ReviewsPage() {
                 </div>
               )}
               {archivedItems.length > 0 ? (
-                <details className="pb-1.5">
+                <details className="mt-7 pb-1.5">
                   <summary className={cn("ml-9 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>
                     {archivedItems.length} archived · show
                   </summary>
