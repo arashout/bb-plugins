@@ -61,8 +61,8 @@ const SCROLLER = "@container min-h-0 flex-1 overflow-y-auto overscroll-contain";
 const SECTION_HEAD = "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1";
 /** A section's count badge; the caller adds its tone. */
 const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums";
-/** One review's row: a single line, its height, padding, and type. */
-const ROW = "flex h-[30px] items-center gap-2 pl-2 pr-1.5 text-[12.5px]";
+/** One review's row: the title on its own line with the details under it, the PR in a column to their left. */
+const ROW = "flex items-start gap-2 py-1.5 pl-2 pr-1.5 text-[12.5px] leading-5";
 /** A row's checkbox: faint until you point at the row. */
 const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
 const EMPTY = "py-8 text-center text-[12px] text-muted-foreground";
@@ -267,54 +267,56 @@ function ReviewRow({
             aria-label={`Select ${item.repo}#${item.number}`}
             onChange={() => undefined}
             onClick={(event) => onPick(event.shiftKey)}
-            className={CHECKBOX}
+            className={cn(CHECKBOX, "mt-[3px]")}
           />
         ) : <span aria-hidden className="size-3.5 shrink-0" />}
         <PrRef repo={item.repo} number={item.number} href={item.url} strong={active} />
-        <span
-          className={cn("min-w-16 flex-1 truncate @min-[900px]:min-w-0", active ? "text-foreground" : "text-foreground/80")}
-          title={item.title}
-        >
-          {item.title}
-        </span>
-        <span
-          className="min-w-0 truncate text-[11.5px] text-muted-foreground"
-          title={`${item.author} · ${item.reason} · ${updated}`}
-        >
-          {item.author} · {updated}
-        </span>
-        <span className={cn(CHIP, TONE[rule.tone].chip)}>{rule.text}</span>
-        {item.state === "started" ? <span className={cn(CHIP, TONE.amber.chip)}>Review not sent</span> : null}
-        {threadId !== undefined ? (
-          <button
-            type="button"
-            onClick={() => navigate.toThread(threadId)}
-            title="Open its review thread"
-            className={cn(CHIP, TONE.gray.chip, "hover:underline", RING)}
-          >
-            Open<span aria-hidden>↗</span>
-          </button>
-        ) : item.state === "queued" ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onStart}
-            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
-          >
-            Start
-          </button>
-        ) : (
-          <span className={cn(CHIP, TONE.gray.chip)}>Thread unavailable</span>
-        )}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onDismiss}
-          aria-label={`Dismiss ${item.repo}#${item.number}`}
-          className={cn("shrink-0 rounded px-1 text-[11.5px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
-        >
-          Dismiss
-        </button>
+        <div className="min-w-0 flex-1">
+          <p className={cn("truncate", active ? "text-foreground" : "text-foreground/80")} title={item.title}>
+            {item.title}
+          </p>
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="min-w-0 truncate text-[11.5px] text-muted-foreground"
+              title={`${item.author} · ${item.reason} · ${updated}`}
+            >
+              {item.author} · {updated}
+            </span>
+            <span className={cn(CHIP, TONE[rule.tone].chip)}>{rule.text}</span>
+            {item.state === "started" ? <span className={cn(CHIP, TONE.amber.chip)}>Review not sent</span> : null}
+            <span className="flex-1" />
+            {threadId !== undefined ? (
+              <button
+                type="button"
+                onClick={() => navigate.toThread(threadId)}
+                title="Open its review thread"
+                className={cn(CHIP, TONE.gray.chip, "hover:underline", RING)}
+              >
+                Open<span aria-hidden>↗</span>
+              </button>
+            ) : item.state === "queued" ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onStart}
+                className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
+              >
+                Start
+              </button>
+            ) : (
+              <span className={cn(CHIP, TONE.gray.chip)}>Thread unavailable</span>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onDismiss}
+              aria-label={`Dismiss ${item.repo}#${item.number}`}
+              className={cn("shrink-0 rounded px-1 text-[11.5px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
       </div>
     </li>
   );
