@@ -277,9 +277,6 @@ describe("addressing Your turn PRs in one batch thread", () => {
     await vi.advanceTimersByTimeAsync(8_100);
     await env.settled(plan.batchId!);
     await env.refresh();
-    expect(await env.rpc("agent_run", { path: PATH, action: "address-review", mode: "new", threadId: null, prompt: "Fix it" }))
-      .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
-    expect(await env.rpc("thread_start", { path: PATH, prompt: "Fix it" })).toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." }))
       .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     const again = await env.plan([42, 43, 44].map(url));
@@ -510,6 +507,31 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." }))
       .toEqual({ ok: false, error: "A batch thread is addressing this PR's feedback. Wait for it to finish." });
     expect(env.send).not.toHaveBeenCalled();
+  });
+
+  // A Fix listed before the claim still starts no second agent: the claim refuses the new thread it would start, thread or no thread yet.
+  it("refuses the new thread a Fix listed earlier would start once a starting batch thread claims its PR", async () => {
+    const env = await setup();
+    env.add("thr-repo", { title: "📦 inkwell/folio", parentThreadId: "thr-coordinator", environment: { hostId: HOST } });
+    const controller = env.efforts.claimRepoController({ effortId: env.effort.id, repo: REPO, projectId: PROJECT, hostId: HOST });
+    env.efforts.saveRepoController({ ...controller.record, threadId: "thr-repo", state: "ready" });
+    env.current.set(43, { ...env.current.get(43)!, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
+    await env.refresh();
+    const fix = await env.rpc("deck_batch_plan", { kind: "fix", effortId: env.effort.id, prUrls: [url(43)] }) as { ok: true; batchId: string; items: BatchItem[] };
+    expect(fix.items.map((item) => item.what)).toEqual([expect.stringMatching(/^Start a thread under Manuscript review: /u)]);
+    env.hang.spawn = true;
+    const plan = await env.plan([url(43)]);
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await vi.waitFor(() => expect(env.spawn).toHaveBeenCalledTimes(1));
+    expect(claims(env).map(([number]) => number)).toEqual([43]);
+    env.hang.spawn = false;
+    await env.rpc("deck_batch_start", { batchId: fix.batchId });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await env.settled(fix.batchId);
+    expect((await env.batch(fix.batchId)).items.map((item) => [item.state, item.detail]))
+      .toEqual([["refused", "A batch thread is addressing this PR's feedback. Wait for it to finish."]]);
+    expect(env.spawn).toHaveBeenCalledTimes(1);
   });
 
   // Each sent PR keeps its link to the batch thread, with BB's status for it, however the thread ends and after the PR leaves Your turn,

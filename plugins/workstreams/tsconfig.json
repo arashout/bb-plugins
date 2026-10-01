@@ -32,7 +32,6 @@
     "actions.ts",
     "ghactions.ts",
     "direct.ts",
-    "agent.ts",
     "runs.ts",
     "runstore.ts",
     "rescan.ts",

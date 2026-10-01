@@ -102,7 +102,7 @@ describe("the effort deck on the server", () => {
   it("says what became of each row the view drew that left: merged, with when, or closed, and nothing of one still open", async () => {
     const env = await setup();
     env.current.set(402, { ...env.current.get(402)!, state: "MERGED", mergedAt: daysAgo(1) });
-    expect(await env.rpc("pr_refresh", { prUrl: url(402) })).toMatchObject({ status: "checked" });
+    expect(await env.rpc("pr_refresh_many", { prUrls: [url(402)] })).toMatchObject({ reads: [{ read: { status: "checked" } }] });
     env.current.set(403, { ...env.current.get(403)!, state: "CLOSED" });
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     const view = await env.harness.callRpc("deck_get", { ghosts: [url(401), url(402), url(403), url(402)] }) as DeckView;
@@ -114,7 +114,7 @@ describe("the effort deck on the server", () => {
   it("counts a merge a read saw on the card of the effort whose ticket it carries, after the PR leaves the inventory", async () => {
     const env = await setup();
     env.current.set(402, { ...env.current.get(402)!, state: "MERGED", mergedAt: daysAgo(1) });
-    expect(await env.rpc("pr_refresh", { prUrl: url(402) })).toMatchObject({ status: "checked" });
+    expect(await env.rpc("pr_refresh_many", { prUrls: [url(402)] })).toMatchObject({ reads: [{ read: { status: "checked" } }] });
     const card = (await env.deck()).active[0]!;
     expect(card).toMatchObject({ name: "Shelf order", stats: { open: 1, mergedWeek: 1 }, progress: { merged: 1, open: 1 } });
     expect(card.activity.filter((item) => item.kind === "merged")).toEqual([{ kind: "merged", prUrl: url(402), ref: "folio #402", who: null,

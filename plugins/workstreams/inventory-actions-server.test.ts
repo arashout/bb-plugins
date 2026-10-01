@@ -178,10 +178,6 @@ describe("inventory actions on the server", () => {
     const refusal = "Its effort is done. Reopen it before merging this PR.";
     expect((await env.rpc("action_merge_preview", { prUrl: url(316) }) as { ok: true; refusals: string[] }).refusals).toContain(refusal);
     expect(await env.rpc("action_merge", { prUrl: url(316), sha: HEAD, acknowledgeUnresolved: false })).toEqual({ ok: false, error: refusal });
-    // The board's own writes stop too: a done effort's PR gets no branch update or nudge from any view.
-    const stopped = { ok: false, error: "Its effort is done. Reopen it first; nothing was written." };
-    expect(await env.rpc("action_update_branch", { prUrl: url(313) })).toEqual(stopped);
-    expect(await env.rpc("action_nudge", { prUrl: url(313), rerequest: false, comment: "Ping" })).toEqual(stopped);
     expect(done().map((call) => call.method)).not.toContain("prWrite");
     expect(await env.rpc("effort_reopen", { effortKey: effort.id })).toMatchObject({ ok: true });
     expect(await env.rpc("inventory_mark_ready", { prUrl: url(313), headOid: HEAD })).toEqual({ ok: true, detail: "Wrote ready." });
@@ -254,7 +250,7 @@ describe("inventory actions on the server", () => {
     // A new head with different code lands: the confirmation covers the old one only, so the notes need you again, and nothing merges.
     const original = env.current.get(319)!;
     env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
-    await env.rpc("pr_refresh", { prUrl: url(319) });
+    await env.rpc("pr_refresh_many", { prUrls: [url(319)] });
     expect([await status(), (await env.row(319)).attention.map((reason) => reason.kind), (await env.row(319)).confirmation?.current])
       .toEqual(["Approval comment to address", ["approval-note"], false]);
     expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals)
@@ -264,7 +260,7 @@ describe("inventory actions on the server", () => {
     feedback.save(url(319), "thr-worker", { attemptId: "A-9", headOid: "b".repeat(40), fingerprint: FEEDBACK.fingerprint, blockers: [],
       findings: [{ sourceId: "review-319", resolution: "fixed", evidence: "Labels wrap at 40 characters in src/spine.ts.",
         validation: { outcome: "passed", detail: "Spine label tests passed." } }] }, Date.now());
-    await env.rpc("pr_refresh", { prUrl: url(319) });
+    await env.rpc("pr_refresh_many", { prUrls: [url(319)] });
     expect([await status(), (await env.row(319)).confirmation]).toEqual(["Approval comment to address", null]);
     expect((await env.rpc("action_merge_preview", { prUrl: url(319) }) as { refusals: string[] }).refusals).toEqual([NOTE_WAITS]);
   });
@@ -278,10 +274,10 @@ describe("inventory actions on the server", () => {
     // Nothing about an older or stale confirmation stops a revoke: a push lands, and it's still yours to take back.
     const original = env.current.get(319)!;
     env.current.set(319, { ...original, headRefOid: "b".repeat(40) });
-    await env.rpc("pr_refresh", { prUrl: url(319) });
+    await env.rpc("pr_refresh_many", { prUrls: [url(319)] });
     expect(await env.row(319)).toMatchObject({ confirmation: { current: false, evidence: true } });
     env.current.set(319, original);
-    await env.rpc("pr_refresh", { prUrl: url(319) });
+    await env.rpc("pr_refresh_many", { prUrls: [url(319)] });
     await env.rpc("pr_hold_set", { prUrl: url(319), held: true, reason: "Store layout first" });
     const after = env.since();
     expect(await env.rpc("inventory_confirm_revoke", { prUrl: url(319) })).toEqual({ ok: true, detail: "Revoked your confirmation; its notes need you again." });

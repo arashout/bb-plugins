@@ -399,12 +399,11 @@ repacking and counts checkout-backed PRs.
 
 Workstreams starts planning and context threads with the Planning model setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the Code-work model setting (`codeModel`, default `codex/gpt-6-sol/high`). A thread created with another provider cannot change providers in place, so Workstreams doesn't send it Ask or Fix turns: message it in its own thread, or set the Code-work model to its provider.
 
-Authorized PR work routes through the repository controller under the effort
-coordinator. Existing PR workers remain linked as history and repair context;
-repair previews show the available parent before launch. Repairs keep the PR's
-real checkout. A coordinator or repository controller does not satisfy a merge
-gate or replace a PR's latest result. Unarchive an archived controller before
-resuming its repository. An uncertain controller launch never starts a duplicate.
+A new PR worker goes beneath the effort's repository controller, under its
+coordinator. Existing PR workers remain linked as history and repair context.
+Repairs keep the PR's real checkout. A coordinator or repository controller
+does not satisfy a merge gate or replace a PR's latest result. Unarchive an
+archived controller before resuming its repository.
 
 Archive an idle leaf thread from its thread menu on the Map. **Archived
 threads** shows archive history and lets you undo it. Threads with children

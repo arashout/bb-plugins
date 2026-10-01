@@ -154,6 +154,21 @@ describe("asking threads to fix an effort's code work", () => {
     expect([env.send.mock.calls.length, env.spawn.mock.calls.length]).toEqual([1, 0]);
   });
 
+  // One writer per checkout, inside Workstreams or not: a thread already at work in the PR's checkout, though the board hasn't seen it yet,
+  // keeps a new worker out.
+  it("starts no worker in a checkout another thread is already working in", async () => {
+    const env = await setup();
+    const plan = await env.plan([url(44)]);
+    expect(plan.items.map((item) => item.what)).toEqual(["Start a thread under Manuscript review: address changes"]);
+    await env.rpc("deck_batch_start", { batchId: plan.batchId });
+    env.add("thr-busy", { status: "active", environmentPath: PATH });
+    await vi.advanceTimersByTimeAsync(8_100);
+    await env.settled(plan.batchId);
+    expect((await env.batch(plan.batchId)).items.map((item) => [item.ref, item.state, item.detail])).toEqual([
+      ["folio #44", "refused", expect.stringContaining("Thread thr-busy is already working in this checkout")]]);
+    expect(env.spawn).not.toHaveBeenCalled();
+  });
+
   // A fix goes only where its listing said: a thread that went away gets no new worker in its place, and one that appeared isn't asked
   // in place of the worker the listing named.
   it("sends nothing for a PR whose thread went away after the listing", async () => {

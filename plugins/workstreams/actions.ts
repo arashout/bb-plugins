@@ -1,105 +1,12 @@
-// PR row actions. Pure: which thread an agent action should run in, and
-// whether a merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
+// PR row actions. Pure: whether a merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
 // server.ts do, and they read every decision from here so it can be tested.
 import type { MergeStateStatus } from "./contract.js";
-import type { ThreadTier } from "./threads.js";
 import { feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { feedbackToAddress, type ReviewFeedback } from "./feedback-to-address.js";
-
-/** Actions that need judgement, so they go to an agent thread. */
-export const AGENT_ACTIONS = ["investigate-ci", "resolve-conflicts", "address-review", "address-comments", "review-approval-note"] as const;
-export type AgentAction = (typeof AGENT_ACTIONS)[number];
 
 /** Mechanical GitHub actions the host runs directly, behind a confirm dialog. */
 export const DIRECT_ACTIONS = ["merge", "update-branch", "nudge"] as const;
 export type DirectAction = (typeof DIRECT_ACTIONS)[number];
-
-// ---- which thread an agent action runs in -----------------------------------
-
-export type ThreadMode = "continue" | "subthread" | "new";
-
-/** A thread linked to the row, with what the dialog read about it live. */
-export type ThreadCandidate = {
-  id: string;
-  title: string;
-  tier: ThreadTier;
-  /** Mid-turn (or starting, or stopping): a message would interrupt or queue. */
-  running: boolean;
-  updatedAt: number;
-  /** Fraction of the context window in use, 0-1, or null when not reported. */
-  contextUsed: number | null;
-  /** BB's own answer to whether this thread may take a child. */
-  canSpawnChild: boolean;
-};
-
-/** Which thread APIs are safe for tracked Board actions. */
-export type ThreadCapabilities = { send: boolean; subthread: boolean; contextUsage: boolean };
-
-export type Recommendation = { mode: ThreadMode; threadId: string | null; reason: string };
-
-const STRONG = new Set<ThreadTier>(["started", "environment"]);
-const TIER_ORDER: readonly ThreadTier[] = ["started", "environment", "ticket", "paths"];
-
-/** Strongest tier first, then most recently updated, then id: total and stable. */
-export function byRelevance(a: ThreadCandidate, b: ThreadCandidate): number {
-  return (
-    TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)
-  );
-}
-
-function quoted(title: string): string {
-  const flat = title.replace(/\s+/gu, " ").trim();
-  return `'${flat.length > 60 ? `${flat.slice(0, 59)}…` : flat}'`;
-}
-
-/** A subthread of `parent` when the SDK and BB allow one, else a new thread that says why. */
-function subthreadOr(parent: ThreadCandidate, caps: ThreadCapabilities, reason: string): Recommendation {
-  if (!caps.subthread) {
-    return { mode: "new", threadId: null, reason: "New thread: this BB version cannot spawn a subthread." };
-  }
-  if (!parent.canSpawnChild) {
-    return { mode: "new", threadId: null, reason: `New thread: BB will not add a subthread to ${quoted(parent.title)}.` };
-  }
-  return { mode: "subthread", threadId: parent.id, reason };
-}
-
-/**
- * Where an agent action should run. The user can override it in the dialog;
- * this is only the preselection, and its reason is shown in one line.
- *
- * Repairs (CI, conflicts) hang off the most relevant linked thread of ANY tier
- * as a subthread: they do not need the author's reasoning, a subthread leaves
- * the parent's context untouched, and the parent hears when it finishes.
- *
- * Review replies use a subthread of the thread that wrote the PR (a strong
- * link). Each Board action needs its own thread so lifecycle events and final
- * answers belong to exactly one run. Weak links (a title or a path mention)
- * often point at large unrelated threads, so they get a new thread.
- */
-export function recommendThread(
-  action: AgentAction,
-  candidates: readonly ThreadCandidate[],
-  caps: ThreadCapabilities,
-): Recommendation {
-  const ranked = [...candidates].sort(byRelevance);
-  if (action === "investigate-ci" || action === "resolve-conflicts") {
-    const best = ranked[0];
-    if (best === undefined) return { mode: "new", threadId: null, reason: "New thread: no thread is linked to this work yet." };
-    return subthreadOr(best, caps, `Subthread of ${quoted(best.title)}: it's the most relevant thread already on this work.`);
-  }
-  const strong = ranked.filter((thread) => STRONG.has(thread.tier));
-  if (strong.length === 0) {
-    return ranked.length === 0
-      ? { mode: "new", threadId: null, reason: "New thread: no thread is linked to this work yet." }
-      : {
-          mode: "new",
-          threadId: null,
-          reason: "New thread: the linked threads only mention this work, and may be large or unrelated.",
-        };
-  }
-  const parent = strong.find((thread) => thread.canSpawnChild) ?? strong[0]!;
-  return subthreadOr(parent, caps, `Subthread of ${quoted(parent.title)}: it wrote this PR; this action gets its own tracked thread.`);
-}
 
 // ---- merge ------------------------------------------------------------------
 

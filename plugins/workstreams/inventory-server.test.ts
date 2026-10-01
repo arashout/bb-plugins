@@ -14,7 +14,7 @@ const UNIT: RawUnit = { path: "/p/folio", dirName: "folio", repo: "folio", githu
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); vi.useRealTimers(); });
 
-async function setup(options: { local?: boolean; rebasing?: boolean; closed?: boolean; reviewers?: string[]; cohort?: boolean; approvalFeedback?: boolean; inspection?: "open" | "closed" | "failed" } = {}) {
+async function setup(options: { local?: boolean; rebasing?: boolean; cohort?: boolean; approvalFeedback?: boolean; inspection?: "open" | "closed" | "failed" } = {}) {
   const calls: { method: string; input: unknown }[] = [];
   const beforeLive = vi.fn(async () => {});
   const primary = { ...(options.cohort ? { ...PR, title: "ABC-42: Improve manuscript review", headRefName: "abc-42-review" } : PR),
@@ -36,7 +36,6 @@ async function setup(options: { local?: boolean; rebasing?: boolean; closed?: bo
     if (method === "prLive") { await beforeLive(); return { ok: true, live: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN",
       headRefOid: SHA, stackedAbove: [], unresolvedThreads: 0, unresolvedAtLeast: false, approvalNotes: [], approvalNotesMore: 0, approvalNotesComplete: true,
       approvalFeedback: primary.approvalFeedback, reviewFeedback: primary.reviewFeedback ?? { openThreads: 0, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } }; }
-    if (method === "prReviewers") return options.closed ? { ok: false, error: "PR is no longer open." } : { ok: true, reviewers: options.reviewers ?? ["ada"] };
     if (method === "prWrite") return { ok: true, detail: "Done." };
     if (method === "inspectPrs") return options.inspection === "open"
       ? { entries: [entries[0]], closed: [], failed: [], warnings: [] }
@@ -60,26 +59,24 @@ describe("authored backlog server actions", () => {
     expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(0);
   });
 
-  it("coalesces an explicit PR refresh and reports its observation time", async () => {
+  it("shares one explicit PR read between concurrent callers and reports its observation time", async () => {
     const { harness, calls, board } = await setup({ inspection: "open" });
     await new Promise((resolve) => setTimeout(resolve, 2));
     const [first, second] = await Promise.all([
-      harness.callRpc("pr_refresh", { prUrl: URL }),
-      harness.callRpc("pr_refresh", { prUrl: URL }),
-    ]);
-    expect(first).toMatchObject({ status: "checked", checkedAt: expect.any(String) });
+      harness.callRpc("pr_refresh_many", { prUrls: [URL] }),
+      harness.callRpc("pr_refresh_many", { prUrls: [URL] }),
+    ]) as { reads: { prUrl: string; read: { status: string; checkedAt: string } }[] }[];
+    expect(first!.reads).toEqual([{ prUrl: URL, read: { status: "checked", checkedAt: expect.any(String) } }]);
     expect(second).toEqual(first);
     expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(1);
-    expect((await board()).prObservations[URL]?.checkedAt).toBe((first as { checkedAt: string }).checkedAt);
-    expect(await harness.callRpc("pr_refresh", { prUrl: URL })).toEqual(first);
-    expect(calls.filter((call) => call.method === "inspectPrs")).toHaveLength(1);
+    expect((await board()).prObservations[URL]?.checkedAt).toBe(first!.reads[0]!.read.checkedAt);
   });
 
   it("keeps the last successful check time when an explicit refresh fails", async () => {
     const { harness, board } = await setup({ inspection: "failed" });
     const previous = (await board()).prObservations[URL]?.checkedAt;
     await new Promise((resolve) => setTimeout(resolve, 2));
-    expect(await harness.callRpc("pr_refresh", { prUrl: URL })).toMatchObject({ status: "failed", checkedAt: previous });
+    expect(await harness.callRpc("pr_refresh_many", { prUrls: [URL] })).toMatchObject({ reads: [{ read: { status: "failed", checkedAt: previous } }] });
     expect((await board()).prObservations[URL]).toMatchObject({ checkedAt: previous, failedAt: expect.any(String) });
   });
   it("keeps legacy cached approval replies visible without clearing missing or current feedback", async () => {
@@ -151,8 +148,6 @@ describe("authored backlog server actions", () => {
     expect(group).toMatchObject({ level: "effort", clusters: [], repoCount: 1, total: 2 });
     expect(group?.name).toContain("Improve manuscript review");
     expect(board.prInventory.entries.every((entry) => entry.effortKey === group?.key)).toBe(true);
-    expect(await env.harness.callRpc("effort_plan", { groupKey: group!.key })).toMatchObject({ ok: true,
-      members: { tickets: ["ABC-42"], prUrls: [URL, URL.replace("/42", "/43")] }, projects: [{ id: "project-folio" }] });
     env.entries.pop();
     await env.harness.runCli(["refresh"]);
     expect((await env.board()).groups.some((entry) => entry.key === "ticket:ABC-42")).toBe(false);
@@ -179,13 +174,6 @@ describe("authored backlog server actions", () => {
     env.beforeLive.mockImplementationOnce(async () => { await env.harness.callRpc("pr_hold_set", { prUrl: URL, held: true }); });
     expect(await env.harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: false, error: expect.stringContaining("On hold") });
     expect(env.calls.some((call) => call.method === "prWrite")).toBe(false);
-  });
-  it("allows manual branch preparation while a PR is held", async () => {
-    const env = await setup();
-    await env.harness.callRpc("pr_hold_set", { prUrl: URL, held: true });
-    expect(await env.harness.callRpc("action_update_branch", { prUrl: URL })).toMatchObject({ ok: true });
-    expect(env.calls.find((call) => call.method === "prWrite")?.input).toMatchObject({ kind: "update-branch" });
-    expect((await env.board()).prHolds[URL]).toBeDefined();
   });
   it("derives owner scope from origin identity even when the checkout has no PR", async () => {
     const { calls, board } = await setup();
@@ -214,19 +202,7 @@ describe("authored backlog server actions", () => {
 
   it("does not let a PR URL bypass a matching checkout's live rebase guard", async () => {
     const { harness, calls } = await setup({ local: true, rebasing: true });
-    expect(await harness.callRpc("action_update_branch", { prUrl: URL })).toMatchObject({ ok: false, error: expect.stringContaining("rebase") });
-    expect(calls.some((call) => call.method === "prWrite")).toBe(false);
-  });
-
-  it("checks that a remote PR is still open before updating its branch", async () => {
-    const { harness, calls } = await setup({ closed: true });
-    expect(await harness.callRpc("action_update_branch", { prUrl: URL })).toMatchObject({ ok: false, error: expect.stringContaining("no longer open") });
-    expect(calls.some((call) => call.method === "prWrite")).toBe(false);
-  });
-
-  it("rejects a nudge when pending reviewers change after the inventory was read", async () => {
-    const { harness, calls } = await setup({ reviewers: ["grace"] });
-    expect(await harness.callRpc("action_nudge", { prUrl: URL, rerequest: true, comment: null })).toMatchObject({ ok: false, error: expect.stringContaining("reviewers changed") });
+    expect(await harness.callRpc("action_merge", { prUrl: URL, sha: SHA, acknowledgeUnresolved: false })).toMatchObject({ ok: false, error: expect.stringContaining("rebase") });
     expect(calls.some((call) => call.method === "prWrite")).toBe(false);
   });
 });

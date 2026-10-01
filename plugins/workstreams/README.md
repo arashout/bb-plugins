@@ -123,21 +123,16 @@ unless an explicit ticket or PR owner takes precedence.
 
 ```mermaid
 flowchart LR
-  action["Confirmed agent action for assigned work"] --> parent["Effort parent: emoji title"]
-  parent --> controller["Repository controller: plain title"]
-  controller --> worker["Optional PR or checkout worker: plain title"]
-  controller --> workspace["Isolated worktree for that PR"]
+  parent["Effort parent: emoji title"] --> controller["Repository controller: plain title"]
+  controller --> worker["PR worker that Ask or Fix starts: plain title"]
 ```
 
-The confirmed agent action creates a missing parent or controller when it needs
-one. Newly created coordinators and controllers use isolated directories that
-do not contain a repository checkout; existing thread environments stay intact.
-A controller can work directly or delegate a bounded
-task to a child.
-Work without an effort uses one shared **Unassigned work** parent and a plain
-repository child. This placement organizes threads without assigning the PR or
-checkout to an effort. A personal workspace keeps the same hierarchy when no
-matching BB project is available.
+Ask and Fix start a PR worker only for a PR with no thread, and only beneath a
+parent that already exists: its effort's repository controller, or its
+repository's child of the shared **Unassigned work** parent when no effort owns
+it. Without one, the PR is skipped with why. A controller can work directly or
+delegate a bounded task to a child. Unassigned placement organizes threads
+without assigning the PR or checkout to an effort.
 Legacy bulk Advance no longer runs. Its saved jobs stay readable as history,
 and the isolated worktrees it created stay on disk for inspection; automatic
 cleanup is not implemented.

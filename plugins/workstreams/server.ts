@@ -41,13 +41,13 @@ import { EFFORT_ATTEMPT_MIGRATIONS, EFFORT_DECISION_MIGRATIONS, EFFORT_EXECUTION
   from "./effort-work-store.js";
 import { effortAdminListSchema, effortAdminMergeResultSchema, effortAdminPreviewResultSchema, effortAdminResultSchema, effortAdminRevision, effortAdminScope, effortAdminSyncActionSchema, type EffortAdminSyncAction } from "./effort-admin.js";
 import { createUnassignedPlacementService, UNASSIGNED_PLACEMENT_MIGRATION } from "./unassigned-placement.js";
-import { createCoordinatorService, coordinateInputSchema, coordinateResultSchema, effortPlanSchema, type EffortPlan } from "./effort-coordinator.js";
+import { createCoordinatorService } from "./effort-coordinator.js";
 import { effortTitle } from "./effort-title.js";
 import { threadEffortAssignmentScope, threadEffortChip, threadEffortContextSchema, threadEffortMoveScope, threadEffortSignals, type ThreadEffortPicker, type ThreadEffortReady } from "./thread-effort.js";
 import { suggestThreadEfforts } from "./thread-effort-suggestions.js";
 import { confirmedPrCohorts, confirmedThreadPrUrls } from "./thread-intent.js";
 import { planGroupingRepair, reviewGroupingRepair, repairRequestEstimate } from "./grouping-repair.js";
-import { effortParent, activeCheckoutThread } from "./effort-routing.js";
+import { activeCheckoutThread } from "./effort-routing.js";
 import { createRepoControllerService } from "./repo-controller.js";
 import { inventoryEffort, inventoryTicketEfforts } from "./effort-membership.js";
 import { canonicalPrUrl, prHoldFor, prHoldsSchema } from "./pr-holds.js";
@@ -142,11 +142,10 @@ import {
   ticketsIn,
   withinPath,
 } from "./threads.js";
-import { startThread } from "./spawn.js";
+import { startThread, type SpawnSdk } from "./spawn.js";
 import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
 import { dismissalSchema, sentState, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
-import { AGENT_ACTIONS, MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
-import { planAgent, runAgent, type AgentSdk } from "./agent.js";
+import { MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
 import { executeMerge, type WriteResult } from "./direct.js";
@@ -353,7 +352,6 @@ const writeResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), detail: z.string() }),
   z.object({ ok: z.literal(false), error: z.string() }),
 ]);
-const threadModeSchema = z.enum(["continue", "subthread", "new"]);
 /** What one PR's read from GitHub got: fresh facts, why it failed (GitHub's own reason, a rate limit among them), or another read held it. */
 const prReadSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("checked"), checkedAt: z.string() }),
@@ -365,13 +363,10 @@ type PrRead = z.infer<typeof prReadSchema>;
 export const rpcContract = defineRpcContract({
   board_get: { input: z.null(), output: boardSchema },
   pr_poll: { input: z.null(), output: z.object({ scheduled: z.number() }) },
-  pr_refresh: { input: prUrlInput, output: prReadSchema },
-  /** A full read of up to four PRs at once, review threads and comments included, the read pr_refresh makes: what each read got. */
+  /** A full read of up to four PRs at once, review threads and comments included: what each read got. */
   pr_refresh_many: { input: z.object({ prUrls: z.array(prUrlInput.shape.prUrl).min(1).max(4) }).strict(),
     output: z.object({ reads: z.array(z.object({ prUrl: z.string(), read: prReadSchema })) }) },
   pr_hold_set: { input: z.object({ prUrl: z.string().max(500).refine((value) => canonicalPrUrl(value) !== null, "Choose a valid GitHub PR URL"), held: z.boolean(), reason: z.string().max(1_000).optional() }).strict(), output: prHoldsSchema },
-  effort_plan: { input: z.object({ groupKey: z.string().min(1).max(500) }).strict(), output: effortPlanSchema },
-  effort_coordinate: { input: coordinateInputSchema, output: coordinateResultSchema },
   effort_admin_list: { input: z.null(), output: effortAdminListSchema },
   effort_admin_create: { input: z.object({ name: z.string().max(500), goal: z.string().max(4_000), projectId: z.string().max(200).optional(), requestId: z.string().uuid() }).strict(), output: effortAdminResultSchema },
   effort_admin_update: { input: z.object({ effortKey: z.string().min(1).max(500), name: z.string().max(500), goal: z.string().max(4_000), expectedScope: z.string().max(100_000) }).strict(), output: effortAdminResultSchema },
@@ -445,53 +440,6 @@ export const rpcContract = defineRpcContract({
     ]),
     output: writeResult,
   },
-  action_update_branch: { input: directInput, output: writeResult },
-  /** Re-request the scan's pending reviewers and/or post a comment (sent to gh on stdin). */
-  action_nudge: {
-    input: z.union([
-      pathInput.extend({ rerequest: z.boolean(), comment: z.string().max(4_000).nullable() }),
-      prUrlInput.extend({ rerequest: z.boolean(), comment: z.string().max(4_000).nullable() }),
-    ]),
-    output: writeResult,
-  },
-  /** Read-only: the row's linked threads, live, and where the agent action should run. */
-  agent_plan: {
-    input: z.object({ path: z.string().max(1_000), action: z.enum(AGENT_ACTIONS) }).strict(),
-    output: z.discriminatedUnion("ok", [
-      z.object({
-        ok: z.literal(true),
-        candidates: z.array(
-          z.object({
-            id: z.string(),
-            title: z.string(),
-            tier: z.enum(THREAD_TIERS),
-            running: z.boolean(),
-            contextUsed: z.number().nullable(),
-            canSpawnChild: z.boolean(),
-          }),
-        ),
-        recommendation: z.object({ mode: threadModeSchema, threadId: z.string().nullable(), reason: z.string() }),
-        capabilities: z.object({ send: z.boolean(), subthread: z.boolean(), contextUsage: z.boolean() }),
-      }),
-      z.object({ ok: z.literal(false), error: z.string() }),
-    ]),
-  },
-  /** Run an agent action in its own subthread or new thread. */
-  agent_run: {
-    input: z
-      .object({
-        path: z.string().max(1_000),
-        action: z.enum(AGENT_ACTIONS),
-        mode: threadModeSchema,
-        threadId: z.string().max(200).nullable(),
-        prompt: z.string().max(8_000),
-      })
-      .strict(),
-    output: z.discriminatedUnion("ok", [
-      z.object({ ok: z.literal(true), threadId: z.string(), ticket: z.string() }),
-      z.object({ ok: z.literal(false), error: z.string() }),
-    ]),
-  },
   /** Open runs only: the sidebar badge's cheap read. */
   runs_open: { input: z.null(), output: z.array(runSchema) },
   board_refresh: {
@@ -500,28 +448,9 @@ export const rpcContract = defineRpcContract({
   },
   prefs_get: { input: z.null(), output: prefsSchema },
   prefs_set: { input: prefsSchema, output: prefsSchema },
-  /**
-   * Start a BB thread in one checkout. The client names the path; the unit and
-   * its cluster are looked up from the server's own last scan.
-   */
-  thread_start: {
-    input: z.object({ path: z.string().max(1_000), prompt: z.string().max(8_000) }).strict(),
-    output: z.discriminatedUnion("ok", [
-      z.object({ ok: z.literal(true), threadId: z.string(), ticket: z.string() }),
-      z.object({ ok: z.literal(false), error: z.string() }),
-    ]),
-  },
   thread_archive: { input: z.object({ threadId: z.string().max(200) }).strict(), output: writeResult },
   thread_restore: { input: z.object({ threadId: z.string().max(200) }).strict(), output: writeResult },
   thread_archived: { input: z.object({}).strict(), output: z.array(archiveRecordSchema) },
-  /** Current, server-verified threads associated with one known open PR. */
-  pr_thread_context: {
-    input: prUrlInput,
-    output: z.object({
-      threads: z.array(threadLinkSchema.extend({ role: z.enum(["coordinator", "repo", "pr", "linked"]) })),
-      recommendedThreadId: z.string().nullable(),
-    }),
-  },
   /** Send one user-authored instruction to one thread currently linked to this PR row. */
   thread_message: {
     input: z.object({ path: z.string().max(1_000).optional(), prUrl: z.string().max(500), threadId: z.string().max(200), message: z.string().max(4_000) }).strict(),
@@ -1175,8 +1104,6 @@ export default async function plugin(bb: BbPluginApi) {
     for (const url of urls) inventoryRefreshes.add(url);
   }
   const prPoll = createPrPoll({ now: Date.now, intervalMs: 45_000, batchSize: 20 });
-  const directPrRefreshes = new Map<string, Promise<PrRead>>();
-  const directPrResults = new Map<string, { at: number; result: PrRead }>();
   function knownPrUrl(raw: string): string | null {
     const url = canonicalPrUrl(raw);
     if (url === null) return null;
@@ -1226,24 +1153,7 @@ export default async function plugin(bb: BbPluginApi) {
       return answered(index) ?? { status: "failed", checkedAt, error: "GitHub did not return fresh status for this PR." };
     });
   }
-  async function refreshPrNow(raw: string): Promise<PrRead> {
-    const url = knownPrUrl(raw);
-    if (url === null) return { status: "failed", checkedAt: null, error: "This PR is not tracked on the board." };
-    const existing = directPrRefreshes.get(url);
-    if (existing) return existing;
-    const recent = directPrResults.get(url);
-    if (recent && Date.now() - recent.at < 5_000) return recent.result;
-    const run = readPrsNow([url]).then((reads) => reads[0]!);
-    directPrRefreshes.set(url, run);
-    try {
-      const result = await run;
-      if (directPrResults.size >= 1_000) directPrResults.delete(directPrResults.keys().next().value!);
-      directPrResults.set(url, { at: Date.now(), result });
-      return result;
-    }
-    finally { directPrRefreshes.delete(url); }
-  }
-  /** Up to four PRs read at once, each answered as pr_refresh answers it. */
+  /** Up to four PRs read at once, each answered with what its read got; one the board doesn't track fails. */
   async function refreshPrsNow(raws: readonly string[]): Promise<{ prUrl: string; read: PrRead }[]> {
     const known = raws.map((raw) => ({ raw, url: knownPrUrl(raw) }));
     const urls = [...new Set(known.flatMap((item) => item.url ?? []))];
@@ -2956,9 +2866,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ---- row actions ----------------------------------------------------
   //
-  // The client names a row by its checkout path and nothing else. The repo,
-  // PR and reviewers come from the server's own last scan; the thread a
-  // continue or subthread targets must be one this row is linked to.
+  // The client names a row by its checkout path or PR URL and nothing else.
+  // The repo and PR come from the server's own last scan.
 
   const HOST_ACTION_TIMEOUT_MS = 90_000;
 
@@ -3009,8 +2918,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   const liveOf = (hostId: string) => (prUrl: string) =>
     host.call("prLive", { prUrl }, { hostId, timeoutMs: HOST_ACTION_TIMEOUT_MS });
-  const reviewersOf = (hostId: string) => (prUrl: string) =>
-    host.call("prReviewers", { prUrl }, { hostId, timeoutMs: HOST_ACTION_TIMEOUT_MS });
   const writeOf = (hostId: string) => async (request: Parameters<typeof host.call<"prWrite">>[1]): Promise<WriteResult> => {
     const held = request.kind === "merge" ? holdMessage(request.prUrl) : null;
     if (held) return { ok: false, error: held };
@@ -3027,23 +2934,6 @@ export default async function plugin(bb: BbPluginApi) {
       return records.flatMap((record) => record.success ? [record.data] : []);
     },
   };
-
-  /** The threads the Board links to this row's cluster, strongest first. */
-  async function linkedThreads(path: string): Promise<{ id: string; title: string; tier: ThreadTier }[]> {
-    for (const group of (await board()).groups) {
-      for (const cluster of group.clusters) {
-        if (cluster.units.some((unit) => unit.path === path)) {
-          const unit = cluster.units.find((unit) => unit.path === path)!;
-          const effort = (unit.pr ? effortStore.owner("prUrl", unit.pr.url) : null) ?? effortStore.owner("ticket", cluster.ticket);
-          const parent = effort && unit.pr ? await effortParent(effortStore, effort, unit.pr.url, (id) => bb.sdk.threads.get({ threadId: id })) : null;
-          return parent && !cluster.threads.some((thread) => thread.id === parent.thread.id)
-            ? [{ id: parent.thread.id, title: parent.thread.title ?? effort!.name, tier: "started" as const }, ...cluster.threads]
-            : cluster.threads;
-        }
-      }
-    }
-    return [];
-  }
 
   function knownPr(prUrl: string): { pr: Pr; repo: string; path: string | null } | null {
     const canonical = canonicalPrUrl(prUrl);
@@ -3122,14 +3012,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function prThreadContext(prUrl: string) {
     const known = knownPr(prUrl);
-    if (known === null) return { threads: [], recommendedThreadId: null };
+    if (known === null) return { threads: [] };
     const canonical = canonicalPrUrl(known.pr.url)!;
     const current = await board();
     const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
     const owner = work.ownerForPr(canonical);
     const effort = owner ? effortStore.get(owner.id) : null;
     const repoRecord = effort ? effortStore.repoController(effort.id, known.repo) : null;
-    let invalidRepoId: string | null = null;
     const threads = (await Promise.all(work.linksForPr(canonical).map(async (link) => {
       try {
         const thread = await bb.sdk.threads.get({ threadId: link.threadId, include: "environment" });
@@ -3138,55 +3027,11 @@ export default async function plugin(bb: BbPluginApi) {
         const validRepo = link.role !== "repo" || (repoRecord?.state === "ready" && thread.projectId === repoRecord.projectId &&
           thread.parentThreadId === effort?.coordinatorThreadId &&
           environmentHostId === repoRecord.hostId && thread.canSpawnChild);
-        if (!validRepo) invalidRepoId = link.threadId;
         return { id: link.threadId, tier: link.tier, role: validRepo ? link.role : "linked" as const,
           title: (thread.title ?? thread.titleFallback ?? link.title).slice(0, 200), active: thread.status === "active" };
       } catch { return null; }
     }))).filter((thread): thread is NonNullable<typeof thread> => thread !== null);
-    const repo = threads.find((thread) => thread.role === "repo");
-    const recommendedThreadId = repo?.id ?? (threads.length === 1 && threads[0]!.id !== invalidRepoId ? threads[0]!.id : null);
-    return { threads, recommendedThreadId };
-  }
-
-  async function effortPlan(groupKey: string): Promise<EffortPlan> {
-    const current = await board();
-    const established = effortStore.source(groupKey);
-    if (established?.archivedAt) return { ok: false, error: "Restore this effort before coordinating it." };
-    const group = current.groups.find((entry) => entry.key === groupKey);
-    if (!group && !established) return { ok: false, error: "That group is no longer on the board. Refresh and choose its current effort." };
-    if (!established && (group!.level !== "effort" || outsideGrouping(group!.key))) return { ok: false, error: "Choose an outcome-based effort rather than a catch-all container." };
-    const keys = new Set([groupKey]);
-    for (let pass = 0; pass < 3; pass++) for (const entry of current.groups) if (entry.parentKey && keys.has(entry.parentKey)) keys.add(entry.key);
-    const clusters = current.groups.filter((entry) => keys.has(entry.key)).flatMap((entry) => entry.clusters);
-    const members: EffortMembers = established?.members ?? normalizeMembers({
-      tickets: [...clusters.map((cluster) => cluster.ticket), ...(group?.key.startsWith("ticket:") && clusters.length === 0 ? [group.key.slice(7)] : [])],
-      prUrls: [...clusters.flatMap((cluster) => cluster.units.flatMap((unit) => unit.pr ? [unit.pr.url] : [])),
-        ...current.prInventory.entries.filter((entry) => entry.effortKey && keys.has(entry.effortKey)).map((entry) => entry.pr.url)],
-    });
-    if (members.tickets.length === 0 && members.prUrls.length === 0) return { ok: false, error: "This group has no tracked work to coordinate." };
-    const allProjects = await bb.sdk.projects.list();
-    const memberUrls = new Set(members.prUrls);
-    const memberRepos = new Set(current.prInventory.entries.filter((entry) => memberUrls.has(entry.pr.url.toLowerCase())).map((entry) => entry.repo.toLowerCase()));
-    const paths = [...clusters.flatMap((cluster) => cluster.units.map((unit) => unit.path)),
-      ...readUnits().filter((unit) => unit.githubRepo && memberRepos.has(unit.githubRepo.toLowerCase())).map((unit) => unit.path)];
-    let projects = allProjects.filter((project) => project.id === established?.projectId || project.sources.some((source) => paths.some((path) => withinPath(path, source.path))))
-      .map((project) => ({ id: project.id, name: project.name }));
-    if (projects.length === 0 && established?.coordinatorState === "none") projects = allProjects
-      .filter((project) => project.sources.length > 0).map((project) => ({ id: project.id, name: project.name }));
-    const choices = (await bb.sdk.threads.list({ archived: false, limit: 100 })).filter((thread) =>
-      thread.status === "idle" && thread.deletedAt === null && projects.some((project) => project.id === thread.projectId));
-    const eligible = (await Promise.all(choices.slice(0, 50).map(async (thread) => {
-      try { return await bb.sdk.threads.get({ threadId: thread.id }); } catch { return null; }
-    }))).filter((thread): thread is NonNullable<typeof thread> => thread !== null && thread.canSpawnChild);
-    let effort = established;
-    if (effort?.coordinatorThreadId) {
-      try {
-        const thread = await bb.sdk.threads.get({ threadId: effort.coordinatorThreadId });
-        effort = effortStore.save({ ...effort, coordinatorState: thread.archivedAt === null && thread.deletedAt === null ? "ready" : "unavailable" });
-      } catch { effort = effortStore.save({ ...effort, coordinatorState: "unavailable" }); }
-    }
-    return { ok: true, name: effort?.name ?? group!.name, goal: effort?.goal ?? "", members, projects,
-      threads: eligible.map((thread) => ({ id: thread.id, title: thread.title ?? thread.titleFallback ?? thread.id, projectId: thread.projectId })), effort };
+    return { threads };
   }
 
   function availableWorkEfforts(current: Board): ThreadEffortReady["efforts"] {
@@ -4057,7 +3902,7 @@ export default async function plugin(bb: BbPluginApi) {
     const repo = raw?.pr ? prTarget(raw.pr.url)?.slug : raw?.githubRepo ?? null;
     return { raw, effort, scope, repo };
   }
-  const agentSdk: AgentSdk = {
+  const agentSdk: SpawnSdk = {
     projects: { list: () => bb.sdk.projects.list() },
     threads: {
       spawn: async (args) => {
@@ -4099,8 +3944,6 @@ export default async function plugin(bb: BbPluginApi) {
           return thread;
         } finally { launchingCheckouts.delete(path); }
       },
-      get: (args) => bb.sdk.threads.get(args),
-      context: (args) => bb.sdk.threads.context(args),
     },
   };
 
@@ -4749,16 +4592,8 @@ export default async function plugin(bb: BbPluginApi) {
   const rpcHandlers: PluginRpcHandlers<typeof rpcContract> = {
     board_get: () => board(),
     pr_poll: () => ({ scheduled: pollKnownPrs() }),
-    pr_refresh: ({ prUrl }) => refreshPrNow(prUrl),
     pr_refresh_many: async ({ prUrls }) => ({ reads: await refreshPrsNow(prUrls) }),
     pr_hold_set: ({ prUrl, held, reason }) => setHold(prUrl, held, reason),
-    effort_plan: ({ groupKey }) => effortPlan(groupKey),
-    effort_coordinate: async (input) => {
-      if (effortStore.source(input.groupKey)?.archivedAt) return { ok: false as const, error: "Restore this effort before coordinating it." };
-      const result = await coordinators.coordinate(input, await effortPlan(input.groupKey));
-      bb.realtime.publish(BOARD_CHANGED, { scanning });
-      return result;
-    },
     effort_admin_list: () => {
       const efforts = effortStore.listAll();
       return { efforts, scopes: Object.fromEntries(efforts.map((effort) => [effort.key, effortAdminRevision(effort)])) };
@@ -5130,32 +4965,6 @@ export default async function plugin(bb: BbPluginApi) {
       await bb.storage.kv.set("prefs", next);
       return next;
     },
-    thread_start: async ({ path, prompt }) => withPrWriter(path, readUnits().find((unit) => unit.path === path)?.pr?.url, async () => {
-      // The unit and its cluster come from the last scan, never from the client.
-      const pattern = compilePattern((await settings.get()).ticketPattern);
-      const units = readUnits();
-      const raw = units.find((unit) => unit.path === path);
-      const unit =
-        raw === undefined
-          ? undefined
-          : { path: raw.path, ticket: (await findTickets(pattern, units))(raw)?.ticket ?? raw.dirName };
-      const result = await startThread(
-        {
-          projects: { list: () => bb.sdk.projects.list() },
-          threads: { spawn: (args) => agentSdk.threads.spawn(args) },
-        },
-        unit,
-        prompt,
-        await modelFor("code"),
-      );
-      if (result.ok) {
-        // Linked at once, not on the next relist: the metadata is the record.
-        startedFor.set(result.threadId, result.ticket);
-        bb.log.info(`started thread ${result.threadId} for ${result.ticket}`);
-        announceThreads();
-      }
-      return result;
-    }),
     thread_archive: async ({ threadId }) => {
       const clusters = (await board()).groups.flatMap((group) => group.clusters);
       const cluster = clusters.find((item) => item.threads.some((thread) => thread.id === threadId));
@@ -5166,7 +4975,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
     thread_restore: ({ threadId }) => restoreArchivedThread(bb.sdk.threads, archiveStore, threadId),
     thread_archived: async () => (await archiveStore.list()).sort((a, b) => b.archivedAt - a.archivedAt).slice(0, ARCHIVE_HISTORY_LIMIT),
-    pr_thread_context: ({ prUrl }) => prThreadContext(prUrl),
     thread_message: async ({ path, prUrl, threadId, message }) => {
       const canonical = canonicalPrUrl(prUrl);
       const known = knownPr(prUrl);
@@ -5278,82 +5086,6 @@ export default async function plugin(bb: BbPluginApi) {
           { prUrl: target.prUrl, sha: input.sha, acknowledgeUnresolved: input.acknowledgeUnresolved, method: mergeMethodOf(mergeMethod), deleteBranchSetting: deleteBranchOnMerge },
         );
       }),
-    action_update_branch: (input) =>
-      directActionRun(input, "update-branch", async () => {
-        const target = await actionable(input);
-        if (!target.ok) return target;
-        const live = await reviewersOf(target.hostId)(target.prUrl);
-        if (!live.ok) return live;
-        return writeOf(target.hostId)({ kind: "update-branch", prUrl: target.prUrl });
-      }),
-    action_nudge: (input) =>
-      directActionRun(input, "nudge", async () => {
-        const { rerequest, comment } = input;
-        const target = await actionable(input);
-        if (!target.ok) return target;
-        const live = await reviewersOf(target.hostId)(target.prUrl);
-        if (!live.ok) return live;
-        const scanned = target.pr.reviewRequests;
-        if (rerequest && [...live.reviewers].sort().join("\n") !== [...scanned].sort().join("\n")) {
-          return { ok: false as const, error: "Pending reviewers changed since the last scan. Rescan and confirm again." };
-        }
-        const reviewers = rerequest ? live.reviewers : [];
-        if (rerequest && reviewers.length === 0) return { ok: false as const, error: "No reviewers are pending on this PR to re-request." };
-        return writeOf(target.hostId)({ kind: "nudge", prUrl: target.prUrl, reviewers, comment });
-      }),
-    agent_plan: async ({ path, action }) => {
-      const found = await scannedUnit(path);
-      if (!found) {
-        return { ok: false as const, error: "That checkout is not on the board any more. Rescan and try again." };
-      }
-      const scope = found.raw.pr ? await effortScope(found.raw.pr.url) : await checkoutScope(path);
-      const repo = found.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found.raw.githubRepo ?? null;
-      const parentId = storedPlacementParent(repo, scope);
-      const plan = await planAgent(agentSdk, action, parentId
-        ? [{ id: parentId, title: scope?.name ?? (repo ?? "Unassigned work"), tier: "started" }] : []);
-      plan.recommendation = plan.candidates[0]?.canSpawnChild
-        ? { mode: "subthread", threadId: parentId, reason: "Start this worker beneath its current parent." }
-        : { mode: "new", threadId: null, reason: "Create or restore this work's parent before starting its worker." };
-      return { ok: true as const, ...plan };
-    },
-    agent_run: async ({ path, action, mode, threadId, prompt }) => withPrWriter(path, readUnits().find((unit) => unit.path === path)?.pr?.url, async () => {
-      if (mode === "continue") {
-        return { ok: false as const, error: "Continue in an existing thread cannot track this action reliably. Choose a subthread or new thread." };
-      }
-      const found = await scannedUnit(path);
-      const scope = found?.raw.pr ? await effortScope(found.raw.pr.url) : found ? await checkoutScope(path) : null;
-      const repo = found?.raw.pr ? prTarget(found.raw.pr.url)?.slug ?? null : found?.raw.githubRepo ?? null;
-      const parentId = storedPlacementParent(repo, scope);
-      if (mode === "subthread" && (!parentId || threadId !== parentId)) {
-        return { ok: false as const, error: "Choose this work's current parent, or reopen the action preview." };
-      }
-      const linked = [...new Set([...(await linkedThreads(path)).map((thread) => thread.id), ...(parentId ? [parentId] : [])])];
-      // Recorded before launch; bound to the dedicated thread when spawn returns.
-      const runId = runs.begin({ ...(await runTarget(path)), action, mode, threadId: null });
-      let result: Awaited<ReturnType<typeof runAgent>>;
-      try {
-        result = await runAgent(agentSdk, {
-          unit: found === undefined ? undefined : { path: found.raw.path, ticket: found.ticket },
-          mode,
-          threadId,
-          prompt,
-          linked,
-          model: await modelFor("code"),
-        });
-      } catch (error) {
-        runs.discard(runId);
-        return { ok: false as const, error: String(error).slice(0, 400) };
-      }
-      if (!result.ok) runs.discard(runId);
-      else runs.attach(runId, result.threadId);
-      if (result.ok) {
-        // A new or sub thread is linked at once through the metadata it was seeded with.
-        startedFor.set(result.threadId, result.ticket);
-        bb.log.info(`agent action (${mode}) in thread ${result.threadId} for ${result.ticket}`);
-        announceThreads();
-      }
-      return result;
-    }),
     board_refresh: () => {
       // scan() flips `scanning` synchronously, so read it before calling.
       const idle = !scanning;

@@ -256,7 +256,7 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
     context.running !== null ? "Another action on this PR is running" : null));
   if (mergeable(row)) actions.push(action("merge", `Open a fresh merge preview of ${target}; only a click or ⌘↵ there merges`, null));
   else if (inOrder(row, parents)) actions.push(action("merge", `Merges after #${row.stackedOn}`, `Merge #${row.stackedOn} first; this one follows it`));
-  // pr_refresh reads your PRs and checked-out ones; a teammate's PR with neither goes unread.
+  // pr_refresh_many reads your PRs and checked-out ones; a teammate's PR with neither goes unread.
   const unread = !row.authored && row.stage === null ? "The board reads a teammate's PR only from its checkout" : null;
   actions.push(action("refresh", `Read ${target} from GitHub now`, unread ?? (context.running === "refresh" ? "Reading GitHub now" : null)));
   actions.push(action("thread", thread ? `Open "${thread.title}"` : `Open ${target}'s thread`, thread ? null : "No thread is linked to this PR yet",

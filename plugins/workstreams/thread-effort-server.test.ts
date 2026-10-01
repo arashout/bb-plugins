@@ -446,21 +446,6 @@ it("keeps a ticketless checkout as a standalone PR source", async () => {
   expect((await board()).efforts[0]?.members).toEqual({ tickets: ["ABC-202"], prUrls: [a, b] });
 });
 
-it("offers an explicit project choice when a promoted remote effort has no local checkout", async () => {
-  const { harness, board, clearLocal } = await setup({ remoteDestination: true });
-  const linked = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: a }) as ThreadEffortReady;
-  const destination = linked.efforts.find((effort) => effort.key === "ticket:ABC-202")!;
-  expect(destination).toBeDefined();
-  expect(await harness.callRpc("thread_effort_move", { threadId: "thread", sourceIds: ["ticket:ABC-101"],
-    destinationKey: destination.key, expectedScope: threadEffortMoveScope(linked, ["ticket:ABC-101"], destination.key) })).toMatchObject({ ok: true });
-  const effort = (await board()).efforts[0]!;
-  expect(effort.members.prUrls).toEqual([a, "https://github.com/inkwell/atlas/pull/44", "https://github.com/inkwell/atlas/pull/45"].sort());
-  clearLocal();
-  await harness.runCli(["refresh"]);
-  expect(await harness.callRpc("effort_plan", { groupKey: effort.key })).toMatchObject({ ok: true,
-    projects: [{ id: "proj", name: "Folio" }] });
-});
-
 it("shows a remote-only ticket's inferred effort before any explicit ownership", async () => {
   const { harness } = await setup({ remoteDestination: true });
   const preview = await harness.callRpc("thread_effort_link_pr", { threadId: "thread", prUrl: "https://github.com/inkwell/atlas/pull/44" }) as ThreadEffortReady;

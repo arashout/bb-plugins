@@ -1,4 +1,4 @@
-// PR thread reads and sends through the real server on BB's fake host.
+// PR thread links and sends through the real server on BB's fake host.
 // Every project, PR, checkout, and thread in this file is synthetic.
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,8 +26,6 @@ function pr(number: number, state: "OPEN" | "MERGED" = "OPEN") {
     baseRefName: "main", reviewDecision: "APPROVED" }]))!.pr;
 }
 
-type Context = { threads: { id: string; title: string; role: "coordinator" | "repo" | "pr" | "linked" }[]; recommendedThreadId: string | null };
-
 async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED"; metadata?: Record<string, Record<string, unknown>>;
   initialThreads?: { id: string; title: string; status?: "active" | "idle" }[] } = {}) {
   const currentPr = pr(42, options.state);
@@ -37,7 +35,7 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
     changedPaths: ["src/review.ts"], observed: { status: true, pr: true } };
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const add = (id: string, patch: Record<string, unknown> = {}) => {
-    const row = makeThreadResponse({ id, projectId: PROJECT, title: id, status: "idle", providerId: "codex", ...patch } as never);
+    const row = makeThreadResponse({ id, projectId: PROJECT, title: id, status: "idle", providerId: "codex", environmentPath: null, ...patch } as never);
     threads.set(id, row);
     return row;
   };
@@ -71,13 +69,13 @@ async function setup(options: { remoteOnly?: boolean; state?: "OPEN" | "MERGED";
   const effortStore = createEffortStore(bb.storage.database() as never);
   const effort = effortStore.establish({ sourceKey: "ticket:ABC-42", name: "Improve manuscript review", goal: "Make manuscript review reliable",
     projectId: PROJECT, members: { tickets: ["ABC-42"], prUrls: [URL, NEXT_URL] } });
-  const context = async (url = URL) => await harness.callRpc("pr_thread_context", { prUrl: url }) as Context;
+  const links = async (url = URL) => (await harness.callRpc("board_get", null) as Board).prThreadLinks[url] ?? [];
   const message = async (threadId: string, url = URL) => await harness.callRpc("thread_message", { prUrl: url, threadId, message: "Check this PR" });
-  return { bb, harness, threads, add, send, spawn, effortStore, effort, context, message };
+  return { bb, harness, threads, add, send, spawn, effortStore, effort, links, message };
 }
 
-describe("PR thread context and messaging", () => {
-  it("reads coordinator, repository, and PR history without launching work, and recommends the current repository controller", async () => {
+describe("PR thread links and messaging", () => {
+  it("sends to the effort's current repository controller, linked through its effort, and launches nothing", async () => {
     const env = await setup();
     env.add("thr-coordinator", { title: "🧭 Manuscript review" });
     env.add("thr-repo", { title: "📦 inkwell/folio", parentThreadId: "thr-coordinator", environment: { hostId: HOST } });
@@ -87,24 +85,15 @@ describe("PR thread context and messaging", () => {
     env.effortStore.saveRepoController({ ...claimed.record, threadId: "thr-repo", state: "ready" });
     env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
 
-    const context = await env.context();
-    expect(context.threads).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "thr-coordinator", role: "coordinator" }),
-      expect.objectContaining({ id: "thr-repo", role: "repo" }),
-      expect.objectContaining({ id: "thr-pr", role: "pr" }),
-    ]));
-    expect(context.recommendedThreadId).toBe("thr-repo");
+    expect(await env.message("thr-repo")).toEqual({ ok: true, delivery: "sent" });
+    expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-repo" }));
     expect(env.spawn).not.toHaveBeenCalled();
-    expect(env.send).not.toHaveBeenCalled();
   });
 
   it("includes an explicitly linked remote PR thread and sends without a checkout path", async () => {
     const env = await setup({ remoteOnly: true, metadata: { "thr-remote": { linkedPrUrl: URL } },
       initialThreads: [{ id: "thr-remote", title: "Remote PR author" }] });
-    await vi.waitFor(async () => expect((await env.context()).threads).toEqual([
-      expect.objectContaining({ id: "thr-remote", role: "pr" }),
-    ]));
-    expect((await env.context()).recommendedThreadId).toBe("thr-remote");
+    await vi.waitFor(async () => expect(await env.links()).toEqual(["thr-remote"]));
     expect(await env.message("thr-remote")).toEqual({ ok: true, delivery: "sent" });
     expect(env.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thr-remote", model: "gpt-6-sol", reasoningLevel: "high" }));
     expect(await env.harness.callRpc("runs_open", null)).toEqual([
@@ -115,7 +104,7 @@ describe("PR thread context and messaging", () => {
   it("sends PR turns only to a thread on the configured code-work provider, with its configured model", async () => {
     const env = await setup({ remoteOnly: true, metadata: { "thr-remote": { linkedPrUrl: URL } },
       initialThreads: [{ id: "thr-remote", title: "Remote PR author" }] });
-    await vi.waitFor(async () => expect((await env.context()).recommendedThreadId).toBe("thr-remote"));
+    await vi.waitFor(async () => expect(await env.links()).toEqual(["thr-remote"]));
     await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
     expect(await env.message("thr-remote")).toEqual({ ok: false,
       error: "This thread runs on codex, not the configured claude-code provider. Message it in its own thread, or set the Code-work model to a codex model; nothing was sent." });
@@ -130,21 +119,16 @@ describe("PR thread context and messaging", () => {
     const env = await setup({ remoteOnly: true,
       metadata: { "thr-advance": { role: "rebase-worker", advanceJobId: "old-job", prUrl: URL } },
       initialThreads: [{ id: "thr-advance", title: "PR worker" }] });
-    expect((await env.context()).recommendedThreadId).toBe("thr-advance");
-    const board = await env.harness.callRpc("board_get", null) as Board;
-    expect(board.prThreadLinks[URL]).toContain("thr-advance");
+    expect(await env.links()).toContain("thr-advance");
   });
 
-  it("shows one thread's two recorded PRs in both thread choices and board indicators", async () => {
+  it("shows one thread's two recorded PRs in both PRs' board indicators", async () => {
     const env = await setup({ remoteOnly: true, initialThreads: [{ id: "thr-shared", title: "Two PR review" }] });
     const runs = createRunStore(env.bb.storage.database());
     for (const [url, number] of [[URL, 42], [NEXT_URL, 43]] as const) runs.begin({ path: PATH, ticket: null,
       prUrl: url, prNumber: number, action: "review", mode: "new", threadId: "thr-shared" });
-    expect((await env.context(URL)).threads).toEqual([expect.objectContaining({ id: "thr-shared", role: "pr" })]);
-    expect((await env.context(NEXT_URL)).threads).toEqual([expect.objectContaining({ id: "thr-shared", role: "pr" })]);
-    const board = await env.harness.callRpc("board_get", null) as Board;
-    expect(board.prThreadLinks[URL]).toContain("thr-shared");
-    expect(board.prThreadLinks[NEXT_URL]).toContain("thr-shared");
+    expect(await env.links(URL)).toEqual(["thr-shared"]);
+    expect(await env.links(NEXT_URL)).toEqual(["thr-shared"]);
   });
 
   it("keeps an active linked thread visible when more than twenty historical threads exist", async () => {
@@ -159,23 +143,21 @@ describe("PR thread context and messaging", () => {
     expect(board.prThreadLinks[URL]?.[0]).toBe("thr-active");
   });
 
-  it("keeps merged PR history visible while refusing new instructions", async () => {
+  it("refuses new instructions to a merged PR's thread", async () => {
     const env = await setup({ state: "MERGED" });
     env.add("thr-pr", { environmentPath: PATH });
     env.effortStore.recordWorker(env.effort.id, "thr-pr", URL, "pr");
-    expect((await env.context()).threads).toEqual([expect.objectContaining({ id: "thr-pr", role: "pr" })]);
     expect(await env.message("thr-pr")).toMatchObject({ ok: false });
     expect(env.send).not.toHaveBeenCalled();
   });
 
-  it("rejects unrelated, archived, and hidden targets from both the context and send path", async () => {
+  it("rejects unrelated, archived, and hidden targets from the send path", async () => {
     const env = await setup();
     env.add("thr-unrelated");
     env.add("thr-archived", { archivedAt: Date.now() });
     env.add("thr-hidden", { visibility: "hidden" });
     env.effortStore.recordWorker(env.effort.id, "thr-archived", URL, "pr");
     env.effortStore.recordWorker(env.effort.id, "thr-hidden", URL, "pr");
-    expect((await env.context()).threads).toEqual([]);
     for (const id of ["thr-unrelated", "thr-archived", "thr-hidden"])
       expect(await env.message(id)).toMatchObject({ ok: false });
     expect(env.send).not.toHaveBeenCalled();
