@@ -180,7 +180,11 @@ const INVENTORY_CHANGED = "inventory-changed";
 const RESCAN_DELAY_MS = 3_000;
 /** More paths than this in one batch: rescan everything instead. */
 const TARGETED_MAX = 8;
-/** A batch thread's action in the board's run record: one run per PR it claims, all in its thread. */
+/**
+ * A batch thread's action in the board's run record: one run per PR it claims, all in its thread. Its claim holds a PR until the thread's
+ * start returns; then addressHeld, from BB, says whether the thread holds it, for every writer. Bound runs are kept and settled for one
+ * release, for a rollback; only the badge, Map rows, thread links, and the read of its PRs once they end still read them.
+ */
 const ADDRESS_RUN = "address-feedback";
 /** Each PR's Dismiss from Your turn, a KV key per PR. */
 const DISMISSED = "yourTurnDismissed:";
@@ -3774,8 +3778,9 @@ export default async function plugin(bb: BbPluginApi) {
       const touches = (path: string | null, prUrl: string | null, ticket?: string | null) =>
         (path !== null && paths.has(path)) || (prUrl !== null && prs.has(canonicalPrUrl(prUrl) ?? prUrl)) ||
         (ticket != null && tickets.has(ticket));
-      for (const run of runs.recent(Number.MAX_SAFE_INTEGER)) if (run.status === "running" && touches(run.path, run.prUrl, run.ticket))
+      for (const run of runs.recent(Number.MAX_SAFE_INTEGER)) if (run.status === "running" && run.action !== ADDRESS_RUN && touches(run.path, run.prUrl, run.ticket))
         blockers.push(`Run ${run.id} is ${run.status} for affected work.`);
+      for (const prUrl of addressHeld().keys()) if (touches(prCheckout(prUrl), prUrl)) blockers.push(`A batch thread is addressing feedback on ${prUrl}.`);
       for (const thread of threads) if (!["idle", "error"].includes(thread.status))
         blockers.push(`Thread ${thread.id} is ${thread.status}. Wait for it to settle before merging.`);
       const preview = { scope: effortAdminScope(source, destination, sourceControllers, destinationControllers,
@@ -4714,8 +4719,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (effortAdminRevision(record) !== expectedScope) return { ok: false as const, error: "The effort changed. Refresh before saving." };
       const paths = new Set(record.members.checkoutPaths ?? []);
       const prs = new Set(record.members.prUrls.map((url) => canonicalPrUrl(url) ?? url));
-      if (archived && runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" &&
-        (paths.has(run.path) || (run.prUrl && prs.has(canonicalPrUrl(run.prUrl) ?? run.prUrl)))))
+      const touches = (path: string | null, prUrl: string | null) => (path !== null && paths.has(path)) || (prUrl !== null && prs.has(canonicalPrUrl(prUrl) ?? prUrl));
+      if (archived && (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && run.action !== ADDRESS_RUN && touches(run.path, run.prUrl))
+        || [...addressHeld().keys()].some((prUrl) => touches(prCheckout(prUrl), prUrl))))
         return { ok: false as const, error: "An affected worker is still active. Wait for it to settle before archiving." };
       const effort = effortStore.setArchived(record.id, archived);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
@@ -4749,7 +4755,8 @@ export default async function plugin(bb: BbPluginApi) {
           const tickets = new Set([...freshSource.members.tickets, ...freshDestination.members.tickets]);
           const touches = (path: string | null, pr: string | null, ticket?: string | null) =>
             (path !== null && paths.has(path)) || (pr !== null && prs.has(canonicalPrUrl(pr) ?? pr)) || (ticket != null && tickets.has(ticket));
-          if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && touches(run.path, run.prUrl, run.ticket)))
+          if (runs.recent(Number.MAX_SAFE_INTEGER).some((run) => run.status === "running" && run.action !== ADDRESS_RUN && touches(run.path, run.prUrl, run.ticket))
+            || [...addressHeld().keys()].some((prUrl) => touches(prCheckout(prUrl), prUrl)))
             throw new Error("Affected work became active. Reopen the merge preview after it settles.");
           prepareAdminSync(result.preview.source, result.preview.destination, result.threadDetails);
           seeds.move(result.preview.source.id, result.preview.destination.id);
@@ -5062,7 +5069,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
       if (known.path && launchingCheckouts.has(known.path)) return { ok: false as const, error: "Another action is launching in this checkout." };
       const activeOwnerIds = new Set<string>();
-      for (const run of runs.recent(0, 1_000)) if (run.prUrl && canonicalPrUrl(run.prUrl) === canonical &&
+      // A batch thread's hold is addressHolder's, above: never the run log's copy of its claims.
+      for (const run of runs.recent(0, 1_000)) if (run.prUrl && canonicalPrUrl(run.prUrl) === canonical && run.action !== ADDRESS_RUN &&
         (run.status === "running" || run.status === "needs-you") && run.threadId) activeOwnerIds.add(run.threadId);
       const pending = pendingPrThreads.get(canonical);
       if (pending && pending.id !== threadId) {

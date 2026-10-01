@@ -773,6 +773,37 @@ describe("a batch thread's link", () => {
     }
   });
 
+  // Every writer reads one rule for whether a batch thread holds a PR, BB's word, and never the run log's copy of its claims, which is kept
+  // only for a rollback: resumed after its claims ended, it still holds its effort against archive and merge.
+  it("keeps its effort from being archived or merged while it works, by BB's word, after its claims ended", async () => {
+    const env = await setup();
+    await confirm(env, (await env.plan([url(43)])).batchId);
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get("thr-batch-1")!, lastAssistantText: "Replied." });
+    await vi.waitFor(() => expect(claims(env)).toEqual([[43, "done"]]));
+    await activate(env, "thr-batch-1");
+    const { scopes } = await env.rpc("effort_admin_list", null) as { scopes: Record<string, string> };
+    expect(await env.rpc("effort_admin_archive", { effortKey: env.effort.key, archived: true, expectedScope: scopes[env.effort.key] }))
+      .toEqual({ ok: false, error: "An affected worker is still active. Wait for it to settle before archiving." });
+    expect(await env.rpc("effort_admin_merge_preview", { sourceKey: env.effort.key, destinationKey: env.spine.key }))
+      .toMatchObject({ ok: true, preview: { blockers: [`A batch thread is addressing feedback on ${url(43)}.`] } });
+  });
+
+  // BB's word can come by an event that signals no run: the run log's open copy of the claim then keeps no message from the PR's own thread
+  // that Address would let through.
+  it("lets a message through to a PR's own thread once BB says its batch thread finished, as Address takes the PR", async () => {
+    const env = await setup();
+    await confirm(env, (await env.plan([url(42)])).batchId);
+    await env.refresh();
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.created", { thread: env.threads.get("thr-batch-1")! });
+    await drain();
+    expect(claims(env)).toEqual([[42, "running"]]);
+    expect((await env.plan([url(42)])).items.map((item) => item.ref)).toEqual(["folio #42"]);
+    expect(await env.rpc("thread_message", { prUrl: url(42), threadId: "thr-42", message: "Address mira's note." })).toMatchObject({ ok: true });
+  });
+
   // An earlier build, before a rollback or before this one, left its batch threads' links in the run log only: they still link, and a
   // claim whose thread still works holds its PR.
   it("keeps the links an earlier build's batch threads left in the run log", async () => {
