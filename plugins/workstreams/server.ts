@@ -1943,8 +1943,8 @@ export default async function plugin(bb: BbPluginApi) {
   let threadEnvironments = new Map<string, string | null>();
   /** Threads asking you something, which BB's status leaves out: from its list, and its events since. */
   let waiting = new Set<string>();
-  /** Why each failed thread failed, from its event: BB's list doesn't say. */
-  const failures = new Map<string, string | null>();
+  /** Threads whose turn ended in their own idle or failed event since load, with why a failed one failed: BB's list says neither. */
+  const ended = new Map<string, string | null>();
   /** When the last thread list that answered began: a batch thread linked before it that the list left out is gone, not yet to come. */
   let listedFrom = Number.NEGATIVE_INFINITY;
   const intentNotes = new Map<string, string>();
@@ -2165,7 +2165,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The relist in flight, shared by every caller that asks for one meanwhile. */
   let threadSync: Promise<void> | null = null;
-  /** True once a relist has succeeded: enrichment seeds from threads and must not run without them. */
+  /** True once a relist has succeeded: enrichment seeds from threads and must not run without them, and a batch thread holds its PRs till then. */
   let threadsSynced = false;
   let threadSignal: ReturnType<typeof setTimeout> | null = null;
 
@@ -2300,12 +2300,13 @@ export default async function plugin(bb: BbPluginApi) {
     onThreadChanged(thread, false).catch(onThreadError);
   });
   bb.events.on("thread.active", ({ thread }) => {
-    failures.delete(thread.id);
+    ended.delete(thread.id);
     signalRuns(thread.id, { kind: "active" });
     onThreadChanged(thread, false).catch(onThreadError);
   });
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     waiting.delete(thread.id);
+    ended.set(thread.id, null);
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
@@ -2314,7 +2315,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     waiting.delete(thread.id);
-    failures.set(thread.id, error);
+    ended.set(thread.id, error);
     signalRuns(thread.id, { kind: "failed", text: null, error });
     onThreadChanged(thread, true).catch(onThreadError);
   });
@@ -4206,13 +4207,16 @@ export default async function plugin(bb: BbPluginApi) {
   /** Claims this load is starting a batch thread for; recovery leaves them to it. */
   const addressStarting = new Set<number>();
   /**
-   * A PR's batch thread as BB lists it now, asking you something or why it failed. One the list leaves out is just started, not listed
-   * yet, while its link is newer than the last list and under two minutes old; else it's gone.
+   * A PR's batch thread as BB lists it now, asking you something or why it failed. It's starting until BB says otherwise: before any thread
+   * list answers after a load; or, under two minutes from its link, while BB lists it idle before its first turn, which only its own idle
+   * or failed event ends that young, or while lists older than its link leave it out. One a list leaves out after that is gone.
    */
   function batchThread(link: { threadId: string; linkedAt: number }): SentThread | null {
     const facts = threadFacts.get(link.threadId);
-    if (facts) return { title: facts.title ?? facts.titleFallback ?? null, status: facts.status, waiting: waiting.has(link.threadId), error: failures.get(link.threadId) ?? null };
-    return link.linkedAt >= listedFrom && Date.now() - link.linkedAt < 120_000 ? { title: null, status: "starting", waiting: false, error: null } : null;
+    const young = Date.now() - link.linkedAt < 120_000;
+    if (!facts) return !threadsSynced || (young && link.linkedAt >= listedFrom) ? { title: null, status: "starting", waiting: false, error: null } : null;
+    const thread = { title: facts.title ?? facts.titleFallback ?? null, status: facts.status, waiting: waiting.has(link.threadId), error: ended.get(link.threadId) ?? null };
+    return atWork(thread) || !young || ended.has(link.threadId) ? thread : { ...thread, status: "starting" };
   }
   /**
    * Each PR a batch thread holds, with that thread: its newest batch thread at work or asking you, or a claim whose start hasn't returned,

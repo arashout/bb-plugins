@@ -741,6 +741,38 @@ describe("a batch thread's link", () => {
       detail: said[0]!.replace(/^folio #43: refused: /u, ""), batchId: null });
   });
 
+  // After a reload, until a thread list answers, nothing says the batch thread finished: taken for gone, its PRs would go to a second batch.
+  it("holds its PRs after a reload until the first thread list answers", async () => {
+    const env = await setup();
+    await confirm(env, (await env.plan([url(44)])).batchId);
+    await env.refresh();
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    env.lists.during = () => new Promise<never>(() => undefined);
+    await env.restart();
+    const again = await env.plan([url(44)]);
+    expect([again.items, again.skipped.map((skip) => skip.reason)]).toEqual([[], ["An agent is already working on it."]]);
+  });
+
+  // BB can list a new thread idle before its first turn. Only its own idle or failed event, or two minutes, says it finished: taken for done
+  // at once, its PRs would go to a second batch while it starts on them.
+  it("holds its PRs while BB lists it idle before its first turn, until two minutes pass", async () => {
+    for (const via of ["list", "created"] as const) {
+      const env = await setup();
+      await confirm(env, (await env.plan([url(44)])).batchId);
+      env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+      if (via === "list") await env.refresh();
+      else { await env.harness.emitThreadEvent("thread.created", { thread: env.threads.get("thr-batch-1")! }); await drain(); }
+      expect((await env.plan([url(44)])).skipped.map((skip) => skip.reason)).toEqual(["An agent is already working on it."]);
+      expect((await env.rows()).get(44)?.sent?.state).toBe("working");
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect((await env.plan([url(44)])).items.map((item) => item.ref)).toEqual(["folio #44"]);
+      expect((await env.rows()).get(44)?.sent?.state).toBe("idle");
+      await env.harness.lifecycle.dispose();
+      cleanups.pop();
+      vi.useRealTimers();
+    }
+  });
+
   // An earlier build, before a rollback or before this one, left its batch threads' links in the run log only: they still link, and a
   // claim whose thread still works holds its PR.
   it("keeps the links an earlier build's batch threads left in the run log", async () => {
