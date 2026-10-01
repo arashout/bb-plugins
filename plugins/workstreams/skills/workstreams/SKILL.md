@@ -715,7 +715,7 @@ neither is `yourTurn`. All PRs lists it as Your turn, and the badge counts it,
 unless you dismissed it on this head (`dismissed`), a thread is working on it,
 a batch thread holds it (`addressing`), or its effort is on hold. `sent` links
 the newest batch thread that took it, with BB's status for it. Held PRs have
-none, and a draft has only its approval and conversation comments. The header counts PRs forgotten in
+none; drafts count. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
