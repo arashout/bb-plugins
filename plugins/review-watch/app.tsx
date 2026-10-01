@@ -516,7 +516,7 @@ function ReviewsPage() {
               {areas.length === 0 ? (
                 <p className={EMPTY}>Nothing waiting on you.</p>
               ) : (
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] pb-1.5 pt-0.5">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 pb-1.5 pt-0.5">
                   {areas.map((area) => (
                     <section key={area.key} className="min-w-0" aria-label={area.label}>
                       {/* ml-9 puts the box over the rows' boxes (ml-7 plus the row's
