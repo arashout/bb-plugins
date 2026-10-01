@@ -52,13 +52,40 @@ export const TONE: Record<Tone, { text: string; chip: string; edge: string; butt
   gray: { text: "text-muted-foreground", chip: "bg-foreground/[0.05] text-muted-foreground", edge: "bg-muted-foreground/50", button: "border-border hover:bg-foreground/[0.06]",
     bar: "bg-muted-foreground/35" },
 };
-const BUTTON = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 text-[12px] disabled:opacity-45 aria-disabled:opacity-45", RING);
-const GHOST = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING);
+export const BUTTON = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 text-[12px] disabled:opacity-45 aria-disabled:opacity-45", RING);
+export const GHOST = cn("inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 /** The spinner a control shows while it works; still under reduced motion. */
 export const Spin = () => <span aria-hidden data-spin className="inline-block leading-none motion-safe:animate-spin">↻</span>;
 /** A row a batch is planning: it pulses, or dims under reduced motion. */
 export const WORKING_ROW = "motion-safe:animate-pulse motion-reduce:opacity-60";
+
+// The list vocabulary the deck shares with All PRs, so the two views read as one.
+/** The centered column a view's content and its docked selection bar sit in. */
+export const COLUMN = "mx-auto max-w-3xl";
+/** That column's scrolling content: its gutters, which widen in a wide pane, and its top and bottom spacing. */
+export const CONTENT = cn(COLUMN, "px-2 pb-10 pt-3 @min-[720px]:px-4");
+/** A section's heading line, which its colored bar, title, and count sit in. */
+export const SECTION_HEAD = "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1";
+/** A section's count badge; the caller adds its tone. */
+export const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums";
+/** One PR's row: a single line, its height, padding, and type. */
+export const ROW = "flex h-[30px] items-center gap-2 pl-2 pr-1.5 text-[12.5px]";
+/** A row's checkbox: faint until you point at the row. */
+export const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
+
+/**
+ * A PR's repository, muted, and its number, bold, in a fixed column so rows line up. A long repository name truncates first, so the
+ * number never does. `strong`: the move is yours. With `onClick`, it's a button.
+ */
+export function PrRef({ repo, number, strong, className, onClick }: { repo: string; number: string | number; strong?: boolean; className?: string | false;
+  onClick?(): void }) {
+  const title = `${repo} #${number}`;
+  const parts = <><span className="min-w-0 truncate">{repo}</span><b className={cn("shrink-0 font-medium", strong ? "text-foreground" : "text-foreground/80")}>#{number}</b></>;
+  const column = cn("flex w-[124px] shrink-0 justify-start gap-1 whitespace-nowrap text-muted-foreground @min-[720px]:w-[156px]", className);
+  return onClick ? <button type="button" title={title} onClick={onClick} className={cn(column, "rounded-sm hover:underline", RING)}>{parts}</button>
+    : <span title={title} className={column}>{parts}</span>;
+}
 
 /**
  * A key badge. On a primary button (`inverted`, which fills with the foreground color) it's a translucent wash of the button's own text
@@ -225,16 +252,13 @@ function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowSt
     <div data-deck-row={line.prUrl} data-deck-section={line.section} data-deck-dim={line.dim || undefined} data-deck-dot={line.dot ? true : undefined}
       data-deck-working={working || undefined} aria-busy={working || undefined} tabIndex={state.focus === line.prUrl || (state.focus === null && first) ? 0 : -1}
       aria-label={`${line.ref} ${line.title}${line.dim ? ", settled on Mark seen" : ""}`} onFocus={() => run({ kind: "focus", prUrl: line.prUrl })}
-      className={cn("group relative flex h-[30px] scroll-mt-20 items-center gap-2 rounded-md pl-2 pr-1.5 text-[12.5px] hover:bg-foreground/[0.03]", open && "rounded-b-none",
+      className={cn("group relative scroll-mt-20 rounded-md hover:bg-foreground/[0.03]", ROW, open && "rounded-b-none",
         "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500", selected && "bg-sky-500/[0.07]", state.focus === line.prUrl && "bg-foreground/[0.05]", working && WORKING_ROW)}>
       {line.needs ? <span aria-hidden className={cn("absolute bottom-[7px] left-0 top-[7px] w-0.5 rounded-full", TONE[line.tone].edge)} /> : null}
       <input type="checkbox" tabIndex={-1} checked={selected} disabled={line.dim} aria-label={`Select ${line.ref}`}
-        onChange={() => undefined} onClick={(event) => run({ kind: "select", prUrl: line.prUrl, shift: event.shiftKey })}
-        className="size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20" />
+        onChange={() => undefined} onClick={(event) => run({ kind: "select", prUrl: line.prUrl, shift: event.shiftKey })} className={CHECKBOX} />
       <span className="flex w-1.5 shrink-0">{line.dot ? <Changed title={line.dot} /> : null}</span>
-      <span title={line.ref} className={cn("flex w-[124px] shrink-0 justify-start gap-1 whitespace-nowrap text-muted-foreground @min-[720px]:w-[156px]", line.dim && "opacity-50")}>
-        <span className="min-w-0 truncate">{line.ref.replace(/ #\d+$/u, "")}</span>
-        <b className={cn("shrink-0 font-medium", line.needs ? "text-foreground" : "text-foreground/80")}>#{line.ref.split("#")[1]}</b></span>
+      <PrRef repo={line.ref.replace(/ #\d+$/u, "")} number={line.ref.split("#")[1]!} strong={line.needs} className={line.dim && "opacity-50"} />
       <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
         className={cn("min-w-16 flex-1 cursor-pointer truncate @min-[900px]:min-w-0", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
         {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
@@ -322,13 +346,13 @@ function Section({ section, state, run, open, stuck, held, leaves }: { section: 
     <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE[meta.tone].edge)} />
     {meta.fold ? <span aria-hidden className={cn("text-[10px] text-muted-foreground transition-transform motion-reduce:transition-none", !folded && "rotate-90")}>▶</span> : null}
     <h2 className={cn("truncate text-[12.5px]", meta.fold ? "font-medium text-muted-foreground" : "font-semibold")}>{meta.title}</h2>
-    <span className={cn("min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums", section.count ? cn("font-semibold", TONE[meta.tone].chip) : "text-muted-foreground")}>
+    <span className={cn(COUNT, section.count ? cn("font-semibold", TONE[meta.tone].chip) : "text-muted-foreground")}>
       {meta.fold || meta.tone === "gray" ? section.lines.filter((line) => !line.dim).length : section.count}</span>
     <span title={meta.help} aria-label={meta.help} className="size-4 shrink-0 rounded-full border border-border text-center text-[10px] leading-[14px] text-muted-foreground">?</span>
     {section.changed ? <span className="inline-flex items-center gap-1 text-[11.5px] text-sky-700 dark:text-sky-300"><Changed title="Changed since you looked" />{section.changed} changed</span> : null}
   </>;
   return <section data-deck-sec={section.key} className="mt-0.5 scroll-mt-10">
-    <div className={cn("sticky z-[4] flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1", stuck ? "top-[34px]" : "top-0")}>
+    <div className={cn("sticky z-[4]", SECTION_HEAD, stuck ? "top-[34px]" : "top-0")}>
       {meta.fold ? <button type="button" data-deck-focus={`fold-${section.key}`} aria-expanded={!folded} onClick={() => run({ kind: "fold", key: section.key })}
         className={cn("flex min-w-0 items-center gap-2 rounded", RING)}>{header}</button> : header}
       <span className="flex-1" />
@@ -552,7 +576,7 @@ function FilterLine({ kind, n, run }: { kind: "needs" | "blocked"; n: number; ru
 export function CardBar({ name, color, status, counts, advance, hollow }: { name: string; color: string; status?: { text: string; tone: Tone }; counts?: ReactNode;
   advance?: ReactNode; hollow?: boolean }) {
   return <div className="sticky top-0 z-[6] -mb-[34px] h-[34px] border-b border-border/70 bg-background">
-    <div className="mx-auto flex h-full max-w-3xl items-center gap-2 px-4">
+    <div className={cn(COLUMN, "flex h-full items-center gap-2 px-4")}>
       <Dot color={color} hollow={hollow} /><b className="truncate text-[13px] font-semibold">{name}</b>
       {counts ?? (status ? <span className={cn("shrink-0 text-[11.5px]", TONE[status.tone].text)}>{status.text}</span> : null)}
       <span className="flex-1" />{advance}
@@ -740,7 +764,7 @@ export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusa
   // Advance runs the safe writes only: never a merge, and never a thread's work.
   const safe = kinds.filter((kind) => kind.id !== "merge" && kind.id !== "fix").reduce((sum, kind) => sum + kind.count, 0);
   return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
-    <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]">
+    <div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>
       <b className="mr-1 font-semibold">{selected} selected</b>
       {safe ? <button type="button" data-deck-batch="advance" disabled={!!working} aria-busy={busy("advance") || undefined} onClick={() => run({ kind: "action", id: "advance" })}
         className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background", busy("advance") && "disabled:opacity-100")}>{face("advance", <>Advance · {safe}<Kbd inverted>a</Kbd></>)}</button> : null}
@@ -1149,7 +1173,7 @@ export function DeckPane(props: DeckPaneProps) {
         advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`}
           keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
-      <div ref={props.viewRef} className="mx-auto max-w-3xl px-2 pb-10 pt-3 @min-[720px]:px-4">
+      <div ref={props.viewRef} className={CONTENT}>
         {props.cur === "overview" && props.overview ? <Overview screen={props.overview} run={props.run} />
           : card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
           markdown={props.markdown} filter={props.filter} /></Stack>

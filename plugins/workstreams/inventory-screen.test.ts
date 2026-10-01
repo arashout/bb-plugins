@@ -6,6 +6,7 @@ import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
+import { COLUMN, CONTENT } from "./deck-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./merge-preview-dialog.js";
 import type { Sent } from "./your-turn.js";
 
@@ -214,7 +215,7 @@ describe("simple All PRs list", () => {
   it("keeps every row's PR number outside the part that truncates, so a long repo name never hides it", () => {
     const long = "inkwell/a-repository-name-long-enough-to-truncate-in-any-pane";
     const html = pane(patched((row) => row.number === 96 || row.number === 210 ? { repo: long } : null));
-    const numbers = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span><span class="shrink-0">#(\d+)<\/span>/gu)];
+    const numbers = [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span><b class="shrink-0 [^"]*">#(\d+)<\/b>/gu)];
     expect(numbers).toHaveLength(17);
     for (const [, repo] of numbers) expect(repo).not.toMatch(/#\d/u);
     expect(numbers.map((match) => `${match[1]}#${match[2]}`)).toEqual(expect.arrayContaining([`${long}#96`, `${long}#210`]));
@@ -274,6 +275,24 @@ describe("All PRs beside the effort deck", () => {
     const rows = [...html.matchAll(/<li data-inventory-row="[^"]+" tabindex="-1" class="([^"]+)"/gu)];
     expect(rows).toHaveLength(17);
     expect(rows.every((match) => match[1]!.includes("focus-visible:ring-sky-500"))).toBe(true);
+  });
+});
+
+describe("All PRs in the deck's column", () => {
+  // Switching between Efforts and All PRs keeps the content where it was: one centered column, from one constant.
+  it("centers its content and selection bar in the deck's column, at the deck's width", () => {
+    expect(COLUMN).toBe("mx-auto max-w-3xl");
+    expect(CONTENT.split(" ")).toEqual(expect.arrayContaining(COLUMN.split(" ")));
+    const picked = new Set(["https://github.com/inkwell/quill/pull/210"]);
+    const html = renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, error: null, ...CALLBACKS, selected: picked, onSelect: noop, onSelectAll: noop }));
+    expect(html).toContain(`<div class="${CONTENT}"><h1`);
+    expect(html).toMatch(new RegExp(`<div aria-label="Selection"[^>]*><div class="${COLUMN} `, "u"));
+    const pending = renderToStaticMarkup(createElement(InventoryPending, { error: null, onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
+    expect(pending).toContain(`<div class="${CONTENT}">`);
+    // The deck draws its content and its selection bar from the same constants.
+    const deck = readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8");
+    expect(deck).toContain("<div ref={props.viewRef} className={CONTENT}>");
+    expect(deck).toContain('<div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>');
   });
 });
 
@@ -413,7 +432,7 @@ describe("All PRs while Address starts and sends", () => {
   it("shows each row's item as the batch moves it: queued, sending with a spinner, then sent or not sent", () => {
     const live = (a: string, b: string) => render({ live: new Map([["https://github.com/inkwell/quill/pull/210", { kind: "address", state: a }],
       ["https://github.com/inkwell/folio/pull/301", { kind: "address", state: b }]]) });
-    const chip = (html: string, ref: string) => { const match = /data-inventory-live="([^"]+)"[^>]*>(.*?)<\/span>(?=<\/li>|$)/u.exec(rowOf(html, ref));
+    const chip = (html: string, ref: string) => { const match = /data-inventory-live="([^"]+)"[^>]*>(.*?)<\/span>(?=<\/div><\/li>|$)/u.exec(rowOf(html, ref));
       return match && [match[1], text(match[2]!).trim()]; };
     expect([chip(live("sending", "pending"), "inkwell/quill#210"), chip(live("sending", "pending"), "inkwell/folio#301")]).toEqual([["sending", "↻ Sending…"], ["pending", "Queued"]]);
     expect([chip(live("sent", "refused"), "inkwell/quill#210"), chip(live("sent", "refused"), "inkwell/folio#301")]).toEqual([["sent", "Sent"], ["refused", "Not sent"]]);

@@ -17,11 +17,15 @@ import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, s
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
-import { HelpBody, HintBar, Kbd, PaletteBody, RefreshSelected, Spin, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
+import { BUTTON, COLUMN, CONTENT, COUNT, GHOST, HelpBody, HintBar, Kbd, PaletteBody, RefreshSelected, RING, SECTION_HEAD, Spin, TONE, WorkstreamsHeader, type HeaderProps,
+  type HeaderTarget } from "./deck-screen";
 import { DeckDialog, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel, type LiveItems, type Undo, type Working } from "./deck-flow";
 
-const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
+/** The scroller under the header, a container so the deck's column widens its gutters in a wide pane. */
+const SCROLLER = "@container min-h-0 flex-1 overflow-y-auto overscroll-contain";
+/** The deck's empty state. */
+const EMPTY = "py-8 text-center text-[12px] text-muted-foreground";
 
 /** Your turn, the rows you dismissed from it, and every other open PR, each by effort; a PR shows in only one. */
 export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; dismissed: SimpleGroup[]; other: SimpleGroup[] } {
@@ -48,10 +52,12 @@ export function InventoryPending({ error, onRetry, onView, onPalette, onHelp }: 
   onPalette(): void; onHelp(): void }) {
   return <div role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: error ? "Read failed" : "Reading…", error: null }} onView={onView} onPalette={onPalette} onHelp={onHelp} />
-    <div className="p-4 text-[12px]" role={error ? "alert" : "status"}>
-      {error ? <>Couldn't read the inventory: {error} <button type="button" onClick={onRetry} className={cn("ml-1 rounded-sm underline", FOCUS)}>Retry</button></>
-        : <span className="text-muted-foreground">Reading your open PRs…</span>}
-    </div>
+    <div className={SCROLLER}><div className={CONTENT}>
+      <p className={cn(EMPTY, error && "text-foreground")} role={error ? "alert" : "status"}>
+        {error ? <>Couldn't read the inventory: {error} <button type="button" onClick={onRetry} className={cn("ml-1 rounded-sm underline", RING)}>Retry</button></>
+          : "Reading your open PRs…"}
+      </p>
+    </div></div>
   </div>;
 }
 
@@ -64,17 +70,19 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
 function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, onClear }: { count: number; refusal?: string | null; working?: Working | null;
   refresh?: { busy: boolean; progress: string | null }; onAddress(): void; onRefresh(): void; onClear(): void }) {
   if (!count) return null;
-  return <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
-    <b className="mr-1 font-semibold">{count} selected</b>
-    <button type="button" data-inventory-action="address" disabled={!!working} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
-      title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
-      className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background", FOCUS)}>
-      {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address {count}<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
-    <RefreshSelected count={count} busy={!!refresh?.busy} progress={refresh?.progress ?? null} onClick={onRefresh} />
-    {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
-    <span className="flex-1" />
-    <button type="button" onClick={onClear} className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", FOCUS)}>
-      Clear<Kbd>esc</Kbd></button>
+  return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
+    <div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>
+      <b className="mr-1 font-semibold">{count} selected</b>
+      <button type="button" data-inventory-action="address" disabled={!!working} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
+        title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
+        className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background", working?.kind === "address" && "disabled:opacity-100")}>
+        {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address {count}<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
+      <RefreshSelected count={count} busy={!!refresh?.busy} progress={refresh?.progress ?? null} onClick={onRefresh} />
+      {/* A refusal takes the room before Clear and truncates there, so the column's narrower bar never wraps Clear to a line of its own. */}
+      {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 flex-1 basis-0 truncate text-destructive" title={refusal}>{refusal}</span>
+        : <span className="flex-1" />}
+      <button type="button" onClick={onClear} className={GHOST}>Clear<Kbd>esc</Kbd></button>
+    </div>
   </div>;
 }
 
@@ -105,36 +113,44 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null, onRefresh: props.onRefreshAll }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-8">
-      <h1 className="px-4 pt-4 text-[18px] font-semibold tracking-tight">All PRs</h1>
-      {props.error || props.screen.notices.length ? <div className="grid gap-1 px-4 pt-3">
+    <div className={SCROLLER}><div className={CONTENT}>
+      <h1 className="mb-3 pl-2 text-[16px] font-semibold">All PRs</h1>
+      {props.error || props.screen.notices.length ? <div className="grid gap-1 px-2 pb-3">
         {props.error ? <p role="alert" className="text-[12px] text-destructive">Couldn't read the inventory: {props.error}</p> : null}
         {primaryNotice ? <Notice notice={primaryNotice} /> : null}
         {otherNotices.length ? <details className="text-[11px] text-muted-foreground">
-          <summary className={cn("w-fit rounded-sm hover:text-foreground", FOCUS)}>{otherNotices.length} more inventory {otherNotices.length === 1 ? "notice" : "notices"}</summary>
+          <summary className={cn("w-fit rounded-sm hover:text-foreground", RING)}>{otherNotices.length} more inventory {otherNotices.length === 1 ? "notice" : "notices"}</summary>
           <div className="grid gap-1 pt-2">{otherNotices.map((notice) => <Notice key={notice.text} notice={notice} />)}</div>
         </details> : null}
       </div> : null}
-      <section className="mt-5" aria-label="Your turn">
-        <h2 className="mb-2 flex items-center gap-2 px-4 text-[14px] font-semibold">
+      {/* The deck's section headings: a colored bar, then the title and its count. Your turn is yours, so it takes the deck's blue for your moves. */}
+      <section aria-label="Your turn">
+        <div className={SECTION_HEAD}>
+          <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE.blue.edge)} />
           {turnLines.length && props.onSelectAll ? <input type="checkbox" data-inventory-select-all checked={turnPicked === turnLines.length}
             ref={(element) => { if (element) element.indeterminate = turnPicked > 0 && turnPicked < turnLines.length; }}
             aria-label={turnPicked === turnLines.length ? "Clear the selection" : "Select every Your turn PR"} onChange={() => props.onSelectAll!(turnPicked < turnLines.length)}
             className="size-3.5 shrink-0 accent-sky-600" /> : null}
-          Your turn <span className="font-normal tabular-nums text-muted-foreground">{listed}</span></h2>
+          <h2 className="truncate text-[12.5px] font-semibold">Your turn</h2>
+          <span className={cn(COUNT, listed ? cn("font-semibold", TONE.blue.chip) : "text-muted-foreground")}>{listed}</span>
+        </div>
         {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...rows} />
-          : <p className="px-4 text-[12px] text-muted-foreground">Nothing waits on you.</p>}
-        {hidden ? <details className="mt-2" data-inventory-dismissed>
-          <summary className={cn("mx-4 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", FOCUS)}>{hidden} dismissed · show</summary>
-          <div className="pt-2"><SimpleInventoryList groups={dismissed} kind="dismissed" {...callbacks} /></div>
+          : <p className={EMPTY}>Nothing waits on you.</p>}
+        {hidden ? <details className="pb-1.5" data-inventory-dismissed>
+          <summary className={cn("ml-9 w-fit rounded-sm text-[11px] text-muted-foreground hover:text-foreground", RING)}>{hidden} dismissed · show</summary>
+          <SimpleInventoryList groups={dismissed} kind="dismissed" {...callbacks} />
         </details> : null}
       </section>
-      <section className="mt-7" aria-label="Other open PRs">
-        <h2 className="mb-2 px-4 text-[14px] font-semibold">Other open PRs <span className="font-normal tabular-nums text-muted-foreground">{other.reduce((sum, group) => sum + group.lines.length, 0)}</span></h2>
+      <section className="mt-0.5" aria-label="Other open PRs">
+        <div className={SECTION_HEAD}>
+          <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE.gray.edge)} />
+          <h2 className="truncate text-[12.5px] font-semibold">Other open PRs</h2>
+          <span className={cn(COUNT, "text-muted-foreground")}>{other.reduce((sum, group) => sum + group.lines.length, 0)}</span>
+        </div>
         {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
-          : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
+          : <p className={EMPTY}>{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
-    </div>
+    </div></div>
     <SelectionBar count={turnPicked} refusal={props.refusal} working={props.working} refresh={props.refresh} onAddress={() => props.onAddress?.()}
       onRefresh={() => props.onRefreshSelected?.()} onClear={() => props.onClear?.()} />
     {props.footer}
