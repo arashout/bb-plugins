@@ -85,7 +85,7 @@ export type DeckLine = {
   /** Its read, only when it isn't current: the last one failed, or the last full read didn't list it. */
   checked: { text: string; title: string; failed: boolean } | null;
   /** What you did to it, what became of it when it left ("Merged · just now"), or its thread. */
-  trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null } | { kind: "ghost"; text: string }
+  trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null; busy?: boolean } | { kind: "ghost"; text: string }
     | { kind: "thread"; text: string; threadId: string } | null;
   /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, Notes… on review notes, or Release on a held row. */
   inline: { id: DeckActionId; label: string; title: string } | null;
@@ -100,7 +100,9 @@ export type LineContext = { now: number; seenAt: Readonly<Record<string, number>
   /** The card each open PR is on now, by name, so a row that left for another card says where. */
   elsewhere?: ReadonlyMap<string, string>;
   /** PRs you moved to an effort from here, by the effort's name, until Mark seen: a row that left that way says where to, as news it isn't. */
-  moved?: ReadonlyMap<string, string> };
+  moved?: ReadonlyMap<string, string>;
+  /** Each item of a batch sending now, as deck_batch_get read it last: newer than the read's `acted`. */
+  live?: ReadonlyMap<string, { kind: ActedKind; state: "pending" | "sending" | "sent" | "refused" | "unknown" }> };
 
 function info(row: DeckRow, section: string): DeckLine["info"] {
   switch (section) {
@@ -147,6 +149,7 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   const to = row && settled && row.section !== settled.section ? { key: row.section, title: SECTIONS[row.section].title,
     up: DECK_SECTIONS.indexOf(row.section) < DECK_SECTIONS.indexOf(section as DeckSection) } : null;
   const acted = row?.acted ?? null;
+  const live = context.live?.get(item.prUrl) ?? null;
   const dim = item.ghost || item.change !== null || (row !== null && !counted(row, seenAt));
   const needs = !dim && row !== null && needsYou(row, pile, seenAt);
   const since = row?.waitsOn?.since ?? row?.step?.since ?? null;
@@ -160,6 +163,9 @@ export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineCont
   if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Left out: ${left}` };
   else if (sent) trail = sent.threadId ? { kind: "thread", text: sentChip(sent).text, threadId: sent.threadId }
     : { kind: "acted", failed: false, undo: null, title: null, text: sentChip(sent).text };
+  else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
+    busy: live.state === "sending", text: live.state === "pending" ? "Queued" : live.state === "refused" ? "Not sent" : live.state === "unknown" ? "May not have sent"
+      : ACTED[live.kind][live.state === "sent" ? 1 : 0] };
   else if (acted) {
     const failed = acted.state === "refused" || acted.state === "unknown";
     const said = context.details?.get(item.prUrl) ?? (acted.kind === "address" ? row?.sent?.detail : null) ?? null;

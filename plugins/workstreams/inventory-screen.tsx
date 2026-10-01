@@ -16,8 +16,8 @@ import { actionCall, askKind, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pi
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
-import { HelpBody, HintBar, Kbd, PaletteBody, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
-import { DeckDialog, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
+import { HelpBody, HintBar, Kbd, PaletteBody, Spin, WorkstreamsHeader, type HeaderProps, type HeaderTarget } from "./deck-screen";
+import { DeckDialog, useBatchConfirm, useRegistryKeys, workingLabel, type LiveItems, type Undo, type Working } from "./deck-flow";
 
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
@@ -58,13 +58,14 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
 }
 
 /** The Your turn rows you selected, docked under the lists so it never covers one: Address them together, or clear; and why nothing started. */
-function SelectionBar({ count, refusal, onAddress, onClear }: { count: number; refusal?: string | null; onAddress(): void; onClear(): void }) {
+function SelectionBar({ count, refusal, working, onAddress, onClear }: { count: number; refusal?: string | null; working?: Working | null; onAddress(): void; onClear(): void }) {
   if (!count) return null;
   return <div aria-label="Selection" className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-background px-4 py-1.5 text-[12px]">
     <b className="mr-1 font-semibold">{count} selected</b>
-    <button type="button" data-inventory-action="address" onClick={onAddress} title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
+    <button type="button" data-inventory-action="address" disabled={!!working} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
+      title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
       className={cn("inline-flex h-6 items-center gap-1.5 rounded-md border border-foreground bg-foreground px-2 font-medium text-background", FOCUS)}>
-      Address selected ({count})<Kbd inverted>{ACTION.address.keys[0]}</Kbd></button>
+      {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address selected ({count})<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
     {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
     <span className="flex-1" />
     <button type="button" onClick={onClear} className={cn("inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-foreground/[0.06]", FOCUS)}>
@@ -79,6 +80,8 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
   /** Why the last Address started nothing, and why it left each PR out, by PR; and a batch's Undo from its row. */
   refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void;
+  /** A batch call out now, whose rows show pending; and each item of a batch sending now, by PR. */
+  working?: Working | null; live?: LiveItems;
   /** The deck's shared hint bar, under the lists. */
   footer?: ReactNode }) {
   const { turn, other } = splitInventory(props.screen);
@@ -110,7 +113,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
             className="size-3.5 shrink-0 accent-sky-600" /> : null}
           Your turn <span className="font-normal tabular-nums text-muted-foreground">{listed}</span></h2>
         {turn.length ? <SimpleInventoryList groups={turn} kind="turn" {...callbacks} selected={props.selected} onSelect={props.onSelect} notes={props.notes}
-          onUndo={props.onUndo} />
+          onUndo={props.onUndo} working={props.working?.prUrls} live={props.live} />
           : <p className="px-4 text-[12px] text-muted-foreground">No feedback waits on you.</p>}
       </section>
       <section className="mt-7" aria-label="Other open PRs">
@@ -119,7 +122,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
           : <p className="px-4 text-[12px] text-muted-foreground">{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
     </div>
-    <SelectionBar count={picked} refusal={props.refusal} onAddress={() => props.onAddress?.()} onClear={() => props.onClear?.()} />
+    <SelectionBar count={picked} refusal={props.refusal} working={props.working} onAddress={() => props.onAddress?.()} onClear={() => props.onClear?.()} />
     {props.footer}
   </div>;
 }
@@ -282,8 +285,8 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       onOpenRoster={(effortId) => navigate.toPluginPanel("board", { subPath: `roster/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
       selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? turnLines.map((line) => line.prUrl) : []))} onAddress={address}
-      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)}
-      footer={<HintBar hints={hintKeys(context, on)} flash={flash} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
+      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} working={batch.working} live={batch.live}
+      footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
       : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}
     {batch.element}
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>

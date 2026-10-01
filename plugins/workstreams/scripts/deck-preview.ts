@@ -6,7 +6,8 @@
 // screenshot size. The hash picks what it draws: a card's id opens on that
 // card, else it opens on Overview, as the deck does, and "light" uses light
 // host colors (#effort-store-pickup,light), which want the browser's light
-// color scheme, since dark: follows it.
+// color scheme, since dark: follows it. "working" draws Store pickup with two
+// rows selected while Advance plans (#effort-store-pickup,working).
 // The [ ] ← → keys, the strip's arrow buttons, and the next card's edge
 // flip it with the deck's own flip code (deck-flip.ts, bundled in), so the
 // motion shows too. Run: npx vite-node scripts/deck-preview.ts
@@ -34,7 +35,9 @@ const view = { ...deck, active: deck.active.map((item) => NOTES[item.id] ? { ...
 const order = view.active.map((item) => item.id);
 const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
 const ring = deckRing(order);
-const pane = (cur: string) => {
+/** Store pickup's two Your turn rows, selected, which "working" shows while Advance plans. */
+const PICKED = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/quill/pull/211"]);
+const pane = (cur: string, working = false) => {
   const card = cards.get(cur) ?? null;
   const context: KeyContext = { view: "deck", cur: card ?? (cur === "overview" ? "overview" : null), service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused: null, selected: [],
     seenAvailable: false, undo: false, held: view.held.length, done: view.done.length };
@@ -45,9 +48,10 @@ const pane = (cur: string) => {
     held: view.held.map((item) => ({ id: item.id, key: item.key, name: item.name, note: `${item.reason || "No reason given"} · ${item.stats.open} open` })),
     done: view.done.map((item) => ({ id: item.id, key: item.key, name: item.name, archived: item.archived, note: `${item.merged} merged · ${item.open} open` })),
     read: { text: "Read 25s ago", error: null }, seen: { changed: 0, available: false, note: null },
-    state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set(cur === "effort-store-pickup" ? ["notes"] : []), open: new Set<string>(),
+    state: { selected: working ? PICKED : new Set<string>(), expanded: new Set<string>(), focus: null, working: working ? PICKED : undefined }, tiles: new Set(cur === "effort-store-pickup" ? ["notes"] : []), open: new Set<string>(),
     pile: null, stuck: false,
-    on, hints: hintKeys(context, on), flash: null, batch: { kinds: [] }, run: noop, onPalette: noop, onHelp: noop, onUndo: noop }));
+    on, hints: hintKeys(context, on), flash: null,
+    batch: working ? { kinds: [{ id: "nudge", count: 1, tone: "blue" }], address: 2, working: { kind: "advance", label: "Planning…" } } : { kinds: [] }, run: noop, onPalette: noop, onHelp: noop, onUndo: noop }));
 };
 // Every card's pane waits in a template. A flip does what the deck does: it lands at once, copying the card it takes away first, then
 // plays its motion over the pane it swapped in. The frame's data-cur names the card shown, for a check to read.
@@ -56,7 +60,8 @@ const ring = ${JSON.stringify(ring)};
 const frame = document.querySelector("[data-deck-frame]");
 const parts = decodeURIComponent(location.hash.slice(1)).split(",");
 if (parts.includes("light")) document.documentElement.className = "light";
-const pane = (id) => document.querySelector('template[data-card="' + CSS.escape(id) + '"]').content.cloneNode(true);
+const pane = (id) => (document.querySelector('template[data-card="' + CSS.escape(id + (parts.includes("working") ? ":working" : "")) + '"]')
+  ?? document.querySelector('template[data-card="' + CSS.escape(id) + '"]')).content.cloneNode(true);
 const flips = flipper();
 let cur = ring.find((id) => parts.includes(id)) ?? ring[0];
 frame.replaceChildren(pane(cur));
@@ -91,6 +96,7 @@ body{margin:0;background:var(--background);color:var(--foreground);font:13px/1.4
 </style><style>${readFileSync(css, "utf8")}</style></head><body>
 <section data-deck-frame data-bb-plugin="workstreams" style="position:fixed;inset:0;display:flex">${pane(ring[0]!)}</section>
 ${ring.map((id) => `<template data-card="${id}">${pane(id)}</template>`).join("\n")}
+<template data-card="effort-store-pickup:working">${pane("effort-store-pickup", true)}</template>
 <script type="module">${script}</script></body></html>`;
 const out = join(process.env.TMPDIR ?? tmpdir(), "deck-preview.html");
 writeFileSync(out, html);

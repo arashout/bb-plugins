@@ -20,7 +20,7 @@ import { acceptLabel, acceptPlan, advanceTarget, availability, cardScreen, cardS
   type PaletteItem, type RowFacts } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
   type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
-import { DeckDialog, message, useBatchConfirm, useRegistryKeys, type Undo } from "./deck-flow";
+import { DeckDialog, message, useBatchConfirm, useRegistryKeys, workingLabel, type Undo } from "./deck-flow";
 import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./roster-merge-dialog";
@@ -194,6 +194,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const batch = useBatchConfirm({ seenAt: () => seenRef.current.at, scopeName: (id) => view?.active.find((item) => item.id === id)?.name ?? null, say, setUndo, load,
     onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; }, onReturn: () => returnFocus(), reread: view });
   const details = batch.details;
+  const live = batch.live;
   const notes = useNotesConfirm({ say, load, onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; },
     onReturn: () => returnFocus(), ask: (prUrl, effortId) => void batch.plan("ask", effortId, [prUrl]) });
 
@@ -213,8 +214,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     for (const url of leftAt.current.keys()) if (open.has(url) || !drawn.has(url)) leftAt.current.delete(url);
     return { gone: new Map((view?.gone ?? []).map((item) => [item.prUrl, { how: item.how, at: item.at }])), elsewhere: open, left: new Map(leftAt.current) };
   }, [view, seen.rows]);
-  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, accepted, moved, ...fates })])),
-    [active, seen, now, details, accepted, moved, fates]);
+  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, live, accepted, moved, ...fates })])),
+    [active, seen, now, details, live, accepted, moved, fates]);
   const order = useMemo(() => keepOrder(place.order, active.map((item) => item.id)), [active, place.order]);
   // Overview opens the ring without taking an effort's number key.
   const ring = useMemo(() => deckRing(view ? order : null), [view, order]);
@@ -914,10 +915,13 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
-      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()) }} tiles={new Set(here.tiles)}
+      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set(refreshing.keys()),
+        working: batch.working?.prUrls }} tiles={new Set(here.tiles)}
       open={new Set(here.open)} stuck={stuck}
-      on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null} flash={flash}
-      batch={{ kinds, address: on.address.on ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : 0, refusal: batch.refusal }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
+      on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null}
+      flash={flash ?? (batch.sending ? { text: batch.sending, undo: false, busy: true } : null)}
+      batch={{ kinds, address: on.address.on ? selected.filter((line) => !line.dim && line.row?.yourTurn).length : 0, refusal: batch.refusal,
+        working: batch.working && { kind: batch.working.kind, label: workingLabel(batch.working) } }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
       notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} filter={here.filter?.kind ?? null} />
     {batch.element}

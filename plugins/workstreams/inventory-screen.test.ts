@@ -319,3 +319,33 @@ describe("keyboard safety", () => {
     expect(html).toMatch(/data-merge-go="true" title="Click, or press ⌘↵\. Merging needs ⌘↵ or a click; Enter alone doesn&#x27;t merge\."/u);
   });
 });
+
+// All PRs' Address selected works from its click until its start answers, and while the batch thread starts each row says so.
+describe("All PRs while Address starts and sends", () => {
+  const picked = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/folio/pull/301"]);
+  const render = (extra: Record<string, unknown>) => renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, error: null, ...CALLBACKS,
+    selected: picked, onSelect: noop, onSelectAll: noop, onAddress: noop, onClear: noop, ...extra }));
+  const address = (html: string) => /<button type="button" data-inventory-action="address"([^>]*)>(.*?)<\/button>/u.exec(html)!;
+
+  it("spins Address with Starting… and pulses the selected rows until the start answers", () => {
+    const idle = render({});
+    expect(address(idle)[1]).not.toMatch(/ disabled=""|aria-busy/u);
+    expect(idle).not.toContain("data-inventory-working");
+    const starting = render({ working: { kind: "address", prUrls: picked } });
+    expect(address(starting)[1]).toMatch(/ disabled="" aria-busy="true"/u);
+    expect(text(address(starting)[2]!).trim()).toBe("↻ Starting…");
+    expect(rowOf(starting, "inkwell/quill#210")).toMatch(/data-inventory-working="true" aria-busy="true" class="[^"]*motion-safe:animate-pulse/u);
+    expect(rowOf(starting, "inkwell/folio#301")).toContain('data-inventory-working="true"');
+    expect(rowOf(starting, "inkwell/quill#211")).not.toContain("data-inventory-working");
+  });
+
+  it("shows each row's item as the batch moves it: queued, sending with a spinner, then sent or not sent", () => {
+    const live = (a: string, b: string) => render({ live: new Map([["https://github.com/inkwell/quill/pull/210", { kind: "address", state: a }],
+      ["https://github.com/inkwell/folio/pull/301", { kind: "address", state: b }]]) });
+    const chip = (html: string, ref: string) => { const match = /data-inventory-live="([^"]+)"[^>]*>(.*?)<\/span>(?=<\/li>|$)/u.exec(rowOf(html, ref));
+      return match && [match[1], text(match[2]!).trim()]; };
+    expect([chip(live("sending", "pending"), "inkwell/quill#210"), chip(live("sending", "pending"), "inkwell/folio#301")]).toEqual([["sending", "↻ Sending…"], ["pending", "Queued"]]);
+    expect([chip(live("sent", "refused"), "inkwell/quill#210"), chip(live("sent", "refused"), "inkwell/folio#301")]).toEqual([["sent", "Sent"], ["refused", "Not sent"]]);
+    expect(chip(render({}), "inkwell/quill#210")).toBeNull();
+  });
+});

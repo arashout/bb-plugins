@@ -6,8 +6,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import type { DeckWrite } from "./deck-shared";
-import type { Skipped } from "./deck-batch";
+import type { ActedKind, DeckWrite } from "./deck-shared";
+import type { BatchItem, Skipped } from "./deck-batch";
 import { ACTION, actionForKey, typingTarget, type DeckActionId } from "./deck-keys";
 import { SECTIONS, type Availability } from "./deck-view-model";
 import { ConfirmBody, type ConfirmPlan } from "./deck-screen";
@@ -67,6 +67,35 @@ export async function startAddress(rpc: { plan(input: { kind: "address"; effortI
 export const addressToast = (outcome: Extract<AddressOutcome, { ok: true }>) => [`Addressing ${outcome.count} PR${outcome.count === 1 ? "" : "s"} in one thread`,
   outcome.skipped.length === 1 ? `left out ${refOf(outcome.skipped)}` : outcome.skipped.length ? `${outcome.skipped.length} left out, each says why` : ""].filter(Boolean).join(" · ");
 
+/** A batch button between its click and its plan's (or Address's start's) answer: which one, and the rows it takes, which show pending. */
+export type Working = { kind: DeckWrite | "advance"; prUrls: ReadonlySet<string> };
+/** What the pressed button says while it works. */
+export const workingLabel = (working: Working) => working.kind === "address" ? "Starting…" : "Planning…";
+/**
+ * One batch call at a time: another click or key while one is out is ignored. `set` shows what's working, and clears it once the call
+ * answers or fails. Resolves false for an ignored call.
+ */
+export function oneAtATime(set: (working: Working | null) => void) {
+  let out = false;
+  return async (working: Working, call: () => Promise<unknown>): Promise<boolean> => {
+    if (out) return false;
+    out = true;
+    set(working);
+    try { await call(); } finally { out = false; set(null); }
+    return true;
+  };
+}
+/** A sending batch's line, from its items as dispatch settles each: "Sending 3 of 7…"; null once it isn't sending. */
+export function sendingText(batch: { state: string; kind: string; items: readonly Pick<BatchItem, "state">[] }): string | null {
+  if (batch.state !== "dispatching") return null;
+  const n = batch.items.length;
+  if (batch.kind === "address") return `Starting a thread for ${n} PR${n === 1 ? "" : "s"}…`;
+  return `Sending ${Math.min(n, batch.items.filter((item) => item.state !== "pending" && item.state !== "sending").length + 1)} of ${n}…`;
+}
+/** Each item of a batch sending now, by PR, as its row shows it. */
+export type LiveItems = ReadonlyMap<string, { kind: ActedKind; state: BatchItem["state"] }>;
+const NO_ITEMS: LiveItems = new Map();
+
 /**
  * Every GitHub write from the deck or All PRs: plan it (nothing is written), list each PR in a confirm, and send it only after the
  * server's Undo window; Address starts at once instead, with the same window. `reread` is anything that changes with each read, so refusals from batches this view started show on their rows.
@@ -82,6 +111,12 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
   /** Why the last Address left each PR out, and why it started nothing, until the next. */
   const [left, setLeft] = useState<ReadonlyMap<string, string>>(new Map());
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [working, setWorking] = useState<Working | null>(null);
+  const [once] = useState(() => oneAtATime(setWorking));
+  /** Sending batches' items, and the first one's line, from deck_batch_get each second until it ends. */
+  const [live, setLive] = useState<{ items: LiveItems; text: string | null }>({ items: NO_ITEMS, text: null });
+  const [tick, setTick] = useState(0);
+  const liveKey = useRef("");
   const latest = useRef(options);
   latest.current = options;
 
@@ -147,20 +182,41 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
     else latest.current.say(outcome.error);
   }, [rpc, arm]);
 
-  // What a refused or cut-off write said, from the batches this view started, until each is done.
+  // What a refused or cut-off write said, from the batches this view started, until each is done; while one sends, each item's state
+  // and "Sending 3 of 7…", read each second.
+  const tracking = batches.length > 0;
   useEffect(() => {
-    let live = true;
-    for (const batchId of batches) void rpc.call("deck_batch_get", { batchId }).then((batch) => {
-      if (!live || !batch) return;
-      const said = batch.items.filter((item) => (item.state === "refused" || item.state === "unknown") && item.detail);
-      if (said.length) setDetails((current) => new Map([...current, ...said.map((item) => [item.prUrl, item.detail!] as const)]));
-      if (batch.state !== "done" && batch.state !== "cancelled") return;
-      setBatches((current) => current.filter((id) => id !== batchId));
-      const sent = batch.items.filter((item) => item.state === "sent").length;
-      if (batch.state === "done") latest.current.say([`${sent} ${batch.kind === "address" ? "started" : "sent"}`, batch.items.length - sent && `${batch.items.length - sent} not sent`].filter(Boolean).join(" · "));
-    }, () => undefined);
-    return () => { live = false; };
-  }, [options.reread, batches, rpc]);
+    if (!tracking) return;
+    const timer = window.setInterval(() => setTick((n) => n + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [tracking]);
+  useEffect(() => {
+    let alive = true;
+    void Promise.all(batches.map((batchId) => rpc.call("deck_batch_get", { batchId }).then((batch) => batch ?? batchId, () => null))).then((read) => {
+      if (!alive) return;
+      const sending = read.flatMap((batch) => batch && typeof batch !== "string" && batch.state === "dispatching" ? [batch] : []);
+      const items = sending.flatMap((batch) => batch.items.map((item) => [item.prUrl, { kind: item.kind, state: item.state }] as const));
+      const text = sending.map(sendingText).find(Boolean) ?? null;
+      // A read that changed nothing keeps the same map, so the rows aren't drawn again each second.
+      const key = JSON.stringify([items, text]);
+      if (key !== liveKey.current) { liveKey.current = key; setLive({ items: items.length ? new Map(items) : NO_ITEMS, text }); }
+      for (const batch of read) {
+        if (!batch) continue;
+        // A batch that's gone has nothing more to say.
+        if (typeof batch === "string") { setBatches((current) => current.filter((id) => id !== batch)); continue; }
+        const said = batch.items.filter((item) => (item.state === "refused" || item.state === "unknown") && item.detail);
+        if (said.length) setDetails((current) => new Map([...current, ...said.map((item) => [item.prUrl, item.detail!] as const)]));
+        if (batch.state !== "done" && batch.state !== "cancelled") continue;
+        setBatches((current) => current.filter((id) => id !== batch.id));
+        const sent = batch.items.filter((item) => item.state === "sent").length;
+        if (batch.state === "done") {
+          latest.current.say([`${sent} ${batch.kind === "address" ? "started" : "sent"}`, batch.items.length - sent && `${batch.items.length - sent} not sent`].filter(Boolean).join(" · "));
+          latest.current.load();
+        }
+      }
+    });
+    return () => { alive = false; };
+  }, [options.reread, batches, rpc, tick]);
 
   const element = <DeckDialog open={pending !== null} title={pending?.plan.title ?? ""} sub={pending?.plan.sub} onClose={() => setPending(null)} onReturn={options.onReturn}
     onConfirmKey={() => void start()}>
@@ -168,7 +224,12 @@ export function useBatchConfirm(options: { seenAt(): Record<string, number>; sco
       onReplan={() => void plan(pending.request.kind, pending.request.effortId, pending.request.prUrls, pending.reviewer)} onConfirm={() => void start()}
       onCancel={() => setPending(null)} /> : null}
   </DeckDialog>;
-  return { plan, address, refusal, details: left.size ? new Map([...details, ...left]) : details, open: pending !== null, element };
+  return {
+    /** A click or key's plan: its button works, and its rows show pending, until the plan answers; a second while one is out is ignored. */
+    plan: (kind: DeckWrite | "advance", effortId: string | null, prUrls: string[] | null) => once({ kind, prUrls: new Set(prUrls ?? []) }, () => plan(kind, effortId, prUrls)),
+    address: (effortId: string | null, prUrls: string[]) => once({ kind: "address", prUrls: new Set(prUrls) }, () => address(effortId, prUrls)),
+    working, sending: live.text, live: tracking ? live.items : NO_ITEMS,
+    refusal, details: left.size ? new Map([...details, ...left]) : details, open: pending !== null, element };
 }
 
 /**

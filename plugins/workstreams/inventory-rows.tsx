@@ -1,5 +1,6 @@
 import { sendable, type InventoryLine, type LineAction } from "./inventory-view-model";
-import { TONE } from "./deck-screen";
+import { Spin, TONE, WORKING_ROW } from "./deck-screen";
+import type { LiveItems } from "./deck-flow";
 import { sentChip, type Sent } from "./your-turn";
 import { cn } from "./lib/utils";
 
@@ -19,6 +20,8 @@ export type SimpleRowsProps = {
   notes?: ReadonlyMap<string, string>;
   /** Take back a batch still in its Undo window. */
   onUndo?(batchId: string): void;
+  /** Rows a batch call is planning now; and each item of a batch sending now, by PR. */
+  working?: ReadonlySet<string>; live?: LiveItems;
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
 
@@ -33,6 +36,9 @@ function SentChip({ sent, onOpenThread, onUndo }: { sent: Sent; onOpenThread(id:
     : <span data-inventory-sent={sent.state} title={chip.text} className={cn(CHIP, tone)}><span className="truncate">{chip.text}</span></span>;
 }
 const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500";
+/** A sending batch's item on its row: queued, sending, then what it came to. */
+const LIVE: Record<NonNullable<ReturnType<LiveItems["get"]>>["state"], { text: string; tone: keyof typeof TONE }> = { pending: { text: "Queued", tone: "gray" },
+  sending: { text: "Sending…", tone: "blue" }, sent: { text: "Sent", tone: "green" }, refused: { text: "Not sent", tone: "red" }, unknown: { text: "May not have sent", tone: "red" } };
 
 export function SimpleInventoryList(props: SimpleRowsProps) {
   return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4">
@@ -50,8 +56,11 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           // A Your turn row: its feedback, and one thing beside it: why the last Address left it out, what Address made of it, or its re-request.
           const note = turn ? props.notes?.get(line.prUrl) ?? null : null;
           const sent = turn && !note ? line.sent : null;
+          const live = turn ? props.live?.get(line.prUrl) ?? null : null;
+          const working = !!turn && !!props.working?.has(line.prUrl);
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
-            className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]", FOCUS)}>
+            data-inventory-working={working || undefined} aria-busy={working || undefined}
+            className={cn("flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[12px] hover:bg-foreground/[0.025]", picked && "bg-sky-500/[0.07]", working && WORKING_ROW, FOCUS)}>
             {turn && props.onSelect ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
               onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className="size-3.5 shrink-0 accent-sky-600" />
               : <span aria-hidden className="size-3.5 shrink-0" /> : null}
@@ -66,7 +75,8 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
               <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={info}>{info}</p>
               {line.last ? <p role="status" className={cn("text-[11px]", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
             </div>
-            {note ? <span role="alert" data-inventory-left title={note} className={cn(CHIP, TONE.red.chip)}><span className="truncate">Left out: {note}</span></span>
+            {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
+              : note ? <span role="alert" data-inventory-left title={note} className={cn(CHIP, TONE.red.chip)}><span className="truncate">Left out: {note}</span></span>
               : sent ? <SentChip sent={sent} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />
               : nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
               title={nudge.title} className={cn("shrink-0 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-foreground/[0.06] disabled:opacity-50", FOCUS)}>{nudge.label}</button> : null}

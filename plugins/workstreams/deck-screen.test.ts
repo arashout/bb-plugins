@@ -5,7 +5,7 @@ import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, cardSnapshot, hintKeys, overviewScreen, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
-import { ConfirmBody, DeckPane, HelpBody, NotesBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
+import { ConfirmBody, DeckPane, HelpBody, HintBar, NotesBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import { notesScreen } from "./deck-view-model.js";
 import type { SeedProposal } from "./linear-seed.js";
 
@@ -584,5 +584,62 @@ describe("the review notes confirm's markup", () => {
     const failed = body(null, "HTTP 502");
     expect(text(failed)).toContain("Couldn't read the notes: HTTP 502");
     expect(failed).not.toMatch(/data-notes-(confirm|anyway|ask)/u);
+  });
+});
+
+// Matt: "it takes a while to advance any checked PRs and there's zero UI feedback." From the click until the plan answers, the pressed
+// button spins and says so, the bar's other batch buttons wait, and the rows it takes pulse; while it sends, each row says where it is.
+describe("a batch while it plans and sends", () => {
+  const PICKUP = INVENTORY_EFFORTS.pickup.id;
+  const picked = [url("quill", 210), url("quill", 211)];
+  const state = { selected: new Set(picked), expanded: new Set<string>(), focus: null };
+  const kinds = [{ id: "nudge" as const, count: 1, tone: "blue" as const }];
+  const bar = (html: string) => html.slice(html.indexOf('aria-label="Selection"'));
+  /** Each batch button on the bar: its id, whether it's disabled or busy, and its text. */
+  const buttons = (html: string) => [...bar(html).matchAll(/<button type="button" data-deck-batch="([^"]+)"([^>]*)>(.*?)<\/button>/gu)].map(([, id, attrs, body]) =>
+    ({ id, disabled: / disabled=""/u.test(attrs!), busy: /aria-busy="true"/u.test(attrs!), spin: body!.includes("data-spin"), text: text(body!).trim() }));
+
+  it("spins the pressed button with Planning… and disables the bar's other batch buttons while the plan is out", () => {
+    const idle = pane(inkwellDeck(), PICKUP, { state, batch: { kinds, address: 2 } });
+    expect(buttons(idle)).toEqual([{ id: "advance", disabled: false, busy: false, spin: false, text: "Advance · 1 a" },
+      { id: "address", disabled: false, busy: false, spin: false, text: "Address selected (2) b" }, { id: "nudge", disabled: false, busy: false, spin: false, text: "Nudge reviewers 1 n" }]);
+    const planning = pane(inkwellDeck(), PICKUP, { state, batch: { kinds, address: 2, working: { kind: "advance", label: "Planning…" } } });
+    expect(buttons(planning)).toEqual([{ id: "advance", disabled: true, busy: true, spin: true, text: "↻ Planning…" },
+      { id: "address", disabled: true, busy: false, spin: false, text: "Address selected (2) b" }, { id: "nudge", disabled: true, busy: false, spin: false, text: "Nudge reviewers 1 n" }]);
+    // Address says Starting…, since it starts at once; Clear still clears.
+    const starting = pane(inkwellDeck(), PICKUP, { state, batch: { kinds, address: 2, working: { kind: "address", label: "Starting…" } } });
+    expect(buttons(starting).find((item) => item.id === "address")).toMatchObject({ busy: true, spin: true, text: "↻ Starting…" });
+    expect(bar(starting)).toMatch(/<button type="button" class="[^"]*">Clear<kbd/u);
+    // The spinner holds still under reduced motion.
+    expect(bar(planning)).toMatch(/data-spin="true" class="inline-block leading-none motion-safe:animate-spin">↻/u);
+  });
+
+  it("marks the rows the plan takes as pending, and only those, until it answers", () => {
+    const rows = (html: string) => [...html.matchAll(/data-deck-row="([^"]+)"[^>]*?data-deck-working="true"/gu)].map((match) => match[1]);
+    expect(rows(pane(inkwellDeck(), PICKUP, { state }))).toEqual([]);
+    const pending = pane(inkwellDeck(), PICKUP, { state: { ...state, working: new Set(picked) } });
+    expect(rows(pending)).toEqual(picked);
+    expect(pending).toMatch(/data-deck-working="true" aria-busy="true"[^>]*class="[^"]*motion-safe:animate-pulse motion-reduce:opacity-60/u);
+  });
+
+  it("shows each row's item as dispatch moves it, queued, sending, then sent or not, and Sending 3 of 7… in the status line", () => {
+    const pickup = inkwellDeck().active.find((item) => item.id === PICKUP)!;
+    /** Whether each picked row's trail spins, as drawn. */
+    const spins = (live: NonNullable<Parameters<typeof cardScreen>[2]["live"]>) => {
+      const html = pane(inkwellDeck(), PICKUP, { card: cardScreen(pickup, none, { now: NOW, live }) });
+      return picked.map((prUrl) => { const start = html.indexOf(`data-deck-row="${prUrl}"`); const end = html.indexOf("data-deck-row=", start + 20);
+        return html.slice(start, end === -1 ? undefined : end).includes('data-deck-trail="busy"'); });
+    };
+    const line = (live: NonNullable<Parameters<typeof cardScreen>[2]["live"]>, prUrl: string) =>
+      cardScreen(pickup, none, { now: NOW, live }).sections.flatMap((section) => section.lines).find((item) => item.prUrl === prUrl)!.trail;
+    const at = (a: string, b: string) => new Map([[picked[0]!, { kind: "nudge" as const, state: a as "pending" }], [picked[1]!, { kind: "nudge" as const, state: b as "pending" }]]);
+    expect([line(at("sending", "pending"), picked[0]!), line(at("sending", "pending"), picked[1]!)]).toMatchObject([{ text: "Nudging…", busy: true }, { text: "Queued", busy: false }]);
+    expect([line(at("sent", "sending"), picked[0]!), line(at("sent", "sending"), picked[1]!)]).toMatchObject([{ text: "Nudged", busy: false }, { text: "Nudging…", busy: true }]);
+    expect(line(at("sent", "refused"), picked[1]!)).toMatchObject({ text: "Not sent", failed: true, busy: false });
+    // The sending row spins beside its words.
+    expect(spins(at("sending", "pending"))).toEqual([true, false]);
+    const status = renderToStaticMarkup(createElement(HintBar, { hints: [], flash: { text: "Sending 3 of 7…", undo: false, busy: true }, onPalette: noop, onHelp: noop, onUndo: noop }));
+    expect(status).toMatch(/role="status"[^>]*><span[^>]*><span aria-hidden="true" data-spin="true"[^>]*>↻<\/span><span class="truncate">Sending 3 of 7…<\/span>/u);
+    expect(renderToStaticMarkup(createElement(HintBar, { hints: [], flash: { text: "2 sent", undo: false }, onPalette: noop, onHelp: noop, onUndo: noop }))).not.toContain("data-spin");
   });
 });

@@ -1,7 +1,7 @@
 // Address selected with no listing: one click plans one batch thread and starts it into the Undo window, and every way it can start
 // nothing comes back in the server's words for the selection bar and the rows. Every name here is synthetic.
 import { describe, expect, it } from "vitest";
-import { addressToast, startAddress } from "./deck-flow.js";
+import { addressToast, oneAtATime, sendingText, startAddress, workingLabel, type Working } from "./deck-flow.js";
 
 const url = (number: number) => `https://github.com/inkwell/folio/pull/${number}`;
 const held = { prUrl: url(45), ref: "folio #45", reason: "On hold. Release it first." };
@@ -39,5 +39,60 @@ describe("Address selected", () => {
     const late = fake({ ok: true, batchId: "b-3", items: [{}], skipped: [held] }, { ok: false, error: "folio #42: Its effort is on hold. Review the batch again." });
     expect(await startAddress(late.rpc, null, [42, 45].map(url), {})).toEqual({ ok: false,
       error: "Nothing started. folio #42: Its effort is on hold. Review the batch again.", skipped: [held] });
+  });
+});
+
+// Matt: "it takes a while to advance any checked PRs and there's zero UI feedback." A batch button works from its click until its plan
+// answers, a second click or key while one is out plans nothing, and the rows it takes show pending until it answers or fails.
+describe("a batch button while its plan is out", () => {
+  /** A plan that answers when told, and the states the button and rows went through. */
+  function deferred() {
+    const shown: (Working | null)[] = [];
+    let settle!: { resolve(): void; reject(error: Error): void };
+    const calls: string[] = [];
+    const plan = (kind: string) => () => { calls.push(kind); return new Promise<void>((resolve, reject) => { settle = { resolve, reject }; }); };
+    return { shown, calls, plan, settle: () => settle, run: oneAtATime((working) => shown.push(working)) };
+  }
+
+  it("shows the pressed button working and its rows pending until the plan answers, and ignores a repeat press meanwhile", async () => {
+    const flow = deferred();
+    const rows = new Set([url(42), url(43)]);
+    const first = flow.run({ kind: "advance", prUrls: rows }, flow.plan("advance"));
+    expect(flow.shown).toEqual([{ kind: "advance", prUrls: rows }]);
+    expect(workingLabel(flow.shown[0]!)).toBe("Planning…");
+    // The key pressed again, and another button, while the plan is out: neither plans.
+    expect(await flow.run({ kind: "advance", prUrls: rows }, flow.plan("advance"))).toBe(false);
+    expect(await flow.run({ kind: "nudge", prUrls: rows }, flow.plan("nudge"))).toBe(false);
+    expect(flow.calls).toEqual(["advance"]);
+    flow.settle().resolve();
+    expect(await first).toBe(true);
+    // Answered: nothing works or pends, and the next press plans.
+    expect(flow.shown.at(-1)).toBeNull();
+    void flow.run({ kind: "nudge", prUrls: rows }, flow.plan("nudge"));
+    expect(flow.calls).toEqual(["advance", "nudge"]);
+  });
+
+  it("clears the working button and pending rows when the call fails, and says Starting… for Address", async () => {
+    const flow = deferred();
+    const out = flow.run({ kind: "address", prUrls: new Set([url(42)]) }, flow.plan("address"));
+    expect(workingLabel(flow.shown[0]!)).toBe("Starting…");
+    flow.settle().reject(new Error("RPC timed out"));
+    await expect(out).rejects.toThrow("RPC timed out");
+    expect(flow.shown).toEqual([{ kind: "address", prUrls: new Set([url(42)]) }, null]);
+    expect(await flow.run({ kind: "address", prUrls: new Set([url(42)]) }, async () => undefined)).toBe(true);
+  });
+});
+
+// Once the Undo window closes, dispatch sends one item at a time; the status line counts them as each settles.
+describe("a batch while it sends", () => {
+  const items = (...states: ("pending" | "sending" | "sent" | "refused" | "unknown")[]) => states.map((state) => ({ state }));
+  it("says which item of how many is sending, from the items' states, and nothing once it isn't sending", () => {
+    expect(sendingText({ state: "dispatching", kind: "advance", items: items("sending", "pending", "pending") })).toBe("Sending 1 of 3…");
+    expect(sendingText({ state: "dispatching", kind: "advance", items: items("sent", "refused", "sending", "pending", "pending", "pending", "pending") }))
+      .toBe("Sending 3 of 7…");
+    expect(sendingText({ state: "dispatching", kind: "nudge", items: items("sent", "sent", "sent") })).toBe("Sending 3 of 3…");
+    expect(sendingText({ state: "dispatching", kind: "address", items: items("sending", "sending") })).toBe("Starting a thread for 2 PRs…");
+    expect(sendingText({ state: "scheduled", kind: "advance", items: items("pending") })).toBeNull();
+    expect(sendingText({ state: "done", kind: "advance", items: items("sent") })).toBeNull();
   });
 });
