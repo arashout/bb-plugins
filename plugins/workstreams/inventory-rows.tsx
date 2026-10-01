@@ -47,7 +47,7 @@ const LIVE: Record<NonNullable<ReturnType<LiveItems["get"]>>["state"], { text: s
 
 export function SimpleInventoryList(props: SimpleRowsProps) {
   // The deck's rows: one line each, indented under their section's heading, with no rules between them.
-  return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] pb-1.5 pt-0.5">
+  return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 pb-1.5 pt-0.5">
     {props.groups.map((group) => <section key={group.key} data-inventory-group={group.label} className="min-w-0">
       <h3 className="ml-9 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
         {group.effortId ? <button type="button" onClick={() => props.onOpenEffort(group.effortId!)} className={cn("rounded-sm hover:text-foreground hover:underline", RING)}>{group.label}</button> : group.label}

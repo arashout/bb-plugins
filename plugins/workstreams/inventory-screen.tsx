@@ -141,7 +141,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
           <SimpleInventoryList groups={dismissed} kind="dismissed" {...callbacks} />
         </details> : null}
       </section>
-      <section className="mt-0.5" aria-label="Other open PRs">
+      <section className="mt-6" aria-label="Other open PRs">
         <div className={SECTION_HEAD}>
           <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE.gray.edge)} />
           <h2 className="truncate text-[12.5px] font-semibold">Other open PRs</h2>
