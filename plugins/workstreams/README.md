@@ -198,13 +198,9 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   model, under the effort's parent when every PR shares one. Its prompt opens
   with a link to each PR, as its first reply and its report do. It holds each
   PR until it finishes, addresses every comment, bot notes included, replies to
-  each reviewer's note, and never merges. Each PR it sent keeps one state chip
-  that opens the thread: Sending, Working, Needs you, Done, Replied · waiting on
-  a reviewer, Needs your call, Blocked, Ended without a report, or Not sent.
-  Only what stops the work reads Blocked: a thread only its reviewer can settle
-  is their turn, and local state the thread didn't make is a note. Once GitHub
-  shows its feedback cleared, the PR moves to Other open PRs with its chip in
-  grey, and a Blocked from an older build reads Thread ended.
+  each reviewer's note, and never merges. Each PR it sent stays on Your turn with one
+  state chip that opens the thread: Sending, Working, Needs you, Done, Blocked,
+  Ended without a report, or Not sent, until GitHub shows its feedback cleared.
   A PR it left out says why on its row. The deck's selection offers the same.
   On a PR that has a thread, f lists what that thread gets for you to confirm.
   **Other open PRs** follows, by effort; each row shows the PR's state

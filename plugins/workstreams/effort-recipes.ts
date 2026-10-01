@@ -307,13 +307,6 @@ export function prLink(prUrl: string): string {
  * note still needs its own reply (REPLY_RULE).
  */
 export const ADDRESS_ALL_RULE = "Address every comment, including automated reviewers' (Claude, Codex, Copilot, and other review apps): fix what's valid, reply briefly where you disagree or it doesn't apply, and resolve the threads you addressed. A person's note still needs a reply each.";
-/**
- * A thread you replied to that only its reviewer can settle waits on them, not on you: the batch thread reports it under `awaiting`, never
- * as blocked, so a disagreement it answered doesn't read as stuck.
- */
-export const AWAITING_RULE = "An open thread you replied to that only its reviewer can settle, by accepting, answering, or resolving it, is not blocked: report changed or no-change and list it under awaiting.";
-/** Local state the batch thread didn't make, such as an unpushed commit it found, is worth a note, never a blocker: only its own unpushed work blocks. */
-export const LOCAL_STATE_RULE = "Local state you didn't create, such as a pre-existing unpublished commit or a checkout that diverged from the remote, is not a blocker: mention it under notes. Only changes you made and couldn't push block.";
 
 /**
  * A batch thread's title names its PRs, each repository's short name once, in the order listed: "Address feedback: quill #210, #211 ·
@@ -357,6 +350,6 @@ export function addressBatchPrompt(prs: readonly AddressBatchPr[]): string {
     ADDRESS_ALL_RULE,
     "Work in the PR's own checkout with explicit git -C paths when it has one; with none, in an isolated clone at expectedHead, outside every other checkout. Push only to the PR's head branch. Never touch another PR's branch or checkout. Do not merge, deploy, mark ready, request review, or start another thread.",
     "When every PR is done, open your report with the same links, then report the order you worked in, then for each PR: feedback addressed, feedback unresolved or deferred and why, files changed, and test results.",
-    `Then end with one line per PR, each beginning ${RESULT_PREFIX}followed by compact JSON with only these fields: attemptId, the PR's attemptId above; target, its URL; actions, ["address_review_feedback"]; outcome, one of changed, no-change, blocked, or failed; headOid and baseOid, its final remote head and base SHAs; commits, the SHAs you pushed; validation, [{command, result: passed, failed, or not-run, detail}]; blockers, [{kind: ${BLOCKER_KINDS.join(", ")}, summary, question, options: [{id, label, consequence}], recommendation, recommendationReason, prUrl, checks, evidence}]; awaiting, [{login, summary}], one per reviewer whose open thread waits on them; and notes, [string]. Report blocked or failed, never changed or no-change, when validation failed, a note has no reply, a product decision only I can make is unresolved, or changes you made are unpushed. ${AWAITING_RULE} ${LOCAL_STATE_RULE} Name a blocker only for validation-failed, access, environment, dependency, scope, or product-decision, a call only I can make. Workstreams verifies GitHub independently after this turn.`,
+    `Then end with one line per PR, each beginning ${RESULT_PREFIX}followed by compact JSON with only these fields: attemptId, the PR's attemptId above; target, its URL; actions, ["address_review_feedback"]; outcome, one of changed, no-change, blocked, or failed; headOid and baseOid, its final remote head and base SHAs; commits, the SHAs you pushed; validation, [{command, result: passed, failed, or not-run, detail}]; and blockers, [{kind: ${BLOCKER_KINDS.join(", ")}, summary, question, options: [{id, label, consequence}], recommendation, recommendationReason, prUrl, checks, evidence}]. Report blocked or failed, never changed or no-change, when validation failed, a note has no reply, a decision is unresolved, or local changes are unpushed. Workstreams verifies GitHub independently after this turn.`,
   ].join("\n\n");
 }

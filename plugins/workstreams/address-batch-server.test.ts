@@ -305,7 +305,7 @@ describe("addressing Your turn PRs in one batch thread", () => {
     await env.harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr-batch-1", status: "idle" }), lastAssistantText: env.output.text });
     const runs = createRunStore(env.bb.storage.database() as never);
     await vi.waitFor(() => expect(runs.recent(0).filter((run) => run.action === "address-feedback").map((run) => [run.prNumber, run.status, run.result ?? run.error]))
-      .toEqual([[44, "failed", "Blocked: [product-decision] ines asks for a new sort order"], [43, "done", "Reported changed at bbbbbbb"]]));
+      .toEqual([[44, "failed", "Blocked: ines asks for a new sort order"], [43, "done", "Reported changed at bbbbbbb"]]));
     await env.refresh();
     // Claims released, and the feedback still waits: a report and a push answer no reviewer.
     expect((await env.rows()).get(43)).toMatchObject({ addressing: null });

@@ -25,7 +25,7 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   rows: [
     ["Your turn", "Approval comments or other comments that neither your reply on the PR nor your confirmation answered, whatever CI says, then changes requested and open threads. A push answers nothing, and neither does a PR that mentions it. Held PRs and efforts, PRs a thread is working on, and PRs waiting only on CI stay out; a draft shows only for its comments."],
     ["Address selected", "Select Your turn rows with x, a click, or Shift for a range, then Address selected or b. One thread starts for all of them 8 s later unless you Undo, and never merges. Anything it leaves out says why on its row."],
-    ["State", "Each PR Address sent keeps one chip that opens its thread: Sending, Working, Needs you, Done, Replied · waiting on a reviewer, Needs your call, Blocked, Ended without a report, or Not sent. Once GitHub shows its feedback cleared, it moves to Other open PRs with its chip in grey."],
+    ["State", "Each PR Address sent stays on Your turn with one chip that opens its thread: Sending, Working, Needs you, Done, Blocked, Ended without a report, or Not sent. It leaves once GitHub shows the feedback cleared."],
     ["Ask its thread", "f on a row lists what the PR's own thread gets, its fixes or the approval's notes, for you to confirm. It sends 8 s later unless you Undo."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none for a reviewer who hasn't answered yet: you answer first. Once you have, it reads Re-request @login."],

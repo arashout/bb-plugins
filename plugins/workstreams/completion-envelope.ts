@@ -16,7 +16,6 @@ import type { Attempt } from "./effort-phase.js";
 import { BLOCKER_KINDS, RESULT_PREFIX, type WORKER_RESULTS } from "./effort-recipes.js";
 import type { CriterionEvidence } from "./outcome-evidence.js";
 import { canonicalPrUrl } from "./pr-holds.js";
-import { batchReportText } from "./your-turn.js";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const FINGERPRINT = /^[0-9a-f]{64}$/u;
@@ -43,11 +42,6 @@ export const envelopeSchema = z.object({
     options: z.array(optionSchema).max(10).default([]), recommendation: z.string().max(100).nullable().default(null),
     recommendationReason: z.string().max(1_000).nullable().default(null), prUrl: z.string().max(500).nullable().default(null),
     checks: z.array(z.string().max(300)).max(50).default([]), evidence: z.array(z.string().max(500)).max(20).default([]) }).strict()).max(20).default([]),
-  // A batch thread's two later fields, read leniently so a report from before them still reads: threads only their reviewer can settle,
-  // which wait on them and never block, and local state the worker found but didn't make.
-  awaiting: z.array(z.object({ login: z.string().min(1).max(100).transform((login) => login.replace(/^@/u, "")), summary: z.string().max(1_000).default("") }).strict())
-    .max(20).default([]),
-  notes: z.array(z.string().max(1_000)).max(20).default([]),
 }).strict();
 export type Envelope = z.infer<typeof envelopeSchema>;
 
@@ -163,8 +157,7 @@ export type BatchResult = { ok: true; envelope: Envelope; text: string; changed:
 
 /**
  * Each PR's result line in a batch thread's output, by the claim it answers: exactly one line whose attemptId and target are that PR's,
- * read strictly. `changed` is a report of changed or no-change with no blocker; Workstreams still reads GitHub for the rest. `text` is what
- * its run keeps, in batchReportText's words.
+ * read strictly. `changed` is a report of changed or no-change with no blocker; Workstreams still reads GitHub for the rest.
  */
 export function batchResults(output: string, expected: readonly { attemptId: string; target: string }[]): Map<string, BatchResult> {
   const lines = output.split(/\r?\n/u).filter((line) => line.startsWith(RESULT_PREFIX) && line.length <= LINE_LIMIT).flatMap((line) => {
@@ -179,7 +172,7 @@ export function batchResults(output: string, expected: readonly { attemptId: str
     if (canonicalPrUrl(envelope.target) !== canonicalPrUrl(target)) return [attemptId, { ok: false, text: `Its result line is for ${envelope.target}.` }];
     const [blocker] = envelope.blockers;
     const changed = !blocker && (envelope.outcome === "changed" || envelope.outcome === "no-change");
-    return [attemptId, { ok: true, envelope, changed, text: batchReportText({ outcome: envelope.outcome, headOid: envelope.headOid, blocker: blocker ?? null,
-      awaiting: envelope.awaiting.map((item) => item.login), notes: envelope.notes }) }];
+    return [attemptId, { ok: true, envelope, changed,
+      text: blocker ? `Blocked: ${blocker.summary}`.slice(0, 300) : `Reported ${envelope.outcome} at ${envelope.headOid.slice(0, 7)}` }];
   }));
 }

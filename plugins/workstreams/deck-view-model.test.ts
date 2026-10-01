@@ -166,12 +166,6 @@ describe("an effort card", () => {
       [sent("done", { detail: "pushed" }), "Done · pushed"]] as const) {
       expect(line(held(null, now))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text, threadId: "thr-batch" } });
     }
-    // Its feedback cleared, so it's the reviewer's turn: the row still links its thread, and a kindless Blocked says only that the thread ended.
-    for (const [now, text] of [[sent("waiting", { detail: "@otto-v" }), "Replied · waiting on @otto-v"], [sent("ended", { detail: "otto-v hasn't accepted the order" }),
-      "Thread ended · otto-v hasn't accepted the order"]] as const) {
-      const cleared = inkwellDeck({}, (row) => row.number === 211 ? { sent: now, addressing: null, acted: null, yourTurn: null } : {});
-      expect(line(cleared)).toMatchObject({ trail: { kind: "thread", text, threadId: "thr-batch" } });
-    }
     // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
     expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
     // Dispatch refused it, or the last Address left it out: the server's reason, on the row.
