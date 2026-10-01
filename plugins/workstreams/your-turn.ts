@@ -7,16 +7,16 @@
 // answered wait only on the row's Confirm: neither is your turn, and GitHub's
 // decision and the unconfirmed notes still hold the merge. The rest waits
 // too, quietly, as Comments only: open review threads where another person
-// spoke last (your reply last is the reviewer's turn), another person's
-// comment that neither your reply on the PR nor your confirmation answered,
-// and bot notes, a code-review app's review (Claude, Codex, Copilot) that no
-// reply of yours followed, change requests included. A batch addresses all
-// of it; a bot's note alone never makes it a follow-up and never clears
-// anything. A push answers no comment or thread, and neither does an issue
-// or a PR that mentions this one. A PR you hold, and one waiting only on CI
-// or on reviewers, are not your turn; a draft is only for its feedback to
-// address. Pure: the server computes it per row; the badge and the list only
-// count and show it.
+// had the last word, bots aside (your reply last is the reviewer's turn),
+// another person's comment that neither your reply on the PR nor your
+// confirmation answered, and bot notes, a code-review app's review (Claude,
+// Codex, Copilot) that no reply of yours followed, change requests included.
+// A batch addresses all of it; a bot's note alone never makes it a follow-up
+// and never clears anything. A push answers no comment or thread, and
+// neither does an issue or a PR that mentions this one. A PR you hold, and
+// one waiting only on CI or on reviewers, are not your turn; a draft is only
+// for its feedback to address. Pure: the server computes it per row; the
+// badge and the list only count and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
@@ -66,7 +66,7 @@ export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReas
   const approval = reasons.find((reason) => reason.kind === "approval-note");
   if (approval) parts.push({ kind: "approval", text: APPROVED, since: approval.since });
   const read = pr.reviewFeedback;
-  // The review read counts only threads another person spoke last in: one you or a bot spoke last in isn't.
+  // The review read counts only threads another person had the last word in, bots' words skipped: one you spoke last in isn't.
   const open = pr.isDraft ? 0 : read?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: count(open, "open thread", "open threads"), since: null });
   // Another person's comment that no reply on the PR answered; a push or a PR that mentions this one never does.

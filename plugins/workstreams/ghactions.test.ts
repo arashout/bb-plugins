@@ -307,14 +307,16 @@ describe("review feedback to address", () => {
       thread(false, said("otto-v", 9), said("ana-w", 10), said("otto-v", 11))])?.openThreads).toBe(2);
   });
 
-  // A code-review app's last word in an open thread is a bot note, which Your turn names apart: counted as a person's, every Codex or Claude
-  // pass would read as people waiting on you.
-  it("leaves a thread a bot spoke last in out of the open threads", () => {
+  // A code-review app's open thread is a bot note, which Your turn names apart: counted as a person's, every Codex or Claude pass would read
+  // as people waiting on you. A bot's word answers no one either: taken as the last word, a reviewer who tags @claude in their own thread
+  // drops off your list once it answers, and with any reply of yours elsewhere on the PR, from Your turn altogether.
+  it("skips bots' words in an open thread: a person's last word still waits, and a thread only bots spoke in is a bot note", () => {
     const threads = [thread(false, said("chatgpt-codex-connector", 9, "Bot")), thread(false, said("claude[bot]", 9)), thread(false, said("copilot", 9)),
       thread(false, said("otto-v", 10), said("claude", 11))];
-    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9), review("otto-v", "COMMENTED", 10)], threads)?.openThreads).toBe(0);
-    // A person who answers a bot's thread is waiting on you.
+    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9), review("otto-v", "COMMENTED", 10)], threads, [said("ana-w", 12)])?.openThreads).toBe(1);
+    // A person who answers a bot's thread is waiting on you; your reply last stays the reviewer's turn whatever a bot says after it.
     expect(read([review("otto-v", "COMMENTED", 10)], [thread(false, said("claude", 9), said("otto-v", 10))])?.openThreads).toBe(1);
+    expect(read([review("otto-v", "COMMENTED", 10)], [thread(false, said("otto-v", 10), said("ana-w", 11), said("claude", 12))])?.openThreads).toBe(0);
   });
 
   // A bot's word is a deploy preview, a tracker link, a CI report, or a code-review app's pass: none waits on your answer.

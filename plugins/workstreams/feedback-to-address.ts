@@ -16,11 +16,12 @@
 import { z } from "zod";
 
 /**
- * What a PR's own review read shows of feedback on it (ghactions.ts): open threads where a person other than you spoke last, the newest
- * comment from someone else that no later approval of theirs covers, its author's newest reply, when the approval's newest note was left,
- * and when a follow-up last linked it, which answers nothing. `noteAt` and `followUpAt` are absent on a read that predates them. Stored and
- * strict: a thread you or a bot spoke last in stays out of `openThreads` rather than in a field of its own, so an older build still reads
- * it; a read from before that rule counts by who opened the thread until the PR is read again.
+ * What a PR's own review read shows of feedback on it (ghactions.ts): open threads where a person other than you had the last word, bots'
+ * words skipped, the newest comment from someone else that no later approval of theirs covers, its author's newest reply, when the
+ * approval's newest note was left, and when a follow-up last linked it, which answers nothing. `noteAt` and `followUpAt` are absent on a
+ * read that predates them. Stored and strict: a thread you spoke last in, or only bots did, stays out of `openThreads` rather than in a
+ * field of its own, so an older build still reads it; a read from before that rule counts by who opened the thread until the PR is read
+ * again.
  */
 export const reviewFeedbackSchema = z.object({
   openThreads: z.number().int().min(0).max(2_000),

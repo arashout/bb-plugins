@@ -190,7 +190,7 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   replied to, or changes a person requested that no push or reply of yours
   followed. Only these count on the badge. **Comments only**
   follows, closed until you open it: PRs where only a person's comments,
-  open threads where another person spoke last, or bot notes from review apps
+  open threads where another person had the last word (bots aside), or bot notes from review apps
   such as Claude, Codex, or Copilot, wait. A thread you replied to last is
   the reviewer's turn. Select rows in either (x, a click, Shift for a range, or ⇧X for all of
   Your turn) and **Address selected** (b) starts one batch thread for them at

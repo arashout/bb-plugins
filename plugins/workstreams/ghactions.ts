@@ -396,8 +396,8 @@ function followUpsOf(pr: { timelineItems?: unknown; baseRefName?: unknown }, me:
 }
 
 /**
- * What one review read shows of feedback waiting on the PR's author (feedback-to-address.ts): unresolved threads whose last comment is a
- * person's other than the author's, a bot's being a bot note; the newest comment from a person other than the author, as a non-empty review body, a thread
+ * What one review read shows of feedback waiting on the PR's author (feedback-to-address.ts): unresolved threads where a person other than
+ * the author had the last word, bots' words skipped; the newest comment from a person other than the author, as a non-empty review body, a thread
  * comment, or a conversation comment, that neither the approval's notes nor a later approval of that person's own covers; the author's
  * newest review or comment, the only answer; when the approval's newest note was left; and when a follow-up last linked this one, which
  * answers nothing. Bots never count. Undefined without the PR's author or its reviews: without them, it can't tell your reply from a
@@ -443,11 +443,12 @@ export function reviewFeedbackOf(pr: { author?: unknown; reviews?: unknown; comm
   }
   const newest = (dates: string[]) => dates.reduce<string | null>((best, at) => best === null || Date.parse(at) > Date.parse(best) ? at : best, null);
   const last = said.reduce<{ who: string; at: string } | null>((best, item) => best === null || Date.parse(item.at) > Date.parse(best.at) ? item : best, null);
-  // An open thread waits on you only while another person spoke last in it: your reply last is the reviewer's turn, and a bot's last word
-  // is a bot note (your-turn.ts). A push answers none: only a later reply does.
+  // An open thread waits on you only while another person had the last word in it: your reply last is the reviewer's turn. A bot's word
+  // answers no one, so a person's thread a bot spoke in after them still waits; one only bots spoke in is a bot note (your-turn.ts). A push
+  // answers none: only a later reply does.
   const openThreads = threads.map(nodeOf).filter((thread) => {
-    const who = thread.isResolved === false ? person(nodeOf(nodesOf(thread.comments).at(-1))) : null;
-    return who !== null && who !== me;
+    const who = thread.isResolved === false ? nodesOf(thread.comments).map((comment) => person(nodeOf(comment))).filter((login) => login !== null).at(-1) : undefined;
+    return who !== undefined && who !== me;
   }).length;
   const followed = Array.isArray(pr.comments !== null && typeof pr.comments === "object" ? (pr.comments as { nodes?: unknown }).nodes : undefined);
   return { openThreads: Math.min(openThreads, 2_000), comment: last && { login: last.who.slice(0, 140), at: last.at }, repliedAt: newest(replies),

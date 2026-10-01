@@ -709,7 +709,7 @@ work started in and the one working on it. On your own PRs, `yourTurn` names
 the reviewer feedback waiting on you (`approval` and `comments` that neither
 your reply on the PR nor your confirmation answered, whatever CI says, then
 `changes` a person asked for that no push or reply of yours followed,
-`threads` still open where another person spoke last, and `bots`, review apps'
+`threads` still open where another person had the last word (bots aside), and `bots`, review apps'
 notes no reply of yours followed). A change request you answered is an
 attention reason to re-request review instead, and approval notes you
 answered one to confirm; neither is `yourTurn`. `followUp` names the real
