@@ -289,7 +289,7 @@ function ReviewRow({
             type="button"
             onClick={() => navigate.toThread(threadId)}
             title="Open its review thread"
-            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
+            className={cn(CHIP, TONE.gray.chip, "hover:underline", RING)}
           >
             Open<span aria-hidden>↗</span>
           </button>
