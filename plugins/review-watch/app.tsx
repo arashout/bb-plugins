@@ -87,7 +87,8 @@ function PrRef({ repo, number, href, strong }: { repo: string; number: number; h
       title={`${repo} #${number}`}
       className={cn("flex w-[124px] shrink-0 justify-start gap-1 whitespace-nowrap rounded-sm text-muted-foreground hover:underline @min-[720px]:w-[156px]", RING)}
     >
-      <span className="min-w-0 truncate">{repo}</span>
+      {/* The org adds nothing in a personal inbox: the repository's own name, with the full slug in the title. */}
+      <span className="min-w-0 truncate">{repo.split("/").pop()}</span>
       <b className={cn("shrink-0 font-medium", strong ? "text-foreground" : "text-foreground/80")}>#{number}</b>
     </UrlLink>
   );
