@@ -188,21 +188,6 @@ const AGENT_DOING: Record<string, string> = {
   "linear-fetch": "fetching Linear details",
 };
 
-/** The run a row reports: its latest, while open or finished within a day. */
-export function rowRun<R extends Pick<Run, "path" | "status" | "startedAt" | "finishedAt">>(
-  runs: readonly R[],
-  path: string,
-  now: number,
-): R | null {
-  let latest: R | null = null;
-  for (const run of runs) {
-    if (run.path === path && (latest === null || run.startedAt > latest.startedAt)) latest = run;
-  }
-  if (latest === null) return null;
-  if (isOpen(latest.status)) return latest;
-  return now - (latest.finishedAt ?? latest.startedAt) <= ROW_RUN_MS ? latest : null;
-}
-
 /** One line for the row, in the user's words. */
 export function runLabel(run: Run, now: number): string {
   const ago = (at: number) => (now - at < 60_000 ? "just now" : `${compactAge(at, now)} ago`);

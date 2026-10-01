@@ -1,10 +1,9 @@
-// Row actions: availability, thread routing, and merge refusals. Fixtures are the invented Inkwell bookstore: repos quill,
+// Row actions: thread routing and merge refusals. Fixtures are the invented Inkwell bookstore: repos quill,
 // folio, margin, colophon and spine; tickets ABC-/OPS-/WEB-/SHOP-; PRs 42–99.
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
   mergeVerdict,
-  primaryAction,
   recommendThread,
   shouldDeleteBranch,
   type AgentAction,
@@ -13,57 +12,7 @@ import {
   type ThreadCapabilities,
 } from "./actions.js";
 import { APPROVAL_FEEDBACK_MIGRATION, createApprovalFeedbackStore } from "./approval-feedback.js";
-import { inboxSection, inboxVerb, type InboxUnitFacts } from "./workstreams.js";
 import type { MergeStateStatus } from "./contract.js";
-
-const NOW = Date.parse("2030-01-10T12:00:00Z");
-
-function unit(overrides: Partial<InboxUnitFacts> = {}): InboxUnitFacts {
-  return { ticket: "ABC-101", lifecycle: "awaiting-review", stack: null, pr: { mergedAt: null, mergeStateStatus: "CLEAN" }, ...overrides };
-}
-
-/** The action a unit's row offers, read exactly as the Board reads it. */
-function actionOf(facts: InboxUnitFacts) {
-  const section = inboxSection(facts, NOW);
-  return primaryAction(facts, section, inboxVerb(facts, section));
-}
-
-describe("primaryAction", () => {
-  it("offers each agent action only on the row whose verb calls for it", () => {
-    expect(actionOf(unit({ lifecycle: "blocked" }))).toMatchObject({ kind: "agent", action: "investigate-ci" });
-    expect(actionOf(unit({ lifecycle: "awaiting-review", pr: { mergeStateStatus: "DIRTY" } }))).toMatchObject({
-      kind: "agent",
-      action: "resolve-conflicts",
-    });
-    expect(actionOf(unit({ lifecycle: "awaiting-followup" }))).toMatchObject({ kind: "agent", action: "address-review" });
-    expect(actionOf(unit({ lifecycle: "awaiting-rereview" }))).toBeNull();
-    expect(actionOf(unit({ lifecycle: "approved-with-comments" }))).toMatchObject({ kind: "agent", action: "address-comments" });
-    expect(actionOf(unit({ lifecycle: "approved-with-note" }))).toMatchObject({ kind: "agent", action: "review-approval-note" });
-  });
-
-  it("offers the direct actions only where GitHub says they apply", () => {
-    expect(actionOf(unit({ lifecycle: "awaiting-merge" }))).toMatchObject({ kind: "direct", action: "merge" });
-    expect(actionOf(unit({ lifecycle: "awaiting-merge", pr: { mergeStateStatus: "UNSTABLE" } }))).toMatchObject({ action: "merge" });
-    expect(actionOf(unit({ lifecycle: "awaiting-merge", pr: { mergeStateStatus: "BEHIND" } }))).toMatchObject({
-      kind: "direct",
-      action: "update-branch",
-    });
-    expect(actionOf(unit({ lifecycle: "awaiting-review" }))).toMatchObject({ kind: "direct", action: "nudge" });
-  });
-
-  it("never offers Merge on a row stacked behind an unmerged PR, only a jump to the PR it waits on", () => {
-    const behind = unit({ lifecycle: "awaiting-merge", stack: { blockedBelow: 57 } });
-    expect(actionOf(behind)).toEqual({ kind: "jump", behind: 57, label: "Go to #57" });
-  });
-
-  it("offers nothing where there is nothing to do but wait or look", () => {
-    expect(actionOf(unit({ lifecycle: "awaiting-merge", pr: { mergeStateStatus: "BLOCKED" } }))).toBeNull();
-    expect(actionOf(unit({ lifecycle: "awaiting-merge", pr: { mergeStateStatus: "UNKNOWN" } }))).toBeNull();
-    expect(actionOf(unit({ lifecycle: "in-progress" }))).toBeNull();
-    expect(actionOf(unit({ lifecycle: "merged", pr: { mergedAt: "2030-01-09T10:00:00Z" } }))).toBeNull();
-    expect(actionOf(unit({ lifecycle: "up-next", ticket: null, pr: null }))).toBeNull();
-  });
-});
 
 const ALL: ThreadCapabilities = { send: true, subthread: true, contextUsage: true };
 

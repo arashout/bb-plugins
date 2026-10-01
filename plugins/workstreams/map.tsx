@@ -19,9 +19,7 @@ import {
   type MapDatum,
 } from "./faces";
 import {
-  // "Needs you" is an encoding here, not a lens, so the map's set gets a name
-  // that cannot be mistaken for the Board's sections, which are a different
-  // cut of the same lifecycles (see `inboxSection`).
+  // "Needs you" is an encoding here, not a lens, so the map's set gets its own name.
   ACTIONABLE as HALO_STATES,
   DAY_MS,
   LENSES,

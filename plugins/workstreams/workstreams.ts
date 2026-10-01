@@ -1,6 +1,6 @@
 // Pure board logic: no I/O, no SDK. Everything here is unit-tested in
 // workstreams.test.ts, because these rules are the whole point of the plugin.
-import type { MergeStateStatus, Pr, RawUnit } from "./contract.js";
+import type { Pr, RawUnit } from "./contract.js";
 import { feedbackToAddress } from "./feedback-to-address.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
 import { ticketFinder, type TicketSource } from "./tickets.js";
@@ -10,8 +10,7 @@ import { ticketFinder, type TicketSource } from "./tickets.js";
  * could apply to one checkout, the earlier one wins. The order is deliberately
  * NOT a display order. It must never reach a SPATIAL position — on the Map,
  * status is a lens the renderer paints and position belongs to the grouping
- * hierarchy. The Board's inbox is the one list that sorts by next action (see
- * `inboxSection`), and it uses its own section order, not this one.
+ * hierarchy.
  *
  * `closed` remains a lifecycle for persisted state, but abandoned PRs are
  * omitted from the board before grouping.
@@ -1492,10 +1491,6 @@ export function effortLabel(options: {
   return options.assignment.fit >= options.threshold ? options.assignment.label : UNSORTED;
 }
 
-export function isDone(lifecycle: Lifecycle): boolean {
-  return lifecycleGroup(lifecycle) === "done";
-}
-
 /**
  * Assemble the effort level. Names come from `names` when a model supplied one
  * and otherwise from the best-fitting member's own summary, so an effort is
@@ -1564,8 +1559,7 @@ export function buildEfforts(
  * The ONE ordering every level uses: name, then key, with the catch-all last.
  * Lifecycle is not an input and must never become one — spatial position (the
  * Map, the group tree) belongs to the grouping hierarchy, and status is a lens
- * painted on top of it. The Board's inbox orders by next action instead; see
- * `byInboxOrder`.
+ * painted on top of it.
  */
 export function byGroupOrder(a: BoardGroup, b: BoardGroup): number {
   const unsortedA = a.key === UNSORTED || a.key.endsWith(`:${UNSORTED}`);
@@ -1938,192 +1932,6 @@ export function placeClusters(options: {
   return placed;
 }
 
-// ---------------------------------------------------------------------------
-// The Board's inbox: one row per checkout, sectioned by the NEXT ACTION.
-//
-// The Map's rule — position never follows status — is a rule about SPATIAL
-// layout: a picture you navigate by memory must not reshuffle when a PR turns
-// red. The Board is not a picture; it is a list you work through top to
-// bottom, so here status is exactly what decides position. Everything below
-// is pure and deterministic, so two refreshes that changed no work produce
-// the same list in the same order.
-// ---------------------------------------------------------------------------
-
-export const INBOX_SECTIONS = [
-  "fix",
-  "respond",
-  "merge",
-  "waiting",
-  "in-flight",
-  "shipped",
-  "parked",
-] as const;
-export type InboxSection = (typeof INBOX_SECTIONS)[number];
-
-/** How long merged work stays under Recently merged, in whole days, inclusive. */
-export const RECENTLY_SHIPPED_DAYS = 7;
-
-/** The facts section assignment reads. A wire unit and a board unit both fit. */
-export type InboxUnitFacts = {
-  ticket: string | null;
-  lifecycle: Lifecycle;
-  rebasing?: boolean;
-  stack: { blockedBelow: number | null } | null;
-  pr: { mergedAt?: string | null; mergeStateStatus?: MergeStateStatus } | null;
-  observed?: RawUnit["observed"];
-};
-
-/**
- * A ticketless checkout with no pull request: a clone of some repo's default
- * branch. It is not work, so it is parked and hidden unless asked for.
- */
-export function isTicketlessClone(unit: Pick<InboxUnitFacts, "ticket" | "pr" | "observed">): boolean {
-  return unit.ticket === null && unit.pr === null && unit.observed?.pr !== false && unit.observed?.status !== false;
-}
-
-/**
- * The unmerged PR a row is waiting behind, or null. Only live work can be
- * behind something: a merged or closed PR has already left the merge order.
- */
-export function waitingBehind(unit: Pick<InboxUnitFacts, "lifecycle" | "stack">): number | null {
-  if (isDone(unit.lifecycle)) return null;
-  return unit.stack?.blockedBelow ?? null;
-}
-
-function mergedWithin(mergedAt: string | null | undefined, now: number): boolean {
-  if (mergedAt === null || mergedAt === undefined) return false;
-  const at = Date.parse(mergedAt);
-  if (Number.isNaN(at)) return false;
-  return now - at <= RECENTLY_SHIPPED_DAYS * DAY_MS;
-}
-
-/**
- * The lifecycles an open, non-draft pull request can carry — the only ones a
- * merge conflict can pre-empt. `blocked` (red CI) is excluded on purpose:
- * step (b) below already outranks the conflict check in step (c), so a row
- * that is failing CI never needs to ask whether it is also DIRTY.
- */
-const OPEN_PR_LIFECYCLES = new Set<Lifecycle>([
-  "awaiting-followup",
-  "awaiting-rereview",
-  "approved-with-comments",
-  "approved-with-note",
-  "awaiting-merge",
-  "awaiting-review",
-  "unverified",
-]);
-
-/**
- * Step (c) of the precedence below: GitHub reports a merge conflict. This
- * applies WHATEVER the review state — approved, comments open, changes
- * requested, still in review — because nothing else can happen until the
- * conflict is resolved.
- */
-function hasUnresolvedConflict(unit: Pick<InboxUnitFacts, "lifecycle" | "pr">): boolean {
-  return OPEN_PR_LIFECYCLES.has(unit.lifecycle) && unit.pr?.mergeStateStatus === "DIRTY";
-}
-
-/**
- * Step (d): once a PR is `awaiting-merge` (approved, green checks), GitHub's
- * mergeStateStatus decides whether "one button" really is all that's left.
- * CLEAN, HAS_HOOKS and UNSTABLE all mean nothing blocks the merge button.
- * BEHIND needs a branch update — still Merge, just a different button.
- * BLOCKED means branch protection itself is unsatisfied, which the reader
- * cannot clear by clicking merge, so it waits. UNKNOWN (including a value
- * GitHub hasn't reported yet) must never be read as ready, so it waits too.
- * DIRTY never reaches here: `hasUnresolvedConflict` already claimed it.
- */
-function mergeReadiness(status: MergeStateStatus | undefined): { section: InboxSection; verb: string } {
-  switch (status) {
-    case "CLEAN":
-    case "HAS_HOOKS":
-    case "UNSTABLE":
-      return { section: "merge", verb: "Ready to merge" };
-    case "BEHIND":
-      return { section: "merge", verb: "Update branch" };
-    case "BLOCKED":
-      return { section: "waiting", verb: "Blocked by branch rules" };
-    case "DIRTY":
-    case "UNKNOWN":
-    default:
-      return { section: "waiting", verb: "Checking mergeability" };
-  }
-}
-
-/**
- * Which section a checkout is filed under, in PRECEDENCE order for an open,
- * non-draft pull request:
- *   a. stack position (`blockedBelow`) outranks everything else — an
- *      approved, green PR on top of an unmerged one has nothing for the
- *      reader to do yet, whatever its own state.
- *   b. CI failing (`blocked`) — a fix is needed before anything else.
- *   c. a merge conflict (`hasUnresolvedConflict`) — see its own comment.
- *   d. `awaiting-merge` splits by mergeStateStatus (`mergeReadiness`).
- *   e. everything else is unchanged from before mergeStateStatus existed.
- * A ticketless clone is parked whatever it looks like, checked first because
- * none of the above applies to something that is not a pull request.
- */
-export function inboxSection(unit: InboxUnitFacts, now: number): InboxSection {
-  if (isTicketlessClone(unit)) return "parked";
-  if (unit.rebasing && unit.pr !== null && unit.lifecycle === "active") return "in-flight";
-  if (waitingBehind(unit) !== null) return "waiting";
-  if (unit.lifecycle === "blocked") return "fix";
-  if (hasUnresolvedConflict(unit)) return "fix";
-  switch (unit.lifecycle) {
-    case "awaiting-followup":
-    case "approved-with-comments":
-    case "approved-with-note":
-      return "respond";
-    case "awaiting-rereview":
-      return "waiting";
-    case "awaiting-merge":
-      return mergeReadiness(unit.pr?.mergeStateStatus).section;
-    case "awaiting-review":
-    case "unverified":
-      return "waiting";
-    case "active":
-    case "in-progress":
-      return "in-flight";
-    case "shipped":
-    case "merged":
-      return mergedWithin(unit.pr?.mergedAt, now) ? "shipped" : "parked";
-    case "up-next":
-    case "closed":
-      return "parked";
-  }
-}
-
-const VERB: Partial<Record<Lifecycle, string>> = {
-  blocked: "CI failing",
-  "awaiting-followup": "Changes requested",
-  "awaiting-rereview": "Awaiting re-review",
-  "approved-with-comments": "Approved, comments open",
-  "approved-with-note": "Review approval note",
-  "awaiting-review": "In review",
-  unverified: "Status unavailable",
-  active: "Editing",
-  "in-progress": "In progress",
-  shipped: "In release tag",
-  merged: "Merged",
-};
-
-/**
- * The row's action verb, in the words of the section it sits in. Parked rows
- * get none: there is nothing to do with them, and a verb would say otherwise.
- * Mirrors the precedence in `inboxSection`: stack position, then a conflict,
- * then (for `awaiting-merge`) `mergeReadiness`, then the plain lifecycle verb.
- */
-export function inboxVerb(unit: InboxUnitFacts, section: InboxSection): string | null {
-  if (section === "parked") return null;
-  if (unit.rebasing && unit.pr !== null && unit.lifecycle === "active") return "Rebase in progress";
-  const behind = waitingBehind(unit);
-  if (behind !== null) return `Behind #${behind}`;
-  if (hasUnresolvedConflict(unit)) return "Resolve conflicts";
-  if (unit.lifecycle === "unverified" && unit.pr !== null) return "Review status unavailable";
-  if (unit.lifecycle === "awaiting-merge") return mergeReadiness(unit.pr?.mergeStateStatus).verb;
-  return VERB[unit.lifecycle] ?? null;
-}
-
 // ---- age in state ----------------------------------------------------------
 
 /** One unit's row in the persisted transition table. */
@@ -2166,28 +1974,6 @@ export function trackTransitions(
  */
 export type StateAge = { since: number | null; basis: "state" | "last-commit" };
 
-export function stateAge(
-  unit: {
-    lifecycle: Lifecycle;
-    lastCommitAt: string | null;
-    enteredAt: string | null;
-    pr: { mergedAt?: string | null } | null;
-  },
-): StateAge {
-  const parse = (value: string | null | undefined) => {
-    if (value === null || value === undefined) return null;
-    const at = Date.parse(value);
-    return Number.isNaN(at) ? null : at;
-  };
-  const entered = parse(unit.enteredAt);
-  if (entered !== null) return { since: entered, basis: "state" };
-  // The merge time IS the moment a PR entered `merged`. It is not when a
-  // release tag later made it `shipped`, so it is used for `merged` alone.
-  const merged = unit.lifecycle === "merged" ? parse(unit.pr?.mergedAt) : null;
-  if (merged !== null) return { since: merged, basis: "state" };
-  return { since: parse(unit.lastCommitAt), basis: "last-commit" };
-}
-
 /** Compact whole units: "45m", "5h", "12d". Never negative. */
 export function compactAge(since: number, now: number): string {
   const ms = Math.max(0, now - since);
@@ -2215,30 +2001,4 @@ export function relativeTime(iso: string | null, now: number): string {
   const at = Date.parse(iso);
   if (Number.isNaN(at)) return "unknown";
   return now - at < 60_000 ? "just now" : `${compactAge(at, now)} ago`;
-}
-
-// ---- rows and ordering -----------------------------------------------------
-
-/** What ordering reads about a row. */
-export type InboxOrderFacts = {
-  repo: string;
-  prNumber: number | null;
-  path: string;
-  since: number | null;
-};
-
-/**
- * Oldest in state first — the most stuck on top — then repo, then PR number,
- * then path, so the order is total and a refresh that changed nothing moves
- * nothing. A row with no evidence of age at all is treated as the oldest,
- * the same way `stalenessOf` reads an unreadable date as dead.
- */
-export function byInboxOrder(a: InboxOrderFacts, b: InboxOrderFacts): number {
-  const since = (value: number | null) => value ?? Number.NEGATIVE_INFINITY;
-  return (
-    since(a.since) - since(b.since) ||
-    a.repo.localeCompare(b.repo) ||
-    (a.prNumber ?? Number.POSITIVE_INFINITY) - (b.prNumber ?? Number.POSITIVE_INFINITY) ||
-    a.path.localeCompare(b.path)
-  );
 }

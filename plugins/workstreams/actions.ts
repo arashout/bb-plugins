@@ -1,8 +1,7 @@
-// PR row actions. Pure: which action a row offers, which thread an agent
-// action should run in, and whether a merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
+// PR row actions. Pure: which thread an agent action should run in, and
+// whether a merge may go ahead. Nothing here runs a command or calls the SDK; host.ts and
 // server.ts do, and they read every decision from here so it can be tested.
 import type { MergeStateStatus } from "./contract.js";
-import { waitingBehind, type InboxSection, type InboxUnitFacts } from "./workstreams.js";
 import type { ThreadTier } from "./threads.js";
 import { feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { feedbackToAddress, type ReviewFeedback } from "./feedback-to-address.js";
@@ -14,51 +13,6 @@ export type AgentAction = (typeof AGENT_ACTIONS)[number];
 /** Mechanical GitHub actions the host runs directly, behind a confirm dialog. */
 export const DIRECT_ACTIONS = ["merge", "update-branch", "nudge"] as const;
 export type DirectAction = (typeof DIRECT_ACTIONS)[number];
-
-export type PrimaryAction =
-  | { kind: "agent"; action: AgentAction; label: string }
-  | { kind: "direct"; action: DirectAction; label: string }
-  | { kind: "jump"; behind: number; label: string };
-
-export const AGENT_LABEL: Record<AgentAction, string> = {
-  "investigate-ci": "Investigate CI",
-  "resolve-conflicts": "Resolve conflicts",
-  "address-review": "Address review and reply",
-  "address-comments": "Address comments and reply",
-  "review-approval-note": "Review approval note",
-};
-
-export const DIRECT_LABEL: Record<DirectAction, string> = {
-  merge: "Merge",
-  "update-branch": "Update branch",
-  nudge: "Nudge reviewers",
-};
-
-/**
- * The one action a row's `a` key runs, read from the verb `inboxVerb` gave it
- * so the action can never disagree with what the row says. Null where there is
- * nothing to do but look: in flight, shipped, parked, or a PR held by branch
- * rules or an unfinished mergeability check.
- */
-export function primaryAction(
-  unit: Pick<InboxUnitFacts, "lifecycle" | "stack">,
-  section: InboxSection,
-  verb: string | null,
-): PrimaryAction | null {
-  const agent = (action: AgentAction): PrimaryAction => ({ kind: "agent", action, label: AGENT_LABEL[action] });
-  const direct = (action: DirectAction): PrimaryAction => ({ kind: "direct", action, label: DIRECT_LABEL[action] });
-  if (section === "fix" && verb === "CI failing") return agent("investigate-ci");
-  if (section === "fix" && verb === "Resolve conflicts") return agent("resolve-conflicts");
-  if (section === "respond" && verb === "Changes requested") return agent("address-review");
-  if (section === "respond" && verb === "Approved, comments open") return agent("address-comments");
-  if (section === "respond" && verb === "Review approval note") return agent("review-approval-note");
-  if (section === "merge" && verb === "Ready to merge") return direct("merge");
-  if (section === "merge" && verb === "Update branch") return direct("update-branch");
-  if (section === "waiting" && verb === "In review") return direct("nudge");
-  const behind = section === "waiting" ? waitingBehind(unit) : null;
-  if (behind !== null) return { kind: "jump", behind, label: `Go to #${behind}` };
-  return null;
-}
 
 // ---- which thread an agent action runs in -----------------------------------
 
