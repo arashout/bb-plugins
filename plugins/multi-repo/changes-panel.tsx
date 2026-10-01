@@ -40,6 +40,7 @@ import {
   THREAD_CHANGES_CHANNEL,
   changeStatusLabel,
   changeStatusTone,
+  threadSignal,
 } from "./shared.js";
 
 type PatchState = { loading: boolean; patch: string; truncated: boolean; error: string | null };
@@ -393,15 +394,6 @@ function RepoSection({
   );
 }
 
-/** `multi-repo.thread-changed`, validated — a realtime payload is `unknown`. */
-function threadSignal(payload: unknown): { threadId: string; pullRequests: boolean } | null {
-  if (typeof payload !== "object" || payload === null) return null;
-  const record = payload as Record<string, unknown>;
-  return typeof record.threadId === "string"
-    ? { threadId: record.threadId, pullRequests: record.pullRequests === true }
-    : null;
-}
-
 /**
  * The panel.
  *
@@ -514,8 +506,6 @@ export function ChangesPanel({ threadId }: { threadId: string }) {
     useCallback(
       (payload: unknown) => {
         const signal = threadSignal(payload);
-        // Realtime has no per-channel subscriptions, so every thread's signal
-        // arrives here; only this thread's says anything about this checkout.
         if (signal === null || signal.threadId !== threadId) return;
         load({ prs: signal.pullRequests, quiet: true });
       },

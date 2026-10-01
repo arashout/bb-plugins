@@ -265,7 +265,7 @@ independently: a machine without `gh` must not be able to hide the diffs.
 
 Defer bb's hardening until it's needed: diff tiering and pagination, list virtualization, byte budgeting, patch-section splitting. Cap file count and per-file bytes instead.
 
-Surfaces: `ui.threadPanelAction` for the panel, `ui.fileOpener` to claim workspace file-open targets so timeline file links route in rather than dead-ending.
+Surfaces: `ui.threadPanelAction` for the panel, `ui.fileOpener` to claim workspace file-open targets so timeline file links route in rather than dead-ending, and `app.composer.customize({ banners })` for a one-row changed-files summary above the composer — bb's own prompt-context git section reads the thread checkout and finds a plain directory, so without it the thread view gives no sign that a diff exists and no reason to open the panel. The banner reuses the panel's `changes` RPC, polls on a slower interval because it is mounted on every thread rather than open on request, and stops polling when the first read reports no repos.
 
 **Estimate: ~1,650–2,150 LOC, for §9 only.** It excludes provisioning, the cache, and the file lock from §5 — milestones 4 and 5 are where an estimate like this usually breaks, so treat it as a floor.
 

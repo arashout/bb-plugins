@@ -86,6 +86,7 @@ parse fails the launch with a message naming the offending entry.
 |---|---|
 | **Repos** nav panel | The repo set, each repo's object-cache state, and an editor for `repos.json` with loud validation. |
 | **Changes** thread panel | Per-repo diff and pull request. Opened from the thread panel's Actions list. |
+| Composer banner | One row above the composer naming the repos that changed, their file counts and the `+`/`−` totals. Click it to open the Changes panel. Hidden when nothing has changed. |
 | `bb repos` | `list`, `add`, `remove` (each takes `--project`), and `status` for the current thread. |
 | Agent tools | `workspace_list_repos`, `workspace_add_repo`, `workspace_remove_repo`, `workspace_publish_guidance`. |
 | Agent instructions | A generated table of `repo → branch → path`, plus a `multi-repo` skill. |
@@ -193,6 +194,16 @@ uncommitted edits and those are what you want to see.
 Pull requests go through `gh`, per repo, cached for a minute. A workspace can
 span two orgs and an Enterprise host, so each repo is asked independently and a
 machine without `gh` is reported per repo rather than failing the panel.
+
+**The thread view says a diff exists.** bb's own changed-files summary above
+the composer reads the thread's checkout, finds a plain directory rather than a
+git repo, and shows nothing — so every fact about the diff used to live behind
+the panel launcher, with nothing in the thread view to suggest opening it. A
+composer banner fills that gap with one row: which repos moved, how many files
+each, and the totals. It carries no pull-request state and no actions, because
+the panel is still the surface to act on. It polls more slowly than the panel —
+it is a glance mounted on every thread, not a diff someone is reading — and it
+stops polling entirely on a thread with no workspace.
 
 **The two halves refresh independently, and the diff half refreshes itself.**
 Nothing in bb tells a panel that a file on a machine changed, so the diff half

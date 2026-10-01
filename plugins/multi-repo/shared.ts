@@ -35,9 +35,24 @@ export const CHANGES_POLL_MS = 5_000;
 export const REPOS_PANEL_ID = "repos";
 export const REPOS_PANEL_PATH = "repos";
 
+/**
+ * How often the composer banner re-reads its own thread's diff.
+ *
+ * Slower than the panel on purpose. The panel is open because someone is
+ * reading a diff and wants it to keep up; the banner is mounted on every
+ * multi-repo thread view whether or not anyone is looking at the changes, and
+ * all it has to get right is a count. A finished turn still lands immediately
+ * via `THREAD_CHANGES_CHANNEL`, so this interval only covers mid-turn edits.
+ */
+export const BANNER_POLL_MS = 15_000;
+
 /** The thread panel action that owns diff and PR. */
 export const CHANGES_ACTION_ID = "changes";
 export const CHANGES_TAB_TITLE = "Changes";
+
+/** The composer customization, and the banner inside it. */
+export const COMPOSER_CUSTOMIZATION_ID = "workspace";
+export const CHANGES_BANNER_ID = "changes";
 
 export const ENVIRONMENT_PROVIDER_ID = "multi-repo-workspace";
 
@@ -93,4 +108,19 @@ export function changeStatusTone(status: ChangeStatus): string {
     case "modified":
       return "text-amber-600 dark:text-amber-500";
   }
+}
+
+/**
+ * `multi-repo.thread-changed`, validated — a realtime payload is `unknown`.
+ *
+ * Realtime has no per-channel subscriptions, so every thread's signal reaches
+ * every subscriber; the `threadId` is how a surface decides the signal says
+ * anything about the checkout it is showing.
+ */
+export function threadSignal(payload: unknown): { threadId: string; pullRequests: boolean } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+  return typeof record.threadId === "string"
+    ? { threadId: record.threadId, pullRequests: record.pullRequests === true }
+    : null;
 }
