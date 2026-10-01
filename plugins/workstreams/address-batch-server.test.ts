@@ -569,6 +569,26 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     expect((await sent()).get(44)).toBe("working thr-batch-1");
   });
 
+  // A finished claim reads its PR again and rescans its checkout. The scan's PR carries no review read, which only the inventory's poll and
+  // Refresh own: were the rescan to write it over the inventory's, a comment-only PR would leave Your turn and the deck would hide its thread.
+  it("keeps a comment-only PR on Your turn with its sent link through its checkout's rescan after the batch thread ends", async () => {
+    const env = await setup();
+    const { reviewFeedback: _unread, ...scanned } = env.current.get(44)!;
+    env.units.push({ ...worktree("/p/folio-abc-44", REPO, "abc-44-order"), pr: scanned });
+    await env.refresh();
+    await confirm(env, (await env.plan([url(44)])).batchId);
+    const rescans = env.hostCalls.filter((method) => method === "inspectPaths").length;
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr-batch-1", status: "idle" }), lastAssistantText: "Replied." });
+    await vi.waitFor(() => expect(claims(env)).toEqual([[44, "done"]]));
+    await vi.advanceTimersByTimeAsync(3_100);
+    await vi.waitFor(() => expect(env.hostCalls.filter((method) => method === "inspectPaths").length).toBe(rescans + 1));
+    await drain();
+    expect(await env.turn()).toContain(44);
+    expect((await env.rows()).get(44)).toMatchObject({ addressing: null, yourTurn: { why: "Comment from @ines · 2 open threads" },
+      sent: { state: "idle", threadId: "thr-batch-1" } });
+  });
+
   // Address selected's own path, with no listing: its one click schedules the batch, the row reads Sending with Undo, and Undo starts nothing.
   it("starts Address selected's batch at once through the server, and its Undo starts nothing", async () => {
     const env = await setup();

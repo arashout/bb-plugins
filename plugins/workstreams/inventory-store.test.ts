@@ -176,6 +176,25 @@ describe("authored PR cache coverage", () => {
     expect(store.read().entries).toEqual([]);
     expect(store.observation(entry(2).pr.url)?.checkedAt).toBe(new Date(1_000).toISOString());
   });
+
+  // The inventory's poll and Refresh own an authored PR's facts. A scan's PR carries no review read of a comment-only PR or a draft, and a
+  // PR with none says nothing waits on you: written over the inventory's, it took the PR off Your turn until the next read.
+  it("records that a checkout scan read an authored PR, and never rewrites it", () => {
+    const { store } = setup(true);
+    const at = "2026-09-28T10:00:00Z";
+    const comment: InventoryEntry = { ...entry(1), pr: { ...entry(1).pr, latestReviews: [{ login: "ines", state: "COMMENTED", submittedAt: at }],
+      reviewFeedback: { openThreads: 2, comment: { login: "ines", at }, repliedAt: null, noteAt: null, followUpAt: null } } };
+    const draft: InventoryEntry = { ...entry(2), pr: { ...entry(2).pr, isDraft: true, reviewDecision: "CHANGES_REQUESTED",
+      latestReviews: [{ login: "otto", state: "CHANGES_REQUESTED", submittedAt: at }], approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] },
+      reviewFeedback: { openThreads: 1, comment: null, repliedAt: null, noteAt: null, followUpAt: null } } };
+    store.apply(result([comment, draft]));
+    const scanned = [comment, draft].map(({ pr: { reviewFeedback: _read, approvalFeedback: _approval, ...pr } }): Pr => ({ ...pr, checkConclusions: ["FAILURE"] }));
+    store.observe(scanned);
+    expect(store.read().entries.map((row) => row.pr)).toEqual([comment.pr, draft.pr]);
+    expect(store.observation(comment.pr.url)?.checkedAt).toBe(new Date(1_000).toISOString());
+    // Nor does it date a state the row it left alone doesn't show.
+    expect(store.statesSince()).toEqual(new Map());
+  });
 });
 
 describe("undated PR states", () => {
@@ -194,7 +213,7 @@ describe("undated PR states", () => {
     store.inspect({ entries: [red({ checkConclusions: ["SUCCESS"], mergeable: "UNKNOWN" })], closed: [], failed: [], warnings: [] });
     expect(store.statesSince().get(url)).toEqual({ conflicting: 1_000 });
     tick();
-    store.observe([red({ checkConclusions: ["FAILURE"], mergeable: "MERGEABLE" }).pr]);
+    store.inspect({ entries: [red({ checkConclusions: ["FAILURE"], mergeable: "MERGEABLE" })], closed: [], failed: [], warnings: [] });
     expect(store.statesSince().get(url)).toEqual({ "ci-red": 4_000 });
   });
 
@@ -227,12 +246,13 @@ describe("PR ages through reads that date nothing", () => {
     headCommittedAt: iso(1), reviewRequestedAt: [{ reviewer: "mira", at: iso(2) }, { reviewer: "otto", at: iso(3) }] } };
   const { headCommittedAt: _pushed, reviewRequestedAt: _asked, ...undated } = aged.pr;
 
-  it("keeps the inventory's ages while the head and requests stand, since a checkout scan reads none", () => {
+  it("keeps the inventory's ages while the head and requests stand, through a read that dates nothing", () => {
     const { store } = setup();
+    const read = (pr: Pr) => store.inspect({ entries: [{ ...aged, pr }], closed: [], failed: [], warnings: [] });
     store.apply(result([aged]));
-    store.observe([{ ...undated, reviewRequests: ["mira"] }]);
+    read({ ...undated, reviewRequests: ["mira"] });
     expect(store.get(aged.pr.url)?.pr).toMatchObject({ headCommittedAt: iso(1), reviewRequestedAt: [{ reviewer: "mira", at: iso(2) }] });
-    store.observe([{ ...undated, headRefOid: "b".repeat(40), reviewRequests: ["mira"] }]);
+    read({ ...undated, headRefOid: "b".repeat(40), reviewRequests: ["mira"] });
     expect(store.get(aged.pr.url)?.pr.headCommittedAt).toBeUndefined();
     expect(store.get(aged.pr.url)?.pr.reviewRequestedAt).toEqual([{ reviewer: "mira", at: iso(2) }]);
   });

@@ -60,16 +60,20 @@ const readsReviewThreads = (pr: Pr) => !pr.isDraft && readsApproval(pr);
 /**
  * A PR whose review read says what feedback waits on you (your-turn.ts): those, and any other a reviewer has reviewed, drafts included.
  * Only those keep approval evidence, and only the ones not in draft their thread counts, so a PR with only comments keeps its state word.
+ * The checkout scan reads by it too, through reviewFacts: a PR it names left unread would say nothing waits on you.
  */
 const readsReviewFeedback = (pr: Pr) => readsApproval(pr) || pr.latestReviews.some((review) => review.state !== "PENDING");
 
-async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message: string) => void): Promise<void> {
-  const { repo, pr } = entry;
+/**
+ * Read into this PR the feedback waiting on it, when it has any to read: the inventory's and the checkout scan's one review read. `read`
+ * includes the follow-up read: your replies and reviewers' comments in the conversation date the feedback.
+ */
+export async function reviewFacts(read: (url: string) => ReturnType<typeof readReviewThreads>, pr: Pr, warn: (message: string) => void): Promise<void> {
   if (!readsReviewFeedback(pr)) return;
-  // Always with the follow-up read: your replies and reviewers' comments in the conversation date the feedback.
-  const threads = await readReviewThreads(run, prTarget(pr.url)!, true);
+  const named = `${prTarget(pr.url)?.slug} #${pr.number}`;
+  const threads = await read(pr.url);
   if (!threads.ok) {
-    warn(`${repo} #${pr.number}: review threads could not be checked: ${threads.error}`);
+    warn(`${named}: review threads could not be checked: ${threads.error}`);
     return;
   }
   if (threads.reviewFeedback) pr.reviewFeedback = threads.reviewFeedback;
@@ -78,8 +82,10 @@ async function reviewFacts(run: GhRunner, entry: InventoryEntry, warn: (message:
   pr.unresolvedReviewThreads = threads.count;
   pr.resolvedReviewThreads = threads.resolvedCount;
   pr.reviewFollowupPosted = threads.reviewFollowupPosted;
-  if (threads.hasNextPage) warn(`${repo} #${pr.number}: more review threads remain unread.`);
+  if (threads.hasNextPage) warn(`${named}: more review threads remain unread.`);
 }
+/** The inventory's review read: one gh call per PR, with the follow-up read. */
+const threadsRead = (run: GhRunner) => (url: string) => readReviewThreads(run, prTarget(url)!, true);
 
 const date = (value: unknown): string | null => typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value.slice(0, 40) : null;
 type AgesNode = { commits?: { nodes?: { commit?: { oid?: unknown; committedDate?: unknown } }[] };
@@ -155,7 +161,7 @@ export async function readInventoryPrs(run: GhRunner, prUrls: readonly string[])
       return;
     }
     const entry = { repo: target.slug, pr: parsed.pr };
-    await reviewFacts(run, entry, warn);
+    await reviewFacts(threadsRead(run), entry.pr, warn);
     result.entries.push(entry);
   });
   await readAges(run, result.entries, warn);
@@ -347,7 +353,7 @@ export async function readAuthoredPrs(run: GhRunner, scopeOwners: readonly strin
     }
     result.entries.push(...entries.slice(0, capacity).sort((a, b) => a.pr.number - b.pr.number));
   }
-  await bounded(result.entries, (entry) => reviewFacts(run, entry, warn));
+  await bounded(result.entries, (entry) => reviewFacts(threadsRead(run), entry.pr, warn));
   await readAges(run, result.entries, warn);
   return result;
 }

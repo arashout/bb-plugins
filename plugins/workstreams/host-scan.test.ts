@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 async function commands(options: { statusFails?: boolean; dirty?: boolean; authFails?: boolean; prFails?: boolean; prMalformed?: boolean; approvedPr?: boolean; threadsFail?: boolean; threadsMore?: boolean; threadsOpen?: boolean; threadsResolved?: number;
-  approvalBody?: string; replied?: boolean }) {
+  approvalBody?: string; replied?: boolean; listed?: Record<string, unknown> }) {
   const directory = await mkdtemp(join(tmpdir(), "workstreams-scan-"));
   directories.push(directory);
   const threadNodes = Array.from({ length: (options.threadsResolved ?? 1) + (options.threadsOpen ? 1 : 0) }, (_, index) => ({
@@ -52,7 +52,7 @@ esac
   await writeFile(join(directory, "gh"), `#!/bin/sh
 if [ "$1" = auth ]; then ${options.authFails ? "exit 1" : "exit 0"}; fi
 if [ "$1" = repo ]; then echo main; exit 0; fi
-if [ "$1" = pr ]; then ${options.prFails ? "exit 1" : options.prMalformed ? "echo malformed; exit 0" : options.approvedPr ? `echo '[{"number":42,"state":"OPEN","isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}],"url":"https://github.com/example/widget/pull/42","title":"ABC-123: Widget fix","latestReviews":[{"author":{"login":"reviewer"},"state":"APPROVED"},{"author":{"login":"bot"},"state":"COMMENTED"}],"mergeStateStatus":"CLEAN"}]'; exit 0` : "echo '[]'; exit 0"}; fi
+if [ "$1" = pr ]; then ${options.prFails ? "exit 1" : options.prMalformed ? "echo malformed; exit 0" : options.listed ? `echo '${JSON.stringify([options.listed])}'; exit 0` : options.approvedPr ? `echo '[{"number":42,"state":"OPEN","isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}],"url":"https://github.com/example/widget/pull/42","title":"ABC-123: Widget fix","latestReviews":[{"author":{"login":"reviewer"},"state":"APPROVED"},{"author":{"login":"bot"},"state":"COMMENTED"}],"mergeStateStatus":"CLEAN"}]'; exit 0` : "echo '[]'; exit 0"}; fi
 if [ "$1" = api ]; then echo checked >> '${directory}/gh-api-calls'; ${options.threadsFail ? "exit 1" :
   `case "$*" in *includeFollowup=true*) ${answer(followupData)} ;; *) ${answer(reviewData)} ;; esac; exit 0`}; fi
 exit 1
@@ -117,6 +117,19 @@ describe("host scan uncertainty", () => {
       const { units } = await inspectAll([path], [], new AbortController().signal);
       expect(units[0]?.pr?.reviewFeedback).toMatchObject({ noteAt: "2026-09-25T00:00:00Z", repliedAt: replied ? "2026-09-26T00:00:00Z" : null });
       expect(unitLifecycle(units[0]!)).toBe("approved-with-note");
+    }
+  });
+
+  // The scan reads review feedback on every PR the inventory reads it on, a draft's and one with only comments too: a PR with no read says
+  // nothing waits on you. Only an approved or changes-requested PR keeps approval evidence, and only one not in draft its thread counts.
+  it("reads the feedback waiting on a draft and on a PR with only comments, as the inventory does", async () => {
+    const pr = { number: 42, state: "OPEN", url: "https://github.com/example/widget/pull/42", title: "ABC-123: Widget fix", mergeStateStatus: "CLEAN" };
+    for (const listed of [{ ...pr, isDraft: false, reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ author: { login: "reviewer" }, state: "COMMENTED" }] },
+      { ...pr, isDraft: true, reviewDecision: "APPROVED", latestReviews: [{ author: { login: "reviewer" }, state: "APPROVED" }] }]) {
+      const path = await commands({ listed, threadsOpen: true });
+      const { units } = await inspectAll([path], [], new AbortController().signal);
+      expect(units[0]?.pr?.reviewFeedback?.openThreads).toBe(1);
+      expect([units[0]?.pr?.approvalFeedback?.status, units[0]?.pr?.unresolvedReviewThreads]).toEqual([listed.isDraft ? expect.any(String) : undefined, null]);
     }
   });
 

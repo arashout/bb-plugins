@@ -20,7 +20,7 @@ import {
 import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
-import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
+import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs, reviewFacts } from "./inventory.js";
 import { readEqualHeadTrees } from "./advance-host.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -316,19 +316,8 @@ async function inspect(
   }
   unit.observed = { status: status !== null, pr: true };
   unit.pr = parsed.pr;
-  if (parsed.pr.state === "OPEN" && !parsed.pr.isDraft &&
-      (parsed.pr.reviewDecision === "APPROVED" || parsed.pr.reviewDecision === "CHANGES_REQUESTED")) {
-    // With the conversation and links, which say whether feedback to address was answered.
-    const threads = await reviewThreadsOf(parsed.pr.url, true);
-    if (!threads.ok) warn(`${dirName}: cannot check PR review threads: ${threads.error}`);
-    else {
-      unit.pr.unresolvedReviewThreads = threads.count;
-      unit.pr.resolvedReviewThreads = threads.resolvedCount;
-      unit.pr.approvalFeedback = threads.approvalFeedback;
-      unit.pr.reviewFollowupPosted = threads.reviewFollowupPosted;
-      if (threads.reviewFeedback) unit.pr.reviewFeedback = threads.reviewFeedback;
-    }
-  }
+  // The inventory's review read, on the same PRs, with the conversation and links, which say whether feedback to address was answered.
+  if (parsed.pr.state === "OPEN") await reviewFacts((url) => reviewThreadsOf(url, true), unit.pr, warn);
   if (parsed.pr.state === "MERGED") {
     unit.shipped = await shippedOf(unit.repo, path, parsed.mergeCommit);
   }
