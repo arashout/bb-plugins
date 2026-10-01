@@ -133,7 +133,7 @@ const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 const UNREAD = new Set(["Status unknown", "Review history unknown"]);
 const YOU: Owner = { kind: "you", label: "you" };
 /**
- * Attention moves that answer Your turn's feedback: confirming the approval's notes, asking again after a verified follow-up, and a thread's
+ * Attention moves that answer Your turn's feedback: confirming the approval's notes, asking again after your push or reply, and a thread's
  * code work, whose fix takes the feedback too. Merging, or nudging someone else, leaves it waiting.
  */
 const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handled", "rerequest", "open-thread"]);
@@ -233,10 +233,12 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (asks("mark-ready")) actions.push(action("mark-ready", `Mark ${target} ready for review, pinned to the head this row shows`,
     blocked ?? (row.head === null ? "No head commit read yet; Refresh first" : null)));
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
-  // On Your turn the one move left is asking again after your answer, which the same write does: it re-adds the reviewer.
+  // Asking again after your answer, the one move left on Your turn and a change request's once you pushed or replied, reads Re-request: the
+  // same write re-adds the reviewer.
   const nudged = nudgees(row, context.turn);
-  if (nudged.length) actions.push(action("nudge", context.turn ? `Re-request review from ${mentions(nudged)} on ${target}` : `Ask ${mentions(nudged)} again to review ${target}`,
-    blocked, { reviewers: nudged, ...context.turn ? { label: context.running === "nudge" ? "Re-requesting…" : `Re-request ${mentions(nudged)}` } : {} }));
+  const again = !asks("nudge");
+  if (nudged.length) actions.push(action("nudge", again ? `Re-request review from ${mentions(nudged)} on ${target}` : `Ask ${mentions(nudged)} again to review ${target}`,
+    blocked, { reviewers: nudged, ...again ? { label: context.running === "nudge" ? "Re-requesting…" : `Re-request ${mentions(nudged)}` } : {} }));
   if (asks("confirm-handled")) actions.push(action("confirm-handled", `Read the approval's notes on ${target} and what came after, then confirm ` +
     "them handled or ask its thread; it merges nothing", blocked ?? (row.head === null || row.feedbackFingerprint === null ? UNCONFIRMABLE : null)));
   // Your confirmation can always be taken back, at any age, while its effort or the PR is held too: it only makes the PR need you again.

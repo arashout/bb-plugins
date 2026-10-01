@@ -167,6 +167,26 @@ describe("feedback to address holds a PR from ready and from merge", () => {
       .toMatchObject({ status: "Ready to merge", section: "merge", preview: [] });
   });
 
+  // Notes you answered but haven't confirmed are no longer your turn: nothing of the reviewer's waits on a reply, so a batch would do
+  // nothing. They still hold the PR from ready and from merge, and the row's move is your Confirm.
+  it("holds answered, unconfirmed approval notes from ready and merge, off Your turn, with Confirm as the row's move", () => {
+    const { pr } = bodyComment();
+    const replied = verified({ ...pr, reviewFeedback: { ...pr.reviewFeedback!, repliedAt: iso(NOW - 2 * HOUR) } }, null);
+    expect(views({ pr: replied, record: null, since: {} })).toMatchObject({ reasons: ["approval-comments"], status: "Approved with comments", primary: "confirm-handled",
+      yourTurn: null, followUp: null, section: "confirm", lineMerge: false });
+    expect(views({ pr: replied, record: null, since: {} }).preview).not.toEqual([]);
+  });
+
+  // A person's change request you answered with a push or a reply asks you only to re-request it; GitHub's decision still holds the merge.
+  it("offers Re-request for a change request you answered, off Your turn, and never ready", () => {
+    const { pr } = bodyComment();
+    const requested: Pr = { ...pr, reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: iso(NOW - 30 * HOUR) }],
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, reviewFeedback: { openThreads: 0, comment: null, repliedAt: iso(NOW - 2 * HOUR) } };
+    expect(views({ pr: requested, record: null, since: {} })).toMatchObject({ reasons: ["rereview-needed"], primary: "nudge", yourTurn: null, section: "nudge", lineMerge: false });
+    expect(views({ pr: { ...requested, reviewFeedback: { ...requested.reviewFeedback!, repliedAt: null } }, record: null, since: {} }))
+      .toMatchObject({ reasons: [], followUp: "Changes requested by @mira-l", lineMerge: false });
+  });
+
   // Comments only is no real follow-up, so nothing counts it, yet a person's comment there holds the PR from ready and from merge as
   // before. A bot's review is a note to address in a batch: alone it neither holds the PR nor makes it a follow-up.
   it("holds a PR on a person's comment that waits only as Comments only, and never on a bot's review alone", () => {

@@ -290,23 +290,31 @@ describe("review feedback to address", () => {
       comments: { nodes: comments }, timelineItems: { nodes: timeline } }, threads, notes);
 
   it("dates another person's newest review body, thread comment, or conversation comment, and your newest reply", () => {
+    // Her reply last leaves the thread the reviewer's turn; his later conversation comment still waits.
     expect(read([review("otto-v", "COMMENTED", 9, "Why a map here?")], [thread(false, said("otto-v", 10), said("ana-w", 11))], [said("otto-v", 12)]))
-      .toEqual({ openThreads: 1, comment: { login: "otto-v", at: "2026-09-29T12:00:00Z" }, repliedAt: "2026-09-29T11:00:00Z", noteAt: null, followUpAt: null });
+      .toEqual({ openThreads: 0, comment: { login: "otto-v", at: "2026-09-29T12:00:00Z" }, repliedAt: "2026-09-29T11:00:00Z", noteAt: null, followUpAt: null });
     // A review with no body says nothing of its own; its inline comments speak for it.
     expect(read([review("otto-v", "COMMENTED", 9)])?.comment).toBeNull();
   });
 
-  it("counts only open threads someone else started", () => {
-    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("ana-w", 8)), thread(true, said("otto-v", 9)), thread(false, said("otto-v", 9))])?.openThreads)
-      .toBe(1);
+  // An open thread waits on you only while another person spoke last in it. Your reply last is the reviewer's turn: counted, every thread
+  // you answered and they haven't resolved would sit on your list (the live false positive). A push answers none, so only a reply does.
+  it("counts an open thread only while another person spoke last in it", () => {
+    expect(read([review("otto-v", "COMMENTED", 9)], [thread(true, said("otto-v", 9)), thread(false, said("otto-v", 9))])?.openThreads).toBe(1);
+    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("otto-v", 9), said("ana-w", 10))])?.openThreads).toBe(0);
+    // A thread you opened waits on you once a person answers in it, and again when they answer your reply.
+    expect(read([review("otto-v", "COMMENTED", 9)], [thread(false, said("ana-w", 8)), thread(false, said("ana-w", 8), said("otto-v", 9)),
+      thread(false, said("otto-v", 9), said("ana-w", 10), said("otto-v", 11))])?.openThreads).toBe(2);
   });
 
-  // A code-review app's open thread is a bot note, which Your turn names apart: counted as a person's, every Codex or Claude pass would
-  // read as people waiting on you.
-  it("leaves a bot's open threads out of the open threads a person started", () => {
+  // A code-review app's last word in an open thread is a bot note, which Your turn names apart: counted as a person's, every Codex or Claude
+  // pass would read as people waiting on you.
+  it("leaves a thread a bot spoke last in out of the open threads", () => {
     const threads = [thread(false, said("chatgpt-codex-connector", 9, "Bot")), thread(false, said("claude[bot]", 9)), thread(false, said("copilot", 9)),
       thread(false, said("otto-v", 10), said("claude", 11))];
-    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9), review("otto-v", "COMMENTED", 10)], threads)?.openThreads).toBe(1);
+    expect(read([review("chatgpt-codex-connector", "COMMENTED", 9), review("otto-v", "COMMENTED", 10)], threads)?.openThreads).toBe(0);
+    // A person who answers a bot's thread is waiting on you.
+    expect(read([review("otto-v", "COMMENTED", 10)], [thread(false, said("claude", 9), said("otto-v", 10))])?.openThreads).toBe(1);
   });
 
   // A bot's word is a deploy preview, a tracker link, a CI report, or a code-review app's pass: none waits on your answer.

@@ -186,11 +186,13 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   waits with Undo, and a merge runs only from the fresh merge preview.
 - **All PRs:** Every open PR you author and every open PR an effort names, in
   three lists. **Your turn** comes first: your PRs where a real follow-up waits
-  on you, an approval with comments or changes a person requested, by effort,
-  with **No effort** last. Only these count on the badge. **Comments only**
-  follows, closed until you open it: PRs where only a person's comments or open
-  threads, or bot notes from review apps such as Claude, Codex, or Copilot,
-  wait. Select rows in either (x, a click, Shift for a range, or ⇧X for all of
+  on you, by effort, with **No effort** last: an approval's note you haven't
+  replied to, or changes a person requested that no push or reply of yours
+  followed. Only these count on the badge. **Comments only**
+  follows, closed until you open it: PRs where only a person's comments,
+  open threads where another person spoke last, or bot notes from review apps
+  such as Claude, Codex, or Copilot, wait. A thread you replied to last is
+  the reviewer's turn. Select rows in either (x, a click, Shift for a range, or ⇧X for all of
   Your turn) and **Address selected** (b) starts one batch thread for them at
   once, with no listing: it waits 8 s for Undo, then starts on the code-work
   model, under the effort's parent when every PR shares one. Its prompt opens
@@ -202,10 +204,12 @@ goes to a view, and ? opens How this works, or a roster's keys on a roster.
   A PR it left out says why on its row. The deck's selection offers the same.
   On a PR that has a thread, f lists what that thread gets for you to confirm.
   **Other open PRs** follows, by effort; each row shows the PR's state
-  and next step. **Nudge** appears only where a reviewer has waited long
+  and next step. A change request you answered with a push or a reply waits
+  here with **Re-request @login**, and approval notes you answered wait here
+  on your Confirm; both still hold the merge, and Address leaves them out.
+  **Nudge** appears only where a reviewer has waited long
   enough, and the server checks again before it sends. A Your turn row offers
-  none for a reviewer who hasn't answered yet, and reads **Re-request @login**
-  once you've answered that reviewer's changes. All PRs never confirms
+  none for a reviewer who hasn't answered yet. All PRs never confirms
   review notes or merges; those run from the effort's card. Each effort's name
   opens its roster.
 - **Efforts admin:** Administer explicitly saved efforts from one list.

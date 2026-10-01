@@ -60,6 +60,15 @@ export function awaitingRerequest<T extends { login: string; state: string }>(re
     ["CHANGES_REQUESTED", "DISMISSED"].includes(review.state) && !requested.has(review.login.toLowerCase()));
 }
 
+/**
+ * You answered this review since: a push, or a reply of yours on the PR, after it. An answered change request asks only that you ask again;
+ * GitHub's decision still holds the merge until the reviewer comes back. An undated review is never answered.
+ */
+export function answeredSince(review: { submittedAt?: string }, facts: { headCommittedAt?: string; reviewFeedback?: { repliedAt: string | null } }): boolean {
+  const at = Date.parse(review.submittedAt ?? "");
+  return [facts.headCommittedAt, facts.reviewFeedback?.repliedAt].some((answer) => answer != null && Date.parse(answer) > at);
+}
+
 export function prGates({ facts, observedAt, now, held, feedback, reviewers }: GateInput): Gates {
   const approved = facts.reviewDecision === "APPROVED";
   const feedbackState = feedbackVerificationState(facts.approvalFeedback, facts.headOid || null, feedback);

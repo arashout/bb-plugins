@@ -1,23 +1,27 @@
 // Your turn: your open PRs where a reviewer's feedback waits on your move,
 // from facts the inventory already keeps. A real follow-up, which only the
-// badge and Your turn count: an approval that said something, as attention's
-// approval-note reason names it, or notes you answered that attention asks
-// you to confirm; and changes a person asked for that you haven't asked them
-// to review again. The rest waits too, quietly, as Comments only: review
-// threads a person opened that are still open, another person's comment that
-// neither your reply on the PR nor your confirmation answered, and bot notes,
-// a code-review app's review (Claude, Codex, Copilot) that no reply of yours
-// followed, change requests included. A batch addresses all of it; a bot's
-// note alone never makes it a follow-up and never clears anything. A push
-// answers none of it, and neither does an issue or a PR that mentions this
-// one. A PR you hold, and one waiting only on CI or on reviewers, are not
-// your turn; a draft is only for its feedback to address. Pure: the server
-// computes it per row; the badge and the list only count and show it.
+// badge and Your turn count: an approval's note that no reply of yours
+// followed, as attention's approval-note reason names it, and changes a
+// person asked for that neither a push nor a reply of yours on the PR has
+// followed since. Once one has, the row's move is Re-request, and notes you
+// answered wait only on the row's Confirm: neither is your turn, and GitHub's
+// decision and the unconfirmed notes still hold the merge. The rest waits
+// too, quietly, as Comments only: open review threads where another person
+// spoke last (your reply last is the reviewer's turn), another person's
+// comment that neither your reply on the PR nor your confirmation answered,
+// and bot notes, a code-review app's review (Claude, Codex, Copilot) that no
+// reply of yours followed, change requests included. A batch addresses all
+// of it; a bot's note alone never makes it a follow-up and never clears
+// anything. A push answers no comment or thread, and neither does an issue
+// or a PR that mentions this one. A PR you hold, and one waiting only on CI
+// or on reviewers, are not your turn; a draft is only for its feedback to
+// address. Pure: the server computes it per row; the badge and the list only
+// count and show it.
 import { z } from "zod";
 import type { Pr } from "./contract.js";
 import type { AttentionReason } from "./pr-attention.js";
 import { feedbackToAddress, isBot } from "./feedback-to-address.js";
-import { awaitingRerequest } from "./pr-gates.js";
+import { answeredSince, awaitingRerequest } from "./pr-gates.js";
 
 export const YOUR_TURN_KINDS = ["changes", "approval", "threads", "comments", "bots"] as const;
 export type YourTurnKind = (typeof YOUR_TURN_KINDS)[number];
@@ -25,7 +29,7 @@ export type YourTurnKind = (typeof YOUR_TURN_KINDS)[number];
 const FOLLOW_UPS: ReadonlySet<YourTurnKind> = new Set(["changes", "approval"]);
 export const yourTurnSchema = z.object({
   kinds: z.array(z.enum(YOUR_TURN_KINDS)).min(1),
-  /** Each kind in a few words, follow-ups first: "Changes requested by @mira · 2 open threads · 1 bot note", or "Answered @mira · re-request review" once you have. */
+  /** Each kind in a few words, follow-ups first: "Changes requested by @mira · 2 open threads · 1 bot note". */
   text: z.string(),
   /** The real follow-up's words, which lead `text`: "Approved with comments"; null when only comments and bot notes wait, which is Comments only. */
   followUp: z.string().nullable(),
@@ -34,9 +38,9 @@ export const yourTurnSchema = z.object({
 }).strict();
 export type YourTurn = z.infer<typeof yourTurnSchema>;
 
-export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback">;
+export type YourTurnFacts = Pick<Pr, "state" | "isDraft" | "reviewRequests" | "latestReviews" | "reviewFeedback" | "headCommittedAt">;
 
-/** The approval's part as yourTurn words it: a listing finds it by these words, since another part holds a " · " of its own. */
+/** The approval's part as yourTurn words it: a listing finds it by these words. */
 const APPROVED = "Approved with comments";
 
 const time = (value: string | null | undefined): number | null => {
@@ -47,26 +51,22 @@ const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention: its approval-note reason asks whatever CI says,
- * its approval-comments reason asks your confirm of notes you answered, and its rereview-needed reason names change requests you answered.
+ * Whether reviewer feedback waits on you on this PR, and which. `reasons` is its attention, whose approval-note reason asks whatever CI says.
  * `held`: you hold the PR.
  */
-export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since" | "reviewers">[], held: boolean): YourTurn | null {
+export function yourTurn(pr: YourTurnFacts, reasons: readonly Pick<AttentionReason, "kind" | "since">[], held: boolean): YourTurn | null {
   if (held || pr.state !== "OPEN") return null;
   const parts: { kind: YourTurnKind; text: string; since: number | null }[] = [];
-  // Asked again, the next move is theirs; a verified follow-up still leaves asking them yours. A bot's change request is a bot note.
-  const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED" && !isBot(review.login));
-  // A change request you answered, which attention says to ask again, waits on your re-request, not on changes.
-  const asking = new Set(reasons.filter((reason) => reason.kind === "rereview-needed").flatMap((reason) => reason.reviewers.map((login) => login.toLowerCase())));
-  const answered = changes.filter((review) => asking.has(review.login.toLowerCase()));
-  const unanswered = changes.filter((review) => !asking.has(review.login.toLowerCase()));
-  if (changes.length) parts.push({ kind: "changes", since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)),
-    text: [...unanswered.length ? [`Changes requested by ${mentions(unanswered.map((review) => review.login))}`] : [],
-      ...answered.length ? [`Answered ${mentions(answered.map((review) => review.login))} · re-request review`] : []].join(" · ") });
-  const approval = reasons.find((reason) => reason.kind === "approval-note") ?? reasons.find((reason) => reason.kind === "approval-comments");
+  // A person's change request that no push or reply of yours followed. Answered, it waits on your re-request, which attention offers;
+  // asked again, on them. A bot's change request is a bot note.
+  const changes = pr.isDraft ? [] : awaitingRerequest(pr).filter((review) => review.state === "CHANGES_REQUESTED" && !isBot(review.login) && !answeredSince(review, pr));
+  if (changes.length) parts.push({ kind: "changes", text: `Changes requested by ${mentions(changes.map((review) => review.login))}`,
+    since: Math.min(...changes.map((review) => time(review.submittedAt) ?? Number.POSITIVE_INFINITY)) });
+  // Only a note no reply of yours followed: notes you answered (approval-comments) wait on the row's Confirm, not on you here.
+  const approval = reasons.find((reason) => reason.kind === "approval-note");
   if (approval) parts.push({ kind: "approval", text: APPROVED, since: approval.since });
   const read = pr.reviewFeedback;
-  // The review read leaves a bot's open threads out: these are a person's.
+  // The review read counts only threads another person spoke last in: one you or a bot spoke last in isn't.
   const open = pr.isDraft ? 0 : read?.openThreads ?? 0;
   if (open > 0) parts.push({ kind: "threads", text: count(open, "open thread", "open threads"), since: null });
   // Another person's comment that no reply on the PR answered; a push or a PR that mentions this one never does.

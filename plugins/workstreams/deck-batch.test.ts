@@ -129,6 +129,15 @@ describe("planning Address for Your turn PRs", () => {
     expect(planBatch("advance", rows, { selected: false }).items.map((item) => item.kind)).toEqual(["nudge"]);
   });
 
+  // Approval notes you answered wait only on your Confirm, which no batch gives: sent, they would start a thread for nothing. Beside other
+  // feedback, the batch takes the PR for that.
+  it("leaves out a PR whose answered approval notes wait only on your Confirm, and says why", () => {
+    next = 810;
+    const plan = planBatch("address", [row("confirm", {}, feedback(null, { confirm: true })), row("confirm", {}, feedback("1 bot note", { confirm: true }))], { selected: true });
+    expect(brief(plan).skipped).toEqual(["quill #810: Answered. Confirm it yourself."]);
+    expect(plan.items.map((item) => item.ref)).toEqual(["quill #811"]);
+  });
+
   // Each PR in its own thread is the Ask its thread path: the approval's notes through Ask and fixes through Fix, only to a thread it has.
   it("asks each PR's own thread for its notes or fixes, and leaves out a PR with no thread", () => {
     next = 820;

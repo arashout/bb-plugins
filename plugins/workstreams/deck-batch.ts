@@ -127,9 +127,10 @@ export type PlanRow = { row: Pick<DeckRow, "prUrl" | "repo" | "number" | "title"
   fix?: { to: string; route: PlannedRoute; fixes: readonly FixKind[] } | { why: string };
   /**
    * Address: the feedback that waits on you, as its listing names it, or null when none does; why an agent, a v2 roster, or its claim keeps
-   * it; and its checkout's name, or null without one. Each PR in its own thread takes its Ask or Fix above, from its thread alone.
+   * it; and its checkout's name, or null without one. `confirm`: approval notes you answered wait only on your Confirm, which no batch
+   * gives. Each PR in its own thread takes its Ask or Fix above, from its thread alone.
    */
-  address?: { feedback: string | null; busy: string | null; checkout: string | null } };
+  address?: { feedback: string | null; busy: string | null; checkout: string | null; confirm?: boolean } };
 
 const PILE_WHY: Partial<Record<DeckPile, string>> = { held: "Its effort is on hold.", done: "Its effort is done." };
 const SECTION_WHY: Record<string, string> = { merge: "Merges go through the merge preview.", work: "Its thread does this work.", flight: "Nothing to do yet.",
@@ -227,7 +228,7 @@ function planAddress(rows: readonly PlanRow[], mode: AddressMode): ReturnType<ty
     if (pile !== "active") { skip(PILE_WHY[pile]!); continue; }
     if (row.managed) { skip("Its v2 roster runs it."); continue; }
     if (address?.busy) { skip(address.busy); continue; }
-    if (!address?.feedback) { skip("No feedback waits on you."); continue; }
+    if (!address?.feedback) { skip(address?.confirm ? "Answered. Confirm it yourself." : "No feedback waits on you."); continue; }
     if (!counted(row, seenAt)) { skip("A write on it is waiting or just ran."); continue; }
     if (!head) { skip("Not read in full yet. Refresh it first."); continue; }
     if (mode === "batch") {

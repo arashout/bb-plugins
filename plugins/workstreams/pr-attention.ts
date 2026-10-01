@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { Pr } from "./contract.js";
 import { feedbackToAddress } from "./feedback-to-address.js";
 import { checksFailed, checksGreen } from "./pr-checks.js";
-import { awaitingRerequest, changesAddressed, conflicted, mergeClean, reviewEngaged } from "./pr-gates.js";
+import { answeredSince, awaitingRerequest, conflicted, mergeClean, reviewEngaged } from "./pr-gates.js";
 import { prHoldFor, type PrHolds } from "./pr-holds.js";
 import type { WorkOwner } from "./work-context.js";
 
@@ -146,14 +146,15 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
     add({ question: "needs-nudge", kind: "review-waiting", action: "nudge", nextStep: `Nudge ${mentions(reviewers)}`, owner: "reviewers", reviewers, since: waiting[0]!.asked });
   }
 
-  // Ask again only once the gates call the feedback answered: no review thread open, and a change request's verified follow-up
-  // posted. A push alone, even GitHub's "Update branch", answers nothing, but each reviewer asked again has a push after their review.
-  if (pr.reviewDecision !== "APPROVED" && (pr.unresolvedReviewThreads ?? 0) === 0 && changesAddressed(pr)) {
-    const addressed = awaitingRerequest(pr).filter((review) => pushed !== null && pushed > (time(review.submittedAt) ?? Infinity));
+  // Ask again once you answered a review: a push or a reply of yours on the PR after it. Neither clears it: GitHub's decision still holds
+  // the merge until the reviewer comes back, and an open thread a person spoke last in still waits on you (your-turn.ts).
+  if (pr.reviewDecision !== "APPROVED") {
+    const addressed = awaitingRerequest(pr).filter((review) => answeredSince(review, pr));
     if (addressed.length) {
       const reviewers = addressed.map((review) => review.login);
+      const answers = [pushed, time(pr.reviewFeedback?.repliedAt)].flatMap((at) => at === null ? [] : [at]);
       add({ question: "needs-nudge", kind: "rereview-needed", action: "rerequest", nextStep: `Re-request review from ${mentions(reviewers)}`,
-        owner: "you", reviewers, since: pushed });
+        owner: "you", reviewers, since: Math.max(...answers) });
     }
   }
 

@@ -708,10 +708,13 @@ answered for the PR, its last failed read and why, any hold, and the thread the
 work started in and the one working on it. On your own PRs, `yourTurn` names
 the reviewer feedback waiting on you (`approval` and `comments` that neither
 your reply on the PR nor your confirmation answered, whatever CI says, then
-`changes` and `threads` a person left, and `bots`, review apps' notes no reply
-of yours followed). `followUp` names the real follow-up, an approval with
-comments or a person's change request, which All PRs lists as Your turn and
-the badge counts; with it null, only comments and bot notes wait, and All PRs
+`changes` a person asked for that no push or reply of yours followed,
+`threads` still open where another person spoke last, and `bots`, review apps'
+notes no reply of yours followed). A change request you answered is an
+attention reason to re-request review instead, and approval notes you
+answered one to confirm; neither is `yourTurn`. `followUp` names the real
+follow-up, an approval's unanswered note or a person's change request, which
+All PRs lists as Your turn and the badge counts; with it null, only comments and bot notes wait, and All PRs
 lists the PR under Comments only. Either way, All PRs lists it unless a thread is
 working on it, a batch thread holds it (`addressing`, with that thread's
 `threadId` and `title`), or its effort is on hold. Held PRs have none, and a

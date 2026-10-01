@@ -17,7 +17,8 @@ const pr = (patch: Partial<Pr>): Pr => ({ ...base, headCommittedAt: at(9), unres
   approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, approvalFeedbackVerified: true,
   reviewFeedback: { openThreads: 0, comment: null, repliedAt: null }, ...patch });
 /** Your turn as the server computes it: with the PR's own attention, which asks for an approval's notes only once nothing else holds it. */
-const turn = (facts: Pr, held = false) => yourTurn(facts, attentionReasons(facts, {}, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 }), held);
+const reasons = (facts: Pr) => attentionReasons(facts, {}, { now: NOW, thresholds: DEFAULT_ATTENTION_THRESHOLDS, utcOffsetMinutes: 0 });
+const turn = (facts: Pr, held = false) => yourTurn(facts, reasons(facts), held);
 
 const changes = pr({ reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "otto-v", state: "CHANGES_REQUESTED", submittedAt: at(10) }] });
 const approval = pr({ reviewDecision: "APPROVED", latestReviews: [{ login: "mira-l", state: "APPROVED", submittedAt: at(11) }],
@@ -76,15 +77,41 @@ describe("Your turn", () => {
     expect(turn(requested)).toEqual({ kinds: ["changes"], text: "Changes requested by @otto-v", followUp: "Changes requested by @otto-v", since: Date.parse(at(10)) });
   });
 
-  // Once you answered the change request (a verified follow-up, pushed since), the reviewer owes nothing and you owe the re-request: Your
-  // turn says so, rather than asking for changes that are made. A push alone answers nothing, so it keeps asking for them.
-  it("says an answered change request waits on your re-request, and keeps asking for changes nothing answered", () => {
-    const answered = pr({ ...changes, headCommittedAt: at(13), reviewFollowupPosted: true });
-    expect(turn(answered)).toEqual({ kinds: ["changes"], text: "Answered @otto-v · re-request review", followUp: "Answered @otto-v · re-request review", since: Date.parse(at(10)) });
-    expect(turn(pr({ ...changes, headCommittedAt: at(13) }))?.text).toBe("Changes requested by @otto-v");
-    // Another reviewer's change request that nothing answered keeps its own words beside it.
-    const mixed = pr({ ...answered, latestReviews: [...changes.latestReviews, { login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: at(14) }] });
-    expect(turn(mixed)?.text).toBe("Changes requested by @mira-l · Answered @otto-v · re-request review");
+  // A person's change request is a real follow-up only while nothing of yours followed it. Once you pushed or replied on the PR, the next
+  // move is asking them again, which the row offers as Re-request off Your turn, and GitHub's decision still holds the merge. Drop the rule
+  // and every answered request sits on Your turn until the reviewer comes back (the live false positive).
+  it("flags a change request only while no push or reply of yours followed it, and offers Re-request once one did", () => {
+    expect(turn(changes)?.followUp).toBe("Changes requested by @otto-v");
+    expect(reasons(changes).map((reason) => reason.kind)).not.toContain("rereview-needed");
+    const pushed = pr({ ...changes, headCommittedAt: at(13) });
+    const replied = pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } });
+    for (const answered of [pushed, replied]) {
+      expect(turn(answered)).toBeNull();
+      expect(reasons(answered)).toContainEqual(expect.objectContaining({ kind: "rereview-needed", action: "rerequest", reviewers: ["otto-v"] }));
+      expect(reasons(answered).map((reason) => reason.kind)).not.toContain("merge-waiting");
+    }
+    // A reply from before the review answers an older one, not this.
+    expect(turn(pr({ ...changes, reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(9) } }))?.followUp).toBe("Changes requested by @otto-v");
+    // Another reviewer's change request that nothing answered keeps its own words.
+    const mixed = pr({ ...pushed, latestReviews: [...changes.latestReviews, { login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: at(14) }] });
+    expect(turn(mixed)?.followUp).toBe("Changes requested by @mira-l");
+  });
+
+  // An approval's note is a real follow-up only while no reply of yours followed it. Notes you answered wait only on your Confirm, which
+  // the row offers: not Your turn, and still not ready to merge. Drop the rule and every answered approval goes to a batch for nothing.
+  it("flags an approval note only while no reply of yours followed it, and leaves answered notes to Confirm", () => {
+    const answered = pr({ ...approval, reviewFeedback: { ...approval.reviewFeedback!, repliedAt: at(13) } });
+    expect(turn(answered)).toBeNull();
+    expect(reasons(answered)).toEqual([expect.objectContaining({ kind: "approval-comments", action: "confirm-handled" })]);
+    // Beside a bot note it is Comments only, never a follow-up.
+    expect(turn({ ...answered, latestReviews: [...answered.latestReviews, { ...codex, submittedAt: at(14) }] })).toMatchObject({ kinds: ["bots"], followUp: null });
+  });
+
+  // An open thread where another person spoke last waits on you; one where you replied last is the reviewer's turn, which the review read
+  // leaves out of openThreads (ghactions.ts), so it asks nothing here.
+  it("keeps an open thread a person spoke last in as Comments only, and asks nothing once you replied last", () => {
+    expect(turn(pr({ reviewFeedback: { openThreads: 1, comment: null, repliedAt: at(13) } }))).toMatchObject({ kinds: ["threads"], followUp: null });
+    expect(turn(pr({ reviewFeedback: { openThreads: 0, comment: null, repliedAt: at(13) } }))).toBeNull();
   });
 
   it("leaves out a PR you hold and a closed PR, whatever feedback they carry, and a draft but for its feedback to address", () => {
@@ -147,9 +174,9 @@ describe("Your turn", () => {
     expect(turnSummary(turn(changes)!, changes.latestReviews)).toBe("Changes requested by @otto-v");
     // With no approver read, it says what Your turn says.
     expect(turnSummary(turn(approval)!, [])).toBe("Approved with comments");
-    // The re-request's part holds a " · " of its own, which must not shift the approval's part out of place.
-    const asked = { text: "Answered @otto-v · re-request review · Approved with comments · 2 open threads · 3 bot notes" };
-    expect(turnSummary(asked, approval.latestReviews)).toBe("Answered @otto-v · re-request review · Approval comment from @mira-l · 2 open threads · 3 bot notes");
+    // A part that holds a " · " of its own must not shift the approval's part out of place.
+    const asked = { text: "Changes requested by @otto-v · Approved with comments · 2 open threads · 3 bot notes" };
+    expect(turnSummary(asked, approval.latestReviews)).toBe("Changes requested by @otto-v · Approval comment from @mira-l · 2 open threads · 3 bot notes");
   });
 });
 

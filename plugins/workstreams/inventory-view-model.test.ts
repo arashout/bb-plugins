@@ -319,8 +319,10 @@ describe("the PR inventory screen view model", () => {
     // reviewers: it offers none, rather than nudge @mira-l or a click the server refuses.
     const both = find("quill #211", withRow("quill #211", { attention: [reason({ reviewers: ["mira-l"] }), rerequest] }));
     expect([onYourTurn(both), action(both, "nudge")]).toEqual([true, undefined]);
-    // Off Your turn, the same move keeps its Nudge word.
-    expect(action(find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null })), "nudge")).toMatchObject({ label: "Nudge" });
+    // Off Your turn, a change request you answered with a push or a reply still reads Re-request; an overdue review beside it keeps Nudge.
+    expect(action(find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null })), "nudge")).toMatchObject({ label: "Re-request @otto-v, @ines-v" });
+    expect(action(find("quill #211", withRow("quill #211", { attention: [reason({ reviewers: ["mira-l"] }), rerequest], yourTurn: null })), "nudge"))
+      .toMatchObject({ label: "Nudge", reviewers: ["mira-l", "otto-v", "ines-v"] });
   });
 
   it("never merges from a row: Merge… only opens the fresh preview, and nothing a row sends carries a head to merge", () => {

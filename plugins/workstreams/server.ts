@@ -5877,7 +5877,8 @@ export default async function plugin(bb: BbPluginApi) {
       const path = prCheckout(row.prUrl);
       const busy = v2Claimed(row.prUrl, path) ? "A v2 roster worker holds it." : input.threads.executor?.active ? "An agent is already working on it."
         : agentOn(row.prUrl, path);
-      const address = { feedback: input.yourTurn && turnSummary(input.yourTurn, input.reviewers.reviewed), busy, checkout: path && (path.split("/").at(-1) ?? path) };
+      const address = { feedback: input.yourTurn && turnSummary(input.yourTurn, input.reviewers.reviewed), busy, checkout: path && (path.split("/").at(-1) ?? path),
+        confirm: input.attention.some((reason) => reason.kind === "approval-comments") };
       if (!each) return [row.prUrl, { address }];
       const route = await askRoute(row.prUrl, work);
       if (route.kind !== "thread") { const none = { why: "It has no thread. Use One batch thread." }; return [row.prUrl, { address, ask: none, fix: none }]; }

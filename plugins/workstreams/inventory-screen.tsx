@@ -1,6 +1,6 @@
 // All PRs: Your turn, your PRs where a real follow-up waits on you (onYourTurn), by effort, then Comments only, collapsed, where only
 // comments and bot notes wait (commentsOnly), above every other open PR you author or an effort names. Its only direct write is Nudge, one click on a row where the server says it's due; a Your turn row offers
-// none for a reviewer who hasn't answered yet, and reads Re-request @login where you've answered. Your turn and Comments only rows select
+// none for a reviewer who hasn't answered yet, and any row reads Re-request @login where you've answered. Your turn and Comments only rows select
 // (x, a click, Shift for a range; ⇧X or the list's box for all of Your turn), and Address selected, or b, starts one batch thread for them at once, with 8 s to Undo. Each
 // PR it sent stays on Your turn with one state chip that opens its thread, until GitHub shows its feedback cleared; what it left out, or
 // why nothing started, shows on the rows and the selection bar. f on a row opens the deck's listing confirm for the PR's own thread. It
