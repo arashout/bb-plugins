@@ -187,6 +187,20 @@ describe("feedback to address holds a PR from ready and from merge", () => {
       .toMatchObject({ reasons: [], followUp: "Changes requested by @mira-l", lineMerge: false });
   });
 
+  // Asking again follows the change request you answered, never feedback still waiting: a person's open thread, or another reviewer's
+  // change request nothing answered, leads the row with its fix. Led by the re-request, the row filed under Nudge and lost its Fix.
+  it("leads with the feedback still waiting beside a change request you answered, never with the re-request", () => {
+    const { pr } = bodyComment();
+    const pushed: Pr = { ...pr, reviewDecision: "CHANGES_REQUESTED", latestReviews: [{ login: "mira-l", state: "CHANGES_REQUESTED", submittedAt: iso(NOW - 30 * HOUR) }],
+      approvalFeedback: { status: "none", fingerprint: null, sourceIds: [] }, headCommittedAt: iso(NOW - 2 * HOUR), reviewFeedback: { openThreads: 1, comment: null, repliedAt: null } };
+    expect(views({ pr: pushed, record: null, since: {} })).toMatchObject({ reasons: ["rereview-needed"], primary: "thread", yourTurn: "1 open thread",
+      section: "work", lineMerge: false });
+    const second: Pr = { ...pushed, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null },
+      latestReviews: [...pushed.latestReviews, { login: "pia-r", state: "CHANGES_REQUESTED", submittedAt: iso(NOW - HOUR) }] };
+    expect(views({ pr: second, record: null, since: {} })).toMatchObject({ reasons: ["rereview-needed"], primary: "thread",
+      followUp: "Changes requested by @pia-r", section: "work", lineMerge: false });
+  });
+
   // Comments only is no real follow-up, so nothing counts it, yet a person's comment there holds the PR from ready and from merge as
   // before. A bot's review is a note to address in a batch: alone it neither holds the PR nor makes it a follow-up.
   it("holds a PR on a person's comment that waits only as Comments only, and never on a bot's review alone", () => {

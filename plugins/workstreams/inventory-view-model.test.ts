@@ -281,8 +281,8 @@ describe("the PR inventory screen view model", () => {
 
   it("re-requests the reviewers an answered change request names, with the same Nudge", () => {
     const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v", owner: "you", reviewers: ["otto-v"] });
-    const line = find("quill #211", withRow("quill #211", { attention: [rerequest] }));
-    expect(line.steps).toMatchObject([{ text: "Re-request review from @otto-v", owner: { kind: "you" } }]);
+    const line = find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: null }));
+    expect(line).toMatchObject({ primary: "nudge", steps: [{ text: "Re-request review from @otto-v", owner: { kind: "you" } }] });
     expect(action(line, "nudge")).toMatchObject({ enabled: true, reviewers: ["otto-v"] });
   });
 
@@ -415,15 +415,21 @@ describe("the PR inventory screen view model", () => {
     expect(find("catalog #96", withRow("catalog #96", { attention: [] })).steps[0]?.owner.kind).toBe("reviewers");
   });
 
-  // Merging, or nudging someone else, leaves Your turn's feedback waiting on you, so the row leads with the move that answers it, or with the
-  // feedback itself, and the deck files it where Your turn lists it: never under Merge or Nudge reviewers while the feedback waits.
-  it("leads a Your turn row with the move that answers its feedback, or the feedback, before a merge or another reviewer's nudge", () => {
+  // Merging, nudging someone else, or asking again leaves Your turn's feedback waiting on you, so the row leads with the move that answers
+  // it, or with the feedback itself, and the deck files it where Your turn lists it: never under Merge or Nudge reviewers while it waits.
+  it("leads a Your turn row with the move that answers its feedback, or the feedback, before a merge, a nudge, or a re-request", () => {
     const comments = { kinds: ["comments" as const], text: "New comments from @ines-v", followUp: null, since: NOW - 3_600_000 };
     const merge = reason({ kind: "merge-waiting", action: "merge", nextStep: "Merge", owner: "you", reviewers: [] });
     expect(find("folio #340", withRow("folio #340", { attention: [merge], yourTurn: comments }))).toMatchObject({ primary: "thread",
       steps: [{ text: "Address the review feedback", age: "1h", since: NOW - 3_600_000 }, { text: "Merge" }] });
     expect(find("catalog #96", withRow("catalog #96", { yourTurn: comments }))).toMatchObject({ primary: "thread",
       steps: [{ text: "Address the review feedback" }, { text: "Nudge @mira-l, @theo-k", owner: { kind: "reviewers" } }] });
+    // A re-request follows a change request you answered: a person's thread, or another's change request, still waits, and its fix leads.
+    const rerequest = reason({ kind: "rereview-needed", action: "rerequest", nextStep: "Re-request review from @otto-v", owner: "you", reviewers: ["otto-v"] });
+    const threads = { kinds: ["threads" as const], text: "1 open thread", followUp: null, since: null };
+    const answered = find("quill #211", withRow("quill #211", { attention: [rerequest], yourTurn: threads }));
+    expect(answered).toMatchObject({ primary: "thread", steps: [{ text: "Address the review feedback" }, { text: "Re-request review from @otto-v" }] });
+    expect(askKind(answered)).toBe("fix");
     // An approval's notes are yours to confirm, even behind an overdue review; with no feedback waiting, attention keeps its own order.
     const overdue = [reason({}), ...rowOf("folio #301").attention];
     expect(find("folio #301", withRow("folio #301", { attention: overdue }))).toMatchObject({ primary: "confirm-handled",

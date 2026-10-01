@@ -133,10 +133,11 @@ const UNCONFIRMABLE = "No head or approval comments read yet; Refresh first";
 const UNREAD = new Set(["Status unknown", "Review history unknown"]);
 const YOU: Owner = { kind: "you", label: "you" };
 /**
- * Attention moves that answer Your turn's feedback: confirming the approval's notes, asking again after your push or reply, and a thread's
- * code work, whose fix takes the feedback too. Merging, or nudging someone else, leaves it waiting.
+ * Attention moves that answer Your turn's feedback: confirming the approval's notes, and a thread's code work, whose fix takes the feedback
+ * too. Merging, nudging someone else, or asking again leaves it waiting: a re-request follows a change request you already answered, which
+ * Your turn no longer lists, so leading with it would skip a person's open thread or another change request still waiting on you.
  */
-const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handled", "rerequest", "open-thread"]);
+const ANSWERS: ReadonlySet<AttentionReason["action"]> = new Set(["confirm-handled", "open-thread"]);
 
 const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(", ");
 const keyOf = (row: Pick<InventoryRow, "repo" | "number">) => `${row.repo.toLowerCase()}#${row.number}`;
@@ -233,8 +234,8 @@ export function rowActions(row: InventoryRow, parents: ReadonlyMap<string, Inven
   if (asks("mark-ready")) actions.push(action("mark-ready", `Mark ${target} ready for review, pinned to the head this row shows`,
     blocked ?? (row.head === null ? "No head commit read yet; Refresh first" : null)));
   if (asks("request-review")) actions.push(action("request-review", `Pick reviewers to ask for ${target}`, blocked));
-  // Asking again after your answer, the one move left on Your turn and a change request's once you pushed or replied, reads Re-request: the
-  // same write re-adds the reviewer.
+  // Asking again after your answer, a change request's move once you pushed or replied, reads Re-request: the same write re-adds the
+  // reviewer.
   const nudged = nudgees(row, context.turn);
   const again = !asks("nudge");
   if (nudged.length) actions.push(action("nudge", again ? `Re-request review from ${mentions(nudged)} on ${target}` : `Ask ${mentions(nudged)} again to review ${target}`,

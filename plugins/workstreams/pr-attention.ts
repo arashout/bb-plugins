@@ -147,7 +147,8 @@ export function attentionReasons(pr: AttentionFacts, since: StateSince, { now, t
   }
 
   // Ask again once you answered a review: a push or a reply of yours on the PR after it. Neither clears it: GitHub's decision still holds
-  // the merge until the reviewer comes back, and an open thread a person spoke last in still waits on you (your-turn.ts).
+  // the merge until the reviewer comes back, and a person's open thread or another change request still waits on you and leads the row
+  // (your-turn.ts, inventory-view-model.ts).
   if (pr.reviewDecision !== "APPROVED") {
     const addressed = awaitingRerequest(pr).filter((review) => answeredSince(review, pr));
     if (addressed.length) {
