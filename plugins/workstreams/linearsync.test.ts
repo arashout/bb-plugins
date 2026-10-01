@@ -50,21 +50,21 @@ const signal = new AbortController().signal;
 const issueCalls = (calls: Call[]) => calls.filter((call) => call.query.includes("issue("));
 
 describe("Linear sync", () => {
-  it("makes no call at all with no key, and reports every ticket as unowned: behaviour with no key is today's", async () => {
+  it("makes no call at all with no key: behaviour with no key is today's", async () => {
     const { sync, calls } = setup();
-    expect(await sync.sync([], ["ABC-1", "SHOP-2"], signal)).toEqual({ fetched: 0, unowned: ["ABC-1", "SHOP-2"] });
+    expect(await sync.sync([], ["ABC-1", "SHOP-2"], signal)).toEqual({ fetched: 0 });
     expect(calls).toEqual([]);
   });
 
-  it("sends each ticket only with the key whose workspace owns its prefix, and leaves the rest unowned", async () => {
+  it("sends each ticket only with the key whose workspace owns its prefix, and the rest with no key", async () => {
     const { sync, calls } = setup({ teams: { [KEY_A]: ["ABC"], [KEY_B]: ["OPS"] } });
-    const result = await sync.sync([KEY_A, KEY_B], ["ABC-1", "OPS-2", "SHOP-3"], signal);
-    expect(result.unowned).toEqual(["SHOP-3"]);
+    await sync.sync([KEY_A, KEY_B], ["ABC-1", "OPS-2", "SHOP-3"], signal);
     const issues = issueCalls(calls);
     expect(issues).toHaveLength(2);
     expect(issues.find((call) => call.key === KEY_A)?.query).toContain('"ABC-1"');
     expect(issues.find((call) => call.key === KEY_A)?.query).not.toContain('"OPS-2"');
     expect(issues.find((call) => call.key === KEY_B)?.query).toContain('"OPS-2"');
+    expect(issues.some((call) => call.query.includes('"SHOP-3"'))).toBe(false);
     expect(sync.read(["ABC-1", "OPS-2", "SHOP-3"]).size).toBe(2);
   });
 
@@ -125,7 +125,7 @@ describe("Linear sync", () => {
     expect(good.sync.read(["ABC-1"]).get("ABC-1")?.title).toBe("Title of ABC-1");
   });
 
-  it("lets a key replace an agent-sourced row for a ticket it covers, because the key is authoritative", async () => {
+  it("lets a key replace a row the removed agent fetch cached for a ticket it covers, because the key is authoritative", async () => {
     const { sync, calls } = setup();
     sync.store([{ ticket: "ABC-1", detail: { identifier: "ABC-1", title: "from agent", description: null, state: null, project: null, parent: null, labels: [], url: null, updatedAt: null, source: "agent" } }], "agent");
     await sync.sync([KEY_A], ["ABC-1"], signal);
@@ -163,10 +163,10 @@ describe("Linear sync", () => {
     expect(logs.some((line) => line.includes("partial data"))).toBe(true);
   });
 
-  it("does not offer unknown ownership to the agent when a workspace lookup fails", async () => {
+  it("fetches what the answering key owns when another key's workspace lookup fails, and retries that lookup on the next sync", async () => {
     const { sync, calls } = setup({ teams: { [KEY_A]: ["ABC"], [KEY_B]: ["OPS"] }, failWorkspaceKey: KEY_B });
-    expect(await sync.sync([KEY_A, KEY_B], ["ABC-1", "OPS-2"], signal)).toEqual({ fetched: 1, unowned: [] });
-    expect(await sync.unowned([KEY_A, KEY_B], ["ABC-1", "OPS-2"], signal)).toEqual([]);
+    expect(await sync.sync([KEY_A, KEY_B], ["ABC-1", "OPS-2"], signal)).toEqual({ fetched: 1 });
+    await sync.sync([KEY_A, KEY_B], ["ABC-1", "OPS-2"], signal);
     expect(calls.filter((call) => call.key === KEY_B && call.query.includes("viewer")).length).toBeGreaterThan(1);
   });
 });

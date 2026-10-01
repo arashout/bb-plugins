@@ -124,8 +124,8 @@ export type Unit = RawUnit & {
   risk: Risk;
 };
 /**
- * What Linear says about a cluster's ticket, when a key or the agent fallback
- * found it. Context and a seeding signal; never the decider.
+ * What Linear says about a cluster's ticket, when a key (or the removed agent
+ * fetch, in older cached rows) found it. Context and a seeding signal; never the decider.
  */
 export type ClusterLinear = {
   title: string | null;

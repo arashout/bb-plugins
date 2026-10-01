@@ -16,7 +16,7 @@ describe("the Linear seed", () => {
     expect(long).toMatch(/lists…$/u);
   });
 
-  // An agent's answer names a project but not its id, and a seed must record which Linear project it came from.
+  // A row the removed agent fetch cached names a project but not its id, and a seed must record which Linear project it came from.
   it("proposes nothing from a ticket whose project has no id", () => {
     const linear = new Map([["ABC-1", detail("ABC-1", { id: null, name: "Reading lists" }, "agent")], ["ABC-2", detail("ABC-2", { id: "proj-lists", name: "Reading lists" })]]);
     expect(seedProposals({ prs: [pr(1, ["ABC-1"]), pr(2, ["ABC-2"])], linear, efforts: [] }).map((proposal) => [proposal.projectId, proposal.prs.map((item) => item.number)]))

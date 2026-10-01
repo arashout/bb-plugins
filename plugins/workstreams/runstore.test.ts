@@ -166,13 +166,14 @@ describe("stranded continue runs", () => {
   });
 });
 
-describe("settling a run from its answer", () => {
-  it("turns a cleanly finished run into a failure with a short reason when its answer was unusable", () => {
+describe("settling a run with a reason", () => {
+  it("ends an open claim as a failure with a short reason when its batch thread is gone, so its PR is not held forever", () => {
     const { store } = setup();
-    const id = store.begin({ path: "/p", ticket: null, prUrl: null, prNumber: null, action: "linear-fetch", mode: "new", threadId: null });
-    const failed = store.settle(id, false, "No json block in the final message.");
-    expect(failed).toEqual(expect.objectContaining({ id, status: "failed", error: "No json block in the final message.", result: null }));
+    const id = store.begin({ ...TARGET, action: "address-feedback", mode: "new", threadId: "thr-batch-1" });
+    const failed = store.settle(id, false, "Its batch thread is gone.");
+    expect(failed).toEqual(expect.objectContaining({ id, status: "failed", error: "Its batch thread is gone.", result: null }));
     expect(failed?.finishedAt).not.toBeNull();
-    expect(store.settle(id, true, "Stored 2 of 3 tickets")).toEqual(expect.objectContaining({ status: "done", result: "Stored 2 of 3 tickets", error: null }));
+    expect(store.openIn("thr-batch-1")).toEqual([]);
+    expect(store.settle(id, true, "Done")).toEqual(expect.objectContaining({ status: "done", result: "Done", error: null }));
   });
 });

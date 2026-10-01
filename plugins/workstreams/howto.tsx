@@ -10,7 +10,6 @@ import { relativeTime } from "./workstreams";
 import { TIER_WORDS } from "./threadmenu";
 import { THREAD_TIERS } from "./threads";
 import { runLabel } from "./runs";
-import { LinearFetchAction } from "./linearfetch";
 import { ROSTER_KEYS } from "./roster-view-model";
 import { INVENTORY_HOW } from "./inventory-view-model";
 import { ACTION } from "./deck-keys";
@@ -272,10 +271,8 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
       <Section title="Linear details">
         <p>
           Add one or more Linear API keys in settings and each ticket is looked up with the key whose workspace owns
-          its team prefix. For tickets no key covers, an agent in the project that holds your checkouts can look them
-          up with that project's own Linear tools. It runs only when you ask.
+          its team prefix. A ticket no key covers gets no Linear details.
         </p>
-        <LinearFetchAction />
       </Section>
 
       <Section title="Data and services">

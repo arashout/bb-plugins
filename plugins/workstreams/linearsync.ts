@@ -154,22 +154,20 @@ export function createLinearSync(deps: LinearSyncDeps) {
     /**
      * Fetch detail for every ticket a key covers whose cache is missing or past
      * its TTL, batched per key. Never throws for a Linear failure: that is
-     * logged once, the prior cache is kept, and the scan goes on. Returns the
-     * tickets no key covers — the only ones the agent fallback may ask about.
+     * logged once, the prior cache is kept, and the scan goes on.
      */
-    async sync(keys: readonly string[], tickets: readonly string[], signal: AbortSignal): Promise<{ fetched: number; unowned: string[] }> {
-      if (keys.length === 0) return { fetched: 0, unowned: [...tickets] };
+    async sync(keys: readonly string[], tickets: readonly string[], signal: AbortSignal): Promise<{ fetched: number }> {
+      if (keys.length === 0) return { fetched: 0 };
       const found = await workspaces(keys, signal);
-      const complete = found.length === keys.length;
       const { owner } = routeTeams(found);
-      const { byKey, unowned } = planFetch(tickets, owner);
+      const byKey = planFetch(tickets, owner);
       const rows = readRows(tickets);
       const cutoff = now() - LINEAR_DETAIL_TTL_MS;
       let fetched = 0;
       for (const [index, owned] of byKey) {
         const key = keys[index];
         if (key === undefined) continue;
-        // An agent-sourced row for a ticket a key now covers is replaced: the key is authoritative.
+        // A row cached by the removed agent fetch is replaced: the key is authoritative.
         const stale = owned.filter((ticket) => {
           const row = rows.get(ticket);
           return row === undefined || row.source !== "key" || row.fetchedAt < cutoff || missingSeedFields(row.detail);
@@ -196,14 +194,7 @@ export function createLinearSync(deps: LinearSyncDeps) {
         }
       }
       if (fetched > 0) deps.log.info(`linear: fetched ${fetched} ticket(s)`);
-      return { fetched, unowned: complete ? unowned : [] };
-    },
-
-    /** Tickets no key covers, using the last discovery (running one if there is none yet). */
-    async unowned(keys: readonly string[], tickets: readonly string[], signal: AbortSignal): Promise<string[]> {
-      if (keys.length === 0) return [...tickets];
-      const found = await workspaces(keys, signal);
-      return found.length === keys.length ? planFetch(tickets, routeTeams(found).owner).unowned : [];
+      return { fetched };
     },
   };
 }

@@ -185,7 +185,6 @@ const AGENT_DOING: Record<string, string> = {
   "address-review": "addressing review",
   "address-comments": "addressing comments",
   "review-approval-note": "reviewing approval note",
-  "linear-fetch": "fetching Linear details",
 };
 
 /** One line for the row, in the user's words. */

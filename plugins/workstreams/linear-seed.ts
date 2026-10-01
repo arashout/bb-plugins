@@ -64,7 +64,7 @@ export type SeedInput = {
 
 /**
  * One proposal per Linear project a ticket on your open PRs belongs to, most PRs to add first. Only a key read knows a project's id, so a
- * ticket whose detail came from the agent fallback proposes nothing. A PR with tickets in two projects is listed in both; the first created
+ * ticket whose detail the removed agent fetch cached proposes nothing. A PR with tickets in two projects is listed in both; the first created
  * takes it.
  */
 export function seedProposals(input: SeedInput): SeedProposal[] {

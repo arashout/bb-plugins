@@ -94,26 +94,18 @@ export function routeTeams(workspaces: readonly LinearWorkspace[]): {
 
 /**
  * Split tickets by the key that can see them. A ticket whose prefix no key owns
- * is `unowned`: it gets no Linear detail from a key, which is not an error, and
- * it is the only kind of ticket the manual agent fallback may ever ask about.
+ * is left out: it gets no Linear detail, which is not an error.
  */
-export function planFetch(
-  tickets: readonly string[],
-  owner: ReadonlyMap<string, number>,
-): { byKey: Map<number, string[]>; unowned: string[] } {
+export function planFetch(tickets: readonly string[], owner: ReadonlyMap<string, number>): Map<number, string[]> {
   const byKey = new Map<number, string[]>();
-  const unowned: string[] = [];
   for (const ticket of tickets) {
     const index = owner.get(ticketPrefix(ticket));
-    if (index === undefined) {
-      unowned.push(ticket);
-      continue;
-    }
+    if (index === undefined) continue;
     const bucket = byKey.get(index);
     if (bucket === undefined) byKey.set(index, [ticket]);
     else bucket.push(ticket);
   }
-  return { byKey, unowned };
+  return byKey;
 }
 
 /** One aliased query for a batch: `t0: issue(id: "ABC-1") { ... } t1: ...`. Initiatives are capped so a batch stays well inside Linear's query cost. */
@@ -126,7 +118,7 @@ export function detailQuery(batch: readonly string[]): string {
 
 /**
  * What the board keeps about one ticket. Every field past the identifier may be missing. The optional fields came with the Linear seed
- * (A16): a key read always sets them, and an agent answer or a row cached before them has none.
+ * (A16): a key read always sets them, and a row cached before them, or by the removed agent fetch (`source: "agent"`), has none.
  */
 export type LinearDetail = {
   identifier: string;
