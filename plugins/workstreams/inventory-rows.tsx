@@ -1,5 +1,5 @@
 import { sendable, type InventoryLine, type LineAction } from "./inventory-view-model";
-import { BUTTON, CHECKBOX, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
+import { BUTTON, CHECKBOX, GROUP_CARD, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
 import type { LiveItems } from "./deck-flow";
 import { sentText, type Sent } from "./your-turn";
 import { cn } from "./lib/utils";
@@ -48,13 +48,14 @@ const LIVE: Record<NonNullable<ReturnType<LiveItems["get"]>>["state"], { text: s
   sending: { text: "Sending…", tone: "blue" }, sent: { text: "Sent", tone: "green" }, refused: { text: "Not sent", tone: "red" }, unknown: { text: "May not have sent", tone: "red" } };
 
 export function SimpleInventoryList(props: SimpleRowsProps) {
-  // Two lines a row, indented under their section's heading, with no rules between them.
+  // Each group's rows in a card under its title, two lines a row, with no rules between them.
   return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 pb-1.5 pt-0.5">
     {props.groups.map((group) => <section key={group.key} data-inventory-group={group.label} className="min-w-0">
       <h3 className="ml-9 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
         {group.effortId ? <button type="button" onClick={() => props.onOpenEffort(group.effortId!)} className={cn("rounded-sm hover:text-foreground hover:underline", RING)}>{group.label}</button> : group.label}
       </h3>
-      <ul className="min-w-0 list-none">
+      {/* The card's edge lines up with the section's title, which keeps its rows where they were, under the group's title. */}
+      <ul className={cn("ml-[19px] list-none", GROUP_CARD)}>
         {group.lines.map((line) => {
           const nudge = line.actions.find((action) => action.id === "nudge" && action.enabled);
           const next = line.steps[0];
@@ -72,7 +73,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const box = mine && !!props.onSelect;
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
             data-inventory-working={working || undefined} aria-busy={working || undefined}
-            className={cn("group ml-7 min-w-0 rounded-md hover:bg-foreground/[0.03] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500",
+            className={cn("group min-w-0 rounded-md hover:bg-foreground/[0.03] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500",
               picked && "bg-sky-500/[0.07]", working && WORKING_ROW)}>
             <div className={TWO_LINE_ROW}>
               {box ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}

@@ -73,6 +73,8 @@ export const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] t
 export const ROW = "flex h-[30px] items-center gap-2 pl-2 pr-1.5 text-[12.5px]";
 /** A row's checkbox: faint until you point at the row. */
 export const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
+/** The card a group's rows sit in under the group's title: a deck tile's border, radius, and tint, padded less. */
+export const GROUP_CARD = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2 py-1";
 
 /**
  * A PR's repository, muted, and its number, bold, in a fixed column so rows line up. A long repository name truncates first, so the

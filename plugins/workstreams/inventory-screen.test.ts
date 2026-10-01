@@ -6,7 +6,7 @@ import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
 import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
-import { COLUMN, CONTENT } from "./deck-screen.js";
+import { COLUMN, CONTENT, GROUP_CARD } from "./deck-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./merge-preview-dialog.js";
 import type { Sent } from "./your-turn.js";
 
@@ -193,6 +193,23 @@ describe("simple All PRs list", () => {
     // The Roster is gone, so a group's name opens its effort's card on the deck.
     expect(readFileSync(new URL("inventory-screen.tsx", import.meta.url), "utf8"))
       .toContain('onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}');
+  });
+
+  // A group reads as one thing: its title, then a card holding every row it lists, in the deck tiles' look, so All PRs and the deck read alike.
+  it("puts each group's rows, dismissed ones too, in a card directly under the group's title", () => {
+    const surface = "rounded-[10px] border border-border/50 bg-foreground/[0.015]";
+    expect(GROUP_CARD).toContain(surface);
+    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain(`data-deck-tile={id} className={cn("min-w-0 ${surface}`);
+    const view = patched((row) => row.number === 96 ? { yourTurn: { why: "Comment from @theo-k", since: NOW, latest: NOW }, dismissed: true } : null);
+    const html = pane(view);
+    const { turn, dismissed, other } = splitInventory(inventoryScreen(view, { now: NOW, filter: null }));
+    expect(dismissed).toHaveLength(1);
+    const groups = [...html.matchAll(/<section data-inventory-group="[^"]+"[^>]*><h3[^>]*>.*?<\/h3><ul class="([^"]*)">(.*?)<\/ul><\/section>/gu)];
+    expect(groups).toHaveLength(turn.length + dismissed.length + other.length);
+    expect(groups.every(([, card]) => GROUP_CARD.split(" ").every((name) => card!.split(" ").includes(name)))).toBe(true);
+    // Every row on the page sits in one of those cards.
+    const inCards = groups.reduce((sum, [, , rows]) => sum + rows!.split("data-inventory-row=").length - 1, 0);
+    expect(inCards).toBe(html.split("data-inventory-row=").length - 1);
   });
 
   it("shows each row's state word and next step with its age", () => {
