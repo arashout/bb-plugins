@@ -397,7 +397,7 @@ The Map's **Approved** filter persists across reloads, including approved PRs
 that still need fixes, checks, or branch work. The Map dims nonmatches without
 repacking and counts checkout-backed PRs.
 
-Workstreams starts planning and context threads with the Planning model setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the Code-work model setting (`codeModel`, default `codex/gpt-6-sol/high`). A thread created with another provider cannot change providers in place; choose **New agent** to continue through Workstreams while retaining the old thread as history.
+Workstreams starts planning and context threads with the Planning model setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the Code-work model setting (`codeModel`, default `codex/gpt-6-sol/high`). A thread created with another provider cannot change providers in place, so Workstreams doesn't send it Ask or Fix turns: message it in its own thread, or set the Code-work model to its provider.
 
 Authorized PR work routes through the repository controller under the effort
 coordinator. Existing PR workers remain linked as history and repair context;

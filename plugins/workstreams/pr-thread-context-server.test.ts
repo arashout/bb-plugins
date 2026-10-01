@@ -118,7 +118,7 @@ describe("PR thread context and messaging", () => {
     await vi.waitFor(async () => expect((await env.context()).recommendedThreadId).toBe("thr-remote"));
     await env.harness.behavior.setSettings({ codeModel: "claude-code/claude-opus/high" });
     expect(await env.message("thr-remote")).toEqual({ ok: false,
-      error: "This thread runs on codex, not the configured claude-code provider. Choose New agent to start a claude-code thread; its history stays available." });
+      error: "This thread runs on codex, not the configured claude-code provider. Message it in its own thread, or set the Code-work model to a codex model; nothing was sent." });
     expect(env.send).not.toHaveBeenCalled();
     expect(await env.harness.callRpc("runs_open", null)).toEqual([]);
     await env.harness.behavior.setSettings({ codeModel: "codex/gpt-6-sol/xhigh" });

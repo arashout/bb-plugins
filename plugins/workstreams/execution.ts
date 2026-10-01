@@ -24,5 +24,5 @@ export function delegationModels(models: Record<ModelRole, ModelChoice>): string
 /** A thread's provider is fixed at creation; changing its model cannot migrate it. */
 export function configuredProviderError(thread: { providerId: string }, choice: ModelChoice): string | null {
   return thread.providerId === choice.providerId ? null
-    : `This thread runs on ${thread.providerId}, not the configured ${choice.providerId} provider. Choose New agent to start a ${choice.providerId} thread; its history stays available.`;
+    : `This thread runs on ${thread.providerId}, not the configured ${choice.providerId} provider. Message it in its own thread, or set the Code-work model to a ${thread.providerId} model; nothing was sent.`;
 }

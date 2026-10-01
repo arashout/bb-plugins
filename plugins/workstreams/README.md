@@ -54,7 +54,7 @@ repository names, candidate phrases, and available Linear or thread-title
 context needed to name a group. Automatic grouping calls happen when semantic
 inputs change; an unchanged rescan reuses cached decisions.
 
-Workstreams starts planning and context threads with the **Planning model** setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the **Code-work model** setting (`codeModel`, default `codex/gpt-6-sol/high`). Each value is `providerId/model/reasoningLevel`. Existing threads from another provider remain available as history; choose **New agent** to continue through Workstreams on the configured provider.
+Workstreams starts planning and context threads with the **Planning model** setting (`planningModel`, default `codex/gpt-6-sol/medium`) and work, repair, and effort repository controller threads with the **Code-work model** setting (`codeModel`, default `codex/gpt-6-sol/high`). Each value is `providerId/model/reasoningLevel`. Existing threads from another provider remain available as history, but Workstreams doesn't send them Ask or Fix turns: message such a thread in BB directly, or set the Code-work model to its provider.
 
 ## Organize work from a thread
 
