@@ -62,7 +62,7 @@ const SECTION_HEAD = "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border
 /** A section's count badge; the caller adds its tone. */
 const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums";
 /** One review's row: the title on its own line with the details under it, the PR in a column to their left. */
-const ROW = "flex items-start gap-2 py-1.5 pl-2 pr-1.5 text-[12.5px] leading-5";
+const ROW = "flex items-start gap-2 py-1 pl-2 pr-1.5 text-[12.5px] leading-5";
 /** A row's checkbox: faint until you point at the row. */
 const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
 const EMPTY = "py-8 text-center text-[12px] text-muted-foreground";
@@ -232,7 +232,7 @@ function useQueue() {
   return { rpc, items, lastPoll, error, report, refetch };
 }
 
-function ReviewRow({
+export function ReviewRow({
   item,
   now,
   busy,
@@ -275,46 +275,45 @@ function ReviewRow({
           <p className={cn("truncate", active ? "text-foreground" : "text-foreground/80")} title={item.title}>
             {item.title}
           </p>
-          <div className="flex min-w-0 items-center gap-2">
-            <span
-              className="min-w-0 truncate text-[11.5px] text-muted-foreground"
-              title={`${item.author} · ${item.reason} · ${updated}`}
-            >
+          {/* Who and when, then the chips and action at its right; in a narrow pane they wrap under it rather than cut it short. */}
+          <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+            <span className="min-w-0" title={`${item.author} · ${item.reason} · ${updated}`}>
               {item.author} · {updated}
             </span>
-            <span className={cn(CHIP, TONE[rule.tone].chip)}>{rule.text}</span>
-            {item.state === "started" ? <span className={cn(CHIP, TONE.amber.chip)}>Review not sent</span> : null}
-            <span className="flex-1" />
-            {threadId !== undefined ? (
-              <button
-                type="button"
-                onClick={() => navigate.toThread(threadId)}
-                title="Open its review thread"
-                className={cn(CHIP, TONE.gray.chip, "hover:underline", RING)}
-              >
-                Open<span aria-hidden>↗</span>
-              </button>
-            ) : item.state === "queued" ? (
+            <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              <span className={cn(CHIP, TONE[rule.tone].chip)}>{rule.text}</span>
+              {item.state === "started" ? <span className={cn(CHIP, TONE.amber.chip)}>Review not sent</span> : null}
+              {threadId !== undefined ? (
+                <button
+                  type="button"
+                  onClick={() => navigate.toThread(threadId)}
+                  title="Open its review thread"
+                  className={cn(CHIP, TONE.gray.chip, "hover:underline", RING)}
+                >
+                  Open<span aria-hidden>↗</span>
+                </button>
+              ) : item.state === "queued" ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onStart}
+                  className={cn(BUTTON, "h-5 border-border px-1.5 text-[11px] hover:bg-foreground/[0.06]")}
+                >
+                  Start
+                </button>
+              ) : (
+                <span className={cn(CHIP, TONE.gray.chip)}>Thread unavailable</span>
+              )}
               <button
                 type="button"
                 disabled={busy}
-                onClick={onStart}
-                className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]")}
+                onClick={onDismiss}
+                aria-label={`Dismiss ${item.repo}#${item.number}`}
+                className={cn("shrink-0 rounded px-1 text-[11px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
               >
-                Start
+                Dismiss
               </button>
-            ) : (
-              <span className={cn(CHIP, TONE.gray.chip)}>Thread unavailable</span>
-            )}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onDismiss}
-              aria-label={`Dismiss ${item.repo}#${item.number}`}
-              className={cn("shrink-0 rounded px-1 text-[11.5px] text-muted-foreground opacity-0 hover:bg-foreground/[0.06] hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100", RING)}
-            >
-              Dismiss
-            </button>
+            </span>
           </div>
         </div>
       </div>
