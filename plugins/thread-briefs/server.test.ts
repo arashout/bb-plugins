@@ -1029,7 +1029,8 @@ describe("sidebar grouping by status", () => {
 
   /** The grouping reconcile is scheduled, so tests wait on its effect. */
   const settle = async (read: () => boolean) => {
-    for (let attempt = 0; attempt < 200; attempt += 1) {
+    // 5s: long enough for a pass that has to wait out the reconcile debounce.
+    for (let attempt = 0; attempt < 500; attempt += 1) {
       if (read()) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -1057,6 +1058,54 @@ describe("sidebar grouping by status", () => {
 
     await harness.lifecycle.dispose();
   });
+
+  it("leaves a hand-reordered sidebar alone on later passes", async () => {
+    const threads = [groupedThread({ id: "thr_1", sectionId: null })];
+    const { bb, harness, prefs } = groupingHost({ threads });
+    await bb.storage.kv.set("brief:thr_1", storedBrief("thr_1", {}));
+    await plugin(bb);
+
+    // Waits for our own first write, so the drag below really is a later pass.
+    // Waits for our own first write, so the drag below really is a later pass.
+    await settle(() =>
+      (prefs.manualSectionOrder as string[]).includes("section:sec_1"),
+    );
+    // The sidebar as the user has since dragged it: Threads at the top, our
+    // three sections in an order of their own.
+    const dragged = [
+      "threads",
+      "pinned",
+      "section:sec_3",
+      "section:sec_1",
+      "section:sec_2",
+    ];
+    prefs.manualSectionOrder = [...dragged];
+
+    // Pinning a status is the cheapest way to make a later pass actually run,
+    // and it files the thread, so the pass is visibly a real one.
+    await harness.behavior.callRpc("setStatusOverride", {
+      threadId: "thr_1",
+      status: "done",
+    });
+    await settle(() => threads[0]!.sectionId === "sec_3");
+
+    // A reconcile runs on every brief write, so re-asserting our own order here
+    // would undo the drag within seconds of it being made.
+    expect(prefs.manualSectionOrder).toEqual(dragged);
+    expect(
+      harness.sdk
+        .callsTo("plugins.callRpc")
+        .map(([args]) => args as { method: string; input?: { key?: string } })
+        .filter(
+          (args) =>
+            args.method === "setPreference" &&
+            args.input?.key === "manualSectionOrder",
+        ),
+    ).toHaveLength(1);
+
+    await harness.lifecycle.dispose();
+    // Two reconciles, each behind the debounce, so this one needs the room.
+  }, 15_000);
 
   it("files each thread by its brief's status and leaves briefless ones alone", async () => {
     const threads = [

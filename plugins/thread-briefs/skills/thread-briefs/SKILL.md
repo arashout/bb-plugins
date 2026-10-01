@@ -35,7 +35,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | `renameThreads` | `false` | `true` renames each thread to the short name its brief chose. See [Thread titles](#thread-titles). |
 | `doneStaleHours` | `24` | Idle hours after which a `done` thread's ring goes grey instead of taking its project's colour. `0` keeps every done ring coloured. See [Stale done threads](#stale-done-threads). |
 | `doneArchiveHours` | `48` | Idle hours after which a `done` thread is archived. `0` turns auto-archiving off. See [Stale done threads](#stale-done-threads). |
-| `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. See [Sidebar sections](#sidebar-sections). |
+| `sidebarGrouping` | `off` | `status` groups the sidebar into status sections instead of by project; `off` restores it. Reordering the sections by hand sticks. See [Sidebar sections](#sidebar-sections). |
 
 The key is a secret setting, so it stays on the server and is never sent to the
 frontend.
@@ -703,6 +703,15 @@ Threads last is the design, not an oversight. A thread with no brief is left
 set — including a thread created since the last sync, which needs no sync to
 appear. Hiding it would lose threads, so don't add `threads` to `hiddenGroups`.
 
+That order is only the **default**. Reorder the sections in the sidebar — drag
+them, or write `manualSectionOrder` yourself — and the sync leaves your order
+alone from then on: an order holding the same entries is treated as correct
+however it is arranged, whichever way up `threads` sits. The default order only
+decides where a *new* entry lands, inserted after the last entry the default
+puts above it rather than appended, so a section added later shows up beside its
+siblings. An entry the sync does not own — a retired section, a duplicate — is
+dropped the next time it has to write the order at all.
+
 There is **no section for running threads**. `working` is live state and never
 reaches a stored brief, so a section keyed on it could not have members; a
 running thread sits where its last brief puts it and keeps bb's own running
@@ -714,7 +723,9 @@ What the sync owns, and hands back on `off`:
 - the three sections — deleted on `off`, which clears their assignments
 - `organizationMode` → `chronological`
 - `chronologicalSort` → `updated` (newest first inside each section)
-- `manualSectionOrder` → pinned, the three sections, then `threads`
+- `manualSectionOrder` → pinned, the three sections, then `threads`, but only
+  while the stored order is missing an entry; a reordering of the same entries is
+  yours and is never overwritten
 
 Prior values are recorded before the first write and restored on `off`; a
 preference bb had never been given is reset rather than guessed at, because
@@ -737,6 +748,10 @@ no preference writes.
 - Sections exist but the sidebar still groups by project: check
   `bb thread-list prefs get organizationMode`. Something changed it back after
   the sync; the next reconcile will set it again.
+- A section order that reverts: expected only up to the first pass after a
+  section is added or retired, which is the one pass that rewrites the order. A
+  drag that reverts on *every* brief write is a bug — the sync compares entry
+  sets, not arrangements.
 - No glyphs at all, but the Brief panel works: the bb client predates
   `experimental_setThreadRowStatus`, which the content script feature-detects.
 - A lightning bolt where a ring should be: that is bb's `Zap` fallback for an

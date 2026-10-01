@@ -40,7 +40,7 @@ import {
 } from "./summarize.js";
 import { endsWithQuestion, renderTranscript, type OutlineItem } from "./transcript.js";
 import {
-  manualSectionOrder,
+  mergeSectionOrder,
   planAssignments,
   planSections,
   sectionNameForStatus,
@@ -118,6 +118,12 @@ const GROUPED_PREFS = {
   chronologicalSort: "updated",
 } as const;
 
+/** The `thread-list` preference holding the sidebar's section order. */
+const ORDER_PREF = "manualSectionOrder";
+
+/** Every preference the grouping can write, and so has to put back. */
+const RESTORED_PREFS: readonly string[] = [...Object.keys(GROUPED_PREFS), ORDER_PREF];
+
 /** What the grouping changed, recorded before the first write. */
 interface SidebarGroupingState {
   applied: boolean;
@@ -188,7 +194,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "select",
       label: "Group sidebar threads by brief status",
       description:
-        '"status" replaces the sidebar\'s project grouping with Waiting on you / Blocked / Done sections, newest first inside each. "off" puts the previous grouping back and removes the sections.',
+        '"status" replaces the sidebar\'s project grouping with Waiting on you / Blocked / Done sections, newest first inside each. Reorder the sections in the sidebar and that order is kept. "off" puts the previous grouping back and removes the sections.',
       options: ["off", "status"],
       default: "off",
     },
@@ -922,7 +928,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const id of ours) {
       await bb.sdk.threadSections.delete({ id });
     }
-    for (const key of [...Object.keys(GROUPED_PREFS), "manualSectionOrder"]) {
+    for (const key of RESTORED_PREFS) {
       const previous = state.previous?.[key];
       // Reset rather than guess when we never saw a prior value: thread-list
       // owns its own defaults and they can change without us.
@@ -956,17 +962,26 @@ export default async function plugin(bb: BbPluginApi) {
 
     const sections = await ensureSections();
     const sectionIds = new Map(sections.map(({ name, id }) => [name, id]));
+    const prefs = await readThreadListPrefs();
+    // null when the stored order already holds our sections in some order of
+    // its own: a hand-drag in the sidebar outranks our top-to-bottom default.
+    const order = mergeSectionOrder(
+      prefs[ORDER_PREF],
+      sections.map(({ id }) => id),
+    );
     const desired: Record<string, JsonValue> = {
       ...GROUPED_PREFS,
-      manualSectionOrder: manualSectionOrder(sections.map(({ id }) => id)),
+      ...(order === null ? {} : { [ORDER_PREF]: order }),
     };
 
-    const prefs = await readThreadListPrefs();
     if (!state.applied) {
       await bb.storage.kv.set(SIDEBAR_STATE_KEY, {
         applied: true,
+        // The order pref is snapshotted whether or not we are writing it this
+        // pass: teardown restores every key we own, and on a first apply that
+        // leaves the order alone we still have to remember what it was.
         previous: Object.fromEntries(
-          Object.keys(desired).map((key) => [key, prefs[key] ?? null]),
+          RESTORED_PREFS.map((key) => [key, prefs[key] ?? null]),
         ),
       });
     }
