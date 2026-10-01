@@ -446,13 +446,13 @@ export function createDeckBatches(deps: DeckBatchDeps) {
       }
       return out;
     },
-    /** The newest Address item on each PR in the last day, with what dispatch said of it: a PR's Sent reads it beside its claim. */
+    /** The newest Address item on each PR in the last day, with what dispatch said of it: a PR's Sent reads it beside its batch thread. */
     addressed(): Map<string, SentItem> {
       const out = new Map<string, SentItem>();
       const rows = db.prepare(`SELECT id, created_at, state, dispatch_at, body FROM deck_batches WHERE state IN ('scheduled', 'dispatching', 'done') AND created_at >= ?
         ORDER BY dispatch_at`).all(deps.now() - ACTED_MS);
       for (const batch of rows.map(parse)) for (const item of batch!.items) if (item.kind === "address") out.set(item.prUrl, { detail: item.detail, batchId: batch!.id,
-        state: item.state !== "pending" ? item.state : batch!.state === "scheduled" ? "queued" : "sending", confirmedAt: batch!.dispatchAt! - SEND_DELAY_MS });
+        state: item.state !== "pending" ? item.state : batch!.state === "scheduled" ? "queued" : "sending" });
       return out;
     },
     dispose(): void {

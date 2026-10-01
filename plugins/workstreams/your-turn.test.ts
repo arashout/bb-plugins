@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
 import { parsePrList } from "./gh.js";
 import { attentionReasons, DEFAULT_ATTENTION_THRESHOLDS } from "./pr-attention.js";
-import { dismissed, sentState, sentText, turnOf, yourTurn, type Sent, type SentItem, type SentRun, type Turn, type TurnFacts } from "./your-turn.js";
+import { atWork, dismissed, sentState, sentText, turnOf, yourTurn, type Sent, type SentItem, type SentLink, type SentThread, type Turn, type TurnFacts }
+  from "./your-turn.js";
 
 const NOW = Date.UTC(2026, 8, 29, 15);
 const at = (hour: number) => new Date(Date.UTC(2026, 8, 29, hour)).toISOString();
@@ -138,6 +139,7 @@ describe("where a PR lists", () => {
       [{ sent: sent("sending") }, "turn", "A write on it is waiting or just ran."],
       [{ sent: sent("idle") }, "turn", true],
       [{ sent: sent("refused") }, "turn", true],
+      [{ sent: sent("failed") }, "turn", true],
       [{ hold: true }, "held", "On hold. Release it first."],
       [{ pile: "held" }, "held", "Its effort is on hold."],
       // A done or archived effort's PR still lists, as All PRs shows it, but nothing writes to it.
@@ -151,35 +153,45 @@ describe("where a PR lists", () => {
   });
 });
 
-// A sent PR's one link reads its batch item while the batch waits or was refused, else its newest claim and BB's status for that thread.
-// The link outlives the claim for as long as the PR is open; only a newer batch replaces it.
+// A sent PR's one link is the thread its Address started, stored once when that start returned: its batch item while the batch waits or
+// was refused, else that thread with BB's status for it. Which batch a thread belongs to is stored, never told from times (dde6814). The
+// link outlives the thread for as long as the PR is open; only a newer batch's thread replaces it.
 describe("a sent PR", () => {
-  const T = 1_000_000;
-  const item = (state: SentItem["state"], detail: string | null = null): SentItem => ({ state, detail, batchId: "b-2", confirmedAt: T });
-  const run = (status: string, startedAt = T + 8_000): SentRun => ({ threadId: "thr-1", status, startedAt });
+  const item = (state: SentItem["state"], detail: string | null = null): SentItem => ({ state, detail, batchId: "b-2" });
+  const link = (threadId = "thr-1", batchId: string | null = "b-2"): SentLink => ({ threadId, batchId });
+  const thread = (status: string, patch: Partial<SentThread> = {}): SentThread => ({ title: "Address feedback: catalog #96", status, waiting: false, error: null, ...patch });
   const shown = (sent: Sent | null) => sent && [sent.state, sent.threadId, sentText(sent)];
-  const thread = (active: boolean) => ({ title: "Address feedback: catalog #96", active });
 
   it("shows Sending with Undo, then its thread with BB's live status, and keeps the link after the thread ends", () => {
     expect(shown(sentState(item("queued"), null, null))).toEqual(["sending", null, "Sending"]);
     expect(sentState(item("queued"), null, null)?.batchId).toBe("b-2");
     expect(sentState(item("sending"), null, null)?.batchId).toBeNull();
-    expect(shown(sentState(item("sent"), run("running"), thread(true)))).toEqual(["working", "thr-1", "Working"]);
-    expect(shown(sentState(item("sent"), run("needs-you"), thread(false)))).toEqual(["needs-you", "thr-1", "Needs you"]);
-    // The claim ended, however it ended: the link stays, and BB says whether the thread works again.
-    for (const status of ["done", "failed"]) {
-      expect(shown(sentState(item("sent"), run(status), thread(false)))).toEqual(["idle", "thr-1", "Idle"]);
-      expect(shown(sentState(null, run(status), thread(true)))).toEqual(["working", "thr-1", "Working"]);
-    }
-    expect(sentState(null, run("done"), null)).toMatchObject({ state: "idle", threadId: "thr-1", title: null });
+    // Starting and pending are BB queueing or starting its turn, as a thread not listed yet a moment after its start reads.
+    for (const status of ["active", "starting", "pending"]) expect(shown(sentState(item("sent"), link(), thread(status)))).toEqual(["working", "thr-1", "Working"]);
+    // However many PRs its batch took, a thread asking you something needs you.
+    expect(shown(sentState(item("sent"), link(), thread("active", { waiting: true })))).toEqual(["needs-you", "thr-1", "Needs you"]);
+    expect(shown(sentState(item("sent"), link(), thread("error", { error: "Provider overloaded" })))).toEqual(["failed", "thr-1", "Failed: Provider overloaded"]);
+    expect(shown(sentState(item("sent"), link(), thread("error")))).toEqual(["failed", "thr-1", "Failed"]);
+    expect(shown(sentState(item("sent"), link(), thread("idle")))).toEqual(["idle", "thr-1", "Idle"]);
+    // Its batch item gone after a day, the link stays and BB says whether the thread works again; a thread BB no longer lists keeps it too.
+    expect(shown(sentState(null, link(), thread("active")))).toEqual(["working", "thr-1", "Working"]);
+    expect(sentState(null, link(), null)).toMatchObject({ state: "idle", threadId: "thr-1", title: null });
   });
 
-  // A refused batch started nothing, so the older thread it would have replaced stays linked beside the reason.
-  it("says why dispatch refused it beside an older thread's link, and lets a newer batch replace that link", () => {
-    const old = run("done", T - 3_600_000);
-    expect(shown(sentState(item("refused", "On hold. Release it first."), old, thread(false)))).toEqual(["refused", "thr-1", "Not sent: On hold. Release it first."]);
-    expect(shown(sentState(item("refused", "On hold. Release it first."), null, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
-    expect(shown(sentState(item("queued"), old, null))).toEqual(["sending", null, "Sending"]);
-    expect(shown(sentState(item("unknown", "The plugin restarted"), { ...run("running"), threadId: "thr-2" }, thread(true)))).toEqual(["working", "thr-2", "Working"]);
+  it("holds its PR only while its thread works or asks you something", () => {
+    expect(["active", "starting", "pending", "stopping", "idle", "error"].map((status) => atWork(thread(status)))).toEqual([true, true, true, true, false, false]);
+    expect([atWork(thread("active", { waiting: true })), atWork(null)]).toEqual([true, false]);
+  });
+
+  // A refused batch started nothing, so the older thread it would have replaced stays linked beside the reason, an older build's included.
+  it("says why dispatch refused it beside an older batch's thread, and lets a newer batch replace that link", () => {
+    const refused = item("refused", "On hold. Release it first.");
+    expect(shown(sentState(refused, link("thr-1", "b-1"), thread("idle")))).toEqual(["refused", "thr-1", "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(refused, link("thr-1", null), thread("active")))).toEqual(["refused", "thr-1", "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(refused, null, null))).toEqual(["refused", null, "Not sent: On hold. Release it first."]);
+    expect(shown(sentState(item("queued"), link("thr-1", "b-1"), null))).toEqual(["sending", null, "Sending"]);
+    // A reload cut its start off: the thread BB made is its own batch's link once recovery finds it, else it reads as not sent.
+    expect(shown(sentState(item("unknown", "The plugin restarted"), link("thr-2"), thread("active")))).toEqual(["working", "thr-2", "Working"]);
+    expect(shown(sentState(item("unknown", "The plugin restarted"), link("thr-1", "b-1"), thread("idle")))).toEqual(["refused", "thr-1", "Not sent: The plugin restarted"]);
   });
 });

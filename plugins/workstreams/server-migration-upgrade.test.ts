@@ -264,8 +264,16 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends effort notes after where a moved PR came from", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 67 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 67 ORDER BY id").all())
       .toEqual([{ id: 67, hash: statementHash(EFFORT_NOTES_MIGRATION) }]);
+    await harness.lifecycle.dispose();
+  });
+  // A new table only: the live build, rolled back to, never reads it and still reads every row it wrote.
+  it("appends batch thread links after effort notes", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions);
+    await plugin(bb);
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 68 ORDER BY id").all())
+      .toEqual([{ id: 68, hash: statementHash("CREATE TABLE IF NOT EXISTS pr_threads (pr_url TEXT NOT NULL, thread_id TEXT NOT NULL, batch_id TEXT, linked_at INTEGER NOT NULL, PRIMARY KEY (pr_url, thread_id))") }]);
     await harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {

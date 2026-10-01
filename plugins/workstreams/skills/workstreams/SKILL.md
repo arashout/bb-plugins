@@ -449,8 +449,9 @@ approval notes you answered one to confirm; neither is `yourTurn`. All PRs
 lists it as Your turn, and the badge counts it, unless a thread other than its
 own batch thread is working on it, you or its effort hold it, or you dismissed
 it on this head (`dismissed`), whatever button its row leads with. `sent`
-links the newest batch thread that took it, with BB's status for it, and keeps
-it on Your turn while that thread works. The header counts PRs forgotten in
+links the newest batch thread that took it, with BB's status for it (working,
+needs you, failed with why, or idle), and keeps it on Your turn while that
+thread works. The header counts PRs forgotten in
 draft, missing a reviewer, and needing a nudge; `--attention` filters to one
 question. The `inventory_get` RPC returns the same view, and the
 `inventory-changed` realtime event fires after each read, hold, or inventory
@@ -695,10 +696,12 @@ worker titled by its PRs ("Address feedback: quill #210, #211 · folio #301", wi
 addresses each PR's review feedback in turn, in its checkout or in a
 worktree it adds with `git worktree add` beside that repository checkout
 (reusing one already on the head branch, never a fresh clone), replies to each note,
-never merges, and ends with a plain report per PR. Agent
-and thread starts refuse a PR or checkout a claim holds; the claims end when
-the thread finishes, and each PR's result is kept on its run. A result clears
-nothing: only a reply on the PR or your Confirm does. `each` sends Ask or Fix
+never merges, and ends with a plain report per PR. Once
+the worker starts, each PR is linked to it (`pr_threads`) for as long as the
+PR is open, whatever the run log prunes. Agent and thread starts refuse a PR or
+checkout a claim holds until the start returns, then while the thread works or
+asks you something. A result clears nothing: only a reply on the PR or your
+Confirm does. `each` sends Ask or Fix
 to each PR's own thread, and skips a PR with none.
 
 `deck_batch_start` confirms a plan within 10 minutes of it, while each of its

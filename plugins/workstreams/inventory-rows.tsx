@@ -30,7 +30,7 @@ export type SimpleRowsProps = {
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]";
 
-const SENT_TONE: Record<Sent["state"], keyof typeof TONE> = { sending: "gray", refused: "red", working: "blue", "needs-you": "amber", idle: "gray" };
+const SENT_TONE: Record<Sent["state"], keyof typeof TONE> = { sending: "gray", refused: "red", working: "blue", "needs-you": "amber", failed: "red", idle: "gray" };
 /** A sent PR's link to its thread with BB's status for it, grey off Your turn; Sending's is Undo instead, and a refusal says why. */
 function SentChip({ sent, quiet, onOpenThread, onUndo }: { sent: Sent; quiet: boolean; onOpenThread(id: string): void; onUndo?(batchId: string): void }) {
   const text = sentText(sent);

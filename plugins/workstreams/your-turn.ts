@@ -106,33 +106,36 @@ export const dismissed = (dismissal: Dismissal | null | undefined, head: string 
  * Where the newest Address batch sent a PR, and how its thread stands now: waiting out its Undo window, refused by dispatch, or its
  * thread's live status. The link stays for as long as the PR is open, a refusal's included, until a newer batch's thread takes it.
  */
-export const SENT_STATES = ["sending", "refused", "working", "needs-you", "idle"] as const;
+export const SENT_STATES = ["sending", "refused", "working", "needs-you", "failed", "idle"] as const;
 export const sentSchema = z.object({
   state: z.enum(SENT_STATES), threadId: z.string().nullable(), title: z.string().nullable(),
-  /** Why dispatch refused it. */
+  /** Why dispatch refused it, or why its thread failed. */
   detail: z.string().nullable(),
   /** The batch still in its Undo window, which Undo takes back. */
   batchId: z.string().nullable(),
 }).strict();
 export type Sent = z.infer<typeof sentSchema>;
-/** The PR's newest Address item: its state, the batch's, and when the batch was confirmed. */
-export type SentItem = { state: "queued" | "sending" | "sent" | "refused" | "unknown"; detail: string | null; batchId: string; confirmedAt: number };
-/** The PR's newest batch-thread claim, and its thread as BB lists it now. */
-export type SentRun = { threadId: string | null; status: string; startedAt: number };
+/** The PR's newest Address item: its state, its batch, and what dispatch said. */
+export type SentItem = { state: "queued" | "sending" | "sent" | "refused" | "unknown"; detail: string | null; batchId: string };
+/** The PR's newest batch thread, stored when its start returned, and the batch that started it; null for an earlier build's. */
+export type SentLink = { threadId: string; batchId: string | null };
+/** That thread as BB lists it now: its status, whether it asks you something, and why it failed. Null once BB lists it no more. */
+export type SentThread = { title: string | null; status: string; waiting: boolean; error: string | null };
+/** BB's statuses for a thread starting, at work, or stopping: queued counts. */
+const AT_WORK: ReadonlySet<string> = new Set(["starting", "pending", "active", "stopping"]);
+/** A batch thread holds its PRs while it works or asks you something. */
+export const atWork = (thread: SentThread | null): boolean => !!thread && (thread.waiting || AT_WORK.has(thread.status));
 
-/** A PR's Sent from its newest Address item, its newest claim, and that claim's thread. */
-export function sentState(item: SentItem | null, run: SentRun | null, thread: { title: string | null; active: boolean } | null): Sent | null {
+/** A PR's Sent from its newest Address item, its newest batch thread, and that thread as BB lists it. */
+export function sentState(item: SentItem | null, link: SentLink | null, thread: SentThread | null): Sent | null {
   const none = { threadId: null, title: null, detail: null, batchId: null };
   if (item?.state === "queued" || item?.state === "sending") return { ...none, state: "sending", batchId: item.state === "queued" ? item.batchId : null };
-  // A claim started after the batch was confirmed is this batch's; without one, dispatch refused it or was cut off before claiming.
-  // A refusal keeps an older claim's thread linked.
-  const claimed = run !== null && (!item || run.startedAt >= item.confirmedAt);
-  const link = { threadId: run?.threadId ?? null, title: thread?.title ?? null };
-  if (item && !claimed && (item.state === "refused" || item.state === "unknown")) return { ...none, ...link, state: "refused", detail: item.detail };
-  if (!run) return null;
-  // An open claim is its thread at work or asking you; once it ends, BB's own word for the thread.
-  const state = run.status === "needs-you" ? "needs-you" : run.status === "running" || thread?.active ? "working" : "idle";
-  return { ...none, ...link, state };
+  const linked = { threadId: link?.threadId ?? null, title: thread?.title ?? null };
+  // Its batch started no thread: dispatch refused it, or a reload cut its start off and BB made none. An older batch's thread stays linked.
+  if (item && link?.batchId !== item.batchId && (item.state === "refused" || item.state === "unknown")) return { ...none, ...linked, state: "refused", detail: item.detail };
+  if (!link) return null;
+  if (atWork(thread)) return { ...none, ...linked, state: thread!.waiting ? "needs-you" : "working" };
+  return thread?.status === "error" ? { ...none, ...linked, state: "failed", detail: thread.error } : { ...none, ...linked, state: "idle" };
 }
 
 /** A Sent's words. Sending's Undo is the row's own button. */
@@ -142,6 +145,7 @@ export function sentText(sent: Sent): string {
     case "refused": return `Not sent: ${sent.detail ?? "refused"}`;
     case "working": return "Working";
     case "needs-you": return "Needs you";
+    case "failed": return sent.detail ? `Failed: ${sent.detail}` : "Failed";
     case "idle": return "Idle";
   }
 }

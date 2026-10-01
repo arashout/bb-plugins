@@ -144,7 +144,7 @@ import {
 } from "./threads.js";
 import { startThread, type SpawnSdk } from "./spawn.js";
 import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
-import { dismissalSchema, sentState, turnOf, yourTurn, type Dismissal, type Sent } from "./your-turn.js";
+import { atWork, dismissalSchema, sentState, turnOf, yourTurn, type Dismissal, type Sent, type SentThread } from "./your-turn.js";
 import { MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
 import { sendRowMessage } from "./threadmessage.js";
 import { archiveLinkedThread, restoreArchivedThread, archiveRecordSchema, ARCHIVE_HISTORY_LIMIT, type ArchiveStore } from "./threadarchive.js";
@@ -579,6 +579,8 @@ export const MIGRATIONS = [
   APPROVAL_CONFIRMATION_AUDIT_MIGRATION,
   EFFORT_ASSIGNMENT_FROM_MIGRATION,
   EFFORT_NOTES_MIGRATION,
+  // The thread each Address batch started, on each PR it took, stored once when its start returns: the run log, pruned at 200, once held it.
+  `CREATE TABLE IF NOT EXISTS pr_threads (pr_url TEXT NOT NULL, thread_id TEXT NOT NULL, batch_id TEXT, linked_at INTEGER NOT NULL, PRIMARY KEY (pr_url, thread_id))`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -723,6 +725,18 @@ export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
   const runs = createRunStore(db);
+  /** Links a batch thread to a PR it took, once: with the batch that started it, or none when only an earlier build's run log names it. */
+  const linkPrThread = (prUrl: string, threadId: string, batchId: string | null, at: number) =>
+    db.prepare(`INSERT OR IGNORE INTO pr_threads (pr_url, thread_id, batch_id, linked_at) VALUES (?, ?, ?, ?)`).run(prWorkItemKey(prUrl), threadId, batchId, at);
+  /** Every PR's batch threads, oldest first. */
+  const prThreads = () => db.prepare(`SELECT pr_url AS prUrl, thread_id AS threadId, batch_id AS batchId, linked_at AS linkedAt FROM pr_threads
+    ORDER BY linked_at, rowid`).all() as { prUrl: string; threadId: string; batchId: string | null; linkedAt: number }[];
+  /** Each PR's newest batch thread. */
+  const newestPrThreads = () => new Map(prThreads().map((link) => [link.prUrl, link]));
+  /** Whether this thread is a batch thread, whose asking you its PRs' rows show. */
+  const batchThreadId = (threadId: string) => db.prepare(`SELECT 1 FROM pr_threads WHERE thread_id = ?`).get(threadId) !== undefined;
+  // An earlier build, before this one or rolled back to, left its batch threads' links in the run log only.
+  for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && run.prUrl && run.threadId) linkPrThread(run.prUrl, run.threadId, null, run.startedAt);
   const approvalFeedback = createApprovalFeedbackStore(db);
   /** Legacy Advance's saved jobs: history for thread links and All PRs, which holds no PR. */
   const advance = createAdvanceHistory(db);
@@ -1783,6 +1797,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         for (const [threadId, urls] of threadPrUrls) for (const url of urls) offer(url, threadId, "metadata", "pr", "Linked PR thread");
         for (const run of runs.recent(0, 1_000)) if (run.prUrl) offer(run.prUrl, run.threadId, "run", "pr", "Previous PR action");
+        for (const link of prThreads()) offer(link.prUrl, link.threadId, "run", "pr", "Previous PR action");
         for (const batch of advance.list()) for (const job of batch.jobs) {
           offer(job.prUrl, job.threadId, "advance", "pr", "Advance worker");
           for (const attempt of job.previousAttempts) offer(job.prUrl, attempt.threadId, "advance", "pr", "Previous Advance worker");
@@ -1926,6 +1941,12 @@ export default async function plugin(bb: BbPluginApi) {
   /** Every visible, unarchived thread, with the paths its recent events worked in. */
   let threadFacts = new Map<string, ThreadFacts>();
   let threadEnvironments = new Map<string, string | null>();
+  /** Threads asking you something, which BB's status leaves out: from its list, and its events since. */
+  let waiting = new Set<string>();
+  /** Why each failed thread failed, from its event: BB's list doesn't say. */
+  const failures = new Map<string, string | null>();
+  /** When the last thread list that answered began: a batch thread linked before it that the list left out is gone, not yet to come. */
+  let listedFrom = Number.NEGATIVE_INFINITY;
   const intentNotes = new Map<string, string>();
   const intentEpoch = new Map<string, number>();
   let intentEvidenceVersion = 0;
@@ -2177,6 +2198,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       // The threads open runs were bound to before this list began: one it leaves out is gone, not merely newer than the list.
       const bound = new Set(runs.openThreadIds());
+      const began = Date.now();
       const pageSize = 500;
       const maxPages = 21; // Twenty full pages, plus one to confirm there are no more.
       const rows = [] as Awaited<ReturnType<typeof bb.sdk.threads.list>>[number][];
@@ -2211,6 +2233,8 @@ export default async function plugin(bb: BbPluginApi) {
         ]),
       );
       threadEnvironments = new Map(rows.map((row) => [row.id, row.environmentId]));
+      waiting = new Set(rows.filter((row) => row.hasPendingInteraction).map((row) => row.id));
+      listedFrom = began;
       prFreshnessLinks.add("");
       bb.log.info(
         `threads: ${rows.length} listed, ${refreshed.read} event logs read, ${refreshed.reused} unchanged, ${refreshed.failed} skipped`,
@@ -2276,10 +2300,12 @@ export default async function plugin(bb: BbPluginApi) {
     onThreadChanged(thread, false).catch(onThreadError);
   });
   bb.events.on("thread.active", ({ thread }) => {
+    failures.delete(thread.id);
     signalRuns(thread.id, { kind: "active" });
     onThreadChanged(thread, false).catch(onThreadError);
   });
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
+    waiting.delete(thread.id);
     signalRuns(thread.id, { kind: "idle", text: lastAssistantText });
     onThreadChanged(thread, true).then(() => {
       prFreshnessLinks.add(thread.id);
@@ -2287,6 +2313,8 @@ export default async function plugin(bb: BbPluginApi) {
     }).catch(onThreadError);
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
+    waiting.delete(thread.id);
+    failures.set(thread.id, error);
     signalRuns(thread.id, { kind: "failed", text: null, error });
     onThreadChanged(thread, true).catch(onThreadError);
   });
@@ -2295,6 +2323,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.archived", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
+    waiting.delete(thread.id);
     signalRuns(thread.id, { kind: "gone", reason: "Thread archived" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2302,6 +2331,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.deleted", ({ thread }) => {
     intentEpoch.set(thread.id, (intentEpoch.get(thread.id) ?? 0) + 1);
+    waiting.delete(thread.id);
     signalRuns(thread.id, { kind: "gone", reason: "Thread deleted" });
     threadEnvironments.delete(thread.id);
     prFreshnessLinks.add("");
@@ -2309,17 +2339,22 @@ export default async function plugin(bb: BbPluginApi) {
   });
   // A pending interaction IS an event: the agent is waiting on the user.
   bb.events.on("interaction.pending", ({ thread }) => {
+    waiting.add(thread.id);
+    if (batchThreadId(thread.id)) announceThreads();
     signalRuns(thread.id, { kind: "pending" });
   });
   // There is no "interaction answered" event, and the event DTO carries no
   // pending flag. The thread's event sequence does advance when the user
-  // answers, so a waiting run re-reads that one thread's interactions then.
+  // answers, so a waiting thread re-reads its interactions then.
   // Core coalesces this to at most once a second per thread; no polling.
   bb.events.on("experimental_thread.events", ({ thread }) => {
-    if (thread.status !== "active" || !runs.openIn(thread.id).some((run) => run.status === "needs-you")) return;
+    if (thread.status !== "active" || !waiting.has(thread.id)) return;
     bb.sdk.threads.interactions.list({ threadId: thread.id }).then(
       (pending) => {
-        if (pending.length === 0) signalRuns(thread.id, { kind: "settled" });
+        if (pending.length > 0) return;
+        waiting.delete(thread.id);
+        if (batchThreadId(thread.id)) announceThreads();
+        signalRuns(thread.id, { kind: "settled" });
       },
       (error: unknown) => bb.log.warn(`thread ${thread.id}: interaction read failed: ${String(error).slice(0, 200)}`),
     );
@@ -3866,10 +3901,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const manualPrWrites = new Set<string>();
-  /** An open run on this PR or checkout, of this action when named: the board's record of an agent at work there. */
-  const openRunOn = (prUrl: string | null, path: string | null, action?: string) => {
+  /** An open run on this PR or checkout: the board's record of an agent at work there. A batch thread holds its PRs through addressHolder. */
+  const openRunOn = (prUrl: string | null, path: string | null) => {
     const key = prUrl && prWorkItemKey(prUrl);
-    return runs.recent(0, 1_000).find((run) => isOpen(run.status) && (action === undefined || run.action === action) &&
+    return runs.recent(0, 1_000).find((run) => isOpen(run.status) && run.action !== ADDRESS_RUN &&
       ((key !== null && run.prUrl !== null && prWorkItemKey(run.prUrl) === key) || (path !== null && path !== "" && run.path === path))) ?? null;
   };
   // SDK spawn/send can return before thread events reach the board cache.
@@ -3877,8 +3912,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function withPrWriter<T>(path: string, prUrl: string | undefined, action: () => Promise<T>): Promise<T | { ok: false; error: string }> {
     const key = prUrl?.toLowerCase();
     if ((key && manualPrWrites.has(key)) || launchingCheckouts.has(path)) return { ok: false, error: "A batch or another action owns this PR or checkout." };
-    // A batch thread's claim holds the PR and its checkout until the thread finishes: no second agent starts beside it.
-    if (openRunOn(prUrl ?? null, path, ADDRESS_RUN)) return { ok: false, error: ADDRESSING };
+    // A batch thread holds the PR and its checkout while it works: no second agent starts beside it.
+    if (addressHolder(prUrl ?? null, path)) return { ok: false, error: ADDRESSING };
     if (key) manualPrWrites.add(key);
     try {
       const result = await action();
@@ -4000,7 +4035,7 @@ export default async function plugin(bb: BbPluginApi) {
     const current = read ?? await board();
     const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
-    const claims = addressClaims();
+    const claims = addressHeld();
     const sentOf = addressSent();
     const dismissals = await dismissed();
     const shared = (prUrl: string, pr: Pr | null = null) => ({ hold: prHoldFor(prUrl, current.prHolds),
@@ -4170,27 +4205,45 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Claims this load is starting a batch thread for; recovery leaves them to it. */
   const addressStarting = new Set<number>();
-  /** Each PR a batch thread's open claim holds, with that thread, by PR. */
-  function addressClaims(): Map<string, NonNullable<InventoryRow["addressing"]>> {
+  /**
+   * A PR's batch thread as BB lists it now, asking you something or why it failed. One the list leaves out is just started, not listed
+   * yet, while its link is newer than the last list and under two minutes old; else it's gone.
+   */
+  function batchThread(link: { threadId: string; linkedAt: number }): SentThread | null {
+    const facts = threadFacts.get(link.threadId);
+    if (facts) return { title: facts.title ?? facts.titleFallback ?? null, status: facts.status, waiting: waiting.has(link.threadId), error: failures.get(link.threadId) ?? null };
+    return link.linkedAt >= listedFrom && Date.now() - link.linkedAt < 120_000 ? { title: null, status: "starting", waiting: false, error: null } : null;
+  }
+  /**
+   * Each PR a batch thread holds, with that thread: its newest batch thread at work or asking you, or a claim whose start hasn't returned,
+   * with no thread yet, which a reload's recovery binds or drops. Synchronous, so a claim reads it in the same step it writes.
+   */
+  function addressHeld(): Map<string, NonNullable<InventoryRow["addressing"]>> {
     const out = new Map<string, NonNullable<InventoryRow["addressing"]>>();
-    for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && isOpen(run.status) && run.prUrl !== null) {
-      const facts = run.threadId ? threadFacts.get(run.threadId) : undefined;
-      out.set(prWorkItemKey(run.prUrl), { threadId: run.threadId, title: facts ? (facts.title ?? facts.titleFallback ?? null) : null });
+    for (const [prUrl, link] of newestPrThreads()) {
+      const thread = batchThread(link);
+      if (atWork(thread)) out.set(prUrl, { threadId: link.threadId, title: thread!.title });
+    }
+    for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && isOpen(run.status) && run.threadId === null && run.prUrl !== null) {
+      out.set(prWorkItemKey(run.prUrl), { threadId: null, title: null });
     }
     return out;
   }
+  /** The batch thread holding this PR, or the PR checked out at this path, or null. */
+  function addressHolder(prUrl: string | null, path: string | null): NonNullable<InventoryRow["addressing"]> | null {
+    const held = addressHeld();
+    return (prUrl ? held.get(prWorkItemKey(prUrl)) : undefined) ?? (path ? [...held].find(([url]) => prCheckout(url) === path)?.[1] : undefined) ?? null;
+  }
   /**
    * Where the newest Address batch sent each PR: its batch item while it waits out its window or when dispatch refused it, else its newest
-   * claim, open or ended, with that thread's link and BB's status for it now.
+   * batch thread, with BB's status for it now.
    */
   function addressSent(): (prUrl: string) => Sent | null {
     const items = deckBatches.addressed();
-    const latest = new Map<string, Run>();
-    for (const run of runs.recent(0, 1_000)) if (run.action === ADDRESS_RUN && run.prUrl !== null && !latest.has(prWorkItemKey(run.prUrl))) latest.set(prWorkItemKey(run.prUrl), run);
+    const links = newestPrThreads();
     return (prUrl) => {
-      const run = latest.get(prWorkItemKey(prUrl)) ?? null;
-      const facts = run?.threadId ? threadFacts.get(run.threadId) : undefined;
-      return sentState(items.get(prWorkItemKey(prUrl)) ?? null, run, facts ? { title: facts.title ?? facts.titleFallback ?? null, active: facts.status === "active" } : null);
+      const link = links.get(prWorkItemKey(prUrl)) ?? null;
+      return sentState(items.get(prWorkItemKey(prUrl)) ?? null, link, link && batchThread(link));
     };
   }
   /** Each Dismiss, by PR, from the plugin's KV: one key per PR, so no table holds them. */
@@ -4200,13 +4253,13 @@ export default async function plugin(bb: BbPluginApi) {
       .flatMap(([prUrl, read]) => read.success ? [[prUrl, read.data] as const] : []));
   }
   /**
-   * Why an agent or another action already holds this PR or its checkout, or null: an open run on either (a batch thread's claim among
-   * them), a board action in flight, a thread just asked to work on it, or an active thread in its checkout. Synchronous, so a claim
-   * reads it in the same step it writes.
+   * Why an agent or another action already holds this PR or its checkout, or null: an open run on either, a batch thread, a board action in
+   * flight, a thread just asked to work on it, or an active thread in its checkout. Synchronous, so a claim reads it in the same step it
+   * writes.
    */
   function agentOn(prUrl: string, path: string | null): string | null {
     const key = prWorkItemKey(prUrl);
-    if (openRunOn(prUrl, path)) return "An agent is already working on it.";
+    if (openRunOn(prUrl, path) || addressHolder(prUrl, path)) return "An agent is already working on it.";
     if (manualPrWrites.has(key) || (path !== null && launchingCheckouts.has(path))) {
       return "Another action owns it now.";
     }
@@ -4268,8 +4321,8 @@ export default async function plugin(bb: BbPluginApi) {
    * One batch thread for a confirmed Address listing. Each PR is read again first and must still show feedback waiting on you, on the head
    * its row showed, with no hold, paused effort, or agent on it or in its own thread. Then every PR left is checked again and
    * claimed in the board's run record, which every other writer reads, in one step with nothing awaited, before one worker starts on the
-   * code-work model in the listed project and parent. Its claims end when the thread finishes; a failed start drops them. A claim answers no
-   * feedback: only your reply on the PR does.
+   * code-work model in the listed project and parent. Once it starts, each PR is linked to it, and holds while it works; a failed start
+   * drops the claims. A claim answers no feedback: only your reply on the PR does.
    */
   async function dispatchAddress(batch: DeckBatch, items: readonly BatchItem[]): Promise<Map<string, ActionResult>> {
     const results = new Map<string, ActionResult>();
@@ -4337,8 +4390,11 @@ export default async function plugin(bb: BbPluginApi) {
           threads: { origin: ref(origin), executor: ref(executor) } };
       }));
       const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: place.projectId, title, prompt, environment: await contextWorkspace(hostId),
-        ...(place.parentThreadId ? { parentThreadId: place.parentThreadId } : {}), pluginMetadata: { role: ADDRESS_RUN, runIds: claimed.map(({ runId }) => runId) } });
-      for (const { runId } of claimed) runs.attach(runId, thread.id);
+        ...(place.parentThreadId ? { parentThreadId: place.parentThreadId } : {}),
+        pluginMetadata: { role: ADDRESS_RUN, batchId: batch.id, runIds: claimed.map(({ runId }) => runId) } });
+      const at = Date.now();
+      // The runs stay for one release, for a rollback's links.
+      for (const { runId, pr } of claimed) { runs.attach(runId, thread.id); linkPrThread(pr.url, thread.id, batch.id, at); }
       for (const { item } of claimed) results.set(item.prUrl, { ok: true, detail: `Started “${title}”.` });
       bb.log.info(`address batch ${batch.id}: thread ${thread.id} claims ${claimed.length} PR(s)`);
     } catch (error) {
@@ -4351,23 +4407,29 @@ export default async function plugin(bb: BbPluginApi) {
     return results;
   }
   /**
-   * A batch thread's claims that a reload cut off before its start returned: bound to the thread BB made, found by the claims its metadata
-   * names, or dropped when BB made none, since nothing works on those PRs then.
+   * A batch thread's claims that a reload cut off before its start returned: bound and linked to the thread BB made, found by the claims
+   * its metadata names, or dropped when BB made none, since nothing works on those PRs then.
    */
   async function recoverAddressClaims(): Promise<void> {
     const unbound = runs.recent(0, 1_000).filter((run) => run.action === ADDRESS_RUN && isOpen(run.status) && run.threadId === null && !addressStarting.has(run.id)
       && Date.now() - run.startedAt > 60_000);
     if (!unbound.length) return;
-    const owner = new Map<number, string>();
+    const owner = new Map<number, { threadId: string; batchId: string | null }>();
     for (let offset = 0; offset < 2_000; offset += 100) {
       const rows = await bb.sdk.threads.list({ originPluginId: bb.pluginId, includeHidden: true, limit: 100, offset });
       for (const thread of rows) {
         const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
-        if (metadata.role === ADDRESS_RUN && Array.isArray(metadata.runIds)) for (const id of metadata.runIds) if (typeof id === "number") owner.set(id, thread.id);
+        const batchId = typeof metadata.batchId === "string" ? metadata.batchId : null;
+        if (metadata.role === ADDRESS_RUN && Array.isArray(metadata.runIds)) for (const id of metadata.runIds) if (typeof id === "number") owner.set(id, { threadId: thread.id, batchId });
       }
       if (rows.length < 100) break;
     }
-    for (const run of unbound) { const threadId = owner.get(run.id); if (threadId) runs.attach(run.id, threadId); else runs.discard(run.id); }
+    for (const run of unbound) {
+      const found = owner.get(run.id);
+      if (!found) { runs.discard(run.id); continue; }
+      runs.attach(run.id, found.threadId);
+      if (run.prUrl) linkPrThread(run.prUrl, found.threadId, found.batchId, run.startedAt);
+    }
     bb.log.info(`address claims recovered: ${unbound.filter((run) => owner.has(run.id)).length} bound, ${unbound.filter((run) => !owner.has(run.id)).length} dropped`);
     announceThreads();
   }
@@ -4985,8 +5047,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const held = holdMessage(canonical);
       if (held) return { ok: false as const, error: held };
-      // A batch thread's claim holds the PR from before its thread exists, which the owners below can't name yet, until it finishes.
-      if (openRunOn(canonical, known.path, ADDRESS_RUN)) return { ok: false as const, error: ADDRESSING };
+      // A batch thread's claim holds the PR from before its thread exists, which the owners below can't name yet, and its thread while it works.
+      if (addressHolder(canonical, known.path)) return { ok: false as const, error: ADDRESSING };
       if (manualPrWrites.has(canonical)) return { ok: false as const, error: "Another action owns this PR." };
       manualPrWrites.add(canonical);
       try {

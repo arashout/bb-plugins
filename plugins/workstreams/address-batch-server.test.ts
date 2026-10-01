@@ -695,3 +695,63 @@ describe("the checks a batch thread's claims pass as it starts", () => {
     expect((await env.rows()).get(43)?.addressing?.threadId).toBe("thr-batch-1");
   });
 });
+
+// The thread an Address started is stored once, on each PR it took, when its start returns; how that thread stands is BB's word now. The
+// board's run log once carried both: a batch of more than one PR never read as asking you, a failure read as done with no reason, and 200
+// newer runs pruned the link away.
+describe("a batch thread's link", () => {
+  it("shows each PR of a 3-PR batch needing you when its thread asks, and its error once it fails, back to Address", async () => {
+    const env = await setup();
+    await confirm(env, (await env.plan([42, 43, 44].map(url))).batchId);
+    await env.refresh();
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, hasPendingInteraction: true } as never);
+    await env.harness.emitThreadEvent("interaction.pending", { thread: env.threads.get("thr-batch-1")!, interaction: {} as never });
+    await drain();
+    const asking = await env.rows();
+    for (const number of [42, 43, 44]) expect(asking.get(number)).toMatchObject({ section: "flight", addressing: { threadId: "thr-batch-1" },
+      sent: { state: "needs-you", threadId: "thr-batch-1" } });
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "error", hasPendingInteraction: false } as never);
+    await env.harness.emitThreadEvent("thread.failed", { thread: env.threads.get("thr-batch-1")!, error: "Provider overloaded" });
+    await vi.waitFor(async () => {
+      const failed = await env.rows();
+      for (const number of [42, 43, 44]) expect(failed.get(number)).toMatchObject({ addressing: null, turn: { list: "turn", addressable: true },
+        sent: { state: "failed", threadId: "thr-batch-1", detail: "Provider overloaded" } });
+    });
+  });
+
+  it("keeps a batch thread's link through 200 newer runs, and beside a newer batch dispatch refused", async () => {
+    const env = await setup();
+    await confirm(env, (await env.plan([url(43)])).batchId);
+    env.threads.set("thr-batch-1", { ...env.threads.get("thr-batch-1")!, status: "idle" });
+    await env.harness.emitThreadEvent("thread.idle", { thread: env.threads.get("thr-batch-1")!, lastAssistantText: "Replied." });
+    await vi.waitFor(() => expect(claims(env)).toEqual([[43, "done"]]));
+    // The run log keeps its newest 200: a week of merges prunes the batch's claim.
+    const runs = createRunStore(env.bb.storage.database() as never);
+    for (let index = 0; index < 200; index++) runs.recordDirect({ path: PATH, ticket: null, prUrl: url(45), prNumber: 45, action: "merge", ok: false,
+      text: "Not mergeable", startedAt: Date.now() });
+    expect(claims(env)).toEqual([]);
+    await env.refresh();
+    expect((await env.rows()).get(43)).toMatchObject({ addressing: null, sent: { state: "idle", threadId: "thr-batch-1" } });
+    expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
+    // A newer batch that dispatch refused started nothing, so the older thread stays linked beside why.
+    const said = await confirm(env, (await env.plan([url(43)])).batchId, () => env.rpc("pr_hold_set", { prUrl: url(43), held: true, reason: "Counter redesign" }));
+    await env.rpc("pr_hold_set", { prUrl: url(43), held: false });
+    await env.refresh();
+    expect((await env.rows()).get(43)?.sent).toEqual({ state: "refused", threadId: "thr-batch-1", title: "Address feedback: folio #43",
+      detail: said[0]!.replace(/^folio #43: refused: /u, ""), batchId: null });
+  });
+
+  // An earlier build, before a rollback or before this one, left its batch threads' links in the run log only: they still link, and a
+  // claim whose thread still works holds its PR.
+  it("keeps the links an earlier build's batch threads left in the run log", async () => {
+    const env = await setup();
+    env.add("thr-batch-old", { title: "Address feedback: folio #44, #45", status: "active" });
+    const runs = createRunStore(env.bb.storage.database() as never);
+    for (const number of [44, 45]) runs.attach(runs.begin({ path: "", ticket: null, prUrl: url(number), prNumber: number, action: "address-feedback",
+      mode: "new", threadId: null }), "thr-batch-old");
+    await env.restart();
+    await env.refresh();
+    expect((await env.rows()).get(44)).toMatchObject({ addressing: { threadId: "thr-batch-old" }, sent: { state: "working", threadId: "thr-batch-old" } });
+    expect((await env.plan([url(45)])).skipped.map((skip) => skip.reason)).toEqual(["An agent is already working on it."]);
+  });
+});

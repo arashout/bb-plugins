@@ -172,9 +172,9 @@ lists the keys. On other views, ⌘K goes to a view, and ? opens How this works.
   next to the other checkouts, so later scans reuse it. It never clones, so a
   PR whose repository has no local checkout stays out.
   Each sent PR links its thread with BB's status for it: Working, Needs you,
-  or Idle. The link stays while the PR is open, on Other open PRs once it
-  leaves Your turn. A PR it didn't send says why in one line. The deck's
-  selection offers the same.
+  Failed with why, or Idle. The link stays while the PR is open, on Other
+  open PRs once it leaves Your turn. A PR it didn't send says why in one
+  line. The deck's selection offers the same.
   **Other open PRs** follows, by effort; each row shows the PR's state
   and next step. A change request you answered with a push or a reply waits
   here with **Re-request @login**, and approval notes you answered wait here
