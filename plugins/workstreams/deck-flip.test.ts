@@ -34,6 +34,29 @@ describe("the deck as a stack", () => {
   });
 });
 
+describe("the stack's direction", () => {
+  // ] and → move right through the ring, so the cards they reach wait to the right of the card shown, and the one a flip forward takes away
+  // leaves to the left; a stack that peeked below, or a card that left to the right, would move against the arrows.
+  const shift = (transform: string | undefined) => {
+    const at = /translate(X|Y)?\((-?[\d.]+)px(?:, (-?[\d.]+)px)?\)/u.exec(transform ?? "");
+    if (!at) return { x: 0, y: 0 };
+    const [, axis, a, b] = at;
+    return axis === "Y" ? { x: 0, y: Number(a) } : { x: Number(a), y: Number(b ?? 0) };
+  };
+  it("sets each deeper card further right and never lower, and a flip forward sends the top card left as the next comes in from the right", () => {
+    const depths = [1, 2, 3, 4].map((depth) => shift(layerTransform(depth)));
+    expect(depths.map((at) => at.y)).toEqual([0, 0, 0, 0]);
+    expect(depths[0]!.x).toBeGreaterThan(0);
+    for (let depth = 1; depth < depths.length; depth++) expect(depths[depth]!.x).toBeGreaterThan(depths[depth - 1]!.x);
+    const forward = flipFrames(1, "slide"), back = flipFrames(-1, "slide");
+    expect(shift(forward.ghost.at(-1)!.transform as string).x).toBeLessThan(0);
+    expect(shift(forward.top[0]!.transform as string).x).toBeGreaterThan(0);
+    // Back retraces it: the previous card returns from the left, and the card on top sinks back to the right.
+    expect(shift(back.top[0]!.transform as string).x).toBeLessThan(0);
+    expect(shift(back.ghost.at(-1)!.transform as string).x).toBeGreaterThan(0);
+  });
+});
+
 describe("flipping through the deck", () => {
   // Where a flip lands never waits on its motion, so a burst can't lose or queue a press, and the motion never trails the key.
   it("ends a held ] on the card its presses reach, playing the first press and skipping the repeats rather than queueing them", () => {

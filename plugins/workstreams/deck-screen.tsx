@@ -152,39 +152,40 @@ function PilePopover({ pile, items, open, run }: { pile: "hold" | "done"; items:
   </PopoverPrimitive.Root>;
 }
 
-/** A pile's tiny stack, drawn like the deck's: three cards, each one behind a little lower and to the right. An empty pile is an outline. */
+/** A pile's tiny stack, drawn like the deck's: three cards, each one behind a little further right and smaller. An empty pile is an outline. */
 function PileCards({ empty }: { empty: boolean }) {
-  return <span aria-hidden data-deck-pile-cards={empty ? "empty" : "stacked"} className="relative inline-block h-[17px] w-3 shrink-0">
+  return <span aria-hidden data-deck-pile-cards={empty ? "empty" : "stacked"} className="relative inline-block h-[13px] w-3.5 shrink-0">
     {empty ? <i className="absolute left-0 top-0 h-[13px] w-2.5 rounded-[2.5px] border border-dashed border-border" />
-      : [2, 1, 0].map((depth) => <i key={depth} className="absolute left-0 top-0 h-[13px] w-2.5 rounded-[2.5px] border"
-        style={{ transform: `translate(${depth}px, ${depth * 2}px)`, background: `color-mix(in srgb, var(--background) ${100 - 6 * depth}%, #000)`,
+      : [2, 1, 0].map((depth) => <i key={depth} className="absolute left-0 top-0 h-[13px] w-2.5 origin-right rounded-[2.5px] border"
+        style={{ transform: `translateX(${depth * 2}px) scale(${1 - depth * 0.1})`, background: `color-mix(in srgb, var(--background) ${100 - 6 * depth}%, #000)`,
           borderColor: `color-mix(in srgb, var(--foreground) ${34 - 9 * depth}%, transparent)` }} />)}
   </span>;
 }
 
 // ---------------------------------------------------------------------------
-// The stack: the card shown on top, and the next few in the ring peeking out below it.
+// The stack: the card shown on top, and the next few in the ring peeking out to its right.
 // ---------------------------------------------------------------------------
 
 /**
- * The deck as a stack of cards: the one shown on top, over the next few a flip forward reaches, each lower, to the right, smaller, and darker,
- * with the next one's name on its edge, which flips to it. A flip draws the card it takes away in the ghost, over or under the top one
- * (deck-flip.ts); the ghost is otherwise empty. It's clipped at the top card's bottom edge, so a taller card taken away never hangs over the
- * edges or rows below, while its slide and tilt still show above and to the sides.
+ * The deck as a stack of cards: the one shown on top, over the next few a flip forward reaches, each further right, smaller, and darker, as
+ * → and ] move, with the next one's name up its edge, which flips to it. The deepest edge's room is a gutter on the right, inside the deck's
+ * width. A flip draws the card it takes away in the ghost, over or under the top one (deck-flip.ts); the ghost is otherwise empty. It's
+ * clipped at the top card's bottom edge, so a taller card taken away never hangs over the rows below, while its slide and tilt still show
+ * above and to the sides.
  */
 function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; children: ReactNode }) {
-  return <div className="mb-2.5" style={{ paddingBottom: LAYERS[behind.length]!.y }}>
+  return <div className="mb-2.5" style={{ paddingRight: LAYERS[behind.length]!.x }}>
     <div data-deck-stack className="relative isolate">
       {behind.map((chip, index) => { const depth = index + 1; return <div key={chip.id} data-deck-layer={depth} aria-hidden={depth > 1 || undefined}
-        className="absolute inset-0 origin-bottom rounded-[14px] border shadow-[0_1px_2px_rgb(0_0_0/0.08),0_4px_12px_-8px_rgb(0_0_0/0.35)]"
+        className="absolute inset-0 origin-right rounded-[14px] border shadow-[0_1px_2px_rgb(0_0_0/0.08),0_4px_12px_-8px_rgb(0_0_0/0.35)]"
         style={{ zIndex: 4 - depth, transform: layerTransform(depth), background: `color-mix(in srgb, var(--background) ${100 - 4 * depth}%, #000)`,
           borderColor: `color-mix(in srgb, var(--foreground) ${14 - 3 * depth}%, transparent)` }}>
         {depth === 1 ? <button type="button" tabIndex={-1} data-deck-peek={chip.id} onClick={() => run({ kind: "action", id: "next" })} title={`Next: ${chip.name} (] or →)`}
-          aria-label={`Next effort: ${chip.name}`} style={{ height: LAYERS[1].y }}
-          className="absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 rounded-b-[14px] px-4 text-[11px] leading-none text-muted-foreground hover:text-foreground">
-          {chip.id === "overview" ? null : <Dot color={chip.color} hollow={chip.service} />}<span className="truncate">{chip.name}</span></button> : null}
+          aria-label={`Next effort: ${chip.name}`} style={{ width: LAYERS[1].x }}
+          className="absolute inset-y-0 right-0 flex flex-col items-center gap-1.5 rounded-r-[14px] py-4 text-[11px] leading-none text-muted-foreground hover:text-foreground">
+          {chip.id === "overview" ? null : <Dot color={chip.color} hollow={chip.service} />}<span className="min-h-0 truncate [writing-mode:vertical-rl]">{chip.name}</span></button> : null}
       </div>; })}
-      <div data-deck-top className="relative z-[5] origin-bottom rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
+      <div data-deck-top className="relative z-[5] origin-right rounded-[14px] bg-background shadow-[0_1px_2px_rgb(0_0_0/0.2),0_8px_22px_-10px_rgb(0_0_0/0.6)]">{children}</div>
       <div data-deck-ghost aria-hidden className="pointer-events-none absolute inset-0" style={{ clipPath: "inset(-60px -60px 0 -60px)" }} />
     </div>
   </div>;

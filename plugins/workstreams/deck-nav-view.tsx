@@ -544,7 +544,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     const pileElement = rootRef.current?.querySelector<HTMLElement>(`[data-deck-pile="${move === "hold" ? "hold" : "done"}"]`);
     if (leaving && cardElement && pileElement && !reduced()) {
       const from = cardElement.getBoundingClientRect(), to = pileElement.getBoundingClientRect();
-      // It shrinks about its middle, where a flip scales it about its bottom edge.
+      // It shrinks about its middle, where a flip scales it about its right edge.
       const origin = "50% 50%";
       await cardElement.animate([{ transformOrigin: origin, transform: "none", opacity: 1 },
         { transformOrigin: origin, transform: `translate(${to.left - from.left - from.width / 2}px, ${to.top - from.top}px) scale(0.08) rotate(${move === "hold" ? -6 : 6}deg)`, opacity: 0.2 }],

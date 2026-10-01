@@ -333,14 +333,15 @@ describe("the effort deck's markup", () => {
   });
 
   // The card behind the top one is the one ] flips to, so its name on the visible edge says where the next flip lands, and clicking it goes there.
-  it("stacks the next efforts behind the card, each lower, smaller, and to the right, with the next one's name on its edge", () => {
+  it("stacks the next efforts behind the card, each further right and smaller, with the next one's name up its edge", () => {
     const html = pane(inkwellDeck(), SHELF);
     const layers = [...html.matchAll(/data-deck-layer="(\d)"([^>]*)>/gu)].map((match) => `${match[1]}${/aria-hidden="true"/u.test(match[2]!) ? " hidden" : ""} ${
       /transform:([^;"]+)/u.exec(match[2]!)![1]}`);
-    expect(layers).toEqual(["1 translate(3px, 16px) scale(0.98)", "2 hidden translate(6px, 22px) scale(0.96)", "3 hidden translate(9px, 27px) scale(0.94)"]);
+    expect(layers).toEqual(["1 translateX(14px) scale(0.98)", "2 hidden translateX(18px) scale(0.96)", "3 hidden translateX(22px) scale(0.94)"]);
     expect(html).toMatch(/<button type="button" tabindex="-1" data-deck-peek="effort-store-pickup" title="Next: Store pickup \(\] or →\)" aria-label="Next effort: Store pickup"/u);
-    // The deepest edge's room is kept below the stack, so the sections start after it and nothing overlaps them.
-    expect(html).toMatch(/<div class="mb-2.5" style="padding-bottom:27px"><div data-deck-stack="true"/u);
+    // The deepest edge's room is a gutter on the stack's right, inside the deck's width, and nothing peeks below, so the sections follow the card.
+    expect(html).toMatch(/<div class="mb-2.5" style="padding-right:22px"><div data-deck-stack="true"/u);
+    expect(html).not.toMatch(/padding-bottom/u);
     expect(html.indexOf("data-deck-top")).toBeLessThan(html.indexOf('data-deck-card="effort-shelf-order"'));
     // A flip fades the rows as one, and draws the card it takes away in the ghost, which is empty until then and never read aloud. The ghost
     // spans the top card and is clipped at its bottom edge only, so a taller card taken away can't paint over the rows below.
@@ -352,12 +353,12 @@ describe("the effort deck's markup", () => {
     expect(pane(inkwellDeck(), ONE_OFFS).match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe(FOLIO);
     const last = pane(inkwellDeck(), CATALOG);
     expect(last.match(/data-deck-peek="([^"]+)"/u)?.[1]).toBe("overview");
-    expect(last).toMatch(/data-deck-peek="overview" title="Next: Overview \(\] or →\)"[^>]*><span class="truncate">Overview<\/span><\/button>/u);
+    expect(last).toMatch(/data-deck-peek="overview" title="Next: Overview \(\] or →\)"[^>]*><span class="[^"]*\btruncate\b[^"]*">Overview<\/span><\/button>/u);
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none, { now: NOW })]));
     const two = pane(view, SHELF, { chips: stripChips([SHELF], cards, SHELF) });
     expect(two.match(/data-deck-layer=/gu)).toHaveLength(1);
-    expect(two).toMatch(/style="padding-bottom:16px"/u);
+    expect(two).toMatch(/style="padding-right:14px"/u);
   });
 
   it("says the card a flip landed on in one polite status line, and nothing until then", () => {
@@ -365,11 +366,13 @@ describe("the effort deck's markup", () => {
     expect(pane(inkwellDeck(), SHELF, { announce: "Shelf order" })).toMatch(/<p role="status" data-deck-announce="true" class="sr-only">Shelf order<\/p>/u);
   });
 
-  it("draws each pile as a tiny stack of cards, and an empty pile as an outline", () => {
+  it("draws each pile as a tiny stack of cards, each behind further right as the deck's are, and an empty pile as an outline", () => {
     const html = pane(inkwellDeck(), SHELF, { held: [] });
     const piles = [...html.matchAll(/data-deck-pile="(\w+)"[^>]*><span aria-hidden="true" data-deck-pile-cards="(\w+)"[^>]*>(.*?)<\/span>/gu)]
       .map((match) => `${match[1]} ${match[2]} ${match[3]!.match(/<i /gu)!.length}`);
     expect(piles).toEqual(["hold empty 1", "done stacked 3"]);
+    expect([...html.matchAll(/data-deck-pile-cards="stacked".*?<\/span>/gu)][0]![0].match(/transform:[^;"]+/gu))
+      .toEqual(["transform:translateX(4px) scale(0.8)", "transform:translateX(2px) scale(0.9)", "transform:translateX(0px) scale(1)"]);
     expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
   });
 

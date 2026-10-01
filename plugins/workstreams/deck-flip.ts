@@ -10,12 +10,15 @@
 // not at all, so nothing queues. This module imports nothing, so the browser
 // bundle and the preview script can both use it.
 
-/** Each depth's offset and scale about its bottom edge: 0 is the card on top, and 1–3 peek out below it, each lower, to the right, and smaller. */
-export const LAYERS = [{ x: 0, y: 0, scale: 1 }, { x: 3, y: 16, scale: 0.98 }, { x: 6, y: 22, scale: 0.96 }, { x: 9, y: 27, scale: 0.94 }] as const;
-/** Depth 4 and deeper is where a card enters the stack from, out of sight behind the deepest edge. */
+/**
+ * Each depth's offset and scale about its right edge: 0 is the card on top, and 1–3 peek out to its right, each further right and smaller, the
+ * way → and ] flip. The first edge is wide enough for the next card's name; the deepest's offset is the gutter the stack keeps on its right.
+ */
+export const LAYERS = [{ x: 0, scale: 1 }, { x: 14, scale: 0.98 }, { x: 18, scale: 0.96 }, { x: 22, scale: 0.94 }] as const;
+/** Depth 4 and deeper is where a card enters the stack from, out of sight beyond the deepest edge. */
 export const layerTransform = (depth: number) => {
-  const at = depth < LAYERS.length ? LAYERS[depth]! : { x: 12, y: 31, scale: 0.92 };
-  return depth ? `translate(${at.x}px, ${at.y}px) scale(${at.scale})` : "none";
+  const at = depth < LAYERS.length ? LAYERS[depth]! : { x: 26, scale: 0.92 };
+  return depth ? `translateX(${at.x}px) scale(${at.scale})` : "none";
 };
 
 /** The cards behind `cur`, in the order a flip forward reaches them, wrapping, at most three and never `cur` itself. */
@@ -35,7 +38,7 @@ export const REPEAT_MS = 150;
 /** Reduced motion's cross-fade. */
 export const FADE_MS = 120;
 export const EASE = "cubic-bezier(.2,.8,.2,1)";
-/** Where a flip forward sends the card on top, and where a flip back brings the previous card from. */
+/** Where a flip forward sends the card on top, and where a flip back brings the previous card from: to the left, away from the stack. */
 const AWAY = "translateX(-24px) rotate(-1.5deg)";
 const ID = "deck-flip";
 
@@ -84,12 +87,12 @@ export function flipFrames(direction: 1 | -1, kind: "slide" | "fade"): FlipFrame
   if (kind === "fade") return { top: [{ opacity: 0 }, { opacity: 1 }], ghost: [{ opacity: 1 }, { opacity: 0 }], ghostOver: true, rows, layer: () => null };
   const forward = direction > 0;
   return {
-    // Forward, the card on top slides and tilts away as the next one rises out of the stack. Back reverses it: the previous card returns
-    // from where forward sent it, over the one on top, which sinks back into the stack.
+    // Forward, the card on top slides and tilts away to the left as the next one rises out of the stack on its right. Back reverses it: the
+    // previous card returns from the left, where forward sent it, over the one on top, which sinks back into the stack on the right.
     top: forward ? [{ transform: layerTransform(1) }, { transform: "none" }] : [{ transform: AWAY, opacity: 0 }, { transform: "none", opacity: 1 }],
     ghost: [{ transform: "none", opacity: 1 }, { transform: forward ? AWAY : layerTransform(1), opacity: 0 }],
     ghostOver: forward, rows,
-    // Each card behind moves up a place forward, or down a place back; forward, the deepest arrives from out of sight.
+    // Each card behind moves a place left forward, or right back; forward, the deepest arrives from out of sight.
     layer: (depth, count) => [{ transform: layerTransform(depth + direction), opacity: forward && depth === count ? 0 : 1 }, { transform: layerTransform(depth), opacity: 1 }],
   };
 }
