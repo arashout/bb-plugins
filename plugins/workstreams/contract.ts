@@ -270,7 +270,6 @@ export const prWriteSchema = z.discriminatedUnion("kind", [
       deleteBranch: z.boolean(),
     })
     .strict(),
-  z.object({ kind: z.literal("update-branch"), prUrl: z.string().max(500) }).strict(),
   /** Mark ready names the head it was confirmed on. */
   z.object({ kind: z.literal("ready"), prUrl: z.string().max(500), headOid: z.string().regex(/^[0-9a-f]{40}$/u) }).strict(),
   z
@@ -323,14 +322,6 @@ export const hostContract = defineRpcContract({
     input: z.object({ path: z.string().max(1_000) }).strict(),
     output: z.discriminatedUnion("ok", [
       z.object({ ok: z.literal(true), branch: z.string().max(300).nullable(), rebasing: z.boolean() }).strict(),
-      z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
-    ]),
-  },
-  /** Recheck the PR and its pending reviewers immediately before a nudge. */
-  prReviewers: {
-    input: z.object({ prUrl: z.string().max(500) }).strict(),
-    output: z.discriminatedUnion("ok", [
-      z.object({ ok: z.literal(true), reviewers: z.array(z.string().max(140)).max(20) }).strict(),
       z.object({ ok: z.literal(false), error: z.string().max(800) }).strict(),
     ]),
   },

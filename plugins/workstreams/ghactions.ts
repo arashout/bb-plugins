@@ -106,10 +106,6 @@ export function mergeArgv(target: PrTarget, method: MergeMethod, sha: string, de
   return ["pr", "merge", ...repoArgs(target), `--${method}`, "--match-head-commit", sha, ...(deleteBranch ? ["--delete-branch"] : [])];
 }
 
-export function updateBranchArgv(target: PrTarget): string[] {
-  return ["pr", "update-branch", ...repoArgs(target)];
-}
-
 export function rerequestArgv(target: PrTarget, reviewers: readonly string[]): string[] {
   const valid = reviewers.filter((reviewer) => REVIEWER.test(reviewer));
   if (valid.length === 0) throw new Error("No valid reviewers to re-request.");
@@ -639,13 +635,6 @@ export async function runMerge(
   return merged.ok
     ? { ok: true, detail: `Merged ${target.slug} #${target.number}${deleteBranch ? " and deleted its branch" : ""}.` }
     : { ok: false, error: `GitHub refused the merge: ${merged.error}` };
-}
-
-export async function runUpdateBranch(run: GhRunner, target: PrTarget): Promise<WriteResult> {
-  const updated = await run(updateBranchArgv(target));
-  return updated.ok
-    ? { ok: true, detail: `Updated the branch of ${target.slug} #${target.number}.` }
-    : { ok: false, error: `GitHub refused the branch update: ${updated.error}` };
 }
 
 /** Re-request review and/or comment. Each part is optional; a failure says which part failed. */

@@ -18,7 +18,6 @@ import {
   runMerge,
   runNudge,
   runReady,
-  runUpdateBranch,
   threadsArgv,
   type GhRunner,
   type Run,
@@ -535,12 +534,6 @@ describe("writes", () => {
       ok: false,
       error: "GitHub refused the merge: Head branch was modified",
     });
-  });
-
-  it("updates the branch with one gh pr update-branch call", async () => {
-    const { run, calls } = fakeGh();
-    expect((await runUpdateBranch(run, TARGET)).ok).toBe(true);
-    expect(calls.map((call) => call.args)).toEqual([["pr", "update-branch", "47", "--repo", "inkwell/folio"]]);
   });
 
   it("nudges with pending reviewers: re-requests, then posts the body on stdin only", async () => {

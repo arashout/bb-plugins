@@ -151,7 +151,7 @@ export function isStranded(
 
 // ---- direct actions ----------------------------------------------------------
 
-/** What a direct run's row says once it succeeded, before "2m ago". */
+/** What a direct run's row says once it succeeded, before "2m ago". Only merges run directly now; the rest label runs already stored. */
 export const DIRECT_DONE: Record<string, string> = {
   merge: "Merged",
   "update-branch": "Branch updated",
@@ -167,10 +167,7 @@ export function directOutcome(
   result: { ok: true; detail: string } | { ok: false; error: string },
 ): { ok: boolean; text: string } {
   if (!result.ok) return { ok: false, text: clip(result.error) };
-  if (action !== "nudge") return { ok: true, text: DIRECT_DONE[action] ?? clip(result.detail) };
-  // "quill #42: re-requested 2 reviewers and commented." → "Re-requested 2 reviewers and commented"
-  const what = result.detail.replace(/^[^:]*#\d+:\s*/u, "").replace(/\.$/u, "").trim();
-  return { ok: true, text: what === "" ? "Nudged" : clip(what.charAt(0).toUpperCase() + what.slice(1)) };
+  return { ok: true, text: DIRECT_DONE[action] ?? clip(result.detail) };
 }
 
 // ---- what the Board shows ----------------------------------------------------

@@ -145,10 +145,6 @@ function run(overrides: Partial<Run> = {}): Run {
 describe("directOutcome", () => {
   it("keeps a short reason per action, dropping the repo and PR the row already shows", () => {
     expect(directOutcome("merge", { ok: true, detail: "Merged inkwell/quill #42 and deleted its branch." })).toEqual({ ok: true, text: "Merged" });
-    expect(directOutcome("update-branch", { ok: true, detail: "Updated the branch of inkwell/folio #47." })).toEqual({ ok: true, text: "Branch updated" });
-    expect(
-      directOutcome("nudge", { ok: true, detail: "inkwell/margin #61: re-requested 2 reviewers and commented." }),
-    ).toEqual({ ok: true, text: "Re-requested 2 reviewers and commented" });
   });
 
   it("keeps the refusal as the failure reason", () => {

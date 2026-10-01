@@ -5,7 +5,7 @@ import { feedbackVerified, userConfirmation } from "./approval-feedback.js";
 import { feedbackToAddress, type ReviewFeedback } from "./feedback-to-address.js";
 
 /** Mechanical GitHub actions the host runs directly, behind a confirm dialog. */
-export const DIRECT_ACTIONS = ["merge", "update-branch", "nudge"] as const;
+export const DIRECT_ACTIONS = ["merge"] as const;
 export type DirectAction = (typeof DIRECT_ACTIONS)[number];
 
 // ---- merge ------------------------------------------------------------------

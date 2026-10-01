@@ -3,7 +3,7 @@
 // is checked is how a payload is read, not how it was fetched.
 import { describe, expect, it } from "vitest";
 import { prSchema } from "./contract.js";
-import { latestReviewStates, latestReviewers, mergeCommitOf, parseLiveReviewRequests, parseMergeStateStatus, parsePrList } from "./gh.js";
+import { latestReviewStates, latestReviewers, mergeCommitOf, parseMergeStateStatus, parsePrList } from "./gh.js";
 import { namingResponse, parseNames } from "./naming.js";
 
 describe("PR commit identity", () => {
@@ -105,17 +105,6 @@ describe("latestReviewers", () => {
   it("drops an entry with no author or state rather than inventing a reviewer", () => {
     expect(latestReviewers(undefined)).toEqual([]);
     expect(latestReviewers([null, { state: "APPROVED" }, { author: { login: "reader-lin" } }, { author: null, state: "APPROVED" }])).toEqual([]);
-  });
-});
-
-describe("parseLiveReviewRequests", () => {
-  it("requires a readable state and reviewer list so a nudge cannot use stale scan data", () => {
-    expect(parseLiveReviewRequests(JSON.stringify({ state: "open", reviewRequests: [
-      { login: "ada-inkwell" },
-      { __typename: "Team", slug: "reviewers", organization: { login: "inkwell" } },
-    ] }))).toEqual({ state: "OPEN", reviewers: ["ada-inkwell", "inkwell/reviewers"] });
-    expect(parseLiveReviewRequests("not json")).toBeNull();
-    expect(parseLiveReviewRequests(JSON.stringify({ state: "open" }))).toBeNull();
   });
 });
 

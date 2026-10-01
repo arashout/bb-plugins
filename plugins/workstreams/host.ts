@@ -14,11 +14,10 @@ import {
   checkConclusions,
   parseAheadBehind,
   parseLinkback,
-  parseLiveReviewRequests,
   parsePrList,
   repoFromRemote,
 } from "./gh.js";
-import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, runUpdateBranch, type GhRunner } from "./ghactions.js";
+import { prTarget, readApprovalHandling, readLiveMerge, readRateLimitReset, readReviewThreads, runMerge, runNudge, runReady, type GhRunner } from "./ghactions.js";
 import { namingResponse, type NamedGroupRow } from "./naming.js";
 import { checkoutBranch } from "./rebase.js";
 import { readAuthoredPrs, readInventoryPrs, readOpenAuthoredPrs } from "./inventory.js";
@@ -603,16 +602,6 @@ export default experimental_defineHostEntry({
       for (const path of paths) if (await isUnit(path)) units.push(path);
       return inspectAll(units, [], context.signal);
     },
-    prReviewers: async ({ prUrl }, context) => {
-      const target = prTarget(prUrl);
-      if (target === null) return { ok: false as const, error: "That is not a pull request URL." };
-      const result = await ghRunner(context.signal)(["pr", "view", String(target.number), "--repo", target.slug, "--json", "state,reviewRequests"]);
-      if (!result.ok) return { ok: false as const, error: `Could not read current reviewers: ${result.error}` };
-      const live = parseLiveReviewRequests(result.stdout);
-      if (live === null) return { ok: false as const, error: "GitHub did not return the PR's current reviewers." };
-      if (live.state !== "OPEN") return { ok: false as const, error: "This pull request is no longer open. Rescan and try again." };
-      return { ok: true as const, reviewers: live.reviewers };
-    },
     prLive: async ({ prUrl }, context) => {
       const target = prTarget(prUrl);
       if (target === null) return { ok: false as const, error: "That is not a pull request URL." };
@@ -625,8 +614,6 @@ export default experimental_defineHostEntry({
       switch (request.kind) {
         case "merge":
           return runMerge(gh, target, request.method, request.sha, request.deleteBranch);
-        case "update-branch":
-          return runUpdateBranch(gh, target);
         case "nudge":
           return runNudge(gh, target, request.reviewers, request.comment);
         case "ready":
