@@ -158,7 +158,7 @@ import { createRescanQueue } from "./rescan.js";
 import { createPrFreshness } from "./pr-freshness.js";
 import { createPrPoll } from "./pr-poll.js";
 import { scanFailure } from "./scancancel.js";
-import { parseLinearKeys, projectNameOf } from "./linear.js";
+import { LINEAR_MERGED_MS, parseLinearKeys, projectNameOf } from "./linear.js";
 import { PIN_AFTER, planClusterAsks, type AskMemory } from "./asks.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 import { TICKET_SOURCES, linkbacksDue, ticketFinder, type LinkbackCheck, type TicketFacts } from "./tickets.js";
@@ -1257,9 +1257,12 @@ export default async function plugin(bb: BbPluginApi) {
       }
       await readLinkbackComments(pattern, result.units, hostId, signal);
       // A Linear outage keeps the previous cache and is logged once; it never fails a scan. Tickets on your open PRs are read too, so a PR
-      // with no checkout still gets its Linear detail; only prefixes a key's workspace owns are ever sent.
+      // with no checkout still gets its Linear detail, and so are live efforts' own tickets and those of PRs merged in the last 14 days, so
+      // Reconcile reads them fresh. Each waits out its 12-hour cache, and only prefixes a key's workspace owns are ever sent.
       await linear.sync(keys, [...new Set([...ticketsOf(await findTickets(pattern, result.units), result.units),
-        ...inventory.read().entries.flatMap((entry) => prTickets(entry.pr, pattern))])], signal);
+        ...inventory.read().entries.flatMap((entry) => prTickets(entry.pr, pattern)),
+        ...effortStore.list().flatMap((effort) => effort.archivedAt ? [] : effort.members.tickets),
+        ...inventory.merges(Date.now() - LINEAR_MERGED_MS).flatMap((merge) => prTickets(merge, pattern))])], signal);
 
       // The first scan after a load waits for the thread list: threads seed the grouping.
       if (!threadsSynced) await syncThreads();

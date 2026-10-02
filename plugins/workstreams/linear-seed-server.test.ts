@@ -10,6 +10,7 @@ import type { InventoryView } from "./inventory-view.js";
 import plugin from "./server.js";
 
 const HOST = "host-inkwell";
+const DAY = 86_400_000;
 const KEY = "lin_api_inkwellfakekey";
 const url = (number: number) => `https://github.com/inkwell/folio/pull/${number}`;
 const pr = (number: number, title: string, branch = `reader/change${number}`): Pr => parsePrList(JSON.stringify([{ number, url: url(number), state: "OPEN", title,
@@ -71,6 +72,26 @@ describe("Linear sync for your open PRs", () => {
     const stored = env.bb.storage.database().prepare("SELECT ticket, detail FROM linear_detail ORDER BY ticket").all() as { ticket: string; detail: string }[];
     expect(stored.map((row) => row.ticket)).toEqual(["ABC-350", "ABC-351"]);
     expect(JSON.parse(stored[0]!.detail)).toMatchObject({ project: { id: "proj-footer", name: "Footer refresh" }, assignee: "dana" });
+  });
+
+  // A ticket left the sync once its last PR merged, so Reconcile would read a state frozen before the merge. Effort members and the last 14
+  // days' merges stay in; older merges keep their last read, and every ticket still waits out its 12-hour cache.
+  it("also reads effort members' tickets and those of PRs merged in the last 14 days, but no older merge's, each once per 12 hours", async () => {
+    const env = await setup([pr(313, "ABC-350 Footer year")], { "ABC-350": {}, "ABC-380": {}, "ABC-381": {}, "ABC-382": {}, "ABC-383": {}, "ABC-384": {} });
+    expect(env.asked()).toEqual(["ABC-350"]);
+    env.efforts.establish({ sourceKey: "ticket:ABC-380", name: "Shelf labels", goal: "", projectId: "project-folio", coordinatorState: "none",
+      members: { tickets: ["ABC-380"], prUrls: [] } });
+    const merged = env.bb.storage.database().prepare("INSERT INTO pr_merges (url, merged_at, title, head_ref) VALUES (?, ?, ?, ?)");
+    merged.run(url(300), Date.now() - 2 * DAY, "ABC-381 Print shelf labels", "reader/abc-381");
+    merged.run(url(301), Date.now() - DAY, "Label the returns cart", "reader/abc-383-returns");
+    merged.run(url(302), Date.now() - 20 * DAY, "ABC-382 Old shelf labels", "reader/abc-382");
+    const archived = env.efforts.establish({ sourceKey: "ticket:ABC-384", name: "Old labels", goal: "", projectId: "project-folio", coordinatorState: "none",
+      members: { tickets: ["ABC-384"], prUrls: [] } });
+    env.efforts.setArchived(archived.id, true);
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(env.asked().slice(1).sort()).toEqual(["ABC-380", "ABC-381", "ABC-383"]);
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    expect(env.asked()).toHaveLength(4);
   });
 });
 

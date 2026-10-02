@@ -12,6 +12,8 @@ export const LINEAR_TEAMS_TTL_MS = 24 * 60 * 60 * 1_000;
 export const LINEAR_BATCH = 25;
 /** How much of a description is kept: context for naming, not a copy of the ticket. */
 export const DESCRIPTION_CHARS = 500;
+/** A PR merged this recently keeps its tickets in the sync, so Reconcile reads them fresh; an older merge keeps its last read. */
+export const LINEAR_MERGED_MS = 14 * 86_400_000;
 
 /**
  * Every key the two settings hold, in order, without duplicates. A secret
@@ -110,9 +112,9 @@ export function planFetch(tickets: readonly string[], owner: ReadonlyMap<string,
 
 /** One aliased query for a batch: `t0: issue(id: "ABC-1") { ... } t1: ...`. Initiatives are capped so a batch stays well inside Linear's query cost. */
 export function detailQuery(batch: readonly string[]): string {
-  const fields = "identifier title description state { name type } " +
+  const fields = "identifier title description state { name type } priority priorityLabel estimate " +
     "project { id name description targetDate initiatives(first: 5) { nodes { id name } } } parent { identifier title } labels { nodes { name } } " +
-    "assignee { name displayName } cycle { number name endsAt } dueDate url updatedAt";
+    "assignee { name displayName } cycle { number name endsAt } dueDate url createdAt startedAt completedAt canceledAt updatedAt";
   return `query {${batch.map((ticket, slot) => ` t${slot}: issue(id: ${JSON.stringify(ticket)}) { ${fields} }`).join("")} }`;
 }
 
@@ -132,6 +134,12 @@ export type LinearDetail = {
   cycle?: { number: number; name: string | null; endsAt: string | null } | null;
   /** The ticket's own due date, as Linear's calendar date (2026-10-17). */
   dueDate?: string | null;
+  /**
+   * Linear's priority, 0 for none, then 1 Urgent to 4 Low, and its word for it; its points; and when it was created, started, completed,
+   * and canceled. Effort card v2 added them: a row cached before has none until its 12-hour cache runs out.
+   */
+  priority?: number | null; priorityLabel?: string | null; estimate?: number | null;
+  createdAt?: string | null; startedAt?: string | null; completedAt?: string | null; canceledAt?: string | null;
   url: string | null;
   updatedAt: string | null;
   source: "key" | "agent";
@@ -151,6 +159,8 @@ const issueSchema = z.object({
   assignee: z.object({ name: z.string().nullish(), displayName: z.string().nullish() }).nullish(),
   cycle: z.object({ number: z.number(), name: z.string().nullish(), endsAt: z.string().nullish() }).nullish(),
   dueDate: z.string().nullish(),
+  priority: z.number().nullish(), priorityLabel: z.string().nullish(), estimate: z.number().nullish(),
+  createdAt: z.string().nullish(), startedAt: z.string().nullish(), completedAt: z.string().nullish(), canceledAt: z.string().nullish(),
   url: z.string().nullish(),
   updatedAt: z.string().nullish(),
 });
@@ -202,6 +212,8 @@ export function parseDetails(batch: readonly string[], payload: unknown): Map<st
       assignee: value.assignee?.displayName ?? value.assignee?.name ?? null,
       cycle: value.cycle ? { number: value.cycle.number, name: value.cycle.name ?? null, endsAt: value.cycle.endsAt ?? null } : null,
       dueDate: value.dueDate ?? null,
+      priority: value.priority ?? null, priorityLabel: value.priorityLabel ?? null, estimate: value.estimate ?? null,
+      createdAt: value.createdAt ?? null, startedAt: value.startedAt ?? null, completedAt: value.completedAt ?? null, canceledAt: value.canceledAt ?? null,
       url: value.url ?? null,
       updatedAt: value.updatedAt ?? null,
       source: "key",

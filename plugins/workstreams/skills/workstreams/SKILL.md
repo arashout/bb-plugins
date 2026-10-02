@@ -742,8 +742,10 @@ effort membership fixed.
 
 ## Linear details
 
-Ticket detail (title, state, project, parent, labels, url) is fetched with the
-key whose workspace owns the ticket's prefix, batched, and cached for 12 hours.
+Ticket detail (title, state, priority, estimate, dates, project, parent,
+labels, url) is fetched with the key whose workspace owns the ticket's prefix,
+batched, and cached for 12 hours. The sync covers tickets on checkouts and open
+PRs, live efforts' own tickets, and tickets of PRs merged in the last 14 days.
 Workspaces and their team keys are re-read daily and after a settings change. A
 prefix no key owns gets no detail; that is not an error. Failures are logged
 once and keep the previous cache. Keys stay on the server and are never logged.

@@ -147,6 +147,22 @@ describe("Linear sync", () => {
     expect(issueCalls(calls)).toHaveLength(1);
   });
 
+  // Priority, points, and dates came after the cache filled. Refetching every row that lacks them at once would spend the rate limit on one
+  // scan; the 12-hour cache brings them in, and meanwhile the older row still reads, with no priority.
+  it("keeps a row cached before priority, points, and dates until its 12-hour cache runs out, and reads it meanwhile", async () => {
+    const { sync, calls, tick } = setup();
+    const older = { identifier: "ABC-1", title: "Cached", description: null, state: { name: "Done", type: "completed" }, project: null, parent: null, labels: [],
+      assignee: null, cycle: null, dueDate: null, url: null, updatedAt: null, source: "key" as const };
+    sync.store([{ ticket: "ABC-1", detail: older }], "key");
+    await sync.sync([KEY_A], ["ABC-1"], signal);
+    expect(issueCalls(calls)).toHaveLength(0);
+    expect(sync.read(["ABC-1"]).get("ABC-1")).toMatchObject({ title: "Cached", state: { type: "completed" } });
+    expect(sync.read(["ABC-1"]).get("ABC-1")?.priority).toBeUndefined();
+    tick(LINEAR_DETAIL_TTL_MS + 1);
+    await sync.sync([KEY_A], ["ABC-1"], signal);
+    expect(issueCalls(calls)).toHaveLength(1);
+  });
+
   it("retries a missing alias after a partial GraphQL response instead of caching it as no issue", async () => {
     let attempt = 0;
     const { sync, calls, db, logs } = setup({ detailResponse: () => {

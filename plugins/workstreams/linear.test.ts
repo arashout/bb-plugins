@@ -75,7 +75,8 @@ describe("the batched detail query", () => {
     expect(query).toContain('t1: issue(id: "ABC-102")');
     expect(query.match(/issue\(/gu)).toHaveLength(2);
     for (const field of ["title", "description", "state { name type }", "project { id name description targetDate initiatives(first: 5) { nodes { id name } } }",
-      "parent { identifier title }", "labels { nodes { name } }", "assignee { name displayName }", "cycle { number name endsAt }", "dueDate", "url", "updatedAt"]) {
+      "parent { identifier title }", "labels { nodes { name } }", "assignee { name displayName }", "cycle { number name endsAt }", "dueDate", "url", "updatedAt",
+      "priority priorityLabel estimate", "createdAt startedAt completedAt canceledAt"]) {
       expect(query).toContain(field);
     }
   });
@@ -95,6 +96,8 @@ describe("the batched detail query", () => {
           assignee: { name: "Dana Reyes", displayName: "dana" },
           cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" },
           dueDate: "2026-10-10",
+          priority: 2, priorityLabel: "High", estimate: 3,
+          createdAt: "2026-08-01T00:00:00.000Z", startedAt: "2026-08-20T00:00:00.000Z", completedAt: null, canceledAt: null,
           url: "https://linear.app/inkwell/issue/ABC-101",
           updatedAt: "2026-09-01T00:00:00.000Z",
         },
@@ -110,8 +113,12 @@ describe("the batched detail query", () => {
     expect(found?.parent).toEqual({ identifier: "ABC-100", title: "Gift cards" });
     expect(found?.labels).toEqual(["frontend"]);
     expect(found).toMatchObject({ assignee: "dana", cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" }, dueDate: "2026-10-10" });
-    // A key read always states them, so an absent assignee or cycle reads as none rather than as a row to refetch.
-    expect(parseDetails(["ABC-2"], { data: { t0: { identifier: "ABC-2" } } })?.get("ABC-2")).toMatchObject({ assignee: null, cycle: null, dueDate: null });
+    // Priority and points feed the rows' ticket chips and the p expand; the dates are kept for scope growth.
+    expect(found).toMatchObject({ priority: 2, priorityLabel: "High", estimate: 3, createdAt: "2026-08-01T00:00:00.000Z", startedAt: "2026-08-20T00:00:00.000Z",
+      completedAt: null, canceledAt: null });
+    // A key read always states them, so an absent assignee, cycle, priority, or estimate reads as none rather than as a row to refetch.
+    expect(parseDetails(["ABC-2"], { data: { t0: { identifier: "ABC-2" } } })?.get("ABC-2")).toMatchObject({ assignee: null, cycle: null, dueDate: null,
+      priority: null, priorityLabel: null, estimate: null, createdAt: null, completedAt: null });
     expect(found?.source).toBe("key");
     expect(details?.get("ABC-404")).toBeNull();
     expect(parseDetails(["ABC-1"], { errors: [] })).toBeNull();
