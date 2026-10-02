@@ -245,7 +245,7 @@ function Rows({ prUrls, kit, run, turn }: { prUrls: readonly string[]; kit: RowK
   const lines = prUrls.flatMap((prUrl) => kit.lines.get(prUrl) ?? []);
   return lines.length ? <SimpleInventoryList groups={[{ key: "rows", label: "", effortId: null, lines }]} kind={turn ? "turn" : "other"} busyKey={null}
     selected={kit.picked} live={kit.live} notes={kit.left} working={kit.working} reading={kit.reading} tickets={kit.tickets}
-    onSelect={(line, shift) => run({ kind: "select", prUrl: line.prUrl, shift })} onOpenPr={(url) => run({ kind: "open", url })}
+    onSelect={turn ? (line, shift) => run({ kind: "select", prUrl: line.prUrl, shift }) : undefined} onOpenPr={(url) => run({ kind: "open", url })}
     onOpenThread={(id) => run({ kind: "thread", id })} onOpenEffort={() => undefined} onUndo={(batchId) => run({ kind: "undo-batch", batchId })}
     // A row's Nudge opens the deck's listing confirm for it, as n does: the deck never writes on one click.
     onNudge={(line) => run({ kind: "row", id: "nudge", prUrl: line.prUrl })} onRefresh={(line) => run({ kind: "row", id: "refresh", prUrl: line.prUrl })} /> : null;

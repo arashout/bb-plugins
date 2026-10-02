@@ -524,8 +524,20 @@ describe("what the keys act on", () => {
     expect(hintKeys(nothing, availability(nothing))).toContainEqual(["x", "select"]);
     const two = prs({ row: true, thread: false, moves: new Set(), selectable: false, turn: 5, picked: 2 });
     expect([availability(two).select.on, availability(two).address.on, availability(two).clear.on]).toEqual([false, true, true]);
-    expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["g", "refresh"], ["esc", "clear"]]);
+    expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["e", "move"], ["g", "refresh"], ["esc", "clear"]]);
+    // Any row selects, to move; with one off Your turn in the selection, b says why it can't take them, and e still moves them.
+    const mixed = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 3, addressable: false });
+    expect([availability(mixed).address, availability(mixed).move.on]).toEqual([{ on: false, why: "Your turn rows only" }, true]);
+    expect(hintKeys(mixed, availability(mixed))).toEqual([["x", "toggle"], ["e", "move"], ["g", "refresh"], ["esc", "clear"]]);
     expect(availability(prs({ row: false, thread: false, moves: new Set(), turn: 0, picked: 0 }))["select-section"]).toEqual({ on: false, why: "nothing is on Your turn" });
+    // The deck's own e and ⇧A route in All PRs too: e moves the selection, else the focused row, and ⇧A takes the focused row's suggestion.
+    const suggested = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0, suggested: true });
+    expect([availability(suggested).move.on, availability(suggested).accept.on]).toEqual([true, true]);
+    expect(hintKeys(suggested, availability(suggested)).slice(0, 2)).toEqual([["j ↓", "rows"], ["⇧A", "accept"]]);
+    expect(paletteItems(availability(suggested), [], { held: [], done: [] }, null, false).filter((item) => item.key === "move" || item.key === "accept")
+      .map((item) => [item.title, item.keys, item.on])).toEqual([["Accept the suggestion", ["⇧A"], true], ["Move to an effort…", ["e"], true]]);
+    const plain = prs({ row: true, thread: false, moves: new Set(), selectable: false, turn: 5, picked: 0 });
+    expect([availability(plain).move, availability(plain).accept]).toEqual([{ on: false, why: "select a row first" }, { on: false, why: "the row has no suggestion" }]);
   });
 
   it("offers an effort's notes to edit, with ⇧N, and none on a service card", () => {

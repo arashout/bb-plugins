@@ -7,6 +7,7 @@
 // reaches the browser.
 import type { InventoryQuestion, InventoryRow, InventoryView } from "./inventory-view";
 import type { AttentionReason } from "./pr-attention";
+import type { SuggestionGroup } from "./effort-classify";
 import { turnOf, type Sent, type Turn, type TurnFacts } from "./your-turn";
 
 /** An observation's or hold's age: 25s, 52m, 5h, 2d. */
@@ -38,9 +39,11 @@ export const INVENTORY_HOW: { intro: string; rows: [string, string][] } = {
   intro: "All PRs shows your open pull requests and PRs named by an effort. Your turn lists your PRs where a reviewer's feedback waits on you. Other open PRs stays below, grouped by effort.",
   rows: [
     ["Your turn", "A person's approval comment you haven't replied to, their change request with no push or reply since, a thread where they spoke last, or their comment with no reply of yours. Bots never put a PR here. Held PRs stay out."],
-    ["Address", "Select rows with x, a click, or Shift for a range, then Address or b. One thread starts for all of them at once, with 8 s to Undo, and never merges."],
+    ["Address", "Select Your turn rows with x, a click, or Shift for a range, then Address or b. One thread starts for all of them at once, with 8 s to Undo, and never merges."],
     ["Sent", "A sent row links its thread with BB's status for it: Working, Needs you, or Idle. The link stays while the PR is open, on Other open PRs once it leaves Your turn."],
     ["Dismiss", "Hides a row from Your turn until its head moves or someone says something new."],
+    ["Move", "Select any rows, then Move to effort… or e: type to pick an effort or One-offs, or name a new effort. Rows regroup at once, with Undo."],
+    ["Suggestion", "A row no effort owns shows the effort the classifier picks for it, → Effort?, with why on hover. Click it or ⇧A to accept, × to hide it. Weak or tied picks show nothing."],
     ["Other open PRs", "Each row shows its current state and next step. Open the PR to inspect it."],
     ["Nudge", "Appears only when a reviewer has waited long enough and the current PR state allows another request. The server checks again before sending. Your turn offers none: you answer first. After a change request you answered, it reads Re-request @login."],
     ["Refresh", "↻ on a row, g, or Refresh on a selection reads those PRs from GitHub again, review threads included. The row says Read just now, or why the read failed."],
@@ -352,6 +355,30 @@ export const rowTurn = (row: InventoryRow, pile: TurnFacts["pile"]): Turn => tur
 export const onYourTurn = (line: Pick<InventoryLine, "turn">): boolean => line.turn.list === "turn";
 /** A Your turn row Address can take now: nothing it sent is still under way, and its effort is active. */
 export const sendable = (line: Pick<InventoryLine, "turn">): boolean => line.turn.addressable === true;
+
+/** The effort the classifier picks for a PR no effort owns, as its row offers it, and why, in one line. */
+export type RowSuggestion = { effortId: string; name: string; reason: string };
+/**
+ * Each PR's suggestion, by PR: an effort the classifier picks at medium confidence or better, unless you dismissed that effort for the PR.
+ * A weak or tied pick, a new effort, and One-offs show nothing. The reason is the PR's own signals, else its group's.
+ */
+export function rowSuggestions(groups: readonly SuggestionGroup[], dismissed: Readonly<Record<string, string>>): Map<string, RowSuggestion> {
+  return new Map(groups.flatMap((group) => {
+    const target = group.target;
+    if (target?.kind !== "effort" || (group.confidence !== "medium" && group.confidence !== "high")) return [];
+    return group.prs.flatMap((pr) => dismissed[pr.prUrl] === target.effortId ? [] : [[pr.prUrl, { effortId: target.effortId, name: target.name,
+      reason: pr.signals.filter((signal) => signal.effortId === target.effortId).map((signal) => signal.text).join(" · ") || group.reason }] as const]);
+  }));
+}
+/** What accepting these rows' suggestions assigns: one call per effort, in the order the rows show, with only the rows that have one. */
+export function acceptCalls(lines: readonly Pick<InventoryLine, "prUrl">[], suggestions: ReadonlyMap<string, RowSuggestion>): { effortId: string; prUrls: string[] }[] {
+  const calls = new Map<string, string[]>();
+  for (const line of lines) {
+    const suggestion = suggestions.get(line.prUrl);
+    if (suggestion) calls.set(suggestion.effortId, [...calls.get(suggestion.effortId) ?? [], line.prUrl]);
+  }
+  return [...calls].map(([effortId, prUrls]) => ({ effortId, prUrls }));
+}
 
 /**
  * The selection after a click on one of `order`'s rows: Shift adds every row from the last one you clicked through this one, in the order

@@ -1,19 +1,22 @@
 // All PRs: Your turn, your PRs where a person's feedback waits on you (onYourTurn), by effort, above every other open PR you author or an
 // effort names. Its direct writes are Nudge, one click on an Other open PRs row where the server says it's due (Re-request @login where
-// you've answered), and Dismiss, which hides a Your turn row until its head moves or someone says something new. Your turn rows offer no
-// other move: they select (x, a click, Shift for a range; ⇧X or the list's box for all), and Address, or b, starts one batch thread for
-// them at once, with 8 s to Undo. A sent PR links its thread with BB's status for it while the PR is open, on Other open PRs once it
-// leaves Your turn; why one wasn't sent shows on its row. It shares the deck's key registry, hint bar, palette, and ? sheet: j and k move
-// between rows, and n opens the deck's listing confirm for the focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the
-// selection reads those PRs from GitHub again, four at a time; a click on Last read reads every open PR again.
+// you've answered), and Dismiss, which hides a Your turn row until its head moves or someone says something new. Rows select (x, a click,
+// Shift for a range; ⇧X or Your turn's box for all of Your turn): Address, or b, starts one batch thread for them at once, with 8 s to
+// Undo, but only while every selected row is a Your turn row it can take; Move to effort…, or e, routes any of them to an effort
+// (inventory-routing.tsx). A row no effort owns shows the classifier's suggestion, which a click or ⇧A accepts. A sent PR links its thread
+// with BB's status for it while the PR is open, on Other open PRs once it leaves Your turn; why one wasn't sent shows on its row. It
+// shares the deck's key registry, hint bar, palette, and ? sheet: j and k move between rows, and n opens the deck's listing confirm for
+// the focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the selection reads those PRs from GitHub again, four at a
+// time; a click on Last read reads every open PR again.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
 import { SimpleInventoryList, type SimpleGroup } from "./inventory-rows";
+import { MovePicker, useRouting, type MovePickerProps, type MoveTarget } from "./inventory-routing";
 import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, sendable, type InventoryLine, type InventoryScreen, type LineAction,
-  type Outcome } from "./inventory-view-model";
+  type Outcome, type RowSuggestion } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
 import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
@@ -40,8 +43,9 @@ export function splitInventory(screen: InventoryScreen): { turn: SimpleGroup[]; 
   }
   return split;
 }
-/** The rows Address can take, in drawn order. */
-const addressable = (split: ReturnType<typeof splitInventory>) => split.turn.flatMap((group) => group.lines).filter(sendable);
+/** The rows a click or x selects, in drawn order: Your turn's while Address can take them, then every other open PR. */
+const selectable = (split: ReturnType<typeof splitInventory>) => [...split.turn.flatMap((group) => group.lines).filter(sendable),
+  ...split.other.flatMap((group) => group.lines)];
 
 /** The shared header, with this read's freshness; ⌘K and ? open the deck's palette and key sheet. */
 function Header({ read, onView, onPalette, onHelp }: { read: HeaderProps["read"]; onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void }) {
@@ -66,21 +70,30 @@ function Notice({ notice }: { notice: InventoryScreen["notices"][number] }) {
     className={cn("text-[12px]", notice.tone === "error" ? "text-destructive" : "text-muted-foreground")}>{notice.text}</p>;
 }
 
-/** The Your turn rows you selected, docked under the lists so it never covers one: Address them together, or clear; and why nothing started. */
-function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, onClear }: { count: number; refusal?: string | null; working?: Working | null;
-  refresh?: { busy: boolean; progress: string | null }; onAddress(): void; onRefresh(): void; onClear(): void }) {
+/** Why Address can't take a selection: a row in it isn't a Your turn row Address can take. */
+const ADDRESS_ONLY = "Address takes Your turn rows only.";
+/**
+ * The rows you selected, docked under the lists so it never covers one: Address them together while every one is a Your turn row it can
+ * take, else why not; move them to an effort; or clear; and why nothing started.
+ */
+function SelectionBar({ count, addressable, refusal, working, refresh, move, onAddress, onRefresh, onClear }: { count: number; addressable: boolean;
+  refusal?: string | null; working?: Working | null; refresh?: { busy: boolean; progress: string | null }; move?: MovePickerProps; onAddress(): void;
+  onRefresh(): void; onClear(): void }) {
   if (!count) return null;
+  const note = refusal ?? (addressable ? null : ADDRESS_ONLY);
   return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
     <div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>
       <b className="mr-1 font-semibold">{count} selected</b>
-      <button type="button" data-inventory-action="address" disabled={!!working} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
-        title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
+      <button type="button" data-inventory-action="address" disabled={!!working || !addressable} aria-busy={working?.kind === "address" || undefined} onClick={onAddress}
+        title={addressable ? "Starts one thread for them now, with 8 s to Undo. Nothing merges." : ADDRESS_ONLY}
         className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background", working?.kind === "address" && "disabled:opacity-100")}>
-        {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address {count}<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
+        {working?.kind === "address" ? <><Spin />{workingLabel(working)}</> : <>Address{addressable ? ` ${count}` : ""}<Kbd inverted>{ACTION.address.keys[0]}</Kbd></>}</button>
+      {move ? <MovePicker {...move} /> : null}
       <RefreshSelected count={count} busy={!!refresh?.busy} progress={refresh?.progress ?? null} onClick={onRefresh} />
-      {/* A refusal takes the room before Clear and truncates there, so the column's narrower bar never wraps Clear to a line of its own. */}
-      {refusal ? <span role="alert" data-inventory-refusal className="min-w-0 flex-1 basis-0 truncate text-destructive" title={refusal}>{refusal}</span>
-        : <span className="flex-1" />}
+      {/* A refusal, or why Address can't take these, takes the room before Clear and truncates there, so the column's narrower bar never wraps
+          Clear to a line of its own. */}
+      {note ? <span role={refusal ? "alert" : "status"} data-inventory-refusal className={cn("min-w-0 flex-1 basis-0 truncate", refusal ? "text-destructive" : "text-muted-foreground")}
+        title={note}>{note}</span> : <span className="flex-1" />}
       <button type="button" onClick={onClear} className={GHOST}>Clear<Kbd>esc</Kbd></button>
     </div>
   </div>;
@@ -89,8 +102,11 @@ function SelectionBar({ count, refusal, working, refresh, onAddress, onRefresh, 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenEffort(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
-  /** Your turn rows selected for Address, by PR; a row's checkbox, Your turn's box for all or none, Address, and Clear. */
+  /** Rows selected, by PR; a row's checkbox, Your turn's box for all or none of it, Address, Move to effort…'s picker, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
+  move?: MovePickerProps;
+  /** The classifier's suggestion for each row no effort owns, by PR, with accepting rows' suggestions, and hiding one. */
+  suggestions?: ReadonlyMap<string, RowSuggestion>; onAccept?(lines: InventoryLine[]): void; onDismissSuggestion?(line: InventoryLine): void;
   /** Why the last Address started nothing, and why it didn't send each PR, by PR; a batch's Undo from its row; and Dismiss and back. */
   refusal?: string | null; notes?: ReadonlyMap<string, string>; onUndo?(batchId: string): void; onDismiss?(line: InventoryLine, dismiss: boolean): void;
   /** A batch call out now, whose rows show pending; and each item of a batch sending now, by PR. */
@@ -104,12 +120,14 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
     onOpenEffort: props.onOpenEffort, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
-  // Address takes only rows nothing it sent is still working on; Your turn's box takes only Your turn's.
+  // Your turn's box takes only the Your turn rows Address can; the bar counts every selected row, and Address takes them only if it can take each.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
+  const chosen = selectable(split).filter((line) => props.selected?.has(line.prUrl));
   const listed = turn.reduce((sum, group) => sum + group.lines.length, 0);
   const hidden = dismissed.reduce((sum, group) => sum + group.lines.length, 0);
-  const rows = { ...callbacks, selected: props.selected, onSelect: props.onSelect, notes: props.notes, onUndo: props.onUndo, working: props.working?.prUrls, live: props.live };
+  const pick = { selected: props.selected, onSelect: props.onSelect, suggestions: props.suggestions, onAccept: props.onAccept, onDismissSuggestion: props.onDismissSuggestion };
+  const rows = { ...callbacks, ...pick, notes: props.notes, onUndo: props.onUndo, working: props.working?.prUrls, live: props.live };
   return <div ref={props.rootRef} role="region" aria-label="PR inventory" className={REGION}>
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null, onRefresh: props.onRefreshAll }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
@@ -147,12 +165,12 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
           <h2 className="truncate text-[12.5px] font-semibold">Other open PRs</h2>
           <span className={cn(COUNT, "text-muted-foreground")}>{other.reduce((sum, group) => sum + group.lines.length, 0)}</span>
         </div>
-        {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} />
+        {other.length ? <SimpleInventoryList groups={other} kind="other" {...callbacks} {...pick} />
           : <p className={EMPTY}>{props.screen.empty ?? "No other open PRs."}</p>}
       </section>
     </div></div>
-    <SelectionBar count={turnPicked} refusal={props.refusal} working={props.working} refresh={props.refresh} onAddress={() => props.onAddress?.()}
-      onRefresh={() => props.onRefreshSelected?.()} onClear={() => props.onClear?.()} />
+    <SelectionBar count={chosen.length} addressable={chosen.every(sendable)} refusal={props.refusal} working={props.working} refresh={props.refresh} move={props.move}
+      onAddress={() => props.onAddress?.()} onRefresh={() => props.onRefreshSelected?.()} onClear={() => props.onClear?.()} />
     {props.footer}
   </div>;
 }
@@ -216,11 +234,12 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const [flash, setFlash] = useState<{ text: string; undo: boolean } | null>(null);
   const [activeRow, setActiveRow] = useState<string | null>(null);
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
+  const [moving, setMoving] = useState(false);
   const anchor = useRef<string | null>(null);
-  // A selected row Address can't take now (a batch took it, or you answered it) stays unselected if it comes back.
+  // A selected row that can't be selected now (a batch took it from Your turn, or it closed) stays unselected if it comes back.
   useEffect(() => {
     if (!view) return;
-    const live = new Set(addressable(splitInventory(inventoryScreen(view, { now: Date.now(), filter: null }))).map((line) => line.prUrl));
+    const live = new Set(selectable(splitInventory(inventoryScreen(view, { now: Date.now(), filter: null }))).map((line) => line.prUrl));
     setPicked((current) => [...current].every((prUrl) => live.has(prUrl)) ? current : new Set([...current].filter((prUrl) => live.has(prUrl))));
   }, [view]);
   const opener = useRef<HTMLElement | null>(null);
@@ -231,6 +250,16 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     flashTimer.current = window.setTimeout(() => setFlash(null), ms ?? (withUndo ? 9_000 : 5_000));
   }, []);
   const refresh = useRefresh({ say, reads: () => load() });
+  const routing = useRouting({ say, setUndo });
+  // After a move, focus follows the row it left from to its new group once the list reads it there.
+  const refocus = useRef<string | null>(null);
+  useEffect(() => {
+    const row = refocus.current ? rootRef.current?.querySelector<HTMLElement>(`[data-inventory-row="${CSS.escape(refocus.current)}"]`) : null;
+    if (!row) return;
+    refocus.current = null;
+    row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: "nearest" });
+  }, [view]);
   // A row's newer outcome wins: a read after a Nudge, or a Nudge after a read.
   const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, pending: new Map([...refresh.reading].map((prUrl) => [prUrl, "refresh" as const])),
     outcomes: new Map([...outcomes, ...[...refresh.outcomes].filter(([prUrl, outcome]) => (outcomes.get(prUrl)?.at ?? 0) <= outcome.at)]) }),
@@ -257,19 +286,32 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const due = focused?.actions.find((action) => action.id === "nudge" && action.enabled) ?? null;
   const readable = !!focused?.actions.some((action) => action.id === "refresh" && action.enabled);
   const thread = focused?.actions.find((action) => action.id === "thread" && action.enabled)?.threadId ?? null;
-  // Your turn in drawn order, which a Shift-click's range follows, less rows a batch still works on; a selected row that leaves it is no
-  // longer selected.
+  // The rows in drawn order, which a Shift-click's range follows, less Your turn rows a batch still works on; a selected row that leaves
+  // them is no longer selected. Address takes the selection only while it can take every row in it.
   const split = screen ? splitInventory(screen) : null;
   const turnLines = split ? split.turn.flatMap((group) => group.lines).filter(sendable) : [];
-  const selectable = split ? addressable(split) : [];
-  const selected = selectable.filter((line) => picked.has(line.prUrl));
+  const order = split ? selectable(split) : [];
+  const chosen = order.filter((line) => picked.has(line.prUrl));
+  const selected = chosen.every(sendable) ? chosen : [];
   const toggle = (line: InventoryLine, shift: boolean) => {
-    setPicked(pickRows(selectable.map((item) => item.prUrl), picked, line.prUrl, shift, anchor.current));
+    setPicked(pickRows(order.map((item) => item.prUrl), picked, line.prUrl, shift, anchor.current));
     anchor.current = line.prUrl;
   };
+  const clear = () => { setPicked(new Set()); setMoving(false); };
+  // A suggestion shows only on a row the list files under No effort, so one read before a move never shows on a row an effort has now.
+  const loose = new Set(screen?.groups.find((group) => group.effort === null)?.lines.map((line) => line.prUrl));
+  const suggestions = new Map([...routing.suggestions].filter(([prUrl]) => loose.has(prUrl)));
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
     prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...readable ? ["refresh" as const] : []]),
-      selectable: !!focused && selectable.includes(focused), turn: turnLines.length, picked: selected.length } };
+      selectable: !!focused && order.includes(focused), turn: turnLines.length, picked: chosen.length, addressable: !!selected.length,
+      suggested: !!focused && suggestions.has(focused.prUrl) } };
+  /** Move the selection where the picker says: on success the picker closes, the selection clears, and focus follows the focused row. */
+  const moveTo = async (to: MoveTarget) => {
+    refocus.current = activeRow ?? (chosen[0] ? `${chosen[0].slug}#${chosen[0].number}` : null);
+    const refusal = await routing.move(chosen.map((line) => line.prUrl), to);
+    if (refusal === null) clear(); else refocus.current = null;
+    return refusal;
+  };
   /** Address the selected Your turn rows: one batch thread, started now, with 8 s to Undo. */
   const address = () => { if (selected.length) void batch.address(null, selected.map((line) => line.prUrl)); };
   /** Dismiss a row on the head and the newest word it shows, or bring it back. */
@@ -283,7 +325,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     load();
   };
   /** Refresh the selection, else the focused row: four at a time, each row saying what its read got. */
-  const reread = () => { void refresh.read(selected.length ? selected.map((line) => line.prUrl) : focused && readable ? [focused.prUrl] : []); };
+  const reread = () => { void refresh.read(chosen.length ? chosen.map((line) => line.prUrl) : focused && readable ? [focused.prUrl] : []); };
   const on = availability(context);
   const contextRef = useRef(context);
   contextRef.current = context;
@@ -305,9 +347,12 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
       case "refresh": reread(); return;
-      case "select": if (focused && selectable.includes(focused)) toggle(focused, false); return;
+      case "select": if (focused && order.includes(focused)) toggle(focused, false); return;
       case "select-section": setPicked(new Set(turnLines.map((line) => line.prUrl))); say(`Selected ${turnLines.length} on Your turn.`); return;
-      case "clear": setPicked(new Set()); return;
+      case "clear": clear(); return;
+      // e moves the selection, else the focused row, which it selects so the bar shows what moves.
+      case "move": if (!chosen.length && focused && order.includes(focused)) setPicked(new Set([focused.prUrl])); setMoving(true); return;
+      case "accept": if (focused && suggestions.has(focused.prUrl)) { refocus.current = activeRow; routing.accept([focused]); } return;
       case "undo": if (undo?.live()) { const last = undo; setUndo(null); setFlash(null); void last.run(); } return;
       case "open-thread": if (thread) navigate.toThread(thread); return;
       case "open-pr": if (focused) navigate.openUrl(focused.prUrl); return;
@@ -326,8 +371,10 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
-      selected={picked} onSelect={toggle} onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : []))} onAddress={address}
-      onClear={() => setPicked(new Set())} refusal={batch.refusal} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} onDismiss={dismiss} working={batch.working} live={batch.live}
+      selected={picked} onSelect={toggle} onAddress={address} onClear={clear} refusal={batch.refusal}
+      onSelectAll={(all) => setPicked(new Set(all ? [...picked, ...turnLines.map((line) => line.prUrl)] : [...picked].filter((prUrl) => !turnLines.some((line) => line.prUrl === prUrl))))}
+      move={{ open: moving && chosen.length > 0, onOpenChange: setMoving, efforts: routing.efforts, busy: routing.busy, onMove: moveTo }}
+      suggestions={suggestions} onAccept={routing.accept} onDismissSuggestion={routing.dismiss} notes={batch.details} onUndo={(batchId) => void undoBatch(batchId)} onDismiss={dismiss} working={batch.working} live={batch.live}
       onRefresh={(line) => void refresh.read([line.prUrl])} onRefreshSelected={reread} onRefreshAll={refresh.all} reading={refresh.reading}
       refresh={{ busy: refresh.reading.size > 0, progress: refresh.progress }}
       footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />

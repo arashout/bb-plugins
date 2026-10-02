@@ -1,7 +1,10 @@
 // Render the PR inventory's acceptance fixture to static HTML for a visual
 // check, since installing this build migrates the live store: Address's
-// states on Your turn, a PR it left out, and the selection bar's refusal. It
-// writes only $TMPDIR/inventory-preview.html, styled by the last `bb plugin
+// states on Your turn, a PR it left out, and the selection bar's refusal; and
+// routing at 1100 and 420 px (#routing-1100, #routing-420), with suggestions,
+// a selection Address can't take, and Move to effort…'s picker open over its
+// button as the popover places it (#routing-new-1100 has a new effort typed).
+// It writes only $TMPDIR/inventory-preview.html, styled by the last `bb plugin
 // build`'s dist/app.css over dark host colors and a minimal Preflight, both of
 // which the host supplies. Run: npx vite-node scripts/inventory-preview.ts
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,10 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { inkwellInventory, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
+import { inkwellInventory, inkwellInventorySuggestions, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "../inkwell-fixtures.js";
 import type { InventoryView } from "../inventory-view.js";
-import { inventoryScreen } from "../inventory-view-model.js";
+import { inventoryScreen, rowSuggestions } from "../inventory-view-model.js";
 import { InventoryPane } from "../inventory-screen.js";
+import { moveItems } from "../inventory-routing.js";
+import { PickerBody } from "../thread-effort-popover.js";
+import { availability, hintKeys, type KeyContext } from "../deck-view-model.js";
+import { HintBar } from "../deck-screen.js";
 import type { Sent } from "../your-turn.js";
 
 const css = new URL("../dist/app.css", import.meta.url);
@@ -38,8 +45,25 @@ const pane = (shown: InventoryView, extra: Record<string, unknown> = {}) => rend
   screen: inventoryScreen(shown, { now: NOW, filter: null }), busyKey: null, error: null,
   onView: noop, onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenEffort: noop, onNudge: noop,
   selected: new Set<string>(), onSelect: noop, onSelectAll: noop, onAddress: noop, onClear: noop, onUndo: noop, ...extra }));
-const frame = (width: number, body: string) =>
-  `<section style="width:${width}px;height:1100px;border:1px solid #2a2a2a;flex:none;display:flex" data-bb-plugin="workstreams">${body}</section>`;
+const frame = (width: number, body: string, { id, height = 1100 }: { id?: string; height?: number } = {}) =>
+  `<section${id ? ` id="${id}"` : ""} style="width:${width}px;height:${height}px;border:1px solid #2a2a2a;flex:none;display:flex;position:relative" data-bb-plugin="workstreams">${body}</section>`;
+/** Routing: each suggestion on its row, a selection with one row off Your turn, and the picker over Move to effort…, with the hint bar's keys. */
+const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
+const efforts = Object.values(INVENTORY_EFFORTS);
+const picked = new Set([url("folio", 301), url("catalog", 96), url("atlas", 410)]);
+const keys: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: false, held: 0, done: 0,
+  prs: { row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: picked.size, addressable: false } };
+const routing = (query: string) => `${pane(base, { selected: picked, suggestions: rowSuggestions(inkwellInventorySuggestions(), {}), onAccept: noop, onDismissSuggestion: noop,
+  move: { open: false, onOpenChange: noop, efforts, busy: false, onMove: async () => null },
+  footer: createElement(HintBar, { hints: hintKeys(keys, availability(keys)), flash: null, onPalette: noop, onHelp: noop, onUndo: noop }) })
+}<div data-picker-panel style="position:absolute" class="z-50 w-80 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-popover text-[12px] text-popover-foreground shadow-md">${
+  renderToStaticMarkup(createElement(PickerBody, { mode: "effort", query, items: moveItems(efforts, query), highlight: query ? moveItems(efforts, query).length - 1 : -1,
+    busy: false, current: null, confirm: null, notice: null, error: null, listId: "move", onQuery: noop, onKeyDown: noop, onPick: noop, onHighlight: noop }))}</div>`;
+/** Where the popover puts the picker: above its button, aligned to its start, kept 8 px inside the frame. */
+const place = `<script>for (const frame of document.querySelectorAll("section")) { const panel = frame.querySelector("[data-picker-panel]");
+  const button = frame.querySelector('[data-inventory-action="move"]'); if (!panel || !button) continue;
+  const f = frame.getBoundingClientRect(), b = button.getBoundingClientRect();
+  panel.style.left = Math.max(8, Math.min(b.left - f.left, f.width - panel.offsetWidth - 8)) + "px"; panel.style.top = (b.top - f.top - panel.offsetHeight - 6) + "px"; }</script>`;
 const html = `<!doctype html><html class="dark"><head><meta charset="utf-8"><title>Inventory preview</title><style>
 :root{color-scheme:dark;--background:#151515;--foreground:#e6e6e6;--card:#1b1b1b;--popover:#1f1f1f;--popover-foreground:#e6e6e6;--muted:#232323;
 --muted-foreground:#9a9a9a;--border:#2c2c2c;--input:#333;--ring:#6b8afd;--destructive:#f07178;--state-hover:#ffffff10;--state-active:#ffffff18;--radius:6px}
@@ -47,9 +71,10 @@ const html = `<!doctype html><html class="dark"><head><meta charset="utf-8"><tit
 button,input{font:inherit;color:inherit;background:transparent;text-align:inherit}h1,h2{font-size:inherit;font-weight:inherit}svg{display:block}
 table{border-collapse:collapse}}
 body{margin:0;padding:16px;background:#101010;color:var(--foreground);font:13px/1.45 system-ui,-apple-system,sans-serif;display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
-</style><style>${readFileSync(css, "utf8")}</style></head><body>${frame(1280, pane(tracked))}${frame(560, pane(starting, { notes: left,
+</style><style>${readFileSync(css, "utf8")}</style></head><body>${frame(1100, routing(""), { id: "routing-1100", height: 1320 })}${
+  frame(420, routing(""), { id: "routing-420", height: 1640 })}${frame(1100, routing("Delivery windows"), { id: "routing-new-1100", height: 1320 })}${frame(1280, pane(tracked))}${frame(560, pane(starting, { notes: left,
   selected: new Set(["https://github.com/inkwell/spine/pull/155", "https://github.com/inkwell/folio/pull/301"]),
-  refusal: "Nothing started. spine #155: An agent is working in its checkout." }))}${frame(420, pane(view))}</body></html>`;
+  refusal: "Nothing started. spine #155: An agent is working in its checkout." }))}${frame(420, pane(view))}${place}</body></html>`;
 const out = join(process.env.TMPDIR ?? tmpdir(), "inventory-preview.html");
 writeFileSync(out, html);
 console.log(out);

@@ -150,7 +150,7 @@ describe("the PR inventory screen view model", () => {
   it("imports only types and Your turn's pure rule, so it can't compute attention or reach a server module", () => {
     const source = readFileSync(new URL("./inventory-view-model.ts", import.meta.url), "utf8");
     const imports = [...source.matchAll(/^import (type )?.* from "(.+)";$/gmu)].map((match) => [match[2], match[1] === "type " ? "type" : "value"]);
-    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./your-turn", "value"]]);
+    expect(imports).toEqual([["./inventory-view", "type"], ["./pr-attention", "type"], ["./effort-classify", "type"], ["./your-turn", "value"]]);
     // The server publishes this channel (inventory-get-server.test.ts pins its side), and the picker checks logins as gh would.
     expect(INVENTORY_CHANGED).toBe("inventory-changed");
     expect(LOGIN.source).toBe(REVIEWER.source);
@@ -498,6 +498,9 @@ describe("the PR inventory screen view model", () => {
     expect(words.get("Dismiss")).toContain("until its head moves");
     expect(words.get("Nudge")).toContain("server checks again");
     expect(words.get("Nudge")).toContain("Your turn offers none");
+    // Routing: any row moves, and only a suggestion the classifier stands behind shows.
+    expect(words.get("Move")).toContain("Select any rows");
+    expect(words.get("Suggestion")).toContain("Weak or tied picks show nothing");
   });
 
   it("names each effort's group, with No effort last", () => {

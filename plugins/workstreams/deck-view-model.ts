@@ -532,10 +532,12 @@ export type KeyContext = {
   selected: readonly DeckLine[];
   seenAvailable: boolean; undo: boolean; held: number; done: number;
   /**
-   * In All PRs: whether a row is focused, whether it has a thread, and the moves its inventory row offers; whether the focused row is on Your
-   * turn, which x selects; how many rows Your turn lists, which ⇧X selects; and how many are selected, which b addresses.
+   * In All PRs: whether a row is focused, whether it has a thread, and the moves its inventory row offers; whether x selects the focused
+   * row; how many rows Your turn lists, which ⇧X selects; how many rows are selected, which e moves, and whether b can address them all;
+   * and whether the focused row has a suggestion, which ⇧A accepts.
    */
-  prs?: { row: boolean; thread: boolean; moves: ReadonlySet<DeckActionId>; selectable?: boolean; turn?: number; picked?: number };
+  prs?: { row: boolean; thread: boolean; moves: ReadonlySet<DeckActionId>; selectable?: boolean; turn?: number; picked?: number; addressable?: boolean;
+    suggested?: boolean };
 };
 export type Availability = Record<DeckActionId, { on: boolean; why: string }>;
 
@@ -597,7 +599,10 @@ export function availability(context: KeyContext): Availability {
   }
   // Address takes the Your turn rows ticked for it, never a row by focus alone: you pick what one thread gets.
   const picked = deck ? addressPicks(selected).length : prs?.picked ?? 0;
-  set("address", (deck ? live : true) && picked > 0, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : deck ? "no Your turn row is ticked" : "select Your turn rows first");
+  // In All PRs, b takes the selection only while every row in it is one Address can take.
+  const mixed = !deck && picked > 0 && prs?.addressable === false;
+  set("address", (deck ? live : true) && picked > 0 && !mixed, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : deck ? "no Your turn row is ticked"
+    : mixed ? "Your turn rows only" : "select Your turn rows first");
   set("undo", context.undo, "nothing to undo");
   // In All PRs, a row holds or refreshes only when its list offers it. Refresh takes the selection there when there is one.
   set("hold-pr", deck ? row : !!prs?.moves.has("hold-pr"), deck || !row ? "focus a row first" : "the row has no such move");
@@ -606,14 +611,16 @@ export function availability(context: KeyContext): Availability {
   set("refresh", deck ? row : !!prs?.picked || !!prs?.moves.has("refresh"), deck || !row ? "focus a row first" : "the row has no such move");
   set("row-next", !deck || context.cur !== "overview", "no rows on Overview"); set("row-prev", !deck || context.cur !== "overview", "no rows on Overview");
   const turnRow = !!focused && !focused.dim && focused.row?.turn.list === "turn";
-  set("select", deck ? turnRow : !!prs?.selectable, deck ? "focus a Your turn row first" : "focus a Your turn row first");
+  set("select", deck ? turnRow : !!prs?.selectable, deck ? "focus a Your turn row first" : "focus a row first");
   set("select-section", deck ? !!card && card.yourTurn > 0 : (prs?.turn ?? 0) > 0, "nothing is on Your turn");
   set("expand", deck && !!card && card.moves.length > 0, deck ? (card ? "nothing to move here" : NO_CARD) : "Efforts only");
   set("clear", selected.length > 0 || (prs?.picked ?? 0) > 0, "nothing ticked");
   set("open-thread", deck ? !!focused?.row?.thread : !!prs?.thread, row ? "the row has no thread" : "focus a row first");
   set("open-pr", row, "focus a row first");
-  set("accept", sorting, service ? "focus a row first" : "only a service card's rows move from here");
-  set("move", sorting, service ? "focus a row first" : "only a service card's rows move from here");
+  // In All PRs, ⇧A takes the focused row's suggestion, and e moves the selection, else the focused row.
+  set("accept", deck ? sorting : !!prs?.suggested, !deck ? (row ? "the row has no suggestion" : "focus a row first") : service ? "focus a row first"
+    : "only a service card's rows move from here");
+  set("move", deck ? sorting : !!prs?.picked || !!prs?.selectable, !deck ? "select a row first" : service ? "focus a row first" : "only a service card's rows move from here");
   set("one-off", (service || leaves) && row && !focused!.dim, !card ? (deck ? NO_CARD : "Efforts only") : card.card.oneOff ? "they're in One-offs"
     : service || leaves ? "focus a row first" : "only an effort's or a service card's rows move from here");
   set("new-effort", sorting, service ? "focus a row first" : "only a service card's rows move from here");
@@ -634,8 +641,8 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
     const move = (["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const).find((id) => on[id].on);
     const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : move === "fix" ? "ask to fix"
       : ACTION[move].title.replace("…", "").toLowerCase()] as [DeckActionId, string] : false;
-    return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["refresh", "refresh"], ["clear", "clear"])
-      : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
+    return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["move", "move"], ["refresh", "refresh"], ["clear", "clear"])
+      : pick(["row-next", "rows"], moveHint, ["accept", "accept"], ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
   }
   // The card's moves, each by its key, in rank order; then its chores and its finish line.
   const moves = (card?.moves ?? []).flatMap((item) => item.kind === "reconcile" ? [] : [[item.kind, HINT[item.kind]] as [DeckActionId, string]]);

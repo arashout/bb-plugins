@@ -346,10 +346,11 @@ describe("selecting Your turn PRs to address together", () => {
       selected, onSelect: noop, onSelectAll: noop, onAddress: noop, onClear: noop, onUndo: noop, ...extra }));
   const boxes = (html: string) => [...html.matchAll(/aria-label="Select (inkwell\/[^"]+)"/gu)].map((match) => match[1]);
 
-  // Only Your turn's rows take a checkbox, so Address selected never reaches a PR with nothing waiting on you.
-  it("offers a checkbox on each Your turn row and a box for the whole list, and none on other rows", () => {
+  // Every open row takes a checkbox, to move it to an effort; Your turn's box takes Your turn alone, which Address can.
+  it("offers a checkbox on each row and a box for all of Your turn", () => {
     const html = selectedPane(new Set());
-    expect(boxes(html)).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
+    expect(boxes(html)).toEqual(splitInventory(SCREEN).turn.concat(splitInventory(SCREEN).other).flatMap((group) => group.lines.map((line) => `${line.slug}#${line.number}`)));
+    expect(boxes(html).slice(0, 5)).toEqual(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301", "inkwell/folio#318"]);
     expect(html).toContain('aria-label="Select every Your turn PR"');
     // Nothing selected, nothing to address: the bar stays away.
     expect(html).not.toContain('data-inventory-action="address"');
@@ -380,7 +381,8 @@ describe("selecting Your turn PRs to address together", () => {
     const html = selectedPane(new Set(), view);
     expect(refs(splitInventory(inventoryScreen(view, { now: NOW, filter: null })).turn)).toEqual([["Store pickup", ["inkwell/quill#210", "inkwell/quill#211",
       "inkwell/spine#155"]], ["No effort", ["inkwell/folio#301", "inkwell/folio#318"]]]);
-    expect(boxes(html)).toEqual(["inkwell/spine#155", "inkwell/folio#318"]);
+    const turnRefs = refs(splitInventory(inventoryScreen(view, { now: NOW, filter: null })).turn).flatMap(([, lines]) => lines);
+    expect(boxes(html).filter((ref) => turnRefs.includes(ref!))).toEqual(["inkwell/spine#155", "inkwell/folio#318"]);
     const chip = (markup: string, ref: string) => { const row = rowOf(markup, ref); const at = row.indexOf("data-inventory-sent="); return text(row.slice(row.lastIndexOf("<", at), row.indexOf("</li>", at))).trim(); };
     expect(["inkwell/quill#210", "inkwell/quill#211", "inkwell/spine#155", "inkwell/folio#301"].map((ref) => chip(html, ref))).toEqual(["Working ↗",
       "Sending · Undo", "Idle ↗", "Needs you ↗"]);
@@ -389,14 +391,14 @@ describe("selecting Your turn PRs to address together", () => {
     // A dispatch refusal is one line on its row.
     expect(text(rowOf(selectedPane(new Set(), patched((row) => row.number === 210 ? { sent: sent("refused", "Its effort is on hold. Nothing was started.", null) } : null)),
       "inkwell/quill#210"))).toContain("Not sent: Its effort is on hold. Nothing was started.");
-    // Answered, it leaves Your turn and keeps its link, grey on Other open PRs, with no box.
+    // Answered, it leaves Your turn and keeps its link, grey on Other open PRs, where its box moves it and Address won't take it.
     const left = patched((row) => row.number === 155 ? { sent: sent("idle"), yourTurn: null } : null);
     const parts = splitInventory(inventoryScreen(left, { now: NOW, filter: null }));
     expect(refs(parts.turn).flatMap(([, lines]) => lines)).not.toContain("inkwell/spine#155");
     expect(refs(parts.other).flatMap(([, lines]) => lines)).toContain("inkwell/spine#155");
     const other = selectedPane(new Set(), left);
     expect(chip(other, "inkwell/spine#155")).toBe("Idle ↗");
-    expect(rowOf(other, "inkwell/spine#155")).not.toContain("Select inkwell/spine#155");
+    expect(rowOf(other, "inkwell/spine#155")).toContain("Select inkwell/spine#155");
     expect(rowOf(selectedPane(new Set(), patched((row) => row.number === 155 ? { sent: sent("working"), yourTurn: null } : null)), "inkwell/spine#155"))
       .toMatch(/data-inventory-sent="working"[^>]*class="[^"]*text-muted-foreground/u);
   });

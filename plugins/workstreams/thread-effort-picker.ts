@@ -32,7 +32,7 @@ const norm = (text: string) => text.trim().replace(/\s+/gu, " ").toLocaleLowerCa
  * after them, then every other effort by name, all narrowed by what you typed; then "+ New effort" from the typed name, then Remove.
  * PRs: the tracked PRs to link, narrowed the same way.
  */
-export function pickerItems(input: { picker: ThreadEffortPicker; currentKey: string | null; query: string; mode: PickerMode;
+export function pickerItems(input: { picker: Pick<ThreadEffortPicker, "choices" | "jev">; currentKey: string | null; query: string; mode: PickerMode;
   linkable: readonly { url: string; label: string }[]; linkedUrl: string | null; jev: JevAnswer }): PickerItem[] {
   const query = norm(input.query);
   const match = (text: string) => !query || norm(text).includes(query);

@@ -160,6 +160,26 @@ export function inkwellSuggestions(): SuggestionGroup[] {
 }
 
 /**
+ * The deck case's suggestions as classify_get hands All PRs the inventory case's: folio #325 for Shelf order (high), and at medium folio
+ * #301 for Shelf order and catalog #96 for Store pickup; folio #318 for Shelf order only at low, atlas #410 and catalog #97 as a new
+ * effort, and folio #305 with no clear signal, none of which shows.
+ */
+export function inkwellInventorySuggestions(): SuggestionGroup[] {
+  const pr = (repo: string, number: number, title: string, text: string, effortId: string) =>
+    ({ prUrl: url(repo, number), repo: `inkwell/${repo}`, number, title, signals: [{ kind: text.startsWith("thread") ? "thread" as const : "group" as const, effortId, text }] });
+  const { shelf, pickup } = INVENTORY_EFFORTS;
+  const [high, ...rest] = inkwellSuggestions();
+  return [high!,
+    { key: `effort:${shelf.id}:medium`, target: { kind: "effort", effortId: shelf.id, name: shelf.name }, confidence: "medium", reason: "Board group",
+      signals: ["board group “Shelves”"], tickets: [], prs: [pr("folio", 301, "Show spine labels on shelf cards", "board group “Shelves”", shelf.id)] },
+    { key: `effort:${pickup.id}:medium`, target: { kind: "effort", effortId: pickup.id, name: pickup.name }, confidence: "medium", reason: "Linked thread",
+      signals: ["thread “Store pickup”"], tickets: [], prs: [pr("catalog", 96, "Show series order on catalog pages", "thread “Store pickup”", pickup.id)] },
+    { key: `effort:${shelf.id}:low`, target: { kind: "effort", effortId: shelf.id, name: shelf.name }, confidence: "low", reason: "Board group",
+      signals: ["board group “Shelves”"], tickets: [], prs: [pr("folio", 318, "Keep the reading list sort", "board group “Shelves”", shelf.id)] },
+    ...rest];
+}
+
+/**
  * The inventory case as the effort deck serves it: Shelf order (the approved folio stack and the conflicting #330) and Store pickup (three
  * PRs to fix and two stacked on them) on the active pile, One-offs holding the two approvals with comments and the overdue catalog
  * review, Gift cards on hold, Store hours done, and four PRs no effort owns on their service cards: folio #325 suggested for Shelf order,

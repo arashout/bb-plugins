@@ -1,4 +1,4 @@
-import { sendable, type InventoryLine, type LineAction } from "./inventory-view-model";
+import { sendable, type InventoryLine, type LineAction, type RowSuggestion } from "./inventory-view-model";
 import { BUTTON, CHECKBOX, GROUP_CARD, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
 import type { LiveItems } from "./deck-flow";
 import type { TicketChip } from "./deck-view-model";
@@ -8,14 +8,17 @@ import { cn } from "./lib/utils";
 export type SimpleGroup = { key: string; label: string; effortId: string | null; lines: InventoryLine[] };
 export type SimpleRowsProps = {
   groups: SimpleGroup[];
-  /** Your turn rows show why, select, and dismiss; dismissed ones show why and come back; other rows their state. Any row links its sent thread. */
+  /** Your turn rows show why, select, and dismiss; dismissed ones show why and come back; other rows their state, and select. Any row links its sent thread. */
   kind: "turn" | "dismissed" | "other";
   busyKey: string | null;
   onOpenPr(url: string): void;
   onOpenThread(id: string): void;
   onOpenEffort(effortId: string): void;
   onNudge(line: InventoryLine, action: LineAction): void;
-  /** Your turn rows you selected for Address, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. */
+  /**
+   * Rows you selected, by PR, and a click on one's checkbox; Shift takes the range from the last one you clicked. A Your turn row takes one
+   * only while Address can take it; any other open row always does, to move.
+   */
   selected?: ReadonlySet<string>;
   onSelect?(line: InventoryLine, shift: boolean): void;
   /** Why the last Address didn't send a PR, by PR. */
@@ -30,6 +33,8 @@ export type SimpleRowsProps = {
   onRefresh?(line: InventoryLine): void; reading?: ReadonlySet<string>;
   /** A deck card's ticket chip for each row, by PR, with its Linear priority. */
   tickets?: ReadonlyMap<string, TicketChip>;
+  /** The classifier's suggestion for each row no effort owns, by PR; accept some rows' suggestions, or hide one row's. */
+  suggestions?: ReadonlyMap<string, RowSuggestion>; onAccept?(lines: InventoryLine[]): void; onDismissSuggestion?(line: InventoryLine): void;
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 items-center gap-1 rounded px-1.5 text-[11px]";
 /** One PR's row, taller than the deck's: the PR in its own column, then the title on a line of its own with the why, chips, and action under it. */
@@ -53,10 +58,14 @@ const LIVE: Record<NonNullable<ReturnType<LiveItems["get"]>>["state"], { text: s
 export function SimpleInventoryList(props: SimpleRowsProps) {
   // Each group's rows in a card under its title, two lines a row, with no rules between them.
   return <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 pb-1.5 pt-0.5">
-    {props.groups.map((group) => <section key={group.key} data-inventory-group={group.label} className="min-w-0">
-      {/* A deck card's move names its rows itself, so their group has no title. */}
-      {group.label ? <h3 className="ml-9 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
+    {props.groups.map((group) => { const suggested = props.onAccept ? group.lines.filter((line) => props.suggestions?.has(line.prUrl)) : []; return <section key={group.key}
+      data-inventory-group={group.label} className="min-w-0">
+      {/* A deck card's move names its rows itself, so their group has no title. Several suggestions here take one click together. */}
+      {group.label ? <h3 className="ml-9 flex flex-wrap items-center gap-x-2 pb-0.5 pt-1.5 text-[11px] font-medium text-muted-foreground">
         {group.effortId ? <button type="button" onClick={() => props.onOpenEffort(group.effortId!)} className={cn("rounded-sm hover:text-foreground hover:underline", RING)}>{group.label}</button> : group.label}
+        {suggested.length > 1 ? <button type="button" data-inventory-action="accept-all" onClick={() => props.onAccept!(suggested)}
+          title={`Put each in its suggested effort: ${[...new Set(suggested.map((line) => props.suggestions!.get(line.prUrl)!.name))].join(", ")}`}
+          className={cn("rounded-sm font-normal hover:text-foreground hover:underline", RING)}>Accept all suggestions ({suggested.length})</button> : null}
       </h3> : null}
       {/* The card's edge lines up with the section's title, which keeps its rows where they were, under the group's title. */}
       <ul className={cn("ml-[19px] list-none", GROUP_CARD)}>
@@ -66,7 +75,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const turn = props.kind !== "other" ? line.yourTurn : null;
           const mine = props.kind === "turn";
           const info = turn ? `${turn.why}${turn.age ? ` · ${turn.age}` : ""}` : `${line.status}${next ? ` · ${next.text}${next.age ? ` · ${next.age}` : ""}` : ""}`;
-          const picked = mine && !!props.selected?.has(line.prUrl);
+          const picked = !!props.selected?.has(line.prUrl);
           // One thing beside it: a batch sending it now, why the last Address didn't send it, its sent thread, or, off Your turn, its Nudge.
           const note = mine ? props.notes?.get(line.prUrl) ?? null : null;
           const sent = note ? { state: "refused" as const, threadId: null, title: null, detail: note, batchId: null } : mine || line.sent?.threadId ? line.sent : null;
@@ -74,14 +83,15 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const working = mine && !!props.working?.has(line.prUrl);
           const refresh = props.onRefresh ? line.actions.find((action) => action.id === "refresh") : undefined;
           const reading = !!props.reading?.has(line.prUrl);
-          const box = mine && !!props.onSelect;
+          const box = props.kind !== "dismissed" && !!props.onSelect;
           const ticket = props.tickets?.get(line.prUrl);
+          const suggestion = props.onAccept ? props.suggestions?.get(line.prUrl) : undefined;
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
             data-inventory-working={working || undefined} aria-busy={working || undefined}
             className={cn("group min-w-0 rounded-md hover:bg-foreground/[0.03] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500",
               picked && "bg-sky-500/[0.07]", working && WORKING_ROW)}>
             <div className={TWO_LINE_ROW}>
-              {box ? sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
+              {box ? !mine || sendable(line) ? <input type="checkbox" tabIndex={-1} checked={picked} aria-label={`Select ${line.slug}#${line.number}`}
                 onChange={() => undefined} onClick={(event) => props.onSelect!(line, event.shiftKey)} className={cn(CHECKBOX, "mt-[3px]")} />
                 : <span aria-hidden className="size-3.5 shrink-0" /> : null}
               <PrRef repo={line.repo} number={line.number} strong={mine || !!nudge} onClick={() => props.onOpenPr(line.prUrl)} />
@@ -91,6 +101,12 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                 <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
                   <span className="min-w-0" title={info}>{info}</span>
                   <span className="ml-auto flex min-w-0 max-w-full items-center gap-1.5">
+                    {suggestion ? <span data-inventory-suggestion={suggestion.name} className={cn(CHIP, "gap-0 border border-dashed border-border px-0 text-muted-foreground")}>
+                      <button type="button" tabIndex={-1} data-inventory-action="accept" onClick={() => props.onAccept!([line])} title={suggestion.reason}
+                        aria-label={`Put it in ${suggestion.name}: ${suggestion.reason}`} className={cn("min-w-0 truncate rounded-l px-1 hover:text-foreground", RING)}>→ {suggestion.name}?</button>
+                      {props.onDismissSuggestion ? <button type="button" tabIndex={-1} data-inventory-action="dismiss-suggestion" onClick={() => props.onDismissSuggestion!(line)}
+                        aria-label={`Hide the suggestion of ${suggestion.name}`} title="Hide this suggestion" className={cn("shrink-0 rounded-r px-1 hover:text-foreground", RING)}>×</button> : null}
+                    </span> : null}
                     {ticket ? <span data-inventory-ticket={ticket.text} title={ticket.title} className={cn(CHIP, "shrink-0 px-1 text-muted-foreground")}>
                       {ticket.glyph ? <span aria-hidden className={cn("text-[10px] font-bold leading-none", TONE[ticket.tone].text)}>{ticket.glyph}</span> : null}
                       <span className="truncate">{ticket.text}</span></span> : null}
@@ -116,6 +132,6 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           </li>;
         })}
       </ul>
-    </section>)}
+    </section>; })}
   </div>;
 }

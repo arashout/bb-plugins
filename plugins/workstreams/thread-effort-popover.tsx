@@ -97,7 +97,8 @@ export type PickerBodyProps = {
   /** The highlighted item's index; -1 for none. */
   highlight: number;
   busy: boolean;
-  linked: readonly Linked[];
+  /** The thread's linked PRs, under the list; All PRs' Move to effort… has none. */
+  linked?: readonly Linked[];
   /** The thread's own effort: linked PRs elsewhere offer to move here. */
   current: { id: string; name: string } | null;
   /** A Move here that takes more than its PR, waiting on Move all with what else it takes listed. */
@@ -110,11 +111,11 @@ export type PickerBodyProps = {
   onKeyDown(event: KeyboardEvent<HTMLInputElement>): void;
   onPick(index: number): void;
   onHighlight(index: number): void;
-  onLinkMode(): void;
-  onMove(pr: Linked): void;
-  onConfirmMove(): void;
-  onCancelMove(): void;
-  onOpenPr(pr: Linked): void;
+  onLinkMode?(): void;
+  onMove?(pr: Linked): void;
+  onConfirmMove?(): void;
+  onCancelMove?(): void;
+  onOpenPr?(pr: Linked): void;
 };
 
 /** One list row, as the popover draws it. */
@@ -195,14 +196,14 @@ export function PickerBody(props: PickerBodyProps) {
     </div>
     {props.error || props.notice ? <p role={props.error ? "alert" : "status"} title={props.error ?? props.notice ?? undefined}
       className={cn("line-clamp-2 border-t border-border px-2.5 py-1.5 text-[11px]", props.error ? "text-destructive" : "text-muted-foreground")}>{props.error ?? props.notice}</p> : null}
-    {mode === "effort" ? <div className="flex flex-wrap items-center gap-1 border-t border-border px-2.5 py-1.5" aria-label="Linked PRs" role="group">
+    {mode === "effort" && props.linked ? <div className="flex flex-wrap items-center gap-1 border-t border-border px-2.5 py-1.5" aria-label="Linked PRs" role="group">
       <span className="pr-0.5 text-[10.5px] uppercase tracking-wide text-muted-foreground">PRs</span>
       {props.linked.map((pr) => {
         const elsewhere = props.current !== null && pr.effortId !== props.current.id;
         return <span key={pr.url} data-linked-pr={pr.ref} className="inline-flex h-5 max-w-full items-center gap-1 rounded-full border border-border px-1.5 text-[11px]">
-          <button type="button" onClick={() => props.onOpenPr(pr)} title={`${pr.title} · open on GitHub`} className={cn("shrink-0 rounded", RING)}>{pr.ref}</button>
+          <button type="button" onClick={() => props.onOpenPr?.(pr)} title={`${pr.title} · open on GitHub`} className={cn("shrink-0 rounded", RING)}>{pr.ref}</button>
           {pr.effortName && pr.effortId !== props.current?.id ? <span className="min-w-0 truncate text-muted-foreground" title={`In ${pr.effortName}`}>· {pr.effortName}</span> : null}
-          {elsewhere ? <button type="button" data-linked-move onClick={() => props.onMove(pr)} disabled={props.busy}
+          {elsewhere ? <button type="button" data-linked-move onClick={() => props.onMove?.(pr)} disabled={props.busy}
             title={`${pr.effortName ? "Move" : "Add"} ${pr.ref}${pr.sourceIds.some((id) => id.startsWith("ticket:")) ? " with its ticket" : ""} to ${props.current!.name}`}
             className={cn("shrink-0 rounded px-0.5 text-foreground underline-offset-2 hover:underline disabled:opacity-50", RING)}>{pr.effortName ? "Move here" : "Add"}{pr.also.length ? "…" : ""}</button> : null}
         </span>;
