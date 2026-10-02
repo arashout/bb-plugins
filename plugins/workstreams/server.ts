@@ -188,6 +188,8 @@ const TARGETED_MAX = 8;
 const ADDRESS_RUN = "address-feedback";
 /** Each PR's Dismiss from Your turn, a KV key per PR. */
 const DISMISSED = "yourTurnDismissed:";
+/** The effort whose suggestion you dismissed for a PR in All PRs, a KV key per PR. */
+const SUGGESTION_DISMISSED = "suggestionDismissed:";
 /** What every other writer hears while a batch thread's claim holds the PR. */
 const ADDRESSING = "A batch thread is addressing this PR's feedback. Wait for it to finish.";
 
@@ -3543,6 +3545,35 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: false as const, error: (error as Error).message.slice(0, 400) };
     }
   }
+  /**
+   * Move PRs All PRs lists into one effort as one action, out of whichever effort has each now, exactly or through a ticket, or none, with
+   * an audit row per PR naming where it was, which Undo reverses. Their tickets stay where they are. `destination` runs only once the PRs
+   * check out; one it `made` is removed again on a refusal.
+   */
+  async function moveInto(destination: () => { effort: EstablishedEffort; made: boolean } | null, source: AssignmentSource, prUrls: readonly string[]) {
+    const listed = new Set((await inventoryGet()).groups.flatMap((group) => group.rows.map((row) => row.prUrl)));
+    const keys = [...new Set(prUrls.map(prWorkItemKey))];
+    const label = (url: string) => { const target = prTarget(url); return target ? `${target.slug} #${target.number}` : url; };
+    const gone = keys.filter((url) => !listed.has(url)).map(label);
+    if (gone.length) return { ok: false as const, error: `${gone.join(", ")} ${gone.length === 1 ? "isn't" : "aren't"} open now. Refresh and try again.` };
+    const target = destination();
+    if (!target) return { ok: false as const, error: "The effort changed. Refresh and try again." };
+    const refuse = (error: string) => { if (target.made) effortStore.discard(target.effort.id); return { ok: false as const, error }; };
+    if (target.effort.archivedAt) return refuse("Restore this effort first.");
+    if (piles.get(target.effort).pile === "done") return refuse("Reopen this effort first.");
+    try {
+      const { actionId, effort, added } = assignments.move({ effortId: target.effort.id, source, prUrls: keys });
+      bb.realtime.publish(BOARD_CHANGED, { scanning });
+      inventoryChanged();
+      return { ok: true as const, actionId, effort: { id: effort.id, key: effort.key, name: effort.name }, added };
+    } catch (error) { return refuse((error as Error).message.slice(0, 400)); }
+  }
+  /** Each suggestion you dismissed in All PRs, by PR, from the plugin's KV: one key per PR, so no table holds them. */
+  async function suggestionDismissals(): Promise<Record<string, string>> {
+    const keys = await bb.storage.kv.list(SUGGESTION_DISMISSED);
+    return Object.fromEntries((await Promise.all(keys.map(async (key) => [key.slice(SUGGESTION_DISMISSED.length), await bb.storage.kv.get<unknown>(key)] as const)))
+      .flatMap(([prUrl, effortId]) => typeof effortId === "string" ? [[prUrl, effortId] as const] : []));
+  }
 
   /** Suggestions for your open PRs no effort owns, from what the board already read: nothing is read again, and nothing moves. */
   async function classifyGet(read?: Board) {
@@ -3570,9 +3601,10 @@ export default async function plugin(bb: BbPluginApi) {
     const tickets = [...prs.values()].flatMap((pr) => prTickets(pr, pattern));
     const details = linear.read([...new Set([...tickets, ...current.efforts.flatMap((effort) => effort.members.tickets)])]);
     const hits = assignments.ruleHits(Date.now() - 7 * 24 * 60 * 60_000);
+    const joinable = current.efforts.filter((effort) => !effort.archivedAt && effort.id !== oneOffs?.id && piles.get(effort).pile !== "done");
     return {
       groups: suggestEfforts({ prs: [...prs.values()], pattern,
-        efforts: current.efforts.filter((effort) => !effort.archivedAt && effort.id !== oneOffs?.id && piles.get(effort).pile !== "done")
+        efforts: joinable
           .map((effort) => { const seed = seeds.get(effort.id); return { id: effort.id, name: effort.name, tickets: effort.members.tickets,
             seededFrom: seed && { id: seed.id, name: seed.name } }; }),
         groups: current.groups.filter((group) => group.level === "effort" && !outsideGrouping(group.key) && !group.key.startsWith("ticket:") && !effortStore.get(group.key))
@@ -3583,6 +3615,7 @@ export default async function plugin(bb: BbPluginApi) {
       oneOffsId: oneOffs?.id ?? null,
       rules: assignments.rules().map((rule) => ({ ...rule, effortName: rule.effortId ? effortStore.get(rule.effortId)?.name ?? null : null,
         hits: hits.get(rule.id) ?? 0 })),
+      efforts: joinable.filter((effort) => piles.get(effort).pile === "active").map((effort) => ({ id: effort.id, name: effort.name })),
     };
   }
 
@@ -4797,7 +4830,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: true as const, notes: saved };
       } catch (error) { return { ok: false as const, error: (error as Error).message.slice(0, 400) }; }
     },
-    classify_get: () => classifyGet(),
+    classify_get: async () => ({ ...await classifyGet(), dismissed: await suggestionDismissals() }),
     deck_get: ({ seen, ghosts }) => deckGet(seen, ghosts),
     deck_batch_plan: (input) => deckBatchPlan(input),
     deck_batch_start: ({ batchId }) => deckBatches.start(batchId),
@@ -4837,6 +4870,23 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     classify_one_off: ({ prUrls, from }) => from ? moveToOneOffs(from, prUrls) : classifyInto(oneOffsEffort, "one-off", prUrls),
+    classify_move: async ({ prUrls, to }) => {
+      if (to.kind === "effort") return moveInto(() => { const effort = effortStore.get(to.effortKey); return effort && { effort, made: false }; }, "assign", prUrls);
+      if (to.kind === "one-off") return moveInto(() => { const made = effortStore.source(ONE_OFFS_SOURCE) === null; return { effort: oneOffsEffort(), made }; }, "one-off", prUrls);
+      // As classify_new_effort names and keys one: a retry of the same request can't create it twice.
+      const name = adminName(to.name);
+      const sourceKey = `classify-created:${to.requestId}`;
+      if (effortStore.source(sourceKey)) return { ok: false as const, error: "This effort was already created. Refresh and try again." };
+      const error = adminNameError(name, null);
+      if (error) return { ok: false as const, error };
+      return moveInto(() => ({ effort: effortStore.establish({ sourceKey, name, goal: "", projectId: "", members: { tickets: [], prUrls: [] }, coordinatorState: "none" }),
+        made: true }), "new-effort", prUrls);
+    },
+    classify_dismiss: async ({ prUrl, effortId }) => {
+      const key = `${SUGGESTION_DISMISSED}${prWorkItemKey(prUrl)}`;
+      if (effortId) await bb.storage.kv.set(key, effortId); else await bb.storage.kv.delete(key);
+      return { ok: true as const };
+    },
     classify_undo: async ({ actionId }) => {
       try {
         const { effortId, source } = assignments.undo(actionId);

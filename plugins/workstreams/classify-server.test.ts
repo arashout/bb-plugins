@@ -198,6 +198,69 @@ describe("One-offs", () => {
   });
 });
 
+// All PRs routes selected rows from any group, so a move takes PRs out of whichever effort has them, and Undo has to know where each was.
+describe("Moving PRs from All PRs", () => {
+  it("moves PRs from No effort and from another effort into the one you pick, and Undo puts each back where it was", async () => {
+    const env = await setup();
+    const pickup = env.efforts.establish({ sourceKey: "ticket:ABC-330", name: "Store pickup", goal: "", projectId: "", coordinatorState: "none",
+      members: { tickets: ["ABC-330"], prUrls: [] } });
+    // #314 is Shelf order's only through ABC-341, which stays with Shelf order.
+    const moved = await env.call("classify_move", { prUrls: [url(313), url(314)], to: { kind: "effort", effortKey: pickup.id } });
+    expect(moved).toMatchObject({ ok: true, added: 2, effort: { name: "Store pickup" } });
+    expect(await env.grouped()).toEqual({ "Store pickup": [313, 314], "No effort": [316] });
+    expect(env.efforts.owner("ticket", "ABC-341")?.id).toBe(env.shelf.id);
+    expect(await env.call("classify_move", { prUrls: [url(313)], to: { kind: "effort", effortKey: pickup.id } }))
+      .toEqual({ ok: false, error: "These are in Store pickup already." });
+    expect(await env.call("classify_undo", { actionId: moved.actionId })).toEqual({ ok: true });
+    expect(await env.grouped()).toEqual({ "Shelf order": [314], "No effort": [313, 316] });
+  });
+
+  it("starts a new effort with the PRs and removes it again on Undo; One-offs comes on first use", async () => {
+    const env = await setup();
+    const count = () => env.efforts.listAll().length;
+    const before = count();
+    const requestId = "77777777-7777-4777-8777-777777777777";
+    const created = await env.call("classify_move", { prUrls: [url(313), url(314)], to: { kind: "new", name: " Footer  work ", requestId } });
+    expect(created).toMatchObject({ ok: true, added: 2, effort: { name: "Footer work" } });
+    expect(await env.grouped()).toEqual({ "Footer work": [313, 314], "No effort": [316] });
+    // A lost reply's retry can't create it twice.
+    expect(await env.call("classify_move", { prUrls: [url(316)], to: { kind: "new", name: "Footer work", requestId } }))
+      .toEqual({ ok: false, error: "This effort was already created. Refresh and try again." });
+    expect(await env.call("classify_undo", { actionId: created.actionId })).toEqual({ ok: true });
+    expect([count(), await env.grouped()]).toEqual([before, { "Shelf order": [314], "No effort": [313, 316] }]);
+    const oneOff = await env.call("classify_move", { prUrls: [url(314)], to: { kind: "one-off" } });
+    expect(oneOff).toMatchObject({ ok: true, added: 1, effort: { name: "One-offs" } });
+    expect(await env.grouped()).toEqual({ "One-offs": [314], "No effort": [313, 316] });
+  });
+
+  // A refusal changes nothing, and a destination it would have created isn't left behind empty.
+  it("refuses a PR that isn't open now, a taken name, and a done effort, and creates nothing", async () => {
+    const env = await setup();
+    const count = () => env.efforts.listAll().length;
+    const before = count();
+    expect(await env.call("classify_move", { prUrls: [url(313), url(999)], to: { kind: "one-off" } }))
+      .toEqual({ ok: false, error: "inkwell/folio #999 isn't open now. Refresh and try again." });
+    expect(await env.call("classify_move", { prUrls: [url(313)], to: { kind: "new", name: "shelf ORDER", requestId: "88888888-8888-4888-8888-888888888888" } }))
+      .toEqual({ ok: false, error: "An effort with that name already exists." });
+    createEffortPileStore(env.bb.storage.database()).move(env.shelf, "complete");
+    expect(await env.call("classify_move", { prUrls: [url(313)], to: { kind: "effort", effortKey: env.shelf.id } })).toEqual({ ok: false, error: "Reopen this effort first." });
+    expect([count(), env.efforts.source(ONE_OFFS_SOURCE), await env.grouped()]).toEqual([before, null, { "Shelf order": [314], "No effort": [313, 316] }]);
+  });
+
+  // classify_get lists where Move to effort… can send PRs, and the suggestions you dismissed, by the effort each named.
+  it("lists the active efforts, One-offs aside, and keeps a dismissed suggestion until you take it back", async () => {
+    const env = await setup();
+    await env.call("classify_move", { prUrls: [url(316)], to: { kind: "one-off" } });
+    const held = env.efforts.establish({ sourceKey: "ticket:ABC-370", name: "Gift cards", goal: "", projectId: "", coordinatorState: "none", members: { tickets: [], prUrls: [] } });
+    createEffortPileStore(env.bb.storage.database()).move(held, "hold", "Waiting on the vendor");
+    expect(await env.call("classify_dismiss", { prUrl: url(313), effortId: env.shelf.id })).toEqual({ ok: true });
+    const read = await env.call("classify_get", null);
+    expect([read.efforts, read.dismissed]).toEqual([[{ id: env.shelf.id, name: "Shelf order" }], { [url(313)]: env.shelf.id }]);
+    await env.call("classify_dismiss", { prUrl: url(313), effortId: null });
+    expect((await env.call("classify_get", null)).dismissed).toEqual({});
+  });
+});
+
 /**
  * You author #313, #316, #317, #320, and #318 (in the done Quill export). #314 is in Shelf order through ABC-341. "Direct work" links #313
  * and #314 through its own metadata; "Checkout work" names #314 too, but reaches #316 only by running in #316's checkout.

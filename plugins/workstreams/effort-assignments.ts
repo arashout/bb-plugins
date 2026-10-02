@@ -40,7 +40,11 @@ export const classifyContract = {
   /** Read-only: a suggestion for each open PR of yours that no effort owns, grouped for accepting together. */
   classify_get: { input: z.null(), output: z.object({ groups: z.array(suggestionGroupSchema), oneOffsId: z.string().nullable(),
     /** Your standing rules, with how many PRs each placed in the last 7 days. */
-    rules: z.array(ruleSchema.extend({ effortName: z.string().nullable(), hits: z.number() }).strict()) }).strict() },
+    rules: z.array(ruleSchema.extend({ effortName: z.string().nullable(), hits: z.number() }).strict()),
+    /** The efforts on the active pile, One-offs aside, that All PRs' Move to effort… lists. */
+    efforts: z.array(z.object({ id: z.string(), name: z.string() }).strict()),
+    /** Suggestions you dismissed in All PRs: by PR, the effort each named, so a later suggestion of another effort still shows. */
+    dismissed: z.record(z.string(), z.string()) }).strict() },
   /**
    * Add a standing rule. After each read it places open PRs of yours that no effort owns and that were opened after the rule; `now` also places
    * every PR it matches today, as one undoable action per effort. A stack rule names no effort or value.
@@ -62,6 +66,17 @@ export const classifyContract = {
    * out of it. Undo puts each back where it was.
    */
   classify_one_off: { input: z.object({ prUrls, from: z.string().min(1).max(500).optional() }).strict(), output: classifyActionResultSchema },
+  /**
+   * Move PRs All PRs lists into an effort, One-offs, which the first use creates, or a new effort by name, out of whichever effort has
+   * each now, or none, as one action. Undo puts each back where it was, and removes a new effort again.
+   */
+  classify_move: { input: z.object({ prUrls, to: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("effort"), effortKey: z.string().min(1).max(500) }).strict(),
+    z.object({ kind: z.literal("one-off") }).strict(),
+    z.object({ kind: z.literal("new"), name: z.string().max(500), requestId: z.string().uuid() }).strict()]) }).strict(), output: classifyActionResultSchema },
+  /** Hide the suggestion of an effort for one PR in All PRs, or with null show it again. A suggestion of another effort still shows. */
+  classify_dismiss: { input: z.object({ prUrl: z.string().min(1).max(500), effortId: z.string().min(1).max(500).nullable() }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict() },
   /** Reverse one classification action while its effort still owns everything the action added. */
   classify_undo: { input: z.object({ actionId: z.string().uuid() }).strict(), output: z.discriminatedUnion("ok", [failure, z.object({ ok: z.literal(true) }).strict()]) },
 };
