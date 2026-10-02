@@ -4,12 +4,13 @@
 // section; this ranks a card's rows into its few moves (rankMoves), words its
 // finish line, counts Your turn for its strip chip, and says which actions the
 // keys, hint bar, ? sheet, and ⌘K offer right now. Moves and keys follow the
-// read as All PRs does; Mark seen only settles what changed since you looked
-// (deck-place.ts). It imports types, zero-import modules, All PRs' time
-// format, and approval-evidence.ts's wording (zod only), so no server module
-// reaches the browser (A12.1).
+// read as All PRs does, but leave a row a write of yours holds, as
+// deck_batch_plan does; Mark seen settles what changed since you looked
+// (deck-place.ts) and the writes that landed. It imports types, zero-import
+// modules, All PRs' time format, and approval-evidence.ts's wording (zod
+// only), so no server module reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { cardTier, DECK_SECTIONS, LOOSE_ID, SERVICE_PREFIX, serviceGoal, serviceName, yours, type DeckPile, type DeckSection, type DeckWrite }
+import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, SERVICE_PREFIX, serviceGoal, serviceName, yours, type DeckPile, type DeckSection, type DeckWrite }
   from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
@@ -63,9 +64,9 @@ export type DeckLine = {
   prUrl: string; ref: string; title: string;
   /** Its section as the read has it; a row that left keeps the one you saw it in. */
   section: DeckSection;
-  /** A move takes it now: an active card, a section whose move is yours, and no write of yours waiting on it or running. */
+  /** A move takes it now: an active card, a section whose move is yours, and no write of yours holding it (busy). */
   needs: boolean;
-  /** It left, or a write of yours waits on it or runs: no key takes it. */
+  /** It left, or a write of yours holds it: no key takes it. */
   dim: boolean; ghost: boolean;
   /** It changed, arrived, or left since you marked the card seen, which Mark seen settles. */
   dot: boolean;
@@ -73,16 +74,17 @@ export type DeckLine = {
   signals: string[];
   row: DeckRow | null;
 };
-/** What a view knows beyond deck_get: the time, and when each row was last marked seen. */
-export type LineContext = { now: number; seenAt: Readonly<Record<string, number>> };
 
-/** A write of yours waits out its Undo window on the row, or runs on it: no move takes it until that lands. */
-const busy = (row: Pick<DeckRow, "acted">) => row.acted?.state === "queued" || row.acted?.state === "sending";
+/**
+ * A write of yours holds its row from its Undo window until you mark the row seen after it lands, as deck_batch_plan reads it (counted):
+ * a thread's fix leaves GitHub as it was, so only your look says the read is past it. No move takes the row until then.
+ */
+const busy = (row: Pick<DeckRow, "acted">, seenAt: number | undefined) => !counted(row, seenAt);
 
 /** One settled row as a line: the read's row in its section now, or one that left, which only counts toward what Mark seen settles. */
-export function deckLine(item: Shown<DeckRow>, pile: DeckPile, signals: string[] = []): DeckLine {
+export function deckLine(item: Shown<DeckRow>, pile: DeckPile, seenAt: number | undefined, signals: string[] = []): DeckLine {
   const row = item.row;
-  const dim = item.ghost || (row !== null && busy(row));
+  const dim = item.ghost || (row !== null && busy(row, seenAt));
   return {
     prUrl: item.prUrl, ref: row ? refOf(row) : item.settled!.ref, title: row?.title ?? item.settled!.title,
     section: row?.section ?? item.section as DeckSection, needs: !dim && row !== null && pile === "active" && yours(row.section), dim, ghost: item.ghost,
@@ -201,12 +203,13 @@ function reconcile({ done, prUrls, merged }: DeckCard["linear"]["reconcile"]): M
  * then Confirm); your own blockers (Fix); a reviewer holding it 4 days or more (Nudge, naming who); then Linear and GitHub disagreeing
  * (Reconcile, from `disagree`). Nudges under 4 days, requests, and ready marks are chores: Advance clears them, and they never take a move.
  * With nothing to move and every open PR held, Release is the one move. A held effort moves nothing until you resume it. A row a write of
- * yours waits on or runs takes no move until it lands, but Your turn keeps its rows with their state, as All PRs does.
+ * yours holds (busy, by `seenAt`) takes no move, but Your turn keeps its rows with their state, as All PRs does.
  */
-export function rankMoves(rows: readonly DeckRow[], pile: DeckPile, now: number, disagree?: DeckCard["linear"]["reconcile"]): { moves: Move[]; chores: string[] } {
+export function rankMoves(rows: readonly DeckRow[], pile: DeckPile, now: number, disagree?: DeckCard["linear"]["reconcile"],
+  seenAt: Readonly<Record<string, number>> = {}): { moves: Move[]; chores: string[] } {
   const active = pile === "active";
   const turn = rows.filter((row) => active && row.turn.list === "turn");
-  const live = rows.filter((row) => active && !busy(row) && row.turn.list !== "turn");
+  const live = rows.filter((row) => active && !busy(row, seenAt[row.prUrl]) && row.turn.list !== "turn");
   const of = (kind: ActKind) => live.filter((row) => MOVE_OF[row.section] === kind && (kind !== "nudge" || now - (since(row) ?? now) >= HOLDS_MS));
   const moves = ([["address", turn], ...(["merge", "confirm", "fix", "nudge"] as const).map((kind) => [kind, of(kind)] as const)] as const)
     .flatMap(([kind, list]) => list.length ? [move(kind, list, now)] : []);
@@ -331,7 +334,7 @@ export type CardScreen = {
   tickets: ReadonlyMap<string, TicketChip>;
   /** Every row the keys know: each open PR as the read has it, and each that left since you marked the card seen. */
   lines: DeckLine[];
-  /** What changed here since you marked it seen, and whether Mark seen has anything else to settle: a suggestion you accepted. */
+  /** What changed here since you marked it seen, and whether Mark seen has anything else to settle: a suggestion you accepted, or a write that landed. */
   changed: number; settleable: boolean;
   /** Its PRs on hold now, which its Held toggle lists. */
   held: number;
@@ -384,13 +387,14 @@ const CHORE: Partial<Record<DeckSection, string>> = { nudge: "nudge", request: "
  * which only counts what changed. On a service card, each row names where its suggestion points, and `accepted` collapses the
  * suggestions you took.
  */
-export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>> }, context: { now: number; accepted?: Accepted }): CardScreen {
+export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at?: Readonly<Record<string, number>> },
+  context: { now: number; accepted?: Accepted }): CardScreen {
   const { now } = context;
   const current = card.sections.flatMap((section) => section.rows);
   const groupOf = new Map(card.suggestions.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group] as const)));
   const lines = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => {
     const chip = pointer(groupOf.get(item.prUrl)?.target ?? null);
-    return deckLine(item, card.pile, chip && !item.ghost ? [chip] : []);
+    return deckLine(item, card.pile, seen.at?.[item.prUrl], chip && !item.ghost ? [chip] : []);
   });
   const byPr = new Map(lines.map((line) => [line.prUrl, line]));
   const counts = (of: readonly DeckSection[]) => current.filter((row) => of.includes(row.section)).length;
@@ -410,7 +414,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     ["Target", linear.projects.flatMap((project) => project.targetDate ? [`${calendarDay(project.targetDate)} ${project.name}`] : []).join(" · ")],
     ["Parent", tallies(linear.parents)], ["Read", `${linear.known} of ${plural(linear.tickets, "ticket")}`]] as [string, string][]).filter(([, value]) => value);
   const suggest = suggestGroups(card, lines, context.accepted ?? new Map());
-  const { moves, chores } = rankMoves(current, card.pile, now, linear.reconcile);
+  const { moves, chores } = rankMoves(current, card.pile, now, linear.reconcile, seen.at);
   const issues = new Map(linear.issues.map((issue) => [issue.id, issue]));
   const tickets = new Map(current.flatMap((row) => {
     const [first, ...rest] = row.tickets;
@@ -424,7 +428,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     moves, chores: { prUrls: chores, text: tally(chores.map((prUrl) => CHORE[byPr.get(prUrl)!.section]!)) }, tickets,
     lines,
     changed: lines.filter((line) => line.dot).length + threads.filter((thread) => thread.dot).length,
-    settleable: suggest.some((group) => group.accepted),
+    settleable: suggest.some((group) => group.accepted) || lines.some((line) => line.row?.acted?.state === "sent" && line.dim),
     held: counts(["held"]),
     finish: card.kind === "effort" && !card.oneOff ? finish(card, current, now) : null,
     next: card.next[0]?.text ?? null,

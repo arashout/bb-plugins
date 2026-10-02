@@ -4,6 +4,7 @@ import type { DeckCard, DeckRow, DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import { availability, cardScreen, notesScreen, cardSnapshot, hintKeys, keptServiceCards, overviewScreen, paletteItems, priorityOf, rankMoves, readText, refreshNote,
   rowFacts, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { planBatch, type PlanRow } from "./deck-batch.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 import type { LinearDetail } from "./linear.js";
 import type { Sent } from "./your-turn.js";
@@ -142,6 +143,27 @@ describe("a card's moves", () => {
     // One held PR among moving ones is no move: it waits under Held.
     const one = inkwellDeck({}, (row) => row.number === 156 ? { hold: { reason: "", heldAt: NOW } } : {});
     expect([card(one, PICKUP).moves.map((move) => move.kind), card(one, PICKUP).held]).toEqual([["address"], 1]);
+  });
+
+  // The card and deck_batch_plan read one rule (counted): a write you made holds its row from when it's queued until you mark the card seen
+  // after it lands. A card that freed the row sooner would read "Advance 1" or "Fix 1…" over a listing that skips it as just ran.
+  it("offers a chore or move only on rows the plan takes, so a write that landed holds its row until Mark seen", () => {
+    const at = NOW - 3_600_000;
+    const chore = url("folio", 325), fix = url("folio", 330);
+    const cases = [[null, undefined, true], ["queued", undefined, false], ["sending", undefined, false], ["sent", undefined, false], ["sent", at - 1, false],
+      ["sent", at, true], ["refused", undefined, true], ["unknown", undefined, true]] as const;
+    for (const [state, seenAt, offered] of cases) {
+      const view = inkwellDeck({}, (row) => state && [325, 330].includes(row.number) ? { acted: { kind: row.number === 325 ? "ready" : "fix", state, at, batchId: "b1" } } : {});
+      const seen = { rows: {}, at: seenAt === undefined ? {} : { [chore]: seenAt, [fix]: seenAt } };
+      const folio = card(view, FOLIO, seen), shelf = card(view, SHELF, seen);
+      const plans = (kind: "advance" | "fix", row: DeckRow, extra: Partial<PlanRow> = {}) => planBatch(kind, [{ row, pile: "active", seenAt, head: "a".repeat(40),
+        fingerprint: null, shown: { requested: [], reviewed: [] }, ...extra }], { selected: true }).items.length > 0;
+      expect([folio.chores.prUrls.includes(chore), plans("advance", line(folio, chore).row!), shelf.moves.some((move) => move.kind === "fix"),
+        plans("fix", line(shelf, fix).row!, { fix: { to: "Ask its thread", route: { kind: "thread", id: "thr" }, fixes: ["conflicts"] } })])
+        .toEqual([offered, offered, offered, offered]);
+      // A write that landed and holds its row is what Mark seen offers to settle; one still waiting isn't done yet.
+      expect([folio.settleable, shelf.settleable]).toEqual([state === "sent" && !offered, state === "sent" && !offered]);
+    }
   });
 
   // Reconcile writes nothing to Linear or GitHub: Show unfolds the open PRs of tickets Linear calls done, to merge or close them, and Linear
