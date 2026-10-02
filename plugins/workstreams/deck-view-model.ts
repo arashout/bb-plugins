@@ -243,7 +243,7 @@ export type TicketChip = { text: string; glyph: string | null; title: string; to
 // ---------------------------------------------------------------------------
 
 export type Finish = {
-  /** "4 of 12 done": Linear's completed tickets of those it read, else merged PRs of every PR a read saw. */
+  /** "4 of 12 done": Linear's completed tickets of those it read and didn't cancel, else merged PRs of every PR a read saw. */
   done: string;
   /** The date it answers to and where it stands: the Linear project's target, else the current cycle's end; null with neither. */
   date: { text: string; tone: Tone } | null;
@@ -291,7 +291,7 @@ function finish(card: DeckCard, rows: readonly DeckRow[], now: number): Finish {
     : target ? `Nothing merged in 14d to pace ${target.name}`
     : paced ? `No date in Linear · ETA ${paced}` : "No date, and nothing merged in 14d";
   return {
-    done: linear.known ? `${doneTickets} of ${linear.known} done` : `${card.progress.merged} of ${card.progress.merged + stats.open} merged`,
+    done: doneTickets + leftTickets ? `${doneTickets} of ${doneTickets + leftTickets} done` : `${card.progress.merged} of ${card.progress.merged + stats.open} merged`,
     date, eta,
     answers: [["On track?", track],
       ["What's left", [linear.known ? `${plural(leftTickets, "open ticket")}${left.length ? `: ${left.map((state) => `${state.count} ${state.name}`).join(" · ")}` : ""}` : null,

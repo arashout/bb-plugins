@@ -209,6 +209,13 @@ describe("the finish line", () => {
     expect(shelf(five(), [1, 1, 2, 3, 4, 5, 6, 8, 9, 13]).finish?.answers[0]).toEqual(["On track?", "On pace: ETA Oct 7, 7d to spare"]);
   });
 
+  // A canceled ticket will never be done, so it counts on neither side: an effort whose tickets are all done or canceled reads all done.
+  it("counts done of the tickets Linear didn't cancel, and merged PRs once every ticket is canceled", () => {
+    const canceled = (n: number) => ticket(n, "Canceled", "canceled");
+    expect([shelf([...five().slice(0, 4), canceled(364)], []), shelf([ticket(360, "Done", "completed"), ticket(361, "Done", "completed"), canceled(362)], []),
+      shelf([canceled(360)], [])].map((screen) => screen.finish?.done)).toEqual(["1 of 4 done", "2 of 2 done", "0 of 5 merged"]);
+  });
+
   it("says how late a passed target is, in red, and gives no ETA with nothing merged in 14 days", () => {
     const late = shelf(five({ id: "p1", name: "Shelf redesign", targetDate: "2026-02-27" }), [20]).finish!;
     expect([late.date, late.eta, late.answers[0]]).toEqual([{ text: "Target Feb 27 · 215d late", tone: "red" }, null,
