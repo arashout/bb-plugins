@@ -640,7 +640,7 @@ read saw against open PRs); up to three `next` steps (the oldest moves of the
 user's, then the oldest waits, never a held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
 tickets (`known` 0 means no Linear data), with each ticket's state type, priority, and points (`issues`) and where Linear and GitHub
 disagree (`reconcile`: tickets Done in Linear with PRs on the card still open, and open tickets whose PRs all merged in the last 14
-days); `people` (reviewers the user waits
+days, as read 10 minutes or more after the newest merge); `people` (reviewers the user waits
 on, and reviewers whose requested changes wait on the user); its parent and PR
 `threads`, read-only; the week's merges, reviews, and pushes; its rows by
 section; and on an effort's card, its Markdown `notes` (`body`, `revision`),
@@ -748,6 +748,8 @@ Ticket detail (title, state, priority, estimate, dates, project, parent,
 labels, url) is fetched with the key whose workspace owns the ticket's prefix,
 batched, and cached for 12 hours. The sync covers tickets on checkouts and open
 PRs, live efforts' own tickets, and tickets of PRs merged in the last 14 days.
+A merged PR's ticket read before the merge, or under 10 minutes after it, is
+read again on the next scan, since Linear moves it itself soon after.
 Workspaces and their team keys are re-read daily and after a settings change. A
 prefix no key owns gets no detail; that is not an error. Failures are logged
 once and keep the previous cache. Keys stay on the server and are never logged.

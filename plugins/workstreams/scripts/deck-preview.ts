@@ -50,7 +50,7 @@ const url = (repo: string, number: number) => `https://github.com/inkwell/${repo
 /** Four Shelf order merges in the last two weeks, so its ETA paces at 2/wk. */
 const merges = [290, 291, 292, 293].map((number, index) => ({ url: url("folio", number), at: NOW - (1 + 3 * index) * DAY, effortId: "effort-shelf-order",
   tickets: number === 292 ? ["ABC-365"] : [] }));
-const deck = inkwellDeck({ ...inkwellThreads(), linear, merges });
+const deck = inkwellDeck({ ...inkwellThreads(), linear, linearReadAt: new Map([...linear.keys()].map((id) => [id, NOW])), merges });
 /** All PRs' rows, which each move draws. */
 const lines = new Map(inventoryScreen(inkwellInventory(), { now: NOW, filter: null }).groups.flatMap((group) => group.lines.map((line) => [line.prUrl, line] as const)));
 const view = { ...deck, active: deck.active.map((item) => NOTES[item.id] ? { ...item, notes: { body: NOTES[item.id]!, revision: 1, updatedAt: NOW } } : item) };

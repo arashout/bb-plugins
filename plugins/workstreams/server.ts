@@ -1260,11 +1260,13 @@ export default async function plugin(bb: BbPluginApi) {
       await readLinkbackComments(pattern, result.units, hostId, signal);
       // A Linear outage keeps the previous cache and is logged once; it never fails a scan. Tickets on your open PRs are read too, so a PR
       // with no checkout still gets its Linear detail, and so are live efforts' own tickets and those of PRs merged in the last 14 days, so
-      // Reconcile reads them fresh. Each waits out its 12-hour cache, and only prefixes a key's workspace owns are ever sent.
+      // Reconcile reads them fresh. Each waits out its 12-hour cache, but a merged PR's ticket read before Linear could move it is read
+      // again (`merged`: each ticket's newest merge, so oldest first), and only prefixes a key's workspace owns are ever sent.
+      const merged = new Map(inventory.merges(Date.now() - LINEAR_MERGED_MS).reverse()
+        .flatMap((merge) => prTickets(merge, pattern).map((ticket) => [ticket, merge.at] as const)));
       await linear.sync(keys, [...new Set([...ticketsOf(await findTickets(pattern, result.units), result.units),
         ...inventory.read().entries.flatMap((entry) => prTickets(entry.pr, pattern)),
-        ...effortStore.list().flatMap((effort) => effort.archivedAt ? [] : effort.members.tickets),
-        ...inventory.merges(Date.now() - LINEAR_MERGED_MS).flatMap((merge) => prTickets(merge, pattern))])], signal);
+        ...effortStore.list().flatMap((effort) => effort.archivedAt ? [] : effort.members.tickets), ...merged.keys()])], signal, merged);
 
       // The first scan after a load waits for the thread list: threads seed the grouping.
       if (!threadsSynced) await syncThreads();
@@ -4191,14 +4193,15 @@ export default async function plugin(bb: BbPluginApi) {
     const merged = new Map(merges.map((merge) => [prWorkItemKey(merge.url), merge.at]));
     const gone = [...new Set(ghosts.map(prWorkItemKey))].flatMap((prUrl): DeckView["gone"] => open.has(prUrl) ? []
       : merged.has(prUrl) ? [{ prUrl, how: "merged", at: merged.get(prUrl)! }] : inventory.closed(prUrl) ? [{ prUrl, how: "closed", at: null }] : []);
+    const tickets = [...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets),
+      ...merges.flatMap((merge) => merge.tickets)])];
     return { now: Date.now(), rows, classify: { groups, oneOffsId }, gone,
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
         parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, notes: effortNotes.get(effort.id) })),
       merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id,
         tickets: merge.tickets }] : []; }),
-      linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets),
-        ...merges.flatMap((merge) => merge.tickets)])]),
+      linear: linear.read(tickets), linearReadAt: linear.readAt(tickets),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
         updatedAt: facts.updatedAt }])),
       homes: await threadHomes(efforts, work),

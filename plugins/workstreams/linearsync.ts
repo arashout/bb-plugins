@@ -12,6 +12,7 @@ import {
   parseDetails,
   parseWorkspace,
   planFetch,
+  readSettled,
   routeTeams,
   type LinearDetail,
   type LinearWorkspace,
@@ -149,14 +150,21 @@ export function createLinearSync(deps: LinearSyncDeps) {
       return out;
     },
 
+    /** When each ticket `read` knows was read, so a caller can tell a read from before what it saw since. */
+    readAt(tickets: readonly string[]): Map<string, number> {
+      return new Map([...readRows(tickets)].flatMap(([ticket, row]) => row.detail === null ? [] : [[ticket, row.fetchedAt] as const]));
+    },
+
     store,
 
     /**
      * Fetch detail for every ticket a key covers whose cache is missing or past
-     * its TTL, batched per key. Never throws for a Linear failure: that is
-     * logged once, the prior cache is kept, and the scan goes on.
+     * its TTL, or read before Linear could move it after its newest merge in
+     * `merged` (readSettled), batched per key. Never throws for a Linear
+     * failure: that is logged once, the prior cache is kept, and the scan goes on.
      */
-    async sync(keys: readonly string[], tickets: readonly string[], signal: AbortSignal): Promise<{ fetched: number }> {
+    async sync(keys: readonly string[], tickets: readonly string[], signal: AbortSignal,
+      merged: ReadonlyMap<string, number> = new Map()): Promise<{ fetched: number }> {
       if (keys.length === 0) return { fetched: 0 };
       const found = await workspaces(keys, signal);
       const { owner } = routeTeams(found);
@@ -170,7 +178,8 @@ export function createLinearSync(deps: LinearSyncDeps) {
         // A row cached by the removed agent fetch is replaced: the key is authoritative.
         const stale = owned.filter((ticket) => {
           const row = rows.get(ticket);
-          return row === undefined || row.source !== "key" || row.fetchedAt < cutoff || missingSeedFields(row.detail);
+          return row === undefined || row.source !== "key" || row.fetchedAt < cutoff || missingSeedFields(row.detail)
+            || (merged.has(ticket) && !readSettled(row.fetchedAt, merged.get(ticket)!));
         });
         for (let start = 0; start < stale.length; start += LINEAR_BATCH) {
           const batch = stale.slice(start, start + LINEAR_BATCH);

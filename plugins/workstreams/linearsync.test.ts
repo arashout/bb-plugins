@@ -2,7 +2,7 @@
 // here reaches the network.
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { LINEAR_DETAIL_TTL_MS, LINEAR_TEAMS_TTL_MS } from "./linear.js";
+import { LINEAR_DETAIL_TTL_MS, LINEAR_SETTLE_MS, LINEAR_TEAMS_TTL_MS } from "./linear.js";
 import { LINEAR_DETAIL_MIGRATION, createLinearSync } from "./linearsync.js";
 
 const KEY_A = "lin_api_inkwellfakekeyA";
@@ -86,6 +86,23 @@ describe("Linear sync", () => {
     tick(LINEAR_DETAIL_TTL_MS + 1);
     await sync.sync([KEY_A], ["ABC-1"], signal);
     expect(issueCalls(calls)).toHaveLength(2);
+  });
+
+  // A ticket read while its PR was open may have moved when the PR merged: Linear moves a merged PR's tickets itself, soon after. So the
+  // next sync reads it again, and each after until a read lands LINEAR_SETTLE_MS past the merge, rather than waiting out the 12-hour cache.
+  it("reads a ticket again after a merge that names it, until a read lands once Linear had time to move it", async () => {
+    const { sync, calls, tick } = setup();
+    const asked = () => issueCalls(calls).map((call) => [...call.query.matchAll(/issue\(id: "([^"]+)"\)/gu)].map((match) => match[1]));
+    const read = 1_000_000;
+    await sync.sync([KEY_A], ["ABC-1", "ABC-2"], signal);
+    const merged = new Map([["ABC-1", read + 60_000]]);
+    tick(120_000);
+    await sync.sync([KEY_A], ["ABC-1", "ABC-2"], signal, merged);
+    tick(LINEAR_SETTLE_MS);
+    await sync.sync([KEY_A], ["ABC-1", "ABC-2"], signal, merged);
+    await sync.sync([KEY_A], ["ABC-1", "ABC-2"], signal, merged);
+    expect(asked()).toEqual([["ABC-1", "ABC-2"], ["ABC-1"], ["ABC-1"]]);
+    expect(sync.readAt(["ABC-1", "ABC-2", "ABC-3"])).toEqual(new Map([["ABC-1", read + 120_000 + LINEAR_SETTLE_MS], ["ABC-2", read]]));
   });
 
   it("reads each key's workspace once a day, and again after a settings change", async () => {

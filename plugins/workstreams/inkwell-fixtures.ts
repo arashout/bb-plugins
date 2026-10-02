@@ -204,7 +204,7 @@ export function inkwellDeck(patch: Partial<DeckInput> = {}, row: (row: DeckRowIn
       { ...effort(oneOffs.id, "One-offs"), oneOff: true }, effort("effort-gift-cards", "Gift cards", "held"), effort("effort-store-hours", "Store hours", "done")],
     merges: [{ url: url("folio", 290), at: INVENTORY_NOW - day, effortId: shelf }],
     linear: new Map([["ABC-360", { identifier: "ABC-360", title: "Store shelf order", description: null, state: { name: "In Review", type: "started" },
-      project: { id: "p1", name: "Shelf redesign" }, parent: null, labels: ["shelves"], url: null, updatedAt: null, source: "agent" }]]),
+      project: { id: "p1", name: "Shelf redesign" }, parent: null, labels: ["shelves"], url: null, updatedAt: null, source: "agent" }]]), linearReadAt: new Map(),
     threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 2 * HOUR }]]), homes: [],
     classify: { oneOffsId: oneOffs.id, groups: inkwellSuggestions() },
     read: { checkedAt: new Date(INVENTORY_NOW - 25_000).toISOString(), refreshing: false, limitedUntil: null }, seen: new Map(), ...patch });

@@ -5,7 +5,7 @@ import type { SuggestionGroup } from "./effort-classify.js";
 import { inkwellDeck, inkwellInventory, inkwellInventoryPrs, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { inventoryScreen, onYourTurn } from "./inventory-view-model.js";
-import type { LinearDetail } from "./linear.js";
+import { LINEAR_SETTLE_MS, type LinearDetail } from "./linear.js";
 import type { AttentionReason } from "./pr-attention.js";
 
 const DAY = 86_400_000;
@@ -26,7 +26,7 @@ function input(patch: Partial<DeckInput> = {}, row: (row: DeckRowInput) => Parti
       acted: null };
     return { ...base, ...row(base) };
   }));
-  return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), threads: new Map(), homes: [],
+  return { now: INVENTORY_NOW, efforts: [effort("shelf"), effort("pickup")], rows, merges: [], linear: new Map(), linearReadAt: new Map(), threads: new Map(), homes: [],
     classify: { groups: [], oneOffsId: null }, read: { checkedAt: null, refreshing: false, limitedUntil: null }, seen: new Map(), ...patch };
 }
 const sections = (card: ReturnType<typeof deckView>["active"][number]) =>
@@ -261,19 +261,36 @@ describe("the effort deck", () => {
       state: { name: type, type }, project: null, parent: null, labels: [], url, updatedAt: null, source: "key" });
     const shelf = INVENTORY_EFFORTS.shelf.id;
     const merge = (number: number, daysAgo: number, tickets: string[]) => ({ url: url("folio", number), at: INVENTORY_NOW - daysAgo * DAY, effortId: shelf, tickets });
+    const linear = new Map([
+      // Done in Linear with folio #341 open; folio #342 open on a started ticket; the effort's own done ticket has no open PR.
+      ["ABC-361", detail("ABC-361", "completed")], ["ABC-362", detail("ABC-362", "started")], ["ABC-300", detail("ABC-300", "completed")],
+      // Open after their only PRs merged in the last 14 days, with Linear links; one canceled, one done, one merged 20 days ago.
+      ["ABC-390", detail("ABC-390", "started", "https://linear.app/inkwell/issue/ABC-390")], ["ABC-391", detail("ABC-391", "unstarted")],
+      ["ABC-392", detail("ABC-392", "canceled")], ["ABC-395", detail("ABC-395", "completed")], ["ABC-393", detail("ABC-393", "started")],
+      // Still open on Store pickup's quill #210, so not every PR of it merged.
+      ["ABC-370", detail("ABC-370", "started")]]);
     const view = deckView(input({ efforts: [effort("shelf", { tickets: ["ABC-300"] }), effort("pickup")],
       merges: [merge(290, 2, ["ABC-390"]), merge(291, 3, ["ABC-391"]), merge(292, 5, ["ABC-392"]), merge(293, 20, ["ABC-393"]), merge(294, 1, ["ABC-370"]),
-        merge(295, 1, ["ABC-394"]), merge(296, 4, ["ABC-395"])],
-      linear: new Map([
-        // Done in Linear with folio #341 open; folio #342 open on a started ticket; the effort's own done ticket has no open PR.
-        ["ABC-361", detail("ABC-361", "completed")], ["ABC-362", detail("ABC-362", "started")], ["ABC-300", detail("ABC-300", "completed")],
-        // Open after their only PRs merged in the last 14 days, with Linear links; one canceled, one done, one merged 20 days ago.
-        ["ABC-390", detail("ABC-390", "started", "https://linear.app/inkwell/issue/ABC-390")], ["ABC-391", detail("ABC-391", "unstarted")],
-        ["ABC-392", detail("ABC-392", "canceled")], ["ABC-395", detail("ABC-395", "completed")], ["ABC-393", detail("ABC-393", "started")],
-        // Still open on Store pickup's quill #210, so not every PR of it merged.
-        ["ABC-370", detail("ABC-370", "started")]]) }));
+        merge(295, 1, ["ABC-394"]), merge(296, 4, ["ABC-395"])], linear, linearReadAt: new Map([...linear.keys()].map((ticket) => [ticket, INVENTORY_NOW])) }));
     expect(cardOf(view, shelf).linear.reconcile).toEqual({ done: ["ABC-361"], prUrls: [url("folio", 341)],
       merged: [{ id: "ABC-390", url: "https://linear.app/inkwell/issue/ABC-390" }, { id: "ABC-391", url: null }] });
+  });
+
+  // Linear moves a merged PR's tickets itself, soon after the merge, so a ticket last read while its PR was open says nothing yet: that read
+  // would call nearly every merge a mismatch until its cache ran out. Only a read LINEAR_SETTLE_MS past the newest merge naming the ticket,
+  // in any effort, counts; the sync makes one on its next scan.
+  it("calls a ticket open after its PRs merged only from a read made once Linear had time to move it", () => {
+    const detail: LinearDetail = { identifier: "ABC-399", title: null, description: null, state: { name: "In Review", type: "started" }, project: null, parent: null,
+      labels: [], url: null, updatedAt: null, source: "key" };
+    const at = INVENTORY_NOW - 2 * 3_600_000;
+    const merge = (number: number, ago: number, effortId: string) => ({ url: url("folio", number), at: at - ago, effortId, tickets: ["ABC-399"] });
+    const merged = (readAt: number, merges = [merge(280, 0, INVENTORY_EFFORTS.shelf.id)]) => cardOf(deckView(input({ merges,
+      linear: new Map([["ABC-399", detail]]), linearReadAt: new Map([["ABC-399", readAt]]) })), INVENTORY_EFFORTS.shelf.id).linear.reconcile.merged.map((ticket) => ticket.id);
+    expect([at - 1, at + LINEAR_SETTLE_MS - 1, at + LINEAR_SETTLE_MS].map((readAt) => merged(readAt))).toEqual([[], [], ["ABC-399"]]);
+    // A read past Shelf order's own merge still predates a later merge naming the ticket on Store pickup.
+    const own = [merge(281, DAY, INVENTORY_EFFORTS.shelf.id)];
+    expect([merged(at - DAY + LINEAR_SETTLE_MS, own), merged(at - DAY + LINEAR_SETTLE_MS, [...own, merge(282, 0, INVENTORY_EFFORTS.pickup.id)])])
+      .toEqual([["ABC-399"], []]);
   });
 
   it("lists a done effort by name with what it merged and what is still open, without drawing its card", () => {

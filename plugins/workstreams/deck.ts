@@ -19,7 +19,7 @@ import { effortNotesSchema, NO_NOTES, type EffortNotes } from "./effort-notes.js
 import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, rowTurn, type ActionId } from "./inventory-view-model.js";
-import { LINEAR_MERGED_MS, type LinearDetail } from "./linear.js";
+import { LINEAR_MERGED_MS, readSettled, type LinearDetail } from "./linear.js";
 import { sentSchema, turnSchema, yourTurnSchema, type Turn } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
@@ -173,6 +173,8 @@ export type DeckInput = {
   /** Merges a read saw, with the effort that owns each and the tickets its title and branch name. */
   merges: readonly { url: string; at: number; effortId: string; tickets?: readonly string[] }[];
   linear: ReadonlyMap<string, LinearDetail>;
+  /** When each ticket in `linear` was read: a state read before Linear could move it after a merge says nothing of that merge (readSettled). */
+  linearReadAt: ReadonlyMap<string, number>;
   threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
   /** Every visible thread, with the evidence that places it on one card. */
   homes: readonly ThreadEvidence[];
@@ -282,12 +284,14 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   const tickets = [...new Set([...effort.tickets, ...rows.flatMap(({ input: row }) => row.tickets)])].sort();
   const details = tickets.flatMap((ticket) => input.linear.get(ticket) ?? []);
   // Linear and GitHub disagree: a ticket Linear completed while a PR here is open, and an open ticket no open PR names whose PRs merged in
-  // the last 14 days, the merges the sync keeps fresh. A ticket Linear never read disagrees with nothing.
+  // the last 14 days, the merges the sync keeps fresh, as of a read made once Linear could move it after the newest merge naming it, in
+  // any effort. A ticket Linear never read disagrees with nothing.
   const typeOf = (ticket: string) => input.linear.get(ticket)?.state?.type ?? null;
   const done = tickets.filter((ticket) => typeOf(ticket) === "completed" && rows.some(({ input: row }) => row.tickets.includes(ticket)));
   const named = new Set(input.rows.flatMap((row) => row.tickets));
+  const newest = (ticket: string) => Math.max(...input.merges.filter((merge) => merge.tickets?.includes(ticket)).map((merge) => merge.at));
   const merged = [...new Set(merges.filter((merge) => now - merge.at <= LINEAR_MERGED_MS).flatMap((merge) => merge.tickets ?? []))].sort()
-    .filter((ticket) => !named.has(ticket) && ![null, "completed", "canceled"].includes(typeOf(ticket)));
+    .filter((ticket) => !named.has(ticket) && ![null, "completed", "canceled"].includes(typeOf(ticket)) && readSettled(input.linearReadAt.get(ticket), newest(ticket)));
   const threads = new Map<string, DeckCard["threads"][number]>();
   const parent = effort.parentThreadId ? input.threads.get(effort.parentThreadId) : undefined;
   if (parent) threads.set(effort.parentThreadId!, { id: effort.parentThreadId!, title: parent.title, role: "parent", prUrl: null, status: parent.status,

@@ -14,6 +14,10 @@ export const LINEAR_BATCH = 25;
 export const DESCRIPTION_CHARS = 500;
 /** A PR merged this recently keeps its tickets in the sync, so Reconcile reads them fresh; an older merge keeps its last read. */
 export const LINEAR_MERGED_MS = 14 * 86_400_000;
+/** Linear moves a merged PR's tickets itself, soon after the merge: a read sooner than this after it may come before Linear did. */
+export const LINEAR_SETTLE_MS = 10 * 60_000;
+/** A ticket's read speaks for it after a merge that names it only once made LINEAR_SETTLE_MS past the merge. */
+export const readSettled = (readAt: number | undefined, mergedAt: number) => readAt !== undefined && readAt >= mergedAt + LINEAR_SETTLE_MS;
 
 /**
  * Every key the two settings hold, in order, without duplicates. A secret
