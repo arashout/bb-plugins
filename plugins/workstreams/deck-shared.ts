@@ -68,7 +68,10 @@ export function counted(row: { acted: RowActed | null }, seenAt = Number.NEGATIV
   return acted.state === "sent" && acted.at <= seenAt;
 }
 
+/** A section whose move is yours. */
+export const yours = (section: DeckSection): boolean => YOURS.has(section);
+
 /** Needs you: an open PR on an active card (an effort, One-offs, or a service card) whose next move is yours. Held and done efforts pause. */
 export function needsYou(row: { section: DeckSection; acted: RowActed | null }, pile: DeckPile, seenAt?: number): boolean {
-  return pile === "active" && YOURS.has(row.section) && counted(row, seenAt);
+  return pile === "active" && yours(row.section) && counted(row, seenAt);
 }

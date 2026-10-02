@@ -1,27 +1,30 @@
-// The effort deck in the Workstreams panel (plan amendments A15 and A17.1):
-// deck_get live from the server, the one key registry, and every write
-// through a listing confirm that waits out its Undo window, or through the
-// fresh merge preview. Membership changes (accept, move, one-off, new effort,
-// promote, rules) and pile moves are each one explicit click or key with Undo.
+// The effort deck in the Workstreams panel (plan amendments A15 and A17.1,
+// effort card v2): deck_get live from the server, with inventory_get for All
+// PRs' own rows under each move; the one key registry; and every write
+// through a listing confirm that waits out its Undo window, through the fresh
+// merge preview, or, for Address alone, started at once into that window.
+// Membership changes (accept, move, one-off, new effort, promote, rules) and
+// pile moves are each one explicit click or key with Undo.
 //
 // This is the part that talks to BB and the DOM: it keeps your place per view
 // in the session (deck-place.ts), holds rows at their pixel through reads,
-// resizes, flips, and Mark seen, and never leaves focus on the page body.
+// resizes, and flips, and never leaves focus on the page body.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import type { DeckView } from "./deck";
-import { DECK_CHANGED } from "./deck-shared";
+import type { DeckRow, DeckView } from "./deck";
+import { DECK_CHANGED, type DeckSection } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, deckRing, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, numberedEffort, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor,
   type FocusKey, type Place, type Seen, type ViewPlace } from "./deck-place";
-import { acceptLabel, acceptPlan, addressPicks, advanceTarget, availability, cardScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
-  paletteItems, paletteMatch, readText, refreshNote, rowFacts, rowFilter, SECTIONS, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
-  type PaletteItem, type RowFacts } from "./deck-view-model";
+import { acceptLabel, addressPicks, availability, cardScreen, cardSnapshot, hintKeys, keptServiceCards, KIND_OF, overviewScreen,
+  paletteItems, paletteMatch, readText, refreshNote, rowFacts, stripChips, targets, threadSnapshot, threadsKey, type Accepted, type DeckLine, type KeyContext,
+  type PaletteItem } from "./deck-view-model";
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
-  type NotesEdit, type RuleDraft, type RuleItem } from "./deck-screen";
-import { DeckDialog, message, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel, type Undo } from "./deck-flow";
-import { readNote } from "./inventory-view-model";
+  type NotesEdit, type Panel, type RuleDraft, type RuleItem } from "./deck-screen";
+import { DeckDialog, message, useBatchConfirm, useRefresh, useRegistryKeys, type Undo } from "./deck-flow";
+import { inventoryScreen } from "./inventory-view-model";
+import { useInventory } from "./inventory-screen";
 import { useNotesConfirm } from "./notes-flow";
 import { EASE, FLIP_MS, flipMotion, flipper, focusNamesCard, ghostOf, playFlip, settleFlip, type FlipMotion } from "./deck-flip";
 import { MergePreviewDialog } from "./merge-preview-dialog";
@@ -29,6 +32,10 @@ import type { SeedProposal } from "./linear-seed";
 import { deckLinkStep } from "./view-preference";
 
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** A row as All PRs draws it, named "owner/repo#N", which anchors, focus, and j and k find it by. */
+const ROW = "[data-inventory-row]";
+const rowAt = (key: string) => `[data-inventory-row="${CSS.escape(key)}"]`;
+const keyOf = (row: Pick<DeckRow, "repo" | "number">) => `${row.repo}#${row.number}`;
 /** The last deck read, so coming back to the deck draws it at once instead of "Reading…" (PLACE-LOSS #1). */
 let cachedDeck: DeckView | null = null;
 
@@ -122,11 +129,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   /** The card a flip landed on, for screen readers, once the flips stop. */
   const [announce, setAnnounce] = useState("");
   const announceTimer = useRef<number | null>(null);
-  const [stuck, setStuck] = useState(false);
+  /** The focused row, by its All PRs name. */
   const [activeRow, setActiveRow] = useState<string | null>(null);
   const [accepted, setAccepted] = useState<Accepted>(new Map());
-  /** PRs you moved to an effort from a service card, by the effort's name, until you mark that card seen. */
-  const [moved, setMoved] = useState<ReadonlyMap<string, string>>(new Map());
   /** A card an action made, which the deck opens once a read has it: a promoted service card goes on as its effort. */
   const follow = useRef<string | null>(null);
   const [dialog, setDialog] = useState<Dialogs | null>(null);
@@ -139,43 +144,41 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const [undo, setUndo] = useState<Undo | null>(null);
   const [rules, setRules] = useState<RuleItem[]>([]);
   /** Rows whose Refresh is running, until the read after it lands; with what each was, and the reads so far when GitHub answered. */
-  const [refreshing, setRefreshing] = useState<ReadonlyMap<string, { ref: string; was: { status: string; section: keyof typeof SECTIONS } | null; after: number | null }>>(new Map());
+  const [refreshing, setRefreshing] = useState<ReadonlyMap<string, { ref: string; was: { status: string; section: DeckSection } | null; after: number | null }>>(new Map());
   /** The Notes editor, open on one effort's card, with the revision it edits. */
   const [notesEdit, setNotesEdit] = useState<(NotesEdit & { effortId: string; revision: number }) | null>(null);
-  /** Where each row a Mark seen moves sat on screen, so it slides from there to its new place. */
-  const pendingMoves = useRef<Map<string, number> | null>(null);
   const now = useNow(30_000);
 
   const scrollBox = () => scrollerRef.current?.getBoundingClientRect() ?? null;
   const inView = (element: Element) => {
     const box = scrollBox();
     const rect = element.getBoundingClientRect();
-    return !!box && rect.top >= box.top + (stuck ? 34 : 0) + 30 && rect.bottom <= box.bottom + 1;
+    return !!box && rect.top >= box.top + 30 && rect.bottom <= box.bottom + 1;
   };
   /** What holds your place now: `prefer`, else the focused row in view, else the card's top while it shows, else the first row below the top. */
   const captureAnchor = useCallback((prefer?: Element | null): Anchor | null => {
     const box = scrollBox();
     const view = viewRef.current;
     if (!box || !view) return null;
-    const focused = document.activeElement?.closest?.("[data-deck-row]");
+    const focused = document.activeElement?.closest?.(ROW);
     const row = [prefer, focused].find((element) => element && view.contains(element) && inView(element));
-    if (row) return { row: (row as HTMLElement).dataset.deckRow!, at: row.getBoundingClientRect().top - box.top };
+    if (row) return { row: (row as HTMLElement).dataset.inventoryRow!, at: row.getBoundingClientRect().top - box.top };
     // The stack's box: the card on top, without the edges of the cards behind it.
     const card = view.querySelector("[data-deck-stack]");
     const cardBox = card?.getBoundingClientRect();
     if (cardBox && cardBox.bottom > box.top + 40) return { card: true, at: cardBox.top - box.top };
-    for (const element of Array.from(view.querySelectorAll<HTMLElement>("[data-deck-row]"))) {
+    for (const element of Array.from(view.querySelectorAll<HTMLElement>(ROW))) {
       const rect = element.getBoundingClientRect();
-      if (rect.bottom > box.top + (stuck ? 34 : 0) + 36) return { row: element.dataset.deckRow!, at: rect.top - box.top };
+      if (rect.bottom > box.top + 36) return { row: element.dataset.inventoryRow!, at: rect.top - box.top };
     }
     return null;
-  }, [stuck]);
+  }, []);
   const setSlack = (value: number) => { slack.current = value; if (slackRef.current) slackRef.current.style.height = `${value}px`; };
   const restoreAnchor = useCallback((anchor: Anchor | null) => {
     const scroller = scrollerRef.current;
     const view = viewRef.current;
     if (!anchor || !scroller || !view) return;
-    const element = "card" in anchor ? view.querySelector("[data-deck-stack]") : view.querySelector(`[data-deck-row="${CSS.escape(anchor.row)}"]`);
+    const element = "card" in anchor ? view.querySelector("[data-deck-stack]") : view.querySelector(rowAt(anchor.row));
     if (!element) return;
     const next = anchorScroll({ scrollTop: scroller.scrollTop, slack: slack.current, at: element.getBoundingClientRect().top - scroller.getBoundingClientRect().top, want: anchor.at });
     setSlack(next.slack);
@@ -194,9 +197,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   }, []);
   const batch = useBatchConfirm({ seenAt: () => seenRef.current.at, scopeName: (id) => view?.active.find((item) => item.id === id)?.name ?? null, say, setUndo, load,
     onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; }, onReturn: () => returnFocus(), reread: view });
-  const details = batch.details;
   /** The rows a Refresh is about to read, with what each was, for when it starts. */
-  const starting = useRef<Map<string, { ref: string; was: { status: string; section: keyof typeof SECTIONS }; after: null }>>(new Map());
+  const starting = useRef<Map<string, { ref: string; was: { status: string; section: DeckSection }; after: null }>>(new Map());
   const refresh = useRefresh({ say, started: () => setRefreshing((current) => new Map([...current, ...starting.current])),
     reads: (reads) => {
       // A read already running may have started before GitHub answered, so the one after it carries the answer; a failed read stops now.
@@ -206,28 +208,20 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         : answers.get(prUrl) === "checked" ? [[prUrl, { ...item, after }] as const] : [])));
       load();
     } });
-  const live = batch.live;
   const notes = useNotesConfirm({ say, load, onOpen: () => { const key = focusKey(document.activeElement); if (key.id || key.row) opener.current = key; },
     onReturn: () => returnFocus(), ask: (prUrl, effortId) => void batch.plan("ask", effortId, [prUrl]) });
+  // All PRs' own rows, which each move draws, read again after every deck read so the two agree.
+  const inventory = useInventory();
+  useEffect(() => { if (view) inventory.load(); }, [view, inventory.load]);
+  const rowLines = useMemo(() => new Map((inventory.view ? inventoryScreen(inventory.view, { now, filter: null, outcomes: refresh.outcomes }).groups : [])
+    .flatMap((group) => group.lines.map((line) => [line.prUrl, line] as const))), [inventory.view, now, refresh.outcomes]);
 
   // ---- what the deck shows -------------------------------------------------
   const place = placeRef.current;
   // A service card whose last PR left stays until you mark it seen.
   const active = useMemo(() => view ? [...view.active, ...keptServiceCards(place.order, view.active, seen.rows, accepted)] : [],
     [view, place.order, seen.rows, accepted]);
-  /** When the view first drew each row that left, for a ghost's age when the read gives none. */
-  const leftAt = useRef(new Map<string, number>());
-  // What became of a row that left: merged or closed, as the read found it, or on another card now.
-  const fates = useMemo(() => {
-    const open = new Map((view ? [...view.active, ...view.held] : []).flatMap((item) => item.sections.flatMap((section) => section.rows.map((row) => [row.prUrl, item.name] as const))));
-    const drawn = new Set(Object.entries(seen.rows).flatMap(([key, rows]) => key.startsWith("threads:") ? [] : rows.map((row) => row.prUrl)));
-    for (const url of drawn) if (!open.has(url) && !leftAt.current.has(url)) leftAt.current.set(url, Date.now());
-    // One open again, or settled by Mark seen, is no ghost.
-    for (const url of leftAt.current.keys()) if (open.has(url) || !drawn.has(url)) leftAt.current.delete(url);
-    return { gone: new Map((view?.gone ?? []).map((item) => [item.prUrl, { how: item.how, at: item.at }])), elsewhere: open, left: new Map(leftAt.current) };
-  }, [view, seen.rows]);
-  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, details, live, accepted, moved, ...fates })])),
-    [active, seen, now, details, live, accepted, moved, fates]);
+  const cards = useMemo(() => new Map(active.map((item) => [item.id, cardScreen(item, seen, { now, accepted })])), [active, seen, now, accepted]);
   const order = useMemo(() => keepOrder(place.order, active.map((item) => item.id)), [active, place.order]);
   // Overview opens the ring without taking an effort's number key.
   const ring = useMemo(() => deckRing(view ? order : null), [view, order]);
@@ -235,23 +229,24 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   // The order this render reads is the one you last saw until the effect below saves the new one, so the card landed on is kept now.
   const cur = landAfter(place.order, place.cur, ring);
   if (cur) place.cur = cur;
-  const full = cur && cur !== "overview" ? cards.get(cur) ?? null : null;
+  const card = cur && cur !== "overview" ? cards.get(cur) ?? null : null;
   const overview = useMemo(() => overviewScreen(order, cards), [order, cards]);
-  const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, selected: [], expanded: [], tiles: [], open: [] });
+  const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, unpicked: [], open: [] });
   const here = viewPlace(cur);
-  // A header count shows its rows alone until you show all again; everything else on the card counts them all.
-  const card = full && here.filter ? { ...full, sections: filterSections(full, here.filter) } : full;
   // Focus and scroll events can fire between a flip's render and its effects; they read the card shown now.
   const curRef = useRef(cur);
   curRef.current = cur;
-  const lines: DeckLine[] = card ? card.sections.flatMap((section) => section.lines) : [];
-  const focused = lines.find((line) => line.prUrl === activeRow) ?? null;
-  const selected = lines.filter((line) => here.selected.includes(line.prUrl) && !line.dim);
+  const lines: DeckLine[] = card?.lines ?? [];
+  const focused = lines.find((line) => line.row && keyOf(line.row) === activeRow) ?? null;
+  const lineOf = (prUrl: string) => lines.find((line) => line.prUrl === prUrl && line.row) ?? null;
+  // The Address move's rows start ticked, as its listing: b takes each one you haven't unticked that Address can take now.
+  const addressRows = lines.filter((line) => card?.moves.some((item) => item.kind === "address" && item.prUrls.includes(line.prUrl)) && line.row?.turn.addressable === true);
+  const selected = addressRows.filter((line) => !here.unpicked.includes(line.prUrl) && !line.dim);
   const changedHere = card?.changed ?? 0;
   const settleable = card?.settleable ?? false;
   const chips = useMemo(() => stripChips(order, cards, cur), [order, cards, cur]);
   const context: KeyContext = { view: "deck", cur: card ?? (view && cur === "overview" ? "overview" : null), service: order.find((id) => cards.get(id)?.card.kind === "service") ?? null, focused, selected,
-    seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0, filter: here.filter?.kind ?? null };
+    seenAvailable: changedHere > 0 || settleable, undo: !!undo?.live(), held: view?.held.length ?? 0, done: view?.done.length ?? 0 };
   const on = availability(context);
   const persist = useCallback(() => writeStore("sessionStorage", PLACE_KEY, placeRef.current), []);
 
@@ -261,7 +256,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     if (place.order.join() !== order.join()) { place.order = order; persist(); }
     const missing: Record<string, ReturnType<typeof cardSnapshot>> = {};
     for (const item of view.active) {
-      // A row that arrives since you looked joins the snapshot as new, so it stays drawn, as a ghost if it leaves again, until Mark seen.
+      // A row that arrives since you looked joins the snapshot as new, so it counts as changed, and again if it leaves, until Mark seen.
       const known = seen.rows[item.id];
       const arrived = known && withArrivals(known, cardSnapshot(item));
       if (!known || arrived) missing[item.id] = arrived || cardSnapshot(item);
@@ -276,15 +271,6 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const shown = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (pendingAnchor.current) { restoreAnchor(pendingAnchor.current); pendingAnchor.current = null; }
-    // Mark seen: each row it moved slides from where you saw it to its new place, once the anchor holds your place.
-    if (pendingMoves.current) {
-      for (const [prUrl, top] of pendingMoves.current) {
-        const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(prUrl)}"]`);
-        const delta = element ? top - element.getBoundingClientRect().top : 0;
-        if (element && Math.abs(delta) > 1 && !reduced()) element.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 320, easing: EASE });
-      }
-      pendingMoves.current = null;
-    }
     if (pendingFocus.current) { focusBack(pendingFocus.current, scrollFocus.current); pendingFocus.current = null; scrollFocus.current = false; return; }
     // The one safety net: a control that unmounted or hid under focus hands it to its replacement, never to the page.
     const active = document.activeElement;
@@ -323,21 +309,6 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     announceTimer.current = said ? null : window.setTimeout(() => setAnnounce(name), FLIP_MS);
   });
   useEffect(() => () => { if (announceTimer.current !== null) window.clearTimeout(announceTimer.current); }, []);
-  // Each read flashes what it changed on the rows in view: the change, the link to where a row moves, or what became of one that left.
-  const lastFacts = useRef<RowFacts | null>(null);
-  useLayoutEffect(() => {
-    if (!view) return;
-    const facts = rowFacts(view);
-    const changed = lastFacts.current ? changedRows(lastFacts.current, facts) : [];
-    lastFacts.current = facts;
-    if (reduced()) return;
-    for (const prUrl of changed) {
-      const row = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(prUrl)}"]`);
-      for (const part of row ? Array.from(row.querySelectorAll<HTMLElement>("[data-deck-change], [data-deck-to], [data-deck-fate]")) : [])
-        part.animate([{ backgroundColor: "rgba(56,189,248,.3)" }, { backgroundColor: "rgba(56,189,248,.3)", offset: 0.35 }, { backgroundColor: "transparent" }],
-          { duration: 1_800, easing: "ease-out" });
-    }
-  }, [view]);
   // A Refresh's spinner stays until the read after GitHub answered lands; then the hint bar says what it found.
   useEffect(() => {
     if (!view) return;
@@ -369,11 +340,6 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     const handler = () => {
       const melted = meltSlack({ scrollTop: scroller.scrollTop, slack: slack.current });
       if (melted.slack !== slack.current) { setSlack(melted.slack); scroller.scrollTop = melted.scrollTop; }
-      // Where the heading is laid out, not where a flip draws it, so a flip's motion never reads as a scroll.
-      const heading = viewRef.current?.querySelector<HTMLElement>("[data-deck-focus=heading]") ?? null;
-      let bottom = heading?.offsetHeight ?? 0;
-      for (let element = heading; element && element !== scroller; element = element.offsetParent as HTMLElement | null) bottom += element.offsetTop;
-      setStuck(!!heading && bottom < scroller.scrollTop + 2);
       if (onScroll.current !== null) window.clearTimeout(onScroll.current);
       onScroll.current = window.setTimeout(() => {
         const saved = viewPlace(curRef.current);
@@ -404,21 +370,22 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
 
   function focusKey(element: Element | null): FocusKey {
     if (!element) return {};
-    return { id: element.closest<HTMLElement>("[data-deck-focus]")?.dataset.deckFocus, row: element.closest<HTMLElement>("[data-deck-row]")?.dataset.deckRow,
-      section: element.closest<HTMLElement>("[data-deck-sec]")?.dataset.deckSec };
+    return { id: element.closest<HTMLElement>("[data-deck-focus]")?.dataset.deckFocus, row: element.closest<HTMLElement>(ROW)?.dataset.inventoryRow,
+      section: element.closest<HTMLElement>("[data-deck-move]")?.dataset.deckMove };
   }
   function focusBack(key: FocusKey, reveal = false) {
     const root = rootRef.current;
     if (!root) return;
     const live = (element: HTMLElement) => element.isConnected && element.getAttribute("aria-disabled") !== "true" && !(element as HTMLButtonElement).disabled
       && element.offsetParent !== null;
-    const rows = () => Array.from(root.querySelectorAll<HTMLElement>("[data-deck-row]:not([data-deck-dim])"));
+    const rows = () => Array.from(root.querySelectorAll<HTMLElement>(ROW));
     const target = focusFallback<HTMLElement>(key, {
-      byId: (id) => root.querySelector(`[data-deck-focus="${CSS.escape(id)}"]`), row: (prUrl) => root.querySelector(`[data-deck-row="${CSS.escape(prUrl)}"]`),
+      byId: (id) => root.querySelector(`[data-deck-focus="${CSS.escape(id)}"]`), row: (row) => root.querySelector(rowAt(row)),
+      // The move a row left: its next row there, else in a move after it.
       nextLiveRow: (section) => {
-        const sections = Array.from(root.querySelectorAll<HTMLElement>("[data-deck-sec]"));
-        const from = sections.findIndex((element) => element.dataset.deckSec === section);
-        for (const element of from < 0 ? [] : sections.slice(from)) { const row = element.querySelector<HTMLElement>("[data-deck-row]:not([data-deck-dim])"); if (row) return row; }
+        const moves = Array.from(root.querySelectorAll<HTMLElement>("[data-deck-move]"));
+        const from = moves.findIndex((element) => element.dataset.deckMove === section);
+        for (const element of from < 0 ? [] : moves.slice(from)) { const row = element.querySelector<HTMLElement>(ROW); if (row) return row; }
         return null;
       },
       firstLiveRow: () => rows().find(inView) ?? null, heading: () => root.querySelector("[data-deck-focus=heading]"), live });
@@ -429,10 +396,10 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   function landFocus(saved: ViewPlace) {
     const root = rootRef.current;
     if (!root) return;
-    const row = saved.focus ? root.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(saved.focus)}"]`) : null;
+    const row = saved.focus ? root.querySelector<HTMLElement>(rowAt(saved.focus)) : null;
     const heading = root.querySelector<HTMLElement>("[data-deck-focus=heading]");
     const target = (row && inView(row) ? row : null) ?? (heading && inView(heading) ? heading : null)
-      ?? Array.from(root.querySelectorAll<HTMLElement>("[data-deck-row]")).find(inView) ?? heading;
+      ?? Array.from(root.querySelectorAll<HTMLElement>(ROW)).find(inView) ?? heading;
     target?.focus({ preventScroll: true });
   }
 
@@ -461,12 +428,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const cardOf = (id: string) => view?.active.find((item) => item.id === id) ?? view?.held.find((item) => item.id === id) ?? null;
 
   // ---- membership: accept, move, one-off, new effort, rules ---------------
-  /**
-   * `note`: what else an Accept across groups did, said with its result so the result doesn't hide it. `promote`: the service card it
-   * promotes, which the deck leaves for the new effort's card, and comes back to on Undo.
-   */
+  /** `promote`: the service card it promotes, which the deck leaves for the new effort's card, and comes back to on Undo. */
   async function classify(call: () => Promise<{ ok: true; actionId: string; effort: { id: string; name: string }; added: number } | { ok: false; error: string }>,
-    group: string | null, prUrls: readonly string[], note?: string | null, promote: string | null = null) {
+    group: string | null, prUrls: readonly string[], promote: string | null = null) {
     setBusy(true);
     let result: Awaited<ReturnType<typeof call>>;
     try { result = await call(); } catch (cause) { result = { ok: false, error: message(cause) }; }
@@ -476,14 +440,11 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     const text = `${added} PR${added === 1 ? "" : "s"} → ${effort.name}`;
     const index = card?.suggest.findIndex((item) => item.key === group) ?? -1;
     if (group) setAccepted((current) => new Map([...current, [group, { actionId, text, prUrls, index: Math.max(0, index) }]]));
-    // A row you moved stays where it was, saying where it went, until you mark the card seen.
-    setMoved((current) => new Map([...current, ...prUrls.map((url) => [url, effort.name] as const)]));
     const undoIt = async () => {
       const undone = await rpc.call("classify_undo", { actionId });
       if (undone.ok) {
         if (promote) follow.current = promote;
         if (group) setAccepted((current) => { const next = new Map(current); next.delete(group); return next; });
-        setMoved((current) => new Map([...current].filter(([url]) => !prUrls.includes(url))));
       }
       say(undone.ok ? "Undone." : undone.error);
       load();
@@ -491,46 +452,45 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     let used = false;
     setUndo({ label: text, live: () => !used, run: async () => { used = true; await undoIt(); } });
     closeDialog();
-    say(note ? `${text} · ${note}` : text, true);
+    say(text, true);
     if (group) nextSortFocus(prUrls);
     if (promote) follow.current = effort.id;
     load();
     return true;
   }
-  /** After an accept, the next row on the card still to sort takes focus: the next one below the rows it moved, else the first. They stay put, dimmed. */
+  /** After an accept, the next row on the card still to sort takes focus: the next one below the rows it moved, else the first. */
   function nextSortFocus(gone: readonly string[]) {
-    const left = lines.filter((line) => line.row && !line.dim && !line.ghost && !gone.includes(line.prUrl));
+    const left = lines.filter((line) => line.row && !line.dim && !gone.includes(line.prUrl));
     const from = lines.findIndex((line) => gone.includes(line.prUrl));
     const row = left.find((line) => lines.indexOf(line) > from) ?? left[0];
-    const element = row ? rootRef.current?.querySelector(`[data-deck-row="${CSS.escape(row.prUrl)}"]`) : null;
+    const element = row ? rootRef.current?.querySelector(rowAt(keyOf(row.row!))) : null;
     pendingAnchor.current = captureAnchor(element);
-    pendingFocus.current = row ? { row: row.prUrl, section: row.section } : { id: "heading" };
+    pendingFocus.current = row ? { row: keyOf(row.row!) } : { id: "heading" };
     scrollFocus.current = true;
   }
-  const assign = (effortId: string, prUrls: string[], group: string | null, note?: string | null) =>
-    classify(() => rpc.call("classify_assign", { effortKey: effortId, prUrls }), group, prUrls, note);
-  const oneOff = (prUrls: string[], group: string | null, note?: string | null) => classify(() => rpc.call("classify_one_off", { prUrls }), group, prUrls, note);
-  /** `asked`: a weak group's rows you already checked in its confirm; before that, its Accept opens the confirm. `note`: see `classify`. */
-  function acceptGroup(key: string, { asked, note }: { asked?: readonly DeckLine[]; note?: string | null } = {}) {
+  const assign = (effortId: string, prUrls: string[], group: string | null) => classify(() => rpc.call("classify_assign", { effortKey: effortId, prUrls }), group, prUrls);
+  const oneOff = (prUrls: string[], group: string | null) => classify(() => rpc.call("classify_one_off", { prUrls }), group, prUrls);
+  /** `asked`: a weak group's rows you already checked in its confirm; before that, its Accept opens the confirm. */
+  function acceptGroup(key: string, { asked }: { asked?: readonly DeckLine[] } = {}) {
     const group = card?.suggest.find((item) => item.key === key);
     if (!group) return;
     const live = group.lines.filter((line) => !line.dim);
-    const picked = live.filter((line) => here.selected.includes(line.prUrl));
-    const rows = asked ?? (picked.length ? picked : live);
+    const rows = asked ?? live;
     if (!rows.length) return;
     if (group.button.confirm && !asked) { openDialog({ kind: "weak", group: key, lines: rows }); return; }
     const prUrls = rows.map((line) => line.prUrl);
     const target = group.target;
-    if (target?.kind === "effort") void assign(target.effortId, prUrls, key, note);
-    else if (target?.kind === "one-off") void oneOff(prUrls, key, note);
+    if (target?.kind === "effort") void assign(target.effortId, prUrls, key);
+    else if (target?.kind === "one-off") void oneOff(prUrls, key);
     else if (target?.kind === "new") openDialog({ kind: "new", prUrls, refs: refs(rows), name: target.name, goal: "", group: key });
     else {
-      // No clear signal: pick an effort for the rows you selected, else for the focused row, and the dialog names exactly those.
-      const chosen = picked.length ? picked : [live.find((line) => line.prUrl === activeRow) ?? live[0]!];
+      // No clear signal: pick an effort for the focused row, else the group's first, and the dialog names exactly that one.
+      const chosen = [live.find((line) => line === focused) ?? live[0]!];
       openDialog({ kind: "move", prUrls: chosen.map((line) => line.prUrl), refs: refs(chosen), group: null });
     }
   }
-  const scopeRows = () => selected.length ? selected : focused?.row && !focused.dim ? [focused] : [];
+  /** A service card's rows move one at a time, from the focused row. */
+  const scopeRows = () => focused?.row && !focused.dim ? [focused] : [];
   /** The suggestion a row on this card is in. */
   const groupOf = (prUrl: string) => card?.suggest.find((item) => !item.accepted && item.lines.some((line) => line.prUrl === prUrl))?.key ?? null;
 
@@ -592,58 +552,41 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   // ---- Mark seen -----------------------------------------------------------
   function markSeen() {
     if (!view || !card || !context.seenAvailable) return;
-    const root = rootRef.current;
-    const focusedRow = document.activeElement?.closest?.("[data-deck-row]");
-    const firstChanged = Array.from(root?.querySelectorAll("[data-deck-row][data-deck-dot]") ?? []).find(inView);
-    const anchor = captureAnchor(focusedRow && inView(focusedRow) ? focusedRow : firstChanged);
-    const before = Array.from(root?.querySelectorAll<HTMLElement>("[data-deck-row]") ?? []).map((element) => element.dataset.deckRow!);
-    const moved = lines.filter((line) => !line.ghost && (line.change || line.to)).length;
-    // Where each row that moves sits now, for its slide to its new place, which a folded In flight opens to show.
-    pendingMoves.current = new Map(lines.flatMap((line) => {
-      const element = line.to ? root?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(line.prUrl)}"]`) : null;
-      return element ? [[line.prUrl, element.getBoundingClientRect().top] as const] : [];
-    }));
-    const folded = lines.flatMap((line) => line.to && SECTIONS[line.to.key].fold && !here.open.includes(line.to.key) ? [line.to.key] : []);
-    if (folded.length) { here.open = [...new Set([...here.open, ...folded])]; persist(); }
-    const left = lines.filter((line) => line.ghost).length;
+    // Rows follow the read, so nothing moves: the snapshot and seen marks settle, and your place holds.
+    pendingAnchor.current = captureAnchor();
     const stamp = Date.now();
     const settled = { [card.card.id]: cardSnapshot(card.card), [threadsKey(card.card.id)]: threadSnapshot(card.card) };
     const marked = Object.fromEntries(card.card.sections.flatMap((section) => section.rows).map((row) => [row.prUrl, stamp]));
     setSeen((current) => ({ rows: { ...current.rows, ...settled }, at: { ...current.at, ...marked } }));
-    // What you moved from here settles with it: its collapsed suggestions, and the rows that stayed to say where they went.
-    const onCard = new Set(lines.map((line) => line.prUrl));
+    // What you moved from here settles with it: its collapsed suggestions.
     setAccepted((current) => new Map([...current].filter(([key]) => !key.startsWith(`${card.card.id} `))));
-    setMoved((current) => new Map([...current].filter(([url]) => !onCard.has(url))));
-    // The anchor row holds its pixel; if Mark seen took it away, the next row that stays takes its place.
-    const from = anchor && "row" in anchor ? before.indexOf(anchor.row) : -1;
-    const stays = (prUrl: string) => card.card.sections.some((section) => section.rows.some((row) => row.prUrl === prUrl));
-    const survivor = from < 0 ? null : before.slice(from).find(stays) ?? before.slice(0, from).reverse().find(stays) ?? null;
-    pendingAnchor.current = anchor && "row" in anchor ? (survivor ? { row: survivor, at: anchor.at } : null) : anchor;
     const key = focusKey(document.activeElement);
-    pendingFocus.current = { id: key.id === "seen" ? undefined : key.id, row: key.row && stays(key.row) ? key.row : survivor ?? undefined, section: key.section };
-    setSeenNote(["Seen", moved && `${moved} moved`, left && `${left} left this view`].filter(Boolean).join(" · "));
+    pendingFocus.current = { id: key.id === "seen" ? undefined : key.id, row: key.row, section: key.section };
+    const left = lines.filter((line) => line.ghost).length;
+    setSeenNote(["Seen", left && `${left} left this view`].filter(Boolean).join(" · "));
     window.setTimeout(() => setSeenNote(null), 4_500);
   }
 
-  // ---- selection and rows --------------------------------------------------
-  const lastSelected = useRef<string | null>(null);
-  function toggleSelect(prUrl: string, shift: boolean) {
-    const list = here.selected;
-    const visible = lines.filter((line) => !line.dim).map((line) => line.prUrl);
-    if (shift && lastSelected.current && visible.includes(lastSelected.current)) {
-      const [a, b] = [visible.indexOf(lastSelected.current), visible.indexOf(prUrl)].sort((x, y) => x - y);
-      here.selected = [...new Set([...list, ...visible.slice(a, b + 1)])];
-    } else here.selected = list.includes(prUrl) ? list.filter((item) => item !== prUrl) : [...list, prUrl];
-    lastSelected.current = prUrl;
+  // ---- ticks and rows ------------------------------------------------------
+  const lastTicked = useRef<string | null>(null);
+  /** Tick or untick one of the Address move's rows; Shift takes the range from the last one you clicked to this one. */
+  function toggleTick(prUrl: string, shift: boolean) {
+    const order = addressRows.map((line) => line.prUrl);
+    const from = shift && lastTicked.current ? order.indexOf(lastTicked.current) : -1;
+    const [first, last] = [from, order.indexOf(prUrl)].sort((x, y) => x - y);
+    const range = from >= 0 ? order.slice(first, last! + 1) : [prUrl];
+    const tick = here.unpicked.includes(prUrl);
+    here.unpicked = tick ? here.unpicked.filter((item) => !range.includes(item)) : [...new Set([...here.unpicked, ...range])];
+    lastTicked.current = prUrl;
     persist();
     bump();
   }
   function moveRow(delta: number) {
     const root = rootRef.current;
     if (!root) return;
-    const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-deck-row]"));
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(ROW));
     if (!rows.length) return;
-    const current = document.activeElement?.closest<HTMLElement>("[data-deck-row]");
+    const current = document.activeElement?.closest<HTMLElement>(ROW);
     const at = current ? rows.indexOf(current) : -1;
     const visible = rows.filter(inView);
     const next = at < 0 ? (delta > 0 ? visible[0] : visible.at(-1)) ?? rows[0]! : rows[Math.max(0, Math.min(rows.length - 1, at + delta))]!;
@@ -651,23 +594,22 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     next.scrollIntoView({ block: "nearest" });
   }
   const toggleIn = (list: string[], item: string) => list.includes(item) ? list.filter((value) => value !== item) : [...list, item];
-  /** Show only the rows a header count names, from the first of them; the same count, or esc, shows all again, holding the row you're on. */
-  function toggleFilter(kind: "needs" | "blocked") {
-    if (!full) return;
-    if (here.filter?.kind === kind) { here.filter = null; pendingAnchor.current = captureAnchor(); persist(); bump(); return; }
-    here.filter = rowFilter(full, kind);
+  /** A toggle's panel opens, closing any other; the same toggle closes it. */
+  function openPanel(key: Panel, toggle = true) {
+    here.panel = toggle && here.panel === key ? null : key;
+    pendingAnchor.current = captureAnchor();
     persist(); bump();
-    const first = filterSections(full, here.filter)[0]?.key;
-    if (first) window.requestAnimationFrame(() => jumpSection(first));
   }
-  /** A section's header at the top, under the card's bar, with focus on its first row you can act on, which flashes so the eye finds it. */
-  function jumpSection(key: string) {
-    const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-sec="${CSS.escape(key)}"]`);
-    if (!element) return;
-    element.scrollIntoView({ block: "start" });
-    const row = element.querySelector<HTMLElement>("[data-deck-row]:not([data-deck-dim])") ?? element.querySelector<HTMLElement>("[data-deck-row]");
-    row?.focus({ preventScroll: true });
-    if (row && !reduced()) row.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
+  /** A row in view, focused and flashed so the eye finds it: where a move shows it, else in All N PRs, which opens to show it. */
+  function showRow(prUrl: string) {
+    const line = lineOf(prUrl);
+    if (!line?.row) return;
+    const key = keyOf(line.row);
+    const element = rootRef.current?.querySelector<HTMLElement>(rowAt(key));
+    if (!element) { openPanel("all", false); pendingFocus.current = { row: key }; scrollFocus.current = true; return; }
+    element.scrollIntoView({ block: "center" });
+    element.focus({ preventScroll: true });
+    if (!reduced()) element.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
   }
 
   // ---- the one action runner: keys, buttons, the palette ---------------------
@@ -681,29 +623,19 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       case "seen": markSeen(); return;
       case "hold-pile": setPile("hold"); return;
       case "done-pile": setPile("done"); return;
-      case "advance": {
-        // A row's own Advance button takes that row; a key or the card's button takes the selection, else the focused row's safe step,
-        // else the card's, as the hint bar says. The card's rows are the ones its count names, as drawn: one dimmed until Mark seen
-        // stays out even when the server would now plan it.
-        const target = line ? { prUrls: [line.prUrl] } : advanceTarget(context);
-        if (card && target) void batch.plan("advance", card.card.id, target.prUrls);
-        return;
-      }
+      // The card's chores, as its Advance line counts them: never a merge, review notes, or a thread's work.
+      case "advance": if (card && on.advance.on) void batch.plan("advance", card.card.id, card.chores.prUrls); return;
       case "hold": if (card) openDialog({ kind: "hold", id: card.card.id, effortKey: card.card.key, name: card.card.name, reason: "" }); return;
       case "complete": if (card) openDialog({ kind: "complete", id: card.card.id }); return;
-      case "held": jumpSection("held"); return;
+      case "held": openPanel("held", false); return;
+      case "progress": here.open = toggleIn(here.open, "progress"); pendingAnchor.current = captureAnchor(); persist(); bump(); return;
       case "notes": {
         if (!card?.notes) return;
         // A second ⇧N goes back to the editor already open, with what you typed.
         if (notesEdit?.effortId === card.card.id) { rootRef.current?.querySelector<HTMLElement>("[data-deck-notes-editor]")?.focus(); return; }
+        openPanel("notes", false);
         setNotesEdit({ effortId: card.card.id, draft: card.notes.body, revision: card.notes.revision, busy: false, error: null });
         return;
-      }
-      case "tiles": {
-        const all = ["next", "blocked", "stats", "notes", "threads", "linear", "people", "recent"];
-        here.tiles = all.every((tile) => here.tiles.includes(tile)) ? [] : all;
-        pendingAnchor.current = captureAnchor();
-        persist(); bump(); return;
       }
       case "merge": {
         const list = line ? [line] : targets("merge", context);
@@ -721,7 +653,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         if (list.length) void batch.plan(KIND_OF[id]!, card?.card.id ?? null, list.map((item) => item.prUrl));
         return;
       }
-      // The selection's Your turn rows go to one batch thread, started now; each row says why any stays out, and Undo takes it back for 8 s.
+      // The Address move's ticked rows go to one batch thread, started now; each row says why any stays out, and Undo takes it back for 8 s.
       case "address": if (card && on.address.on) void batch.address(card.card.id, addressPicks(selected).map((item) => item.prUrl)); return;
       case "undo": if (undo?.live()) { const run = undo; setUndo(null); setFlash(null); void run.run(); } return;
       case "hold-pr": {
@@ -731,33 +663,35 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
         else openDialog({ kind: "hold-pr", prUrl: row.prUrl, ref: row.ref, reason: "" });
         return;
       }
-      // A row's ↻ takes that row; the key and the bar take the selection, else the focused row.
-      case "refresh": refreshRows(line ? [line] : selected.length ? selected : row ? [row] : []); return;
+      case "revoke": {
+        if (!row?.row?.confirmation) return;
+        void rpc.call("inventory_confirm_revoke", { prUrl: row.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); },
+          (cause: unknown) => say(message(cause)));
+        return;
+      }
+      // A row's ↻, or g, reads that row.
+      case "refresh": refreshRows(row ? [row] : []); return;
       case "row-next": moveRow(1); return;
       case "row-prev": moveRow(-1); return;
-      case "select": if (row && !row.dim) toggleSelect(row.prUrl, false); return;
-      case "select-section": {
-        if (!row) return;
-        const same = lines.filter((item) => item.section === row.section && item.needs).map((item) => item.prUrl);
-        here.selected = [...new Set([...here.selected, ...same])];
-        persist(); bump(); say(`Selected ${same.length} in this section.`); return;
-      }
-      case "expand": if (row) { here.expanded = toggleIn(here.expanded, row.prUrl); pendingAnchor.current = captureAnchor(); persist(); bump(); } return;
-      case "clear":
-        if (here.selected.length) { here.selected = []; persist(); bump(); }
-        else if (row && here.expanded.includes(row.prUrl)) runAction("expand", row);
-        else if (here.filter) toggleFilter(here.filter.kind);
+      case "select": if (row && on.select.on) toggleTick(row.prUrl, false); return;
+      case "select-section": here.unpicked = []; persist(); bump(); say(`Ticked ${addressRows.length} on Your turn.`); return;
+      case "expand": {
+        // ↵ on a row folds the move it's in, and focus goes to the move's header; elsewhere, it toggles the card's first move.
+        const move = card?.moves.find((item) => row && item.prUrls.includes(row.prUrl)) ?? card?.moves[0];
+        if (!move) return;
+        here.open = toggleIn(here.open, move.kind);
+        pendingAnchor.current = captureAnchor();
+        pendingFocus.current = { id: `move-${move.kind}` };
+        persist(); bump();
         return;
-      case "only-needs": case "only-blocked": toggleFilter(id === "only-needs" ? "needs" : "blocked"); return;
+      }
+      case "clear":
+        if (selected.length) { here.unpicked = addressRows.map((item) => item.prUrl); persist(); bump(); }
+        else if (here.panel) openPanel(here.panel as Panel);
+        return;
       case "open-thread": if (row?.row?.thread) navigate.toThread(row.row.thread.id); return;
       case "open-pr": if (row) navigate.openUrl(row.prUrl); return;
-      case "accept": {
-        if (!selected.length) { const key = row && groupOf(row.prUrl); if (key) acceptGroup(key); return; }
-        const plan = acceptPlan(card?.suggest ?? [], [...new Set(selected.flatMap((item) => groupOf(item.prUrl) ?? []))]);
-        for (const key of plan.take) acceptGroup(key, { note: plan.left });
-        if (plan.left) say(plan.left);
-        return;
-      }
+      case "accept": { const key = row && groupOf(row.prUrl); if (key) acceptGroup(key); return; }
       case "move": { const list = scopeRows(); if (list.length) openDialog({ kind: "move", prUrls: list.map((item) => item.prUrl), refs: refs(list), group: null }); return; }
       case "one-off": {
         // A service card's rows have no effort yet; an effort's move out of it, and Undo puts them back.
@@ -800,11 +734,11 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       case "action": runAction(command.id, command.line); return;
       case "go": go({ id: command.id }); return;
       case "view": onView(command.view); return;
-      case "select": toggleSelect(command.prUrl, command.shift); return;
-      case "expand": here.expanded = toggleIn(here.expanded, command.prUrl); persist(); bump(); return;
-      case "focus": setActiveRow(command.prUrl); return;
-      case "tile": here.tiles = toggleIn(here.tiles, command.key); pendingAnchor.current = captureAnchor(); persist(); bump(); return;
+      case "row": { const line = lineOf(command.prUrl); if (line) runAction(command.id, line); return; }
+      case "open": navigate.openUrl(command.url); return;
+      case "select": toggleTick(command.prUrl, command.shift); return;
       case "fold": here.open = toggleIn(here.open, command.key); pendingAnchor.current = captureAnchor(); persist(); bump(); return;
+      case "panel": openPanel(command.key); return;
       case "group": acceptGroup(command.key); return;
       case "undo-group": {
         const done = accepted.get(command.key);
@@ -818,37 +752,11 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       case "undo-batch": void rpc.call("deck_batch_undo", { batchId: command.batchId }).then((result) => { say(result.ok ? "Undone. Nothing was sent." : result.error); load(); },
         (cause: unknown) => say(message(cause))); return;
       case "thread": navigate.toThread(command.id); return;
-      case "section": {
-        // A moved row's link: the place it lands on Mark seen, flashed, and the row keeps focus.
-        const target = command.prUrl ? rootRef.current?.querySelector<HTMLElement>(`[data-deck-arrive="${CSS.escape(command.prUrl)}"]`) : null;
-        // In flight folds; it opens to show where the row lands, then the link goes on there.
-        if (!target && SECTIONS[command.key as keyof typeof SECTIONS]?.fold && !here.open.includes(command.key)) {
-          here.open = [...here.open, command.key]; persist(); bump();
-          window.requestAnimationFrame(() => run(command));
-          return;
-        }
-        if (!target) { jumpSection(command.key); return; }
-        target.scrollIntoView({ block: "center" });
-        if (!reduced()) target.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
-        return;
-      }
-      case "jump": {
-        const element = rootRef.current?.querySelector<HTMLElement>(`[data-deck-row="${CSS.escape(command.prUrl)}"]`);
-        if (!element && lines.some((line) => line.prUrl === command.prUrl && line.section === "flight")) {
-          here.open = [...new Set([...here.open, "flight"])]; pendingFocus.current = { row: command.prUrl }; persist(); bump(); return;
-        }
-        element?.scrollIntoView({ block: "center" });
-        element?.focus({ preventScroll: true });
-        if (element && !reduced()) element.animate([{ background: "rgba(56,189,248,.18)" }, { background: "transparent" }], { duration: 900 });
-        return;
-      }
+      case "jump": showRow(command.prUrl); return;
       case "resume": { const item = view?.held.find((entry) => entry.id === command.id); if (item) void movePile("resume", item); return; }
       case "reopen": { const item = view?.done.find((entry) => entry.id === command.id); if (item) void movePile("reopen", item); return; }
       case "rule-remove": void rpc.call("classify_rule_remove", { ruleId: command.id }).then((result) => { if (!result.ok) say(result.error); loadRules(); }); return;
       case "pile": setPile(command.pile); return;
-      case "revoke": void rpc.call("inventory_confirm_revoke", { prUrl: command.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); },
-        (cause: unknown) => say(message(cause))); return;
-      case "filter": toggleFilter(command.filter); return;
       case "notes-draft": setNotesEdit((current) => current && { ...current, draft: command.text }); return;
       case "notes-cancel": setNotesEdit(null); pendingFocus.current = { id: "notes-edit" }; return;
       case "notes-save": saveNotes(); return;
@@ -857,7 +765,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
 
   // The keys: one registry, only while focus is in the deck (or nowhere), and never while you type.
   useRegistryKeys(rootRef, { on: () => availability(contextRef.current), run: (id, n) => runRef.current(id, undefined, n), say,
-    isRow: (target) => target.dataset.deckRow !== undefined });
+    isRow: (target) => target.dataset.inventoryRow !== undefined });
   const contextRef = useRef(context);
   contextRef.current = context;
 
@@ -907,11 +815,6 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       else if (item.target) run({ kind: item.target.kind, id: item.target.id });
     }, 0);
   };
-  const kinds = (["merge", "nudge", "request", "ready", "fix"] as const).flatMap((id) => {
-    const section = id === "fix" ? "work" : id;
-    const count = selected.filter((line) => line.needs && line.section === section).length;
-    return count ? [{ id, count, tone: SECTIONS[section].tone }] : [];
-  });
   const complete = dialog?.kind === "complete" ? cardOf(dialog.id) : null;
   const weakGroup = dialog?.kind === "weak" ? card?.suggest.find((item) => item.key === dialog.group) ?? null : null;
   const matches = dialog?.kind === "palette" ? paletteMatch(palette, dialog.query) : [];
@@ -922,17 +825,13 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     <DeckPane chips={chips} cur={cur} card={card} overview={cur === "overview" && view ? overview : null} rules={rules} held={pileItems.held} done={pileItems.done} pile={pile} announce={announce}
       read={{ text: view ? readText(view, now) : "Reading…", error, busy: !!view?.refreshing, onRefresh: view ? refresh.all : undefined }}
       seen={{ changed: changedHere, available: context.seenAvailable, note: seenNote }}
-      state={{ selected: new Set(here.selected), expanded: new Set(here.expanded), focus: here.focus, refreshing: new Set([...refreshing.keys(), ...refresh.reading]),
-        reads: new Map([...refresh.outcomes].flatMap(([prUrl, outcome]) => { const note = readNote(outcome, now); return note ? [[prUrl, note] as const] : []; })),
-        working: batch.working?.prUrls }} tiles={new Set(here.tiles)}
-      open={new Set(here.open)} stuck={stuck}
-      on={on} hints={hintKeys(context, on)} advanceScope={advanceTarget(context)?.scope ?? null}
+      kit={{ lines: rowLines, picked: new Set(selected.map((line) => line.prUrl)), live: batch.live, left: batch.details, working: batch.working?.prUrls,
+        reading: new Set([...refreshing.keys(), ...refresh.reading]), refusal: batch.refusal }}
+      open={new Set(here.open)} panel={here.panel as Panel | null} on={on} hints={hintKeys(context, on)}
       flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)}
-      batch={{ kinds, address: on.address.on ? addressPicks(selected).length : 0, refusal: batch.refusal,
-        working: batch.working && { kind: batch.working.kind, label: workingLabel(batch.working) },
-        refresh: { count: selected.filter((line) => line.row && !line.ghost).length, busy: refresh.reading.size > 0, progress: refresh.progress } }} run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
+      run={run} onPalette={() => runAction("palette")} onHelp={() => runAction("help")}
       onUndo={() => runAction("undo")} rootRef={rootRef} scrollerRef={scrollerRef} slackRef={slackRef} viewRef={viewRef} chipsRef={chipsRef}
-      notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} filter={here.filter?.kind ?? null} />
+      notes={notesEdit && notesEdit.effortId === cur ? notesEdit : null} markdown={(body) => <Markdown content={body} />} />
     {batch.element}
     {notes.element}
     <DeckDialog open={dialog?.kind === "hold" || dialog?.kind === "hold-pr"} title={dialog?.kind === "hold" ? `Hold ${dialog.name}` : dialog?.kind === "hold-pr" ? `Hold ${dialog.ref}` : ""}
@@ -1002,8 +901,8 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
     void rpc.call("effort_notes_save", { effortKey: edit.effortId, body: edit.draft, revision: edit.revision }).then((result) => {
       if (!result.ok) { setNotesEdit((current) => current && { ...current, busy: false, error: result.error }); return; }
       setNotesEdit(null);
-      const saved = viewPlace(edit.effortId);
-      if (!saved.tiles.includes("notes")) { saved.tiles = [...saved.tiles, "notes"]; persist(); }
+      viewPlace(edit.effortId).panel = "notes";
+      persist();
       pendingFocus.current = { id: "notes-edit" };
       let used = false;
       setUndo({ label: "Notes saved", live: () => !used, run: async () => {
@@ -1083,7 +982,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   function createEffort() {
     if (dialog?.kind !== "new" || busy || !dialog.name.trim()) return;
     const { prUrls, name, goal, group, promote } = dialog;
-    void classify(() => rpc.call("classify_new_effort", { name: name.trim(), goal: goal.trim(), prUrls, requestId: crypto.randomUUID() }), group, prUrls, null,
+    void classify(() => rpc.call("classify_new_effort", { name: name.trim(), goal: goal.trim(), prUrls, requestId: crypto.randomUUID() }), group, prUrls,
       promote?.id ?? null);
   }
 }

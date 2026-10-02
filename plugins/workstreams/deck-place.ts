@@ -2,11 +2,10 @@
 // design-directions/inventory-calm/PLACE-LOSS.md). Pure: the deck's nav view
 // feeds it the DOM measurements and storage it reads.
 //
-// - Rows hold still. Each view keeps a snapshot of its rows as you last
-//   marked them seen; a row a read changed stays in its old section with a
-//   dot, a row that left stays as a ghost, and a new row joins the end of
-//   its section and stays there, a ghost too if it leaves again. Only Mark
-//   seen, for that view alone, settles them.
+// - What changed since you looked. Each view keeps a snapshot of its rows as
+//   you last marked them seen, against which a read's rows changed, arrived,
+//   or left; only Mark seen, for that view alone, settles them. The rows
+//   themselves follow the read.
 // - The card order is set once per session: new, resumed, and reopened
 //   efforts join the end of the efforts, before the service cards, so an
 //   effort's number key never shifts.
@@ -112,10 +111,10 @@ export function meltSlack(input: { scrollTop: number; slack: number }): { scroll
 
 /** What held your place: a row, or the card's top, and how far below the viewport's top it sat. */
 export type Anchor = { row: string; at: number } | { card: true; at: number };
-/** Where focus was: a control by its `data-deck-focus` id, and the row and section it sat in. */
+/** Where focus was: a control by its `data-deck-focus` id, and the row and move it sat in. */
 export type FocusKey = { id?: string; row?: string; section?: string };
 /** What the view can find, for focusFallback. */
-export type FocusDom<E> = { byId(id: string): E | null; row(prUrl: string): E | null; nextLiveRow(section: string): E | null;
+export type FocusDom<E> = { byId(id: string): E | null; row(key: string): E | null; nextLiveRow(section: string): E | null;
   firstLiveRow(): E | null; heading(): E | null; live(element: E): boolean };
 
 /**
@@ -129,15 +128,13 @@ export function focusFallback<E>(key: FocusKey, dom: FocusDom<E>): E | null {
 }
 
 /**
- * The rows a card's header count shows alone: what needs you, or what's blocked, and every row that matched when you chose it, so a row
- * you act on, which then needs you no more, stays where it was until you show all again.
+ * Each view's place, which the session keeps: the deck's current card and the view you were in, and per view what you had open. `focus` and
+ * an anchor's `row` name a row as All PRs does, "owner/repo#N". `unpicked`: the Address move's rows you unticked. `open`: the moves and
+ * chores whose rows you opened or folded, and "progress" while the finish line's answers show. `panel`: the footer toggle that's open.
  */
-export type RowFilter = { kind: "needs" | "blocked"; prUrls: string[] };
-/** Each view's place, which the session keeps: the deck's current card and the view you were in, and per view what you had open. */
-export type ViewPlace = { anchor: Anchor | null; scrollTop: number; focus: string | null; selected: string[]; expanded: string[]; tiles: string[]; open: string[];
-  filter: RowFilter | null };
+export type ViewPlace = { anchor: Anchor | null; scrollTop: number; focus: string | null; unpicked: string[]; open: string[]; panel: string | null };
 export type Place = { view: "deck" | "prs"; cur: string | null; order: string[]; views: Record<string, ViewPlace> };
-export const EMPTY_VIEW: ViewPlace = { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [], filter: null };
+export const EMPTY_VIEW: ViewPlace = { anchor: null, scrollTop: 0, focus: null, unpicked: [], open: [], panel: null };
 export const PLACE_KEY = "bb-workstreams:deck-place";
 /** What each view last marked seen, and when you last marked each PR's row seen, which outlast the session. */
 export const SEEN_KEY = "bb-workstreams:deck-seen";
@@ -149,10 +146,6 @@ const anchorOf = (value: unknown): Anchor | null => {
   if (!item || typeof item.at !== "number") return null;
   return typeof item.row === "string" ? { row: item.row, at: item.at } : item.card === true ? { card: true, at: item.at } : null;
 };
-const filterOf = (value: unknown): RowFilter | null => {
-  const item = value as { kind?: unknown; prUrls?: unknown } | null;
-  return item && (item.kind === "needs" || item.kind === "blocked") ? { kind: item.kind, prUrls: strings(item.prUrls) } : null;
-};
 
 /** A stored place, with anything missing or malformed dropped rather than trusted. */
 export function readPlace(raw: string | null): Place {
@@ -162,7 +155,7 @@ export function readPlace(raw: string | null): Place {
   for (const [key, item] of Object.entries(typeof value.views === "object" && value.views ? value.views as Record<string, Record<string, unknown>> : {})) {
     if (!item || typeof item !== "object") continue;
     views[key] = { anchor: anchorOf(item.anchor), scrollTop: typeof item.scrollTop === "number" ? item.scrollTop : 0, focus: typeof item.focus === "string" ? item.focus : null,
-      selected: strings(item.selected), expanded: strings(item.expanded), tiles: strings(item.tiles), open: strings(item.open), filter: filterOf(item.filter) };
+      unpicked: strings(item.unpicked), open: strings(item.open), panel: typeof item.panel === "string" ? item.panel : null };
   }
   return { view: value.view === "prs" ? "prs" : "deck", cur: typeof value.cur === "string" ? value.cur : null, order: strings(value.order), views };
 }

@@ -90,30 +90,29 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
 
       <Section title="The effort deck">
         <p>
-          Overview comes first in Efforts and takes no number key. Its action matrix shows what needs you and what&apos;s blocked
+          Overview comes first in Efforts and takes no number key. Its action matrix shows Your turn and what&apos;s blocked
           in each effort, Aging blockers lists the oldest waits on others, and each effort&apos;s tile names its next
           step. Select any of them to open that effort&apos;s card.
         </p>
         <p>
-          After Overview, Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card shows the
-          effort&apos;s status, next steps, what&apos;s blocked, Linear, people, threads, and recent activity. Its
-          open PRs sit below it in sections by the move each needs, with one button per section.
+          After Overview, Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card opens on
+          its finish line, how many tickets are done, its date, and its ETA at the last two weeks&apos; pace (p opens what&apos;s
+          left, who holds it, and whether it&apos;s moving), then up to three moves. Each move is one outcome, one verb,
+          and one key, over the PRs it touches in All PRs&apos; own rows. Moves rank by one rule: someone waits on you
+          (Address, b), one step from merged (Merge, m, then Confirm, c), your blockers (Fix, f), then a reviewer holding a
+          PR four days or more (Nudge, n, naming who). Chores, the other nudges, requests, and ready marks, wait on one
+          Advance line, a, which never turns amber. Notes, Threads, Linear, Held, and All PRs open under the card.
         </p>
         <p>
-          Color marks a move that&apos;s yours, and Needs you counts those moves; gray waits on others. In a card&apos;s
-          header, &ldquo;N need you&rdquo; and &ldquo;N blocked&rdquo; show only those rows; press it again, or esc, to show
-          all. A blue dot marks a
-          change since you looked, and rows stay in place until you mark the view seen: a row a read moved says what
-          changed and links to where it goes, and one that merged or closed stays as a one-line ghost. ↻ on a row reads
-          it from GitHub again and spins until the row updates, and what changed flashes.
+          A strip chip counts Your turn: open PRs where a person&apos;s feedback waits on you. A held PR doesn&apos;t count.
+          Rows follow each read, as All PRs does; a blue dot on a chip marks a change since you looked, until you mark the
+          view seen. ↻ on a row reads it from GitHub again.
         </p>
         <p>
-          Every GitHub write lists each PR in a confirm, then waits {Math.round(SEND_DELAY_MS / 1_000)} s with Undo.
-          Advance runs a card&apos;s safe next steps: nudge, request a review, and mark ready. A row with one of those
-          steps has its own Advance, and a advances the focused row, else the card; the hint bar says which. Review notes
-          are confirmed one PR at a time, never by Advance. Ask threads to fix, or f, sends each PR in Work in threads its own
-          fix in its thread, or starts a worker for one with none; it never merges. Merges run only from the fresh merge
-          preview, on a click or ⌘↵.
+          Address starts one thread for the rows you leave ticked under it, with {Math.round(SEND_DELAY_MS / 1_000)} s
+          to Undo. Every other GitHub write lists each PR in a confirm, then waits the same with Undo. Review notes are
+          confirmed one PR at a time, never by Advance. Fix sends each PR its own fix in its thread, or starts a worker
+          for one with none; it never merges. Merges run only from the fresh merge preview, on a click or ⌘↵.
         </p>
       </Section>
 
@@ -124,12 +123,11 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
           back at the end of the pile.
         </p>
         <p>
-          To pause one PR, choose Hold PR in its details. A held PR is listed in its card&apos;s Held section, with its reason
-          and how long it&apos;s been held; the Held chip in the card&apos;s header, or ⇧H, goes there. No batch or Advance
-          touches it until you release it. Release, on its row or for the whole section, lists each PR first and waits
-          with Undo like any write. One-offs collects PRs that merge on their own, and it stays on the active pile. To move a
-          PR there from an effort, choose Move to One-offs in its details or the selection bar; Undo puts it back. Each
-          effort&apos;s Notes tile keeps Markdown for flags, experiments, and the rest: ⇧N edits it in place and ⌘↵ saves.
+          To pause one PR, focus its row and choose Hold PR in ⌘K. A held PR is listed under the card&apos;s Held toggle, or ⇧H,
+          with its reason and how long it&apos;s been held. No batch or Advance touches it until you release it. Release lists
+          each PR first and waits with Undo like any write. One-offs collects PRs that merge on their own, and it stays on the
+          active pile. To move a PR there from an effort, focus its row and choose Move to One-offs in ⌘K; Undo puts it back.
+          Each effort&apos;s Notes keep Markdown for flags, experiments, and the rest: ⇧N edits them in place and ⌘↵ saves.
         </p>
       </Section>
 
@@ -137,20 +135,20 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <p>
           Every open PR and thread is on a card, or with its done effort on the Done pile. A PR that no effort owns is on
           its repository&apos;s service card, such as folio · service, after the efforts in the strip. A service card works
-          like an effort&apos;s card, and its PRs count in Needs you. A thread goes with the PRs it works on, or with its
+          like an effort&apos;s card, and its Your turn PRs count on its chip. A thread goes with the PRs it works on, or with its
           own checkout. Threads with no effort or single repository, such as ones that only ran in a shared clone, are on
           Loose threads, the last card.
         </p>
         <p>
-          Suggestions above a service card&apos;s rows show where each group of its PRs could go, with its strength (strong,
+          Suggestions under a service card show where each group of its PRs could go, with its strength (strong,
           moderate, or weak) and the signals behind it: a shared ticket, Linear project, stack, linked thread, board group,
           or code area. A ticket prefix only adds weight to a stronger signal. A lone PR whose ticket nothing else carries
           is offered as a weak one-off.
         </p>
         <p>
-          Nothing moves until you press a group&apos;s button, and Undo takes it back. A weak group asks again first. You
-          can also move PRs to any effort, start a new effort from a selection, or mark PRs as one-offs. Promote to effort
-          makes an effort of all the card&apos;s PRs in one confirm.
+          Nothing moves until you press a group&apos;s button, or ⇧A on one of its rows, and Undo takes it back. A weak group
+          asks again first. From a focused row you can also move it to any effort (e), start a new effort from it, or mark it a
+          one-off. Promote to effort makes an effort of all the card&apos;s PRs in one confirm.
         </p>
         <p>
           A standing rule places new PRs on every read by ticket prefix, branch, repository, Linear project, or stack.

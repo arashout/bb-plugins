@@ -195,11 +195,11 @@ describe("simple All PRs list", () => {
       .toContain('onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}');
   });
 
-  // A group reads as one thing: its title, then a card holding every row it lists, in the deck tiles' look, so All PRs and the deck read alike.
+  // A group reads as one thing: its title, then a card holding every row it lists, in the deck panels' look, so All PRs and the deck read alike.
   it("puts each group's rows, dismissed ones too, in a card directly under the group's title", () => {
     const surface = "rounded-[10px] border border-border/50 bg-foreground/[0.015]";
     expect(GROUP_CARD).toContain(surface);
-    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain(`data-deck-tile={id} className={cn("min-w-0 ${surface}`);
+    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain('<div data-deck-panel={panel} className={cn(GROUP_CARD, "mt-1.5 px-3 py-2")}>');
     const view = patched((row) => row.number === 96 ? { yourTurn: { why: "Comment from @theo-k", since: NOW, latest: NOW }, dismissed: true } : null);
     const html = pane(view);
     const { turn, dismissed, other } = splitInventory(inventoryScreen(view, { now: NOW, filter: null }));
@@ -319,10 +319,8 @@ describe("All PRs in the deck's column", () => {
     expect(html).toMatch(new RegExp(`<div aria-label="Selection"[^>]*><div class="${COLUMN} `, "u"));
     const pending = renderToStaticMarkup(createElement(InventoryPending, { error: null, onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
     expect(pending).toContain(`<div class="${CONTENT}">`);
-    // The deck draws its content and its selection bar from the same constants.
-    const deck = readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8");
-    expect(deck).toContain("<div ref={props.viewRef} className={CONTENT}>");
-    expect(deck).toContain('<div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>');
+    // The deck draws its content from the same constant.
+    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain("<div ref={props.viewRef} className={CONTENT}>");
   });
 });
 

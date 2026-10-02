@@ -1,19 +1,23 @@
 // The effort deck's screen (plan amendments A15 and A17.1, design-directions/
-// inventory-calm): the effort strip, one compact bento card with its rows in
-// sections by the move they need, a service card's suggestions, the batch
-// bar, and the hint bar, plus the bodies of the deck's dialogs. Presentational only:
-// data comes in as props, every click goes out through one `run` command, no
-// SDK hook is called, and imports stay relative, so static-markup tests can
-// render it. Color appears only where the move is yours, and muted.
-import { Fragment, type ReactNode, type RefObject } from "react";
+// effort-card-v2): the effort strip, one card per effort with its few next
+// moves over All PRs' own rows (inventory-rows.tsx), its finish line, its
+// chores, and its toggles, a service card's suggestions, and the hint bar,
+// plus the bodies of the deck's dialogs. Presentational only: data comes in
+// as props, every click goes out through one `run` command, no SDK hook is
+// called, and imports stay relative, so static-markup tests can render it.
+// Amber means a person waits on you; chores never turn it.
+import type { ReactNode, RefObject } from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import type { BatchItem, Skipped } from "./deck-batch";
+import type { LiveItems } from "./deck-flow";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
-import type { Availability, CardScreen, Chip, DeckLine, NotesScreen, OverviewScreen, PaletteItem, SectionScreen, Strength, SuggestGroup, Tone } from "./deck-view-model";
+import type { Availability, CardScreen, Chip, DeckLine, Finish, Move, NotesScreen, OverviewScreen, PaletteItem, Strength, SuggestGroup, Tone } from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
 import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
+import { SimpleInventoryList } from "./inventory-rows";
+import type { InventoryLine } from "./inventory-view-model";
 import { Icon } from "./components/ui/icon";
 import { usePortalScopeProps } from "./lib/portal-scope";
 import { cn, POINTER_CURSORS } from "./lib/utils";
@@ -21,18 +25,18 @@ import { cn, POINTER_CURSORS } from "./lib/utils";
 /** Everything a click on the deck can ask for; the nav view decides what each does. */
 export type DeckCommand =
   | { kind: "action"; id: DeckActionId; line?: DeckLine }
-  | { kind: "go"; id: string } | { kind: "view"; view: HeaderTarget }
-  | { kind: "select"; prUrl: string; shift: boolean } | { kind: "expand"; prUrl: string } | { kind: "focus"; prUrl: string }
-  | { kind: "tile"; key: string } | { kind: "fold"; key: string }
+  /** One row's own Nudge, which opens the listing confirm for it, or its ↻. */
+  | { kind: "row"; id: "nudge" | "refresh"; prUrl: string }
+  | { kind: "go"; id: string } | { kind: "view"; view: HeaderTarget } | { kind: "open"; url: string }
+  /** Tick or untick a Your turn row for Address; Shift takes the range from the last one you clicked. */
+  | { kind: "select"; prUrl: string; shift: boolean }
+  /** Show or hide a move's rows, or the chores'; open or close a toggle's panel. */
+  | { kind: "fold"; key: string } | { kind: "panel"; key: Panel }
   | { kind: "group"; key: string } | { kind: "undo-group"; key: string } | { kind: "undo-batch"; batchId: string }
-  | { kind: "thread"; id: string } | { kind: "jump"; prUrl: string } | { kind: "section"; key: string; prUrl?: string }
+  | { kind: "thread"; id: string } | { kind: "jump"; prUrl: string }
   | { kind: "resume"; id: string } | { kind: "reopen"; id: string }
   | { kind: "rule-remove"; id: string } | { kind: "pile"; pile: "hold" | "done" | null }
-  /** Take back your confirmation of a PR's review notes. */
-  | { kind: "revoke"; prUrl: string }
-  /** Show only the rows a header count names, or all again. */
-  | { kind: "filter"; filter: "needs" | "blocked" }
-  /** The Notes tile's editor: what you typed, save (⌘↵), or cancel (esc). */
+  /** The Notes panel's editor: what you typed, save (⌘↵), or cancel (esc). */
   | { kind: "notes-draft"; text: string } | { kind: "notes-save" } | { kind: "notes-cancel" };
 export type Run = (command: DeckCommand) => void;
 
@@ -69,11 +73,9 @@ export const CONTENT = cn(COLUMN, "px-2 pb-10 pt-3 @min-[720px]:px-4");
 export const SECTION_HEAD = "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 bg-background py-1 pl-2 pr-1";
 /** A section's count badge; the caller adds its tone. */
 export const COUNT = "min-w-[18px] rounded-full px-1.5 text-center text-[11px] tabular-nums";
-/** One PR's row: a single line, its height, padding, and type. */
-export const ROW = "flex h-[30px] items-center gap-2 pl-2 pr-1.5 text-[12.5px]";
 /** A row's checkbox: faint until you point at the row. */
 export const CHECKBOX = "size-3.5 shrink-0 accent-sky-600 opacity-50 group-hover:opacity-100 disabled:opacity-20";
-/** The card a group's rows sit in under the group's title: a deck tile's border, radius, and tint, padded less. */
+/** The card a group's rows sit in under the group's title, and a deck card's panels: one border, radius, and tint. */
 export const GROUP_CARD = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-2 py-1";
 
 /**
@@ -107,17 +109,17 @@ const Dot = ({ color, hollow }: { color: string; hollow?: boolean }) => <span ar
   style={hollow ? { borderColor: color } : { background: color }} />;
 const Changed = ({ title }: { title: string }) => <span title={title} aria-label={title} className="inline-block size-1.5 shrink-0 rounded-full bg-sky-500" />;
 
-/** A button that names its key: disabled ones stay focusable and say why. */
-/** `keyless` drops its badge while its key acts through another control, as a does on a focused row or a selection. */
-function ActionButton({ id, on, run, label, tone, primary, line, keyless }: { id: DeckActionId; on: Availability; run: Run; label?: string; tone?: Tone;
-  primary?: boolean; line?: DeckLine; keyless?: boolean }) {
+const PRIMARY = "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90";
+/** A button that names its key: disabled ones stay focusable and say why. `className` replaces its face. */
+function ActionButton({ id, on, run, label, tone, primary, className }: { id: DeckActionId; on: Availability; run: Run; label?: string; tone?: Tone;
+  primary?: boolean; className?: string }) {
   const available = on[id];
   const key = ACTION[id].keys[0];
   return <button type="button" data-deck-focus={`act-${id}`} aria-disabled={available.on ? undefined : true}
     title={available.on ? `${ACTION[id].title}${key ? ` (${key})` : ""}` : `${ACTION[id].title.replace("…", "")}: ${available.why}`}
-    onClick={() => { if (available.on) run({ kind: "action", id, line }); }}
-    className={cn(BUTTON, primary ? "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90" : tone ? TONE[tone].button : "border-border hover:bg-foreground/[0.06]")}>
-    {label ?? ACTION[id].title}<Keys keys={keyless ? "" : key ?? ""} inverted={primary} />
+    onClick={() => { if (available.on) run({ kind: "action", id }); }}
+    className={className ?? cn(BUTTON, primary ? PRIMARY : tone ? TONE[tone].button : "border-border hover:bg-foreground/[0.06]")}>
+    {label ?? ACTION[id].title}<Keys keys={key ?? ""} inverted={primary} />
   </button>;
 }
 
@@ -133,7 +135,7 @@ export function Strip({ chips, cur, deck, held, done, pile, run, chipsRef }: { c
       className={cn("size-7 shrink-0 rounded-md border border-border/70 text-[13px] text-muted-foreground hover:text-foreground", RING)}>←</button>
     <div ref={chipsRef} className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto px-0.5 py-1 [scrollbar-width:none]">
       {chips.map((chip) => <button key={chip.id} type="button" data-deck-focus={`chip-${chip.id}`} data-deck-chip={chip.id} aria-current={deck && chip.id === cur ? "true" : undefined}
-        title={chip.id === "overview" ? "Overview" : `${chip.name}: ${chip.count} need you${chip.n ? ` (${chip.n})` : ""}`} onClick={() => run({ kind: "go", id: chip.id })}
+        title={chip.id === "overview" ? "Overview" : `${chip.name}: ${chip.count} your turn${chip.n ? ` (${chip.n})` : ""}`} onClick={() => run({ kind: "go", id: chip.id })}
         className={cn("relative flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2 text-[12px]", RING,
           chip.service && "border-dashed", deck && chip.id === cur ? "border-foreground/30 bg-foreground/[0.08] text-foreground" : "border-border/70 text-muted-foreground hover:text-foreground")}>
         {chip.n ? <span className="font-mono text-[10.5px] text-muted-foreground/80">{chip.n}</span> : null}
@@ -221,195 +223,83 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
 }
 
 // ---------------------------------------------------------------------------
-// Rows: one line each.
+// The effort card: its header, its finish line, its few moves over All PRs' rows, its chores, and its toggles.
 // ---------------------------------------------------------------------------
 
-export type RowState = { selected: ReadonlySet<string>; expanded: ReadonlySet<string>; focus: string | null;
-  /** Rows whose Refresh is reading GitHub now, until the read that carries it lands; and what each Refresh got: Read just now, or why it failed. */
-  refreshing?: ReadonlySet<string>; reads?: ReadonlyMap<string, { text: string; ok: boolean }>;
-  /** Rows a batch button is planning now, until its plan answers. */
-  working?: ReadonlySet<string> };
-/** What a narrow pane drops from a row, as the mock does below 720 px: who approved a merge, the suggested reviewer, and "draft". */
-const OPTIONAL_INFO = new Set(["merge", "request", "ready"]);
+/**
+ * What the card's rows draw from: each open PR as All PRs words it, by PR; the Your turn rows ticked for Address; a batch sending now and
+ * why the last Address left a PR out; the rows a batch is planning; and the rows a Refresh is reading.
+ */
+export type RowKit = { lines: ReadonlyMap<string, InventoryLine>; picked: ReadonlySet<string>; live?: LiveItems; left?: ReadonlyMap<string, string>;
+  working?: ReadonlySet<string>; reading?: ReadonlySet<string>;
+  /** Why the last Address started nothing. */
+  refusal?: string | null };
+/** A footer toggle's panel, one open at a time. */
+export type Panel = "notes" | "threads" | "linear" | "held" | "all";
 
-/** Refresh on a row: ↻ on the row you point at or focus, which spins while GitHub reads it, and stays in sight until the row updates. */
-function RefreshControl({ line, busy, run }: { line: DeckLine; busy: boolean; run: Run }) {
-  return <button type="button" tabIndex={-1} data-deck-refresh={busy ? "busy" : "idle"} aria-busy={busy || undefined}
-    aria-label={busy ? `Reading ${line.ref} from GitHub` : `Refresh ${line.ref} from GitHub`} title={busy ? "Reading GitHub now…" : "Refresh from GitHub"}
-    onClick={() => { if (!busy) run({ kind: "action", id: "refresh", line }); }}
-    className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING,
-      busy ? "text-sky-700 dark:text-sky-300" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>
-    <span aria-hidden className={cn("inline-block leading-none", busy && "motion-safe:animate-spin")}>↻</span></button>;
-}
-
-/** `leaves`: the row is in an effort, other than One-offs, so it can move to One-offs from its details. */
-function Row({ line, state, run, first, leaves }: { line: DeckLine; state: RowState; run: Run; first: boolean; leaves?: boolean }) {
-  const open = state.expanded.has(line.prUrl);
-  const selected = state.selected.has(line.prUrl);
-  const busy = state.refreshing?.has(line.prUrl) ?? false;
-  const working = state.working?.has(line.prUrl) ?? false;
-  const read = state.reads?.get(line.prUrl);
-  const trail = line.trail;
-  return <div className={cn("ml-7", open && "rounded-md bg-foreground/[0.035]")}>
-    <div data-deck-row={line.prUrl} data-deck-section={line.section} data-deck-dim={line.dim || undefined} data-deck-dot={line.dot ? true : undefined}
-      data-deck-working={working || undefined} aria-busy={working || undefined} tabIndex={state.focus === line.prUrl || (state.focus === null && first) ? 0 : -1}
-      aria-label={`${line.ref} ${line.title}${line.dim ? ", settled on Mark seen" : ""}`} onFocus={() => run({ kind: "focus", prUrl: line.prUrl })}
-      className={cn("group relative scroll-mt-20 rounded-md hover:bg-foreground/[0.03]", ROW, open && "rounded-b-none",
-        "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500", selected && "bg-sky-500/[0.07]", state.focus === line.prUrl && "bg-foreground/[0.05]", working && WORKING_ROW)}>
-      {line.needs ? <span aria-hidden className={cn("absolute bottom-[7px] left-0 top-[7px] w-0.5 rounded-full", TONE[line.tone].edge)} /> : null}
-      <input type="checkbox" tabIndex={-1} checked={selected} disabled={line.dim} aria-label={`Select ${line.ref}`}
-        onChange={() => undefined} onClick={(event) => run({ kind: "select", prUrl: line.prUrl, shift: event.shiftKey })} className={CHECKBOX} />
-      <span className="flex w-1.5 shrink-0">{line.dot ? <Changed title={line.dot} /> : null}</span>
-      <PrRef repo={line.ref.replace(/ #\d+$/u, "")} number={line.ref.split("#")[1]!} strong={line.needs} className={line.dim && "opacity-50"} />
-      <span onClick={() => run({ kind: "expand", prUrl: line.prUrl })} title={line.title}
-        className={cn("min-w-16 flex-1 cursor-pointer truncate @min-[900px]:min-w-0", line.needs ? "text-foreground" : "text-foreground/80", line.dim && "opacity-50", line.ghost && "line-through")}>
-        {line.stacked ? <span className="mr-1 text-muted-foreground" title={`Stacked on ${line.stacked}`}>↳</span> : null}{line.title}</span>
-      {read ? <span role="status" data-deck-read={read.ok ? "ok" : "failed"} title={read.text} className={cn("min-w-0 max-w-56 truncate whitespace-nowrap text-[11px]",
-        read.ok ? "text-muted-foreground" : "text-destructive")}>{read.text}</span>
-        : line.checked ? <span title={line.checked.title} className={cn("shrink-0 whitespace-nowrap text-[11px]",
-        line.checked.failed ? "text-destructive" : "hidden text-muted-foreground @min-[720px]:inline")}>{line.checked.text}</span> : null}
-      {line.signals.map((signal) => <span key={signal} className={cn("hidden shrink-0 rounded px-1.5 text-[11px] @min-[720px]:inline", TONE.gray.chip)}>{signal}</span>)}
-      {line.info ? <span title={line.info.text} data-deck-change={line.change ? true : undefined} className={cn("min-w-0 truncate text-[11.5px]",
-        OPTIONAL_INFO.has(line.section) && !line.change && "hidden @min-[720px]:inline",
-        line.info.tone ? cn("rounded px-1.5 leading-[19px]", TONE[line.dim ? "gray" : line.info.tone].chip)
-        // What a read changed is the one thing on a settling row that stays at full strength.
-        : line.change ? "rounded px-1 leading-[19px] text-foreground/80" : "text-muted-foreground", line.dim && !line.change && "opacity-50")}>{line.info.text}</span> : null}
-      <span className={cn("w-7 shrink-0 text-right text-[11px] tabular-nums", line.hot ? TONE.amber.text : "text-muted-foreground")}>{line.age ?? ""}</span>
-      {/* Release stays in sight on Held's few rows; Advance and Notes… show on the row you point at or focus. Only the focused row's badge
-          shows, and none while a selection takes the key: then its key acts on that row alone, which the hint bar names. */}
-      {line.inline ? <button type="button" tabIndex={-1} data-deck-inline={line.inline.id} title={line.inline.title}
-        onClick={() => run({ kind: "action", id: line.inline!.id, line })}
-        className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] hover:bg-foreground/[0.06]",
-          line.inline.id !== "release" && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{line.inline.label}
-        {state.selected.size ? null : <span className="hidden group-focus-within:inline-flex"><Kbd>{ACTION[line.inline.id].keys[0]}</Kbd></span>}</button>
-        : null}
-      {line.to ? <button type="button" tabIndex={-1} data-deck-to={line.to.key} onClick={() => run({ kind: "section", key: line.to!.key, prUrl: line.prUrl })}
-        title={`It moves to ${line.to.title} on Mark seen. Show where.`}
-        className={cn("shrink-0 whitespace-nowrap rounded px-1 text-[11.5px] text-sky-700 hover:underline dark:text-sky-300", RING)}>
-        → moved to {line.to.title} {line.to.up ? "↑" : "↓"}</button> : null}
-      {line.row ? <RefreshControl line={line} busy={busy} run={run} /> : null}
-      <span className="flex min-w-12 items-center justify-end gap-1 text-[11.5px]">
-        {trail?.kind === "acted" ? <>
-          <span data-deck-trail={trail.busy ? "busy" : undefined} className={cn("inline-flex max-w-44 items-center gap-1 truncate", trail.failed ? "text-destructive" : "text-muted-foreground")}
-            title={trail.title ?? trail.text}>{trail.busy ? <Spin /> : null}{trail.text}</span>
-          {trail.undo ? <button type="button" data-deck-focus={`undo-${line.prUrl}`} onClick={() => run({ kind: "undo-batch", batchId: trail.undo! })}
-            className={cn("rounded px-1 text-sky-700 hover:underline dark:text-sky-300", RING)}>Undo</button> : null}
-        </> : trail?.kind === "thread" ? <button type="button" tabIndex={-1} onClick={() => run({ kind: "thread", id: trail.threadId })} title={`Open "${trail.text}" (o)`}
-          aria-label={`Open ${trail.text}`} className={cn("max-w-40 truncate rounded px-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
-          {/* A narrow pane keeps the title's room: the thread shows as ↗, named in its tooltip. */}
-          <span className="hidden @min-[720px]:inline">{trail.text} </span>↗</button>
-        : trail ? <span data-deck-fate className="max-w-44 truncate rounded text-muted-foreground" title={line.dot ?? undefined}>{trail.text}</span> : null}
-        {open || !trail ? <button type="button" tabIndex={-1} aria-expanded={open} onClick={() => run({ kind: "expand", prUrl: line.prUrl })}
-          className={cn("shrink-0 rounded px-1 text-muted-foreground hover:text-foreground", !open && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100", RING)}>{open ? "Less" : "More"}</button> : null}
-      </span>
-    </div>
-    {open ? <Details line={line} run={run} busy={busy} leaves={leaves} /> : null}
-  </div>;
-}
-
-/** A row's details: what it waits on, its reviewers and tickets, and every action it can take, each with its key. */
-function Details({ line, run, busy, leaves }: { line: DeckLine; run: Run; busy: boolean; leaves?: boolean }) {
-  const row = line.row;
-  if (!row) return <p className="mb-1.5 ml-9 text-[12px] text-muted-foreground">Left this view since you looked. Mark seen clears it.</p>;
-  const move = SECTION_ACTION[line.section];
-  const facts: [string, string][] = [
-    ["Status", row.status], ["Next", row.waitsOn ? `${row.waitsOn.what} · waits on ${row.waitsOn.on}` : row.step ? `${row.step.text} · ${row.step.owner}` : "—"],
-    ["Reviewers", row.reviewers.length ? row.reviewers.map((review) => `@${review.login} ${review.state === "requested" ? "asked" : review.state}`).join(", ") : "nobody asked"],
-    ["Tickets", row.tickets.join(", ") || "none"],
-    ...row.hold ? [["Held", row.hold.reason || "no reason given"] as [string, string]] : [],
-    ["Checked", row.failed ? "last read failed" : row.checkedAt ? new Date(row.checkedAt).toLocaleString() : "not yet"],
-  ];
-  return <div data-deck-details={line.prUrl} className="mb-1.5 ml-9 mr-1.5 grid gap-1.5 border-t border-border/50 px-2 py-1.5 text-[12px]">
-    <dl className="grid grid-cols-[76px_minmax(0,1fr)] gap-x-3 gap-y-0.5">
-      {facts.map(([label, value]) => <div key={label} className="contents"><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="min-w-0 break-words">{value}</dd></div>)}
-    </dl>
-    <div className="flex flex-wrap gap-1.5">
-      {move && line.needs ? <button type="button" onClick={() => run({ kind: "action", id: move, line })} className={cn(BUTTON, TONE[line.tone].button)}>
-        {ACTION[move].title}<Kbd>{ACTION[move].keys[0]}</Kbd></button> : null}
-      {row.thread ? <button type="button" onClick={() => run({ kind: "thread", id: row.thread!.id })} className={cn(BUTTON, "border-border")}>Open “{row.thread.title}”<Kbd>o</Kbd></button> : null}
-      <button type="button" onClick={() => run({ kind: "action", id: "open-pr", line })} className={GHOST}>Open on GitHub ↗</button>
-      <button type="button" onClick={() => run({ kind: "action", id: "hold-pr", line })} className={GHOST}>{row.hold ? "Release…" : "Hold PR…"}</button>
-      {leaves && !line.dim ? <button type="button" data-deck-one-off onClick={() => run({ kind: "action", id: "one-off", line })} className={GHOST}
-        title="Moves it out of this effort; Undo puts it back">Move to One-offs</button> : null}
-      {row.confirmation ? <button type="button" data-deck-revoke onClick={() => run({ kind: "revoke", prUrl: line.prUrl })} className={GHOST}
-        title="Its review notes need you again before it merges">Revoke confirmation</button> : null}
-      <button type="button" aria-busy={busy || undefined} disabled={busy} onClick={() => run({ kind: "action", id: "refresh", line })} className={GHOST}>
-        {busy ? <><Spin />Refreshing…</> : "Refresh"}</button>
-    </div>
-  </div>;
-}
-const SECTION_ACTION: Partial<Record<string, DeckActionId>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", work: "fix" };
-
-function Section({ section, state, run, open, stuck, held, leaves }: { section: SectionScreen; state: RowState; run: Run; open: boolean; stuck: boolean; held: boolean;
-  leaves: boolean }) {
-  const { meta } = section;
-  const folded = meta.fold && !open;
-  const header = <>
-    <span aria-hidden className={cn("h-3.5 w-[3px] shrink-0 rounded-full", TONE[meta.tone].edge)} />
-    {meta.fold ? <span aria-hidden className={cn("text-[10px] text-muted-foreground transition-transform motion-reduce:transition-none", !folded && "rotate-90")}>▶</span> : null}
-    <h2 className={cn("truncate text-[12.5px]", meta.fold ? "font-medium text-muted-foreground" : "font-semibold")}>{meta.title}</h2>
-    <span className={cn(COUNT, section.count ? cn("font-semibold", TONE[meta.tone].chip) : "text-muted-foreground")}>
-      {meta.fold || meta.tone === "gray" ? section.lines.filter((line) => !line.dim).length : section.count}</span>
-    <span title={meta.help} aria-label={meta.help} className="size-4 shrink-0 rounded-full border border-border text-center text-[10px] leading-[14px] text-muted-foreground">?</span>
-    {section.changed ? <span className="inline-flex items-center gap-1 text-[11.5px] text-sky-700 dark:text-sky-300"><Changed title="Changed since you looked" />{section.changed} changed</span> : null}
-  </>;
-  return <section data-deck-sec={section.key} className="mt-0.5 scroll-mt-10">
-    <div className={cn("sticky z-[4]", SECTION_HEAD, stuck ? "top-[34px]" : "top-0")}>
-      {meta.fold ? <button type="button" data-deck-focus={`fold-${section.key}`} aria-expanded={!folded} onClick={() => run({ kind: "fold", key: section.key })}
-        className={cn("flex min-w-0 items-center gap-2 rounded", RING)}>{header}</button> : header}
-      <span className="flex-1" />
-      {section.action && (!held || section.key === "held") ? <button type="button" data-deck-focus={`sec-${section.key}`} aria-disabled={section.action.enabled ? undefined : true}
-        title={section.action.enabled ? `Acts on this section's ${plural(section.action.count, "PR")}; the ${section.key === "merge" ? "preview" : "confirm"} lists each one`
-          : section.action.why ?? undefined}
-        onClick={() => { if (section.action!.enabled) run({ kind: "action", id: section.action!.id }); }}
-        className={cn(BUTTON, TONE[meta.tone].button)}>{section.action.label}<Kbd>{section.action.key}</Kbd></button> : null}
-    </div>
-    {folded ? null : <div className="pb-1.5 pt-0.5">{section.lines.map((line, index) => <Row key={line.prUrl} line={line} state={state} run={run} first={index === 0}
-      leaves={leaves} />)}
-      {section.arriving.map((item) => <button key={item.prUrl} type="button" tabIndex={-1} data-deck-arrive={item.prUrl} onClick={() => run({ kind: "jump", prUrl: item.prUrl })}
-        title={`Show ${item.ref} where it is now`} className={cn("flex h-[26px] w-full items-center gap-2 rounded-md border border-dashed border-border/70 pl-[62px] pr-2 text-left text-[11.5px] text-muted-foreground hover:text-foreground", RING)}>
-        <b className="font-medium">{item.ref}</b> lands here on Mark seen</button>)}</div>}
-  </section>;
-}
-
-// ---------------------------------------------------------------------------
-// The effort card: a header and a bento of tiles, each with more on expand.
-// ---------------------------------------------------------------------------
-
-/** `more` is "narrow" when only a card under 700 px hides some of the tile. `action` sits before More. */
-function Tile({ id, title, note, open, more, run, className, action, children }: { id: string; title: string; note?: ReactNode; open: boolean; more: boolean | "narrow";
-  run: Run; className?: string; action?: ReactNode; children?: ReactNode }) {
-  return <div data-deck-tile={id} className={cn("min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-3 py-2", className)}>
-    <div className="mb-1.5 flex min-h-5 items-center gap-2">
-      <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-muted-foreground">{title}</span>
-      {note ? <span className="min-w-0 truncate text-[11px] text-muted-foreground">{note}</span> : null}
-      <span className="flex-1" />
-      {action}
-      {more ? <button type="button" data-deck-focus={`tile-${id}`} aria-expanded={open} onClick={() => run({ kind: "tile", key: id })} title="More or less (i toggles every tile)"
-        className={cn("rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING, more === "narrow" && "@min-[700px]:hidden")}>
-        {open ? "Less" : "More"}</button> : null}
-    </div>
-    {children}
-  </div>;
+/** All PRs' two-line rows for `prUrls`, in the card that rows sit in there: ticked for Address on its own rows (`turn`), else as Other open PRs. */
+function Rows({ prUrls, kit, run, turn }: { prUrls: readonly string[]; kit: RowKit; run: Run; turn?: boolean }) {
+  const lines = prUrls.flatMap((prUrl) => kit.lines.get(prUrl) ?? []);
+  return lines.length ? <SimpleInventoryList groups={[{ key: "rows", label: "", effortId: null, lines }]} kind={turn ? "turn" : "other"} busyKey={null}
+    selected={kit.picked} live={kit.live} notes={kit.left} working={kit.working} reading={kit.reading}
+    onSelect={(line, shift) => run({ kind: "select", prUrl: line.prUrl, shift })} onOpenPr={(url) => run({ kind: "open", url })}
+    onOpenThread={(id) => run({ kind: "thread", id })} onOpenEffort={() => undefined} onUndo={(batchId) => run({ kind: "undo-batch", batchId })}
+    // A row's Nudge opens the deck's listing confirm for it, as n does: the deck never writes on one click.
+    onNudge={(line) => run({ kind: "row", id: "nudge", prUrl: line.prUrl })} onRefresh={(line) => run({ kind: "row", id: "refresh", prUrl: line.prUrl })} /> : null;
 }
 
 /**
- * The status line. "N need you" and "N blocked" show only those rows, and again show all; `filter` is the one showing alone. `bar`: the
- * card's sticky one-line bar, whose copies take no focus id of their own.
+ * One move: its outcome and a line of detail, which fold its rows, and its one verb with its key. Address starts at once for the rows you
+ * leave ticked, with 8 s to Undo; every other verb opens its listing confirm or the fresh merge preview first. The first move leads.
  */
-function Counts({ screen, filter, run, bar }: { screen: CardScreen; filter?: "needs" | "blocked" | null; run: Run; bar?: boolean }) {
-  const tone = TONE[screen.status.tone].text;
-  if (!screen.counts.length) return <span className={cn("shrink-0 text-[11.5px] font-medium", tone)}>{screen.status.text}</span>;
-  return <span data-deck-counts className={cn("inline-flex shrink-0 items-center gap-1 text-[11.5px] font-medium", tone)}>
-    {screen.counts.map((part, index) => <Fragment key={part.key}>{index ? <span aria-hidden>·</span> : null}
-      {part.key === "needs" || part.key === "blocked" ? <button type="button" data-deck-focus={bar ? undefined : `count-${part.key}`} aria-pressed={filter === part.key}
-        title={filter === part.key ? "Show all rows (esc)" : `Show only these ${part.n}`} onClick={() => run({ kind: "filter", filter: part.key as "needs" | "blocked" })}
-        className={cn("rounded px-0.5 underline decoration-dotted underline-offset-2 hover:decoration-solid", RING, filter === part.key && "bg-foreground/[0.08] decoration-solid")}>
-        {part.text}</button> : <span>{part.text}</span>}</Fragment>)}
-  </span>;
+function MoveBlock({ move, lead, shown, kit, on, run }: { move: Move; lead: boolean; shown: boolean; kit: RowKit; on: Availability; run: Run }) {
+  const face = cn(BUTTON, "h-7 px-2.5", lead ? PRIMARY : TONE[move.tone].button);
+  const picked = move.prUrls.filter((prUrl) => kit.picked.has(prUrl)).length;
+  return <li data-deck-move={move.kind} className="relative min-w-0 rounded-[10px] py-1 pl-3">
+    <span aria-hidden className={cn("absolute bottom-1.5 left-0 top-1.5 w-[3px] rounded-full", TONE[move.tone].edge)} />
+    <div className="flex min-h-10 items-center gap-3 pr-1">
+      <button type="button" data-deck-focus={`move-${move.kind}`} aria-expanded={shown} onClick={() => run({ kind: "fold", key: move.kind })}
+        title={shown ? "Hide its rows (↵)" : "Show its rows (↵)"} className={cn("min-w-0 flex-1 rounded text-left", RING)}>
+        <b className="block truncate text-[13px] font-semibold leading-5">{move.title}</b>
+        <span className="block truncate text-[11.5px] text-muted-foreground">{move.meta}</span>
+      </button>
+      {move.kind === "address" ? <button type="button" data-deck-focus="act-address" aria-disabled={on.address.on ? undefined : true}
+        title={on.address.on ? "Starts one thread for the ticked PRs now, with 8 s to Undo. Nothing merges. (b)" : `Address: ${on.address.why}`}
+        onClick={() => run({ kind: "action", id: "address" })} className={face}>Address {picked}<Kbd inverted={lead}>{ACTION.address.keys[0]}</Kbd></button>
+        : <ActionButton id={move.kind} on={on} run={run} label={move.verb} primary={lead} className={face} />}
+    </div>
+    {move.kind === "address" && kit.refusal ? <p role="alert" data-deck-refusal className="truncate pb-1 text-[12px] text-destructive" title={kit.refusal}>{kit.refusal}</p> : null}
+    {shown ? <Rows prUrls={move.prUrls} kit={kit} run={run} turn={move.kind === "address"} /> : null}
+  </li>;
 }
 
-/** The Notes tile's editor while it's open: what you typed, the revision it edits, and a save that's running or was refused. */
+/** The finish line, "4 of 12 done · Target Oct 14 · 12d left · ETA Oct 20 at 1.5/wk", which p opens to five one-line answers. */
+function FinishLine({ finish, open, run }: { finish: Finish; open: boolean; run: Run }) {
+  const dot = <span aria-hidden>·</span>;
+  return <div data-deck-finish className={cn("mt-2 rounded-lg", open && "bg-foreground/[0.03]")}>
+    <button type="button" data-deck-focus="progress" aria-expanded={open} onClick={() => run({ kind: "action", id: "progress" })} title={`Where it stands (${ACTION.progress.keys[0]})`}
+      className={cn("flex w-full flex-wrap items-center gap-x-2 rounded-lg px-2 py-1 text-left text-[12px] text-muted-foreground hover:bg-foreground/[0.04]", RING)}>
+      <span className="text-foreground/90">{finish.done}</span>{dot}
+      <span className={finish.date ? TONE[finish.date.tone].text : undefined}>{finish.date?.text ?? "No date"}</span>
+      {finish.eta ? <>{dot}<span className={TONE[finish.eta.tone].text}>{finish.eta.text}</span></> : null}
+      <span aria-hidden className={cn("ml-auto text-[10px] transition-transform motion-reduce:transition-none", open && "rotate-90")}>▶</span>
+    </button>
+    {open ? <dl data-deck-answers className="grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-0.5 px-2 pb-2 pt-0.5 text-[12px]">
+      {finish.answers.map(([label, value]) => <div key={label} className="contents"><dt className="text-[11px] leading-[18px] text-muted-foreground">{label}</dt>
+        <dd className="min-w-0 break-words">{value}</dd></div>)}</dl> : null}
+  </div>;
+}
+
+function ThreadList({ threads, run }: { threads: CardScreen["threads"]; run: Run }) {
+  return threads.length ? <div className="grid">{threads.map((thread) => <button key={thread.id} type="button" onClick={() => run({ kind: "thread", id: thread.id })}
+    title={`Open "${thread.title}"`} className={cn("grid min-h-6 grid-cols-[10px_minmax(0,1fr)_auto_28px] items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
+    <span aria-hidden className={cn("size-2 rounded-full", thread.status === "active" ? "bg-sky-500/70 motion-safe:animate-pulse" : "bg-muted-foreground/40")} />
+    <span className="truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}<small className="ml-1.5 text-[11px] text-muted-foreground">{thread.ref}</small></span>
+    <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
+  </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>;
+}
+
+/** The Notes panel's editor while it's open: what you typed, and a save that's running or was refused. */
 export type NotesEdit = { draft: string; busy: boolean; error: string | null };
 
 /** Editing notes in place: Markdown in a plain field, ⌘↵ saves, esc cancels. */
@@ -428,58 +318,69 @@ function NotesEditor({ edit, run }: { edit: NotesEdit; run: Run }) {
       <span className="mr-auto text-[11px] text-muted-foreground">Markdown</span>
       <button type="button" onClick={() => run({ kind: "notes-cancel" })} className={cn(BUTTON, "border-border")}>Cancel<Kbd>esc</Kbd></button>
       <button type="button" data-deck-notes-save disabled={edit.busy} onClick={() => run({ kind: "notes-save" })}
-        className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background hover:bg-foreground/90")}>{edit.busy ? "Saving…" : "Save"}<Kbd inverted>⌘↵</Kbd></button>
+        className={cn(BUTTON, PRIMARY)}>{edit.busy ? "Saving…" : "Save"}<Kbd inverted>⌘↵</Kbd></button>
     </div>
   </div>;
 }
 
-/**
- * An effort's notes: collapsed, their first line; More renders them all with `markdown` (bb's Markdown in the panel); Edit, or ⇧N, edits
- * them in place.
- */
-function NotesTile({ notes, edit, open, run, markdown }: { notes: NonNullable<CardScreen["notes"]>; edit: NotesEdit | null; open: boolean; run: Run;
+/** A footer toggle's panel: the notes, the threads, what Linear says, the held PRs with Release, or every open PR. */
+function PanelBody({ panel, screen, kit, on, run, notes, markdown }: { panel: Panel; screen: CardScreen; kit: RowKit; on: Availability; run: Run; notes: NotesEdit | null;
   markdown?: (body: string) => ReactNode }) {
-  const key = ACTION.notes.keys[0];
-  return <Tile id="notes" title="Notes" open={open} more={!!notes.body && !edit} run={run} className="col-span-6 @min-[900px]:col-span-12"
-    note={edit || open ? undefined : <span data-deck-notes-first className={notes.first ? "text-foreground/80" : undefined}>{notes.first || "None yet."}</span>}
-    action={edit ? null : <button type="button" data-deck-focus="notes-edit" onClick={() => run({ kind: "action", id: "notes" })} title={`Edit the notes (${key})`}
-      className={cn("inline-flex items-center gap-1 rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
-      Edit<Kbd>{key}</Kbd></button>}>
-    {edit ? <NotesEditor edit={edit} run={run} />
-      : open && notes.body ? <div data-deck-notes-body className="min-w-0 text-[12.5px]">{markdown ? markdown(notes.body)
-        : <p className="whitespace-pre-wrap break-words">{notes.body}</p>}</div> : null}
-  </Tile>;
+  const live = screen.lines.filter((line) => line.row);
+  switch (panel) {
+    case "notes": return notes ? <NotesEditor edit={notes} run={run} /> : <div className="grid gap-1.5">
+      {screen.notes?.body ? <div data-deck-notes-body className="min-w-0 text-[12.5px]">{markdown ? markdown(screen.notes.body)
+        : <p className="whitespace-pre-wrap break-words">{screen.notes.body}</p>}</div> : <p className="text-[12px] text-muted-foreground">No notes yet.</p>}
+      <span><button type="button" data-deck-focus="notes-edit" onClick={() => run({ kind: "action", id: "notes" })} className={GHOST}>Edit<Kbd>{ACTION.notes.keys[0]}</Kbd></button></span>
+    </div>;
+    case "threads": return <ThreadList threads={screen.threads} run={run} />;
+    case "linear": {
+      const { linear } = screen;
+      const states = `Tickets: ${linear.bar.map((state) => `${state.count} ${state.name}`).join(" · ")}`;
+      return <div className="grid gap-1.5">
+        <div data-deck-linear-line className="flex flex-wrap items-center gap-1">
+          {linear.chips.map((chip) => <span key={`${chip.kind}-${chip.text}`} title={chip.kind === "label" ? "Linear label" : `Linear ${chip.kind}`}
+            className={cn("inline-flex max-w-[230px] items-center gap-1 truncate rounded-md px-1.5 text-[11.5px] leading-5", chip.kind === "label" ? "text-muted-foreground" : "border border-border")}>
+            {chip.kind === "label" ? "#" : <span aria-hidden className="text-[10.5px] text-muted-foreground">{chip.kind === "project" ? "▣" : "◇"}</span>}{chip.text}</span>)}
+          {linear.bar.length ? <span role="img" aria-label={states} title={states} className="mx-1 inline-flex h-1.5 w-[70px] gap-px overflow-hidden rounded-full bg-foreground/[0.06]">
+            {linear.bar.map((state) => <i key={state.name} className={cn("block h-full", TONE[state.tone].bar)} style={{ flex: state.count }} />)}</span> : null}
+          {linear.target ? <span title="Project target date" className="text-[11px] text-muted-foreground">{linear.target}</span> : null}
+          {linear.chips.length || linear.bar.length ? null : <span className="text-[12px] text-muted-foreground">{linear.summary}</span>}
+        </div>
+        {linear.lines.length ? <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-2.5 gap-y-0.5 text-[12px]">{linear.lines.map(([label, value]) => <div key={label} className="contents">
+          <dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="break-words">{value}</dd></div>)}</dl> : null}
+      </div>;
+    }
+    case "held": {
+      const held = live.filter((line) => line.section === "held");
+      return <div className="grid gap-1">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground"><span className="flex-1">Nothing acts on a held PR until you release it.</span>
+          <ActionButton id="release" on={on} run={run} label={`Release ${held.length}…`} /></div>
+        <Rows prUrls={held.map((line) => line.prUrl)} kit={kit} run={run} />
+      </div>;
+    }
+    case "all": return <Rows prUrls={live.map((line) => line.prUrl)} kit={kit} run={run} />;
+  }
 }
 
 /**
- * `keyless` drops its Advance's badge while a acts on a focused row or a selection. `notes` is the Notes editor while it's open on this
- * card, and `markdown` renders notes; without it they show as plain text.
+ * An effort's card: its name, Your turn, and goal; its finish line; up to three moves, each over the rows it touches; any further move
+ * on one line; its chores on one Advance line, which never turns amber; and one row of toggles, each opening one panel. A card with only
+ * threads shows them. `notes` is the Notes editor while it's open here, and `markdown` renders notes; without it they show as plain text.
  */
-export function Card({ screen, tiles, run, on, keyless, notes, markdown, filter }: { screen: CardScreen; tiles: ReadonlySet<string>; run: Run; on: Availability;
-  keyless?: boolean; notes?: NotesEdit | null; markdown?: (body: string) => ReactNode; filter?: "needs" | "blocked" | null }) {
+export function Card({ screen, kit, open, panel, run, on, notes, markdown }: { screen: CardScreen; kit: RowKit; open: ReadonlySet<string>; panel: Panel | null;
+  run: Run; on: Availability; notes?: NotesEdit | null; markdown?: (body: string) => ReactNode }) {
   const { card } = screen;
   const held = card.pile === "held";
   const service = card.kind === "service";
   // A service card with only threads, and Loose threads, have nothing but their threads to show.
   const bare = card.kind !== "effort" && card.stats.open === 0;
-  const open = (id: string) => tiles.has(id);
-  // Three waits, or two on a card under 700 px wide.
-  const blocked = open("blocked") ? screen.blocked : screen.blocked.slice(0, 3);
-  const shown = bare ? 6 : 3;
-  const threads = open("threads") ? screen.threads : screen.threads.slice(0, shown);
-  const total = screen.stats.bar.reduce((sum, item) => sum + item.count, 0) || 1;
-  const { linear } = screen;
-  const linearLine = linear.chips.length > 0 || linear.bar.length > 0;
-  const ticketStates = `Tickets: ${linear.bar.map((state) => `${state.count} ${state.name}`).join(" · ")}`;
-  const threadsTile = <Tile id="threads" title="Threads" note={screen.threads.length || undefined} open={open("threads")} more={screen.threads.length > shown} run={run}
-    className={bare ? "col-span-6 @min-[900px]:col-span-12" : "col-span-6 @min-[900px]:row-span-3"}>
-    {threads.length ? <div className="-mx-1 grid">{threads.map((thread) => <button key={thread.id} type="button" onClick={() => run({ kind: "thread", id: thread.id })}
-      title={`Open "${thread.title}"`} className={cn("grid min-h-6 grid-cols-[10px_minmax(0,1fr)_auto_28px] items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
-      <span aria-hidden className={cn("size-2 rounded-full", thread.status === "active" ? "bg-sky-500/70 motion-safe:animate-pulse" : "bg-muted-foreground/40")} />
-      <span className="truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}<small className="ml-1.5 text-[11px] text-muted-foreground">{thread.ref}</small></span>
-      <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
-    </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>}
-  </Tile>;
+  const live = screen.lines.filter((line) => line.row).length;
+  const top = screen.moves.slice(0, 3), over = screen.moves.slice(3);
+  const chores = screen.chores.prUrls;
+  const toggles = ([["notes", screen.notes ? "Notes" : null], ["threads", screen.threads.length ? `Threads ${screen.threads.length}` : null],
+    ["linear", card.linear.known ? `Linear ${card.linear.known}` : null], ["held", screen.held ? `Held ${screen.held}` : null],
+    ["all", live ? `All ${live} PRs` : null]] as [Panel, string | null][]).filter(([, label]) => label);
   return <section data-deck-card={card.id} aria-label={card.name} className="@container relative rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
     style={{ backgroundImage: `linear-gradient(180deg, color-mix(in srgb, ${screen.color} 6%, transparent) 0, transparent 110px)` }}>
     <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
@@ -489,109 +390,43 @@ export function Card({ screen, tiles, run, on, keyless, notes, markdown, filter 
           <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
             <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
           </h1>
-          <Counts screen={screen} filter={filter} run={run} />
-          {/* Held PRs are one press away on every card: the chip jumps to its Held section. */}
-          {screen.held ? <button type="button" data-deck-focus="held" onClick={() => run({ kind: "action", id: "held" })} title={`Go to the held PRs (${ACTION.held.keys[0]})`}
-            className={cn(BUTTON, "h-5 border-border px-1.5 text-[11.5px] text-muted-foreground hover:text-foreground")}>Held · {screen.held}<Kbd>{ACTION.held.keys[0]}</Kbd></button>
-            : null}
+          {screen.yourTurn ? <span data-deck-turn title="A person's feedback waits on you" className={cn("shrink-0 rounded-full px-1.5 text-[11.5px] font-medium", TONE.amber.chip)}>
+            {screen.yourTurn} your turn</span> : null}
         </div>
         <p className="truncate text-[12px] text-muted-foreground" title={card.goal}>{card.goal || "No goal written yet."}{held && card.reason ? ` · held: ${card.reason}` : ""}</p>
       </div>
       <div className="flex flex-wrap gap-1.5">
-        {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, "border-foreground bg-foreground text-background")}>Resume</button>
-          : bare ? null : <>
-          <ActionButton id="advance" on={on} run={run} primary label={`Advance${screen.advance.length ? ` · ${screen.advance.length}` : ""}`} keyless={keyless} />
-          {service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
-            : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
-        </>}
+        {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, PRIMARY)}>Resume</button>
+          : bare ? null : service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
+          : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
       </div>
     </div>
-    {bare ? <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">{threadsTile}</div> : <div className="mt-2.5 grid grid-cols-6 gap-3 @min-[900px]:grid-cols-12">
-      <Tile id="next" title="Next steps" open={open("next")} more={false} run={run} className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-5">
-        {screen.next.items.length ? <ul className="grid gap-px">{screen.next.items.map((item, index) => <li key={`${item.text}-${index}`} className="flex min-h-[22px] items-center gap-2 text-[12px]">
-          <span aria-hidden className="w-3 text-center text-muted-foreground">○</span><span className="min-w-0 flex-1 truncate" title={item.text}>{item.text}</span>
-          {item.prUrl && item.ref ? <button type="button" onClick={() => run({ kind: "jump", prUrl: item.prUrl! })} title={`Show ${item.ref}`}
-            className={cn("shrink-0 rounded px-1 text-[11.5px] hover:bg-foreground/[0.06]", RING)}>{item.ref} ↓</button>
-            : item.owner ? <span className="shrink-0 text-[11px] text-muted-foreground">{item.owner}</span> : null}
-        </li>)}</ul> : <p className="text-[12px] text-muted-foreground">{card.oneOff ? "No outcome: each one-off merges on its own." : "Nothing left to do."}</p>}
-      </Tile>
-      <Tile id="blocked" title="Blocked" note={screen.blocked.length ? `on others · ${screen.blocked.length}` : undefined} open={open("blocked")}
-        more={screen.blocked.length > 3 || (screen.blocked.length === 3 && "narrow")} run={run}
-        className="col-span-6 @min-[700px]:col-span-3 @min-[900px]:col-span-4">
-        {blocked.length ? <div className="grid">{blocked.map((item, index) => <button key={item.prUrl} type="button" onClick={() => run({ kind: "jump", prUrl: item.prUrl })}
-          title={`${item.ref}: ${item.what}`} className={cn("-mx-1 flex min-h-[22px] min-w-0 items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING,
-            index === 2 && !open("blocked") && "@max-[700px]:hidden")}>
-          {item.dot ? <Changed title="Changed since you looked" /> : null}
-          <span className="shrink-0 rounded-full bg-foreground/[0.07] px-1.5 text-[11px]">{item.on}</span>
-          <span className="min-w-0 flex-1 truncate">{item.what}</span><span className="shrink-0 text-[11px] text-muted-foreground">{item.ref}</span>
-          <span className="w-6 shrink-0 text-right text-[11px] text-muted-foreground">{item.age ?? ""}</span>
-        </button>)}</div> : <p className="text-[12px] text-muted-foreground">Nothing waits on others.</p>}
-      </Tile>
-      <Tile id="stats" title="Stats" open={open("stats")} more run={run} className="col-span-6 @min-[900px]:col-span-3">
-        <div className="grid grid-cols-4 @min-[900px]:grid-cols-2 @min-[900px]:gap-y-1">
-          {[[screen.stats.open, "Open PRs"], [screen.stats.mergedWeek, "Merged 7d"], [screen.stats.median, "Median age"], [screen.stats.oldest?.text ?? "—", "Oldest wait"]]
-            .map(([value, label]) => <div key={label} title={label === "Oldest wait" ? screen.stats.oldest?.title : undefined} className="min-w-0">
-              <div className="text-[15px] font-semibold leading-5 tabular-nums">{value}</div><div className="truncate text-[11px] text-muted-foreground">{label}</div></div>)}
+    {screen.finish ? <FinishLine finish={screen.finish} open={open.has("progress")} run={run} /> : null}
+    {bare ? <div className="mt-2.5"><ThreadList threads={screen.threads} run={run} /></div> : <>
+      {/* The first move's rows show until you fold them; the others' when you open them. */}
+      {top.length ? <ol data-deck-moves className="mt-2 grid list-none gap-1">{top.map((item, index) => <MoveBlock key={item.kind} move={item} lead={index === 0}
+        shown={(index === 0) !== open.has(item.kind)} kit={kit} on={on} run={run} />)}</ol>
+        : chores.length ? null : <p data-deck-empty className="px-2 py-3 text-[12px] text-muted-foreground">{held ? "On hold: nothing here acts until you resume it." : "Nothing to move."}</p>}
+      {over.length ? <div data-deck-also className="flex flex-wrap items-center gap-1.5 px-3 py-1 text-[12px]"><span className="w-12 text-[11px] text-muted-foreground">Also</span>
+        {over.map((item) => <span key={item.kind} title={item.meta} className="inline-flex min-w-0 items-center gap-1.5">
+          <ActionButton id={item.kind} on={on} run={run} label={item.verb} /><span className="truncate text-[11.5px] text-muted-foreground">{item.title}</span></span>)}</div> : null}
+      {chores.length ? <div data-deck-advance className="grid">
+        <div className="flex min-h-9 items-center gap-2 px-3 text-[12px]">
+          <button type="button" data-deck-focus="chores" aria-expanded={open.has("chores")} onClick={() => run({ kind: "fold", key: "chores" })}
+            title="Nudges under 4 days, requests, and ready marks" className={cn("flex min-w-0 flex-1 items-center gap-2 rounded text-left", RING)}>
+            <span className="w-12 shrink-0 text-[11px] text-muted-foreground">Chores</span><span className="truncate text-muted-foreground">{screen.chores.text}</span></button>
+          <ActionButton id="advance" on={on} run={run} label={`Advance ${chores.length}`} />
         </div>
-        <div aria-hidden className="mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-foreground/[0.06]">
-          {screen.stats.bar.map((item) => <i key={item.key} className={cn("block h-full", TONE[item.tone].bar)} style={{ flex: item.count / total }} />)}</div>
-        {open("stats") ? <p className="mt-1 text-[11px] text-muted-foreground">{screen.stats.bar.map((item) => `${item.count} ${item.label}`).join(" · ")}</p> : null}
-      </Tile>
-      {screen.notes ? <NotesTile notes={screen.notes} edit={notes ?? null} open={open("notes")} run={run} markdown={markdown} /> : null}
-      {threadsTile}
-      {/* On a card 700 px or wider, the chips, state bar, and target sit on one line in place of the summary; opened, the fields follow. */}
-      <Tile id="linear" title="Linear" note={open("linear") ? undefined : <span className={cn(linearLine && "@min-[700px]:hidden")}>{linear.summary}</span>}
-        open={open("linear")} more={linear.lines.length > 0} run={run} className="col-span-2 @min-[700px]:col-span-6">
-        {linearLine ? <div data-deck-linear-line className={cn("flex-wrap items-center gap-1", open("linear") ? "mb-1.5 flex" : "hidden @min-[700px]:flex")}>
-          {linear.chips.map((chip) => <span key={`${chip.kind}-${chip.text}`}
-            title={chip.kind === "label" ? "Linear label" : `Linear ${chip.kind}`} className={cn("inline-flex max-w-[230px] items-center gap-1 truncate rounded-md px-1.5 text-[11.5px] leading-5",
-              chip.kind === "label" ? "text-muted-foreground" : "border border-border")}>
-            {chip.kind === "label" ? "#" : <span aria-hidden className="text-[10.5px] text-muted-foreground">{chip.kind === "project" ? "▣" : "◇"}</span>}{chip.text}</span>)}
-          {linear.bar.length ? <span role="img" aria-label={ticketStates} title={ticketStates}
-            className="mx-1 inline-flex h-1.5 w-[70px] gap-px overflow-hidden rounded-full bg-foreground/[0.06]">
-            {linear.bar.map((state) => <i key={state.name} className={cn("block h-full", TONE[state.tone].bar)} style={{ flex: state.count }} />)}</span> : null}
-          {linear.target ? <span title="Project target date" className="text-[11px] text-muted-foreground">{linear.target}</span> : null}
-        </div> : null}
-        {open("linear") ? <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-2.5 gap-y-0.5 text-[12px]">{linear.lines.map(([label, value]) => <div key={label} className="contents">
-          <dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="break-words">{value}</dd></div>)}</dl> : null}
-      </Tile>
-      {([["people", "People", screen.people.summary, [
-        ...screen.people.waitOnYou.map((person) => `@${person.login} waits on you: ${person.title}`), ...screen.people.youWaitOn.map((person) => `You wait on @${person.login}: ${person.title}`)]],
-      ["recent", "Recent", screen.recent.summary, screen.recent.items.map((item) => `${item.text} · ${item.age}`)]] as const).map(([id, title, summary, lines]) =>
-        <Tile key={id} id={id} title={title} note={open(id) ? undefined : summary} open={open(id)} more={lines.length > 0} run={run}
-          className="col-span-2 @min-[700px]:col-span-3 @min-[900px]:col-span-6">
-          {open(id) ? <ul className="grid gap-0.5 text-[12px]">{lines.map((line) => <li key={line} className="break-words">{line}</li>)}</ul> : null}
-        </Tile>)}
-    </div>}
+        {open.has("chores") ? <Rows prUrls={chores} kit={kit} run={run} /> : null}
+      </div> : null}
+      {toggles.length ? <div data-deck-toggles className="mt-1.5 flex flex-wrap gap-1 border-t border-border/50 pt-1.5">
+        {toggles.map(([key, label]) => <button key={key} type="button" data-deck-focus={`panel-${key}`} aria-pressed={panel === key} onClick={() => run({ kind: "panel", key })}
+          className={cn(GHOST, panel === key && "bg-foreground/[0.08] text-foreground")}>{label}</button>)}
+      </div> : null}
+      {panel && toggles.some(([key]) => key === panel) ? <div data-deck-panel={panel} className={cn(GROUP_CARD, "mt-1.5 px-3 py-2")}>
+        <PanelBody panel={panel} screen={screen} kit={kit} on={on} run={run} notes={notes ?? null} markdown={markdown} /></div> : null}
+    </>}
   </section>;
-}
-
-/** Above the rows while a header count shows them alone: what shows, how many, and Show all. */
-function FilterLine({ kind, n, run }: { kind: "needs" | "blocked"; n: number; run: Run }) {
-  return <div data-deck-filter={kind} className="flex min-h-8 items-center gap-2 pl-2 pr-1 text-[12px] text-muted-foreground">
-    <span>Only {kind === "needs" ? "what needs you" : "what's blocked"} · {n}</span><span className="flex-1" />
-    <button type="button" data-deck-focus="show-all" onClick={() => run({ kind: "filter", filter: kind })} className={GHOST}>Show all<Kbd>esc</Kbd></button>
-  </div>;
-}
-
-/** The one-line card header that stays once the card's own header scrolls away; `counts` stands in for its status line. */
-export function CardBar({ name, color, status, counts, advance, hollow }: { name: string; color: string; status?: { text: string; tone: Tone }; counts?: ReactNode;
-  advance?: ReactNode; hollow?: boolean }) {
-  return <div className="sticky top-0 z-[6] -mb-[34px] h-[34px] border-b border-border/70 bg-background">
-    <div className={cn(COLUMN, "flex h-full items-center gap-2 px-4")}>
-      <Dot color={color} hollow={hollow} /><b className="truncate text-[13px] font-semibold">{name}</b>
-      {counts ?? (status ? <span className={cn("shrink-0 text-[11.5px]", TONE[status.tone].text)}>{status.text}</span> : null)}
-      <span className="flex-1" />{advance}
-    </div>
-  </div>;
-}
-
-export function CardSections({ screen, state, run, open, stuck }: { screen: CardScreen; state: RowState; run: Run; open: ReadonlySet<string>; stuck: boolean }) {
-  const leaves = screen.card.kind === "effort" && !screen.card.oneOff;
-  return screen.sections.length ? <>{screen.sections.map((section) => <Section key={section.key} section={section} state={state} run={run} open={open.has(section.key)}
-    stuck={stuck} held={screen.card.pile !== "active"} leaves={leaves} />)}</> : <p className="py-8 text-center text-[12px] text-muted-foreground">
-    {screen.card.kind === "loose" ? "Set each thread's effort from the chip above its composer." : screen.card.kind === "service" ? "No open PRs here."
-      : "No open PRs in this effort."}</p>;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,13 +463,13 @@ function Suggestion({ group, run }: { group: SuggestGroup; run: Run }) {
       onClick={() => run({ kind: "jump", prUrl: line.prUrl })} className={cn("rounded px-1 text-[11.5px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground", RING)}>
       {line.ref}</button>)}{more > 0 ? <span className="text-[11.5px] text-muted-foreground">+{more}</span> : null}</span>
     <button type="button" data-deck-focus={`group-${group.key}`} aria-disabled={live ? undefined : true} onClick={() => { if (live) run({ kind: "group", key: group.key }); }}
-      title={group.button.kind === "pick" ? "Pick an effort for each PR (e)" : group.button.confirm ? "Weak signals: lists each PR and its signals before it moves them"
+      title={group.button.kind === "pick" ? `Pick an effort for each PR (${ACTION.move.keys[0]})` : group.button.confirm ? "Weak signals: lists each PR and its signals before it moves them"
         : "Moves nothing until you press it; Undo takes it back"}
-      className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>{group.button.label}<Kbd>{group.button.kind === "pick" ? "e" : "p"}</Kbd></button>
+      className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")}>{group.button.label}<Kbd>{ACTION[group.button.kind === "pick" ? "move" : "accept"].keys[0]}</Kbd></button>
   </div>;
 }
 
-/** Above a service card's rows: its suggestions, Seed from Linear, and the standing rules, which place new PRs on every read. */
+/** Under a service card: its suggestions, Seed from Linear, and the standing rules, which place new PRs on every read. */
 export function Suggestions({ screen, rules, run }: { screen: CardScreen; rules: readonly RuleItem[]; run: Run }) {
   return <section aria-label="Suggestions" data-deck-suggest className="mb-1.5 rounded-[10px] border border-border/50 px-1.5 pb-1 pt-0.5">
     <div className="flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 pl-1">
@@ -745,49 +580,6 @@ export function MoreItems({ view, go }: { view: HeaderProps["view"]; go(target: 
 export function viewPaletteItems(view: HeaderProps["view"]): PaletteItem[] {
   return [...[...TABS, ...MORE_VIEWS].map((item) => ({ key: item.id, group: "Go to", title: item.title, keys: [], on: item.id !== view, why: "you're here", action: null })),
     { key: "how", group: "Help", title: "How it works", keys: [], on: true, why: "", action: null }];
-}
-
-/**
- * The selection's moves, docked under the rows so it never covers one; on a service card, the moves into efforts too, and on an effort's
- * card (`leaves`), the move to One-offs. `address` counts the selected Your turn rows, which Address selected takes.
- */
-export function BatchBar({ selected, kinds, sorting, leaves, address = 0, refusal, working, refresh, run }: { selected: number; kinds: readonly { id: DeckActionId; count: number; tone: Tone }[];
-  sorting: boolean; leaves?: boolean; address?: number;
-  /** The selected rows Refresh reads, and its progress while it reads them. */
-  refresh?: { count: number; busy: boolean; progress: string | null };
-  /** Why the last Address started nothing. */
-  refusal?: string | null;
-  /** The batch button working now: it spins and says so, and the others wait, until its plan answers. */
-  working?: { kind: string; label: string } | null; run: Run }) {
-  if (!selected) return null;
-  const busy = (id: string) => working?.kind === id;
-  // The pressed button keeps its full color while it works; only the others fade.
-  const face = (id: string, idle: ReactNode) => busy(id) ? <><Spin />{working!.label}</> : idle;
-  // Advance runs the safe writes only: never a merge, and never a thread's work.
-  const safe = kinds.filter((kind) => kind.id !== "merge" && kind.id !== "fix").reduce((sum, kind) => sum + kind.count, 0);
-  return <div aria-label="Selection" className="shrink-0 border-t border-border bg-background">
-    <div className={cn(COLUMN, "flex flex-wrap items-center gap-1.5 px-4 py-1.5 text-[12px]")}>
-      <b className="mr-1 font-semibold">{selected} selected</b>
-      {safe ? <button type="button" data-deck-batch="advance" disabled={!!working} aria-busy={busy("advance") || undefined} onClick={() => run({ kind: "action", id: "advance" })}
-        className={cn(BUTTON, "border-foreground bg-foreground font-medium text-background", busy("advance") && "disabled:opacity-100")}>{face("advance", <>Advance · {safe}<Kbd inverted>a</Kbd></>)}</button> : null}
-      {address ? <button type="button" data-deck-batch="address" data-deck-address disabled={!!working} aria-busy={busy("address") || undefined}
-        onClick={() => run({ kind: "action", id: "address" })} title="Starts one thread for them now, with 8 s to Undo. Nothing merges."
-        className={cn(BUTTON, TONE.amber.button, busy("address") && "disabled:opacity-100")}>{face("address", <>Address selected ({address})<Kbd>{ACTION.address.keys[0]}</Kbd></>)}</button> : null}
-      {refusal ? <span role="alert" data-deck-refusal className="min-w-0 truncate text-destructive" title={refusal}>{refusal}</span> : null}
-      {kinds.map((kind) => <button key={kind.id} type="button" data-deck-batch={kind.id} disabled={!!working} aria-busy={busy(kind.id) || undefined}
-        onClick={() => run({ kind: "action", id: kind.id })} className={cn(BUTTON, TONE[kind.tone].button, busy(kind.id) && "disabled:opacity-100")}>
-        {face(kind.id, <>{ACTION[kind.id].title.replace("…", "")} {kind.count}<Kbd>{ACTION[kind.id].keys[0]}</Kbd></>)}</button>)}
-      {refresh?.count ? <RefreshSelected {...refresh} onClick={() => run({ kind: "action", id: "refresh" })} /> : null}
-      {sorting ? <>
-        <button type="button" onClick={() => run({ kind: "action", id: "accept" })} className={cn(BUTTON, "border-border")}>Accept suggestions<Kbd>p</Kbd></button>
-        <button type="button" onClick={() => run({ kind: "action", id: "move" })} className={cn(BUTTON, "border-border")}>Move…<Kbd>e</Kbd></button>
-        <button type="button" onClick={() => run({ kind: "action", id: "new-effort" })} className={cn(BUTTON, "border-border")}>New effort from these…</button>
-        <button type="button" onClick={() => run({ kind: "action", id: "one-off" })} className={cn(BUTTON, "border-border")}>Mark one-offs</button>
-      </> : leaves ? <button type="button" onClick={() => run({ kind: "action", id: "one-off" })} className={cn(BUTTON, "border-border")}>Move to One-offs</button> : null}
-      <span className="flex-1" />
-      <button type="button" onClick={() => run({ kind: "action", id: "clear" })} className={GHOST}>Clear<Kbd>esc</Kbd></button>
-    </div>
-  </div>;
 }
 
 /** Refresh (N) on a selection bar: reads the selected rows from GitHub, saying how far it got. */
@@ -922,7 +714,7 @@ export function CompleteBody({ screen, busy, error, onComplete, onCancel }: { sc
   const active = screen.threads.filter((thread) => thread.status === "active");
   return <div className="grid gap-3 text-[12.5px]">
     <ul className="grid gap-1.5">
-      <li><b className="font-medium">{plural(screen.card.stats.open, "open PR")}</b> <span className="text-muted-foreground">{screen.needsYou} need you</span></li>
+      <li><b className="font-medium">{plural(screen.card.stats.open, "open PR")}</b> <span className="text-muted-foreground">{screen.yourTurn} your turn</span></li>
       {active.length ? <li><b className="font-medium">{plural(active.length, "active thread")}</b> <span className="text-muted-foreground">{active.map((thread) => thread.title).join(", ")}</span></li> : null}
     </ul>
     <p className="text-[12px] text-muted-foreground">Its PRs and threads stay with it on the Done pile, and stop counting. Reopen puts it back.</p>
@@ -1075,14 +867,19 @@ export function HelpBody({ items }: { items: readonly PaletteItem[] }) {
       </div> : null; })}
     </div>
     <div className="grid gap-1.5 border-t border-border/60 pt-3">
-      <div className="flex flex-wrap gap-1.5">{([["green", "Ready to merge"], ["violet", "Confirm notes"], ["blue", "Nudge, request, ready"], ["amber", "Conflict or changes"],
-        ["red", "CI failing"], ["gray", "Waiting or in flight"]] as const).map(([tone, label]) => <span key={tone} className={cn("rounded px-1.5 text-[11px] leading-[19px]", TONE[tone].chip)}>{label}</span>)}</div>
-      <p className="text-muted-foreground">Color means your move; gray waits on others, runs itself, or is on hold. A blue dot marks a change since you looked, which stays put until Mark seen.</p>
-      <p className="text-muted-foreground">Needs you: an open PR on an active card whose next move is yours. A service card counts too: it holds a repository&apos;s PRs no effort has. Dimmed rows don&apos;t count.</p>
-      <p className="text-muted-foreground">Every GitHub write opens one confirm that lists each PR, then waits {Math.round(SEND_DELAY_MS / 1_000)} s with Undo. Merges run only from the fresh preview, on a click or ⌘↵.</p>
+      <h3 className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">How moves rank</h3>
+      <ol data-deck-rank className="grid list-decimal gap-0.5 pl-5">{RANK.map(([rule, keys, tone]) => <li key={rule}>
+        <span className={cn("rounded px-1.5 text-[11px] leading-[19px]", TONE[tone].chip)}>{rule}</span> <Keys keys={keys} /></li>)}</ol>
+      <p className="text-muted-foreground">A card shows its first three moves over the rows each touches; first match wins. Chores (nudges under 4 days, requests,
+        and ready marks) wait on one Advance line, a, and never turn amber. Your turn counts a PR where a person&apos;s feedback waits on you; a held one doesn&apos;t count.</p>
+      <p className="text-muted-foreground">Address starts one thread for the rows you leave ticked, with {Math.round(SEND_DELAY_MS / 1_000)} s to Undo. Every other GitHub
+        write lists each PR first, then waits the same with Undo. Merges run only from the fresh preview, on a click or ⌘↵.</p>
     </div>
   </div>;
 }
+/** The rule rankMoves follows, as ? says it: each rank, its keys, and its color. */
+const RANK: readonly [string, string, Tone][] = [["Someone waits on you", "b", "amber"], ["One step from merged", "m c", "green"], ["Your blockers", "f", "blue"],
+  ["A reviewer holds it 4+ days", "n", "gray"]];
 
 // ---------------------------------------------------------------------------
 // The whole deck.
@@ -1090,7 +887,7 @@ export function HelpBody({ items }: { items: readonly PaletteItem[] }) {
 
 export function Overview({ screen, run }: { screen: OverviewScreen; run: Run }) {
   const panel = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-3 py-2.5";
-  const priorities = [...screen.cards].sort((a, b) => b.needsYou - a.needsYou || b.blocked.length - a.blocked.length).slice(0, 5);
+  const priorities = [...screen.cards].sort((a, b) => b.yourTurn - a.yourTurn || b.blocked.length - a.blocked.length).slice(0, 5);
   const maxPrs = Math.max(1, ...priorities.map((item) => item.stats.bar.reduce((sum, segment) => sum + segment.count, 0)));
   return <section data-deck-overview aria-label="Overview">
     <h1 data-deck-focus="heading" tabIndex={-1} className="mb-3 text-[16px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Overview</h1>
@@ -1105,7 +902,7 @@ export function Overview({ screen, run }: { screen: OverviewScreen; run: Run }) 
             className={cn("grid min-w-0 grid-cols-1 items-center gap-x-2 rounded px-1 py-1 text-left hover:bg-foreground/[0.05] @min-[480px]:grid-cols-[minmax(0,1fr)_auto]", RING)}>
             <span className="flex min-w-0 items-center gap-1.5 text-[12px]"><Dot color={item.color} /><span className="truncate font-medium">{item.card.name}</span>
               {item.changed ? <Changed title="Changed since you looked" /> : null}</span>
-            <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={item.status.text}>{item.needsYou} need you · {item.blocked.length} blocked · {item.stats.bar.find((part) => part.key === "flight")?.count ?? 0} in flight</span>
+            <span className="min-w-0 truncate text-[11px] text-muted-foreground">{item.yourTurn} your turn · {item.blocked.length} blocked · {item.stats.bar.find((part) => part.key === "flight")?.count ?? 0} in flight</span>
             <span role="img" aria-label={item.stats.bar.map((part) => `${part.count} ${part.label}`).join(", ") || "No open PRs"}
               className="mt-1 flex h-1 overflow-hidden rounded-full bg-foreground/[0.06] @min-[480px]:col-span-2">
               {item.stats.bar.map((part) => <i key={part.key} className={cn("h-full shrink-0", TONE[part.tone].bar)} style={{ width: `${part.count / maxPrs * 100}%` }} />)}</span>
@@ -1126,8 +923,8 @@ export function Overview({ screen, run }: { screen: OverviewScreen; run: Run }) 
         className={cn(panel, "grid gap-2 text-left hover:bg-foreground/[0.05]", index === 0 ? "@min-[680px]:col-span-7" : index === 1 ? "@min-[680px]:col-span-5" : "@min-[680px]:col-span-6 @min-[900px]:col-span-4", RING)}>
         <span className="flex min-w-0 items-center gap-2"><Dot color={item.color} /><strong className="min-w-0 flex-1 truncate text-[13px]">{item.card.name}</strong>
           {item.changed ? <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Changed title="Changed since you looked" />Changed</span> : null}</span>
-        <span className="line-clamp-2 text-[12px]">{item.next.items[0]?.text ?? "No next action recorded."}</span>
-        <span className="text-[11px] text-muted-foreground">{item.needsYou} need you · {item.blocked.length} blocked · {item.stats.open} open · {item.stats.mergedWeek} merged in 7d</span>
+        <span className="line-clamp-2 text-[12px]">{item.next ?? "No next action recorded."}</span>
+        <span className="text-[11px] text-muted-foreground">{item.yourTurn} your turn · {item.blocked.length} blocked · {item.stats.open} open · {item.stats.mergedWeek} merged in 7d</span>
       </button>)}
     </div>
   </section>;
@@ -1142,52 +939,35 @@ export type DeckPaneProps = {
   held: readonly Pile[]; done: readonly Pile[];
   read: HeaderProps["read"];
   seen: { changed: number; available: boolean; note: string | null };
-  state: RowState; tiles: ReadonlySet<string>; open: ReadonlySet<string>; pile: "hold" | "done" | null;
-  /** The card's own header has scrolled away, so its one-line bar shows and section headers stick below it. */
-  stuck: boolean;
-  /** What a takes now; the card's Advance shows its badge only when that's the card. */
-  advanceScope?: "selected" | "row" | "card" | null;
+  /** What the card's rows draw from; the moves and chores you opened or folded, and its finish line's expand ("progress"); and its open panel. */
+  kit: RowKit; open: ReadonlySet<string>; panel: Panel | null; pile: "hold" | "done" | null;
   /** The card a flip landed on, said once to screen readers; empty otherwise. */
   announce?: string;
   on: Availability; hints: readonly [string, string][]; flash: { text: string; undo: boolean; busy?: boolean } | null;
-  batch: { kinds: readonly { id: DeckActionId; count: number; tone: Tone }[]; address?: number; refusal?: string | null; working?: { kind: string; label: string } | null;
-    refresh?: { count: number; busy: boolean; progress: string | null } };
   run: Run; onPalette(): void; onHelp(): void; onUndo(): void;
   rootRef?: RefObject<HTMLDivElement | null>; scrollerRef?: RefObject<HTMLDivElement | null>; slackRef?: RefObject<HTMLDivElement | null>;
   chipsRef?: RefObject<HTMLDivElement | null>; viewRef?: RefObject<HTMLDivElement | null>;
   /** The Notes editor while it's open on the card shown, and what renders notes as Markdown. */
   notes?: NotesEdit | null; markdown?: (body: string) => ReactNode;
-  /** The header count whose rows show alone; `card`'s sections are already cut to them. */
-  filter?: "needs" | "blocked" | null;
 };
 
 export function DeckPane(props: DeckPaneProps) {
-  const { card, stuck } = props;
+  const { card } = props;
   const behind = cardsBehind(props.chips, props.cur);
-  const keyless = props.advanceScope === "row" || props.advanceScope === "selected";
   return <div ref={props.rootRef} role="region" aria-label="Effort deck" className={cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS)}>
     <WorkstreamsHeader view="deck" read={props.read} seen={{ ...props.seen, key: "s" }} palette="all actions" help="Keys and colors" onView={(view) => props.run({ kind: "view", view })}
       onSeen={() => props.run({ kind: "action", id: "seen" })} onPalette={props.onPalette} onHelp={props.onHelp} />
     <Strip chips={props.chips} cur={props.cur} deck held={props.held} done={props.done} pile={props.pile} run={props.run} chipsRef={props.chipsRef} />
     <div ref={props.scrollerRef} data-deck-scroller className="@container relative min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]">
-      {stuck && card ? <CardBar name={card.card.name} color={card.color} hollow={card.card.kind !== "effort"} status={card.status}
-        counts={<Counts screen={card} filter={props.filter} run={props.run} bar />}
-        advance={card.card.pile === "active" ? <ActionButton id="advance" on={props.on} run={props.run} primary label={`Advance${card.advance.length ? ` · ${card.advance.length}` : ""}`}
-          keyless={keyless} /> : null} /> : null}
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className={CONTENT}>
         {props.cur === "overview" && props.overview ? <Overview screen={props.overview} run={props.run} />
-          : card ? <><Stack behind={behind} run={props.run}><Card screen={card} tiles={props.tiles} run={props.run} on={props.on} keyless={keyless} notes={props.notes}
-          markdown={props.markdown} filter={props.filter} /></Stack>
-          <div data-deck-rows>{card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}
-            {props.filter ? <FilterLine kind={props.filter} n={card.sections.reduce((sum, section) => sum + section.lines.length, 0)} run={props.run} /> : null}
-            {props.filter && !card.sections.length ? null : <CardSections screen={card} state={props.state} run={props.run} open={props.open} stuck={stuck} />}</div></>
+          : card ? <><Stack behind={behind} run={props.run}><Card screen={card} kit={props.kit} open={props.open} panel={props.panel} run={props.run} on={props.on}
+            notes={props.notes} markdown={props.markdown} /></Stack>
+            {card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}</>
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>
-    <BatchBar selected={props.state.selected.size} kinds={props.batch.kinds} address={props.batch.address} refusal={props.batch.refusal} working={props.batch.working}
-      refresh={props.batch.refresh} sorting={card?.card.kind === "service"}
-      leaves={card?.card.kind === "effort" && !card.card.oneOff} run={props.run} />
     <HintBar hints={props.hints} flash={props.flash} onPalette={props.onPalette} onHelp={props.onHelp} onUndo={props.onUndo} />
     <p role="status" data-deck-announce className="sr-only">{props.announce}</p>
   </div>;

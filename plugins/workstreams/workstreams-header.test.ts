@@ -57,14 +57,14 @@ const TARGETS = ["view-deck", "view-prs", "map", "efforts", "how"];
 /** The deck on Inkwell's Shelf order card, as its nav view draws it; `run` gets every click. */
 function deckPane(run: DeckPaneProps["run"] = noop): DeckPaneProps {
   const deck = inkwellDeck();
-  const cards = new Map(deck.active.map((item) => [item.id, cardScreen(item, { rows: {}, at: {} }, { now: NOW })]));
+  const cards = new Map(deck.active.map((item) => [item.id, cardScreen(item, { rows: {} }, { now: NOW })]));
   const card = cards.get("effort-shelf-order") ?? null;
   const context: KeyContext = { view: "deck", cur: card, service: null, focused: null, selected: [], seenAvailable: true, undo: false, held: 0, done: 0 };
   const on = availability(context);
   return { chips: stripChips(deck.active.map((item) => item.id), cards, "effort-shelf-order"), cur: "effort-shelf-order",
     card, rules: [], held: [], done: [], read: { text: "Read 25s ago", error: null }, seen: { changed: 1, available: true, note: null },
-    state: { selected: new Set<string>(), expanded: new Set<string>(), focus: null }, tiles: new Set<string>(), open: new Set<string>(), pile: null, stuck: false,
-    on, hints: hintKeys(context, on), flash: null, batch: { kinds: [] }, run, onPalette: noop, onHelp: noop, onUndo: noop };
+    kit: { lines: new Map(), picked: new Set() }, open: new Set<string>(), panel: null, pile: null,
+    on, hints: hintKeys(context, on), flash: null, run, onPalette: noop, onHelp: noop, onUndo: noop };
 }
 
 describe("the shared Workstreams header", () => {

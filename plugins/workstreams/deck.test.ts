@@ -205,16 +205,18 @@ describe("the effort deck", () => {
     const view = deckView(input({
       efforts: [effort("shelf"), effort("pickup", { parentThreadId: "thr_pickup" })],
       merges: [{ url: url("quill", 200), at: INVENTORY_NOW - DAY, effortId: pickup }, { url: url("quill", 190), at: INVENTORY_NOW - 20 * DAY, effortId: pickup },
+        { url: url("quill", 195), at: INVENTORY_NOW - 10 * DAY, effortId: pickup },
         { url: url("folio", 290), at: INVENTORY_NOW - DAY, effortId: INVENTORY_EFFORTS.shelf.id }],
       threads: new Map([["thr_pickup", { title: "Store pickup", status: "idle", updatedAt: INVENTORY_NOW - 9 * DAY }],
         ["thr_quill_211", { title: "Work on quill #211", status: "active", updatedAt: INVENTORY_NOW - 60_000 }]]),
     }));
     const card = cardOf(view, pickup);
     expect(card.status).toEqual({ tone: "you", text: "3 need you · 2 blocked" });
-    // Every PR here opened 6 days ago; the stacked PRs have waited since their push 3 days ago, longer than any of your moves is dated.
-    expect(card.stats).toEqual({ open: 5, ready: 0, mergedWeek: 1, medianAgeMs: 6 * DAY,
+    // Every PR here opened 6 days ago; the stacked PRs have waited since their push 3 days ago, longer than any of your moves is dated. The
+    // merge 10 days ago paces the finish line's ETA over two weeks, though it isn't this week's.
+    expect(card.stats).toEqual({ open: 5, ready: 0, mergedWeek: 1, mergedFortnight: 2, medianAgeMs: 6 * DAY,
       oldestWait: { prUrl: url("quill", 212), ref: "quill #212", text: "Merges after quill #210", since: INVENTORY_NOW - 3 * DAY } });
-    expect(card.progress).toEqual({ merged: 2, open: 5 });
+    expect(card.progress).toEqual({ merged: 3, open: 5 });
     // Your moves first, oldest first, then what waits on others.
     expect(card.next).toEqual([{ text: "Resolve the conflicts", owner: "you", prUrl: url("quill", 210) },
       { text: "Address the requested changes", owner: "you", prUrl: url("quill", 211) }, { text: "Address the requested changes", owner: "you", prUrl: url("spine", 155) }]);
@@ -223,7 +225,7 @@ describe("the effort deck", () => {
       { login: "ines-v", prs: [{ prUrl: url("spine", 155), ref: "spine #155", since: INVENTORY_NOW - DAY }] }] });
     expect(card.threads.map(({ id, role, status }) => [id, role, status])).toEqual([["thr_pickup", "parent", "idle"], ["thr_quill_211", "pr", "active"],
       ["thr_quill_210", "pr", "idle"], ["thr_quill_210_plan", "pr", "idle"], ["thr_spine_155", "pr", "idle"]]);
-    // The merge 20 days ago counts toward progress but not this week.
+    // The merges 10 and 20 days ago count toward progress but not this week.
     expect(card.activity.filter((item) => item.kind === "merged")).toEqual([{ kind: "merged", prUrl: url("quill", 200), ref: "quill #200", who: null, at: INVENTORY_NOW - DAY }]);
     expect(card.activity.map((item) => item.kind)).toEqual(["merged", "changes", "changes", "changes", "approved", "approved", "pushed", "pushed", "pushed",
       "pushed", "pushed"]);

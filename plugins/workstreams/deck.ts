@@ -20,7 +20,7 @@ import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, rowTurn, type ActionId } from "./inventory-view-model.js";
 import type { LinearDetail } from "./linear.js";
-import { sentSchema, turnSchema, type Turn } from "./your-turn.js";
+import { sentSchema, turnSchema, yourTurnSchema, type Turn } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
 const WEEK_MS = 7 * 86_400_000;
@@ -46,8 +46,8 @@ export const deckRowSchema = z.object({
   suggested: z.array(z.string()), nudge: z.array(z.string()),
   /** Approval comments waiting for your confirmation. */
   notes: z.number(),
-  /** Where All PRs lists it, Your turn among them, and whether Address takes it (turnOf). */
-  turn: turnSchema,
+  /** Where All PRs lists it, Your turn among them, and whether Address takes it (turnOf); and the feedback that waits on you, when some does. */
+  turn: turnSchema, yourTurn: yourTurnSchema.nullable(),
   tickets: z.array(z.string()),
   stackedOn: z.number().nullable(),
   thread: z.object({ id: z.string(), title: z.string(), active: z.boolean() }).strict().nullable(),
@@ -80,7 +80,8 @@ export const deckCardSchema = z.object({
   pile: z.enum(EFFORT_PILES), reason: z.string(), since: z.number(),
   status: z.object({ tone: z.enum(["you", "waiting", "moving", "quiet", "held"]), text: z.string() }).strict(),
   needsYou: z.number(),
-  stats: z.object({ open: z.number(), ready: z.number(), mergedWeek: z.number(), medianAgeMs: z.number().nullable(),
+  /** `mergedFortnight`: merged in the last 14 days, which paces the finish line's ETA. */
+  stats: z.object({ open: z.number(), ready: z.number(), mergedWeek: z.number(), mergedFortnight: z.number(), medianAgeMs: z.number().nullable(),
     oldestWait: z.object({ prUrl: z.string(), ref: z.string(), text: z.string(), since: z.number() }).strict().nullable() }).strict(),
   /** Merged PRs a read saw against open ones. */
   progress: z.object({ merged: z.number(), open: z.number() }).strict(),
@@ -218,7 +219,7 @@ export function deckRow(row: DeckRowInput, parents: ReadonlyMap<string, Inventor
     prUrl: row.prUrl, repo: row.repo, number: row.number, title: row.title, draft: row.draft, section, status: line.status,
     step: first ? { text: first.text, owner: first.owner.label, since: first.since } : null,
     waitsOn, reviewers: line.reviewers, suggested: line.suggested, nudge: line.actions.find((action) => action.id === "nudge")?.reviewers ?? [],
-    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, turn, tickets: [...row.tickets], stackedOn: row.stackedOn,
+    notes: feedback?.status === "present" ? feedback.sourceIds.length : 0, turn, yourTurn: row.yourTurn, tickets: [...row.tickets], stackedOn: row.stackedOn,
     thread: thread && { id: thread.id, title: thread.title, active: thread.active }, addressing: row.addressing, sent: row.sent,
     hold: row.hold && { reason: row.hold.reason, since: row.hold.heldAt },
     checkedAt: row.checkedAt, failed: row.failure !== null, stale: row.stale, confirmation: row.confirmation, acted: row.acted && now - row.acted.at < ACTED_MS ? row.acted : null,
@@ -286,7 +287,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     const prUrl = thread.prs.find((pr) => rows.some(({ row }) => row.prUrl === pr.url))?.url ?? null;
     threads.set(thread.id, { id: thread.id, title: facts.title, role: "linked", prUrl, status: facts.status, lastActivityAt: facts.updatedAt });
   }
-  const recent = (at: number | null) => at !== null && now - at <= WEEK_MS;
+  const recent = (at: number | null, span = WEEK_MS) => at !== null && now - at <= span;
   const activity: DeckCard["activity"] = [
     ...merges.filter((merge) => recent(merge.at)).map((merge) => ({ kind: "merged" as const, prUrl: merge.url, ref: urlRef(merge.url), who: null, at: merge.at })),
     ...rows.flatMap(({ input: row }) => [
@@ -306,6 +307,7 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
       : { tone: needs ? "you" : blocked.length || held ? "waiting" : rows.length ? "moving" : "quiet", text: parts.join(" · ") || "No open PRs" },
     needsYou: needs,
     stats: { open: rows.length, ready: inSection("merge").length, mergedWeek: merges.filter((merge) => recent(merge.at)).length,
+      mergedFortnight: merges.filter((merge) => recent(merge.at, 2 * WEEK_MS)).length,
       medianAgeMs: ages.length ? ages[Math.floor(ages.length / 2)]! : null, oldestWait: waits[0] ?? null },
     progress: { merged: merges.length, open: rows.length },
     next, blocked,

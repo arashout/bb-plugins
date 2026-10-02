@@ -24,7 +24,7 @@ export type KeyGroup = (typeof KEY_GROUPS)[number];
  */
 export type KeyEffect = "nav" | "local" | "dialog" | "confirm" | "start" | "preview";
 export type DeckActionId = "next" | "prev" | "jump" | "services" | "view" | "seen" | "hold-pile" | "done-pile" | "advance" | "hold" | "complete"
-  | "held" | "tiles" | "notes" | "only-needs" | "only-blocked" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "fix" | "address" | "move" | "undo" | "hold-pr" | "refresh" | "row-next" | "row-prev" | "select"
+  | "held" | "progress" | "notes" | "merge" | "confirm" | "nudge" | "request" | "ready" | "release" | "fix" | "address" | "move" | "undo" | "hold-pr" | "revoke" | "refresh" | "row-next" | "row-prev" | "select"
   | "select-section" | "expand" | "clear" | "open-thread" | "open-pr" | "accept" | "one-off" | "new-effort" | "promote" | "rule" | "seed" | "palette" | "help";
 /** Keys as they read on a kbd: "]" and "→" are the same key, "1–9" names nine, and "⇧H" is Shift with h. */
 export type DeckAction = { id: DeckActionId; group: KeyGroup; title: string; keys: readonly string[]; effect: KeyEffect };
@@ -38,14 +38,12 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "seen", group: "Deck", title: "Mark seen here", keys: ["s"], effect: "local" },
   { id: "hold-pile", group: "Deck", title: "Show the On hold pile", keys: [], effect: "dialog" },
   { id: "done-pile", group: "Deck", title: "Show the Done pile", keys: [], effect: "dialog" },
-  { id: "advance", group: "Card", title: "Advance the row, else the effort…", keys: ["a"], effect: "confirm" },
+  { id: "advance", group: "Card", title: "Advance the chores…", keys: ["a"], effect: "confirm" },
   { id: "hold", group: "Card", title: "Hold the effort…", keys: ["h"], effect: "dialog" },
   { id: "complete", group: "Card", title: "Complete the effort…", keys: [], effect: "dialog" },
-  { id: "held", group: "Card", title: "Go to held PRs", keys: ["⇧H"], effect: "nav" },
-  { id: "tiles", group: "Card", title: "Show or hide every tile's details", keys: ["i"], effect: "local" },
+  { id: "held", group: "Card", title: "Show held PRs", keys: ["⇧H"], effect: "local" },
+  { id: "progress", group: "Card", title: "Show or hide where the effort stands", keys: ["p"], effect: "local" },
   { id: "notes", group: "Card", title: "Edit the effort's notes", keys: ["⇧N"], effect: "local" },
-  { id: "only-needs", group: "Card", title: "Show only what needs you, or all", keys: [], effect: "local" },
-  { id: "only-blocked", group: "Card", title: "Show only what's blocked, or all", keys: [], effect: "local" },
   { id: "merge", group: "Act", title: "Preview merge…", keys: ["m"], effect: "preview" },
   { id: "confirm", group: "Act", title: "Confirm review notes…", keys: ["c"], effect: "dialog" },
   { id: "nudge", group: "Act", title: "Nudge reviewers…", keys: ["n"], effect: "confirm" },
@@ -56,16 +54,17 @@ export const DECK_ACTIONS: readonly DeckAction[] = [
   { id: "address", group: "Act", title: "Address selected", keys: ["b"], effect: "start" },
   { id: "undo", group: "Act", title: "Undo the last action", keys: ["z"], effect: "local" },
   { id: "hold-pr", group: "Act", title: "Hold or release the PR…", keys: [], effect: "dialog" },
+  { id: "revoke", group: "Act", title: "Revoke your notes confirmation", keys: [], effect: "local" },
   { id: "refresh", group: "Act", title: "Refresh from GitHub", keys: ["g"], effect: "local" },
   { id: "row-next", group: "Rows", title: "Next row", keys: ["j", "↓"], effect: "nav" },
   { id: "row-prev", group: "Rows", title: "Previous row", keys: ["k", "↑"], effect: "nav" },
   { id: "select", group: "Rows", title: "Select or unselect the row", keys: ["x"], effect: "local" },
-  { id: "select-section", group: "Rows", title: "Select what needs you in the section", keys: ["⇧X"], effect: "local" },
-  { id: "expand", group: "Rows", title: "Show the row's details", keys: ["↵"], effect: "local" },
+  { id: "select-section", group: "Rows", title: "Select every Your turn row", keys: ["⇧X"], effect: "local" },
+  { id: "expand", group: "Rows", title: "Show or hide the move's rows", keys: ["↵"], effect: "local" },
   { id: "clear", group: "Rows", title: "Clear the selection", keys: ["esc"], effect: "local" },
   { id: "open-thread", group: "Rows", title: "Open the row's thread", keys: ["o"], effect: "nav" },
   { id: "open-pr", group: "Rows", title: "Open the PR on GitHub", keys: [], effect: "nav" },
-  { id: "accept", group: "Sort", title: "Accept the suggestion", keys: ["p"], effect: "local" },
+  { id: "accept", group: "Sort", title: "Accept the suggestion", keys: ["⇧A"], effect: "local" },
   { id: "move", group: "Sort", title: "Move to an effort…", keys: ["e"], effect: "dialog" },
   { id: "one-off", group: "Sort", title: "Move to One-offs", keys: [], effect: "local" },
   { id: "new-effort", group: "Sort", title: "New effort from the selection…", keys: [], effect: "dialog" },

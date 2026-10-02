@@ -1,38 +1,55 @@
 import { describe, expect, it } from "vitest";
 import type { ConfirmRead } from "./approval-evidence.js";
-import type { DeckView } from "./deck.js";
+import type { DeckCard, DeckRow, DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { withArrivals } from "./deck-place.js";
-import { acceptPlan, advanceTarget, availability, cardScreen, notesScreen, cardSnapshot, changedRows, filterSections, hintKeys, keptServiceCards, overviewScreen, paletteItems,
-  readText, refreshNote, rowFacts, rowFilter, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { availability, cardScreen, notesScreen, cardSnapshot, hintKeys, keptServiceCards, overviewScreen, paletteItems, rankMoves, readText, refreshNote, rowFacts,
+  stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
+import type { LinearDetail } from "./linear.js";
 import type { Sent } from "./your-turn.js";
 
+const DAY = 86_400_000;
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
+/** "folio #340" from its URL. */
+const ref = (prUrl: string) => prUrl.replace(/^.*\/inkwell\/([^/]+)\/pull\/(\d+)$/u, "$1 #$2");
 const SHELF = INVENTORY_EFFORTS.shelf.id, PICKUP = INVENTORY_EFFORTS.pickup.id, ONE_OFFS = "effort-one-offs";
 const FOLIO = "service:inkwell/folio", ATLAS = "service:inkwell/atlas", CATALOG = "service:inkwell/catalog";
-const none = { rows: {}, at: {} };
-const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1] = none, details?: ReadonlyMap<string, string>,
-  sorted: Omit<Parameters<typeof cardScreen>[2], "now" | "details"> = {}) => cardScreen(view.active.find((item) => item.id === id)!, seen, { now: NOW, details, ...sorted });
-const lines = (screen: CardScreen) => Object.fromEntries(screen.sections.map((section) => [section.key, section.lines.map((line) =>
-  `${line.ref}${line.needs ? "" : " ·"}${line.dim ? " dim" : ""}${line.ghost ? " ghost" : ""}${line.dot && !line.ghost ? " dot" : ""}${line.change ? ` {${line.info!.text}}` : ""}${
-    line.to ? ` ⇢${line.to.key}` : ""}${line.trail ? ` [${line.trail.text}]` : ""}`)]));
+const none = { rows: {} };
+const cardOf = (view: DeckView, id: string) => view.active.find((item) => item.id === id)!;
+const card = (view: DeckView, id: string, seen: Parameters<typeof cardScreen>[1] = none, accepted?: Accepted) => cardScreen(cardOf(view, id), seen, { now: NOW, accepted });
+const rowsOf = (view: DeckView, id: string) => cardOf(view, id).sections.flatMap((section) => section.rows);
+/** A card with some of its rows changed as the deck row the server sends, for a case the fixture's facts don't reach. */
+const patched = (view: DeckView, id: string, patch: (row: DeckRow) => Partial<DeckRow> | null): DeckCard => ({ ...cardOf(view, id),
+  sections: cardOf(view, id).sections.map((section) => ({ ...section, rows: section.rows.map((row) => ({ ...row, ...patch(row) })) })) });
+/** Each move as [kind, title, meta, verb, the rows it touches]. */
+const moves = (result: Pick<CardScreen, "moves">) => result.moves.map((move) => [move.kind, move.title, move.meta, move.verb, move.prUrls.map(ref)]);
 const context = (screen: CardScreen | "overview", patch: Partial<KeyContext> = {}): KeyContext =>
   ({ view: "deck", cur: screen, service: FOLIO, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1, ...patch });
+const line = (screen: CardScreen, prUrl: string) => screen.lines.find((item) => item.prUrl === prUrl)!;
 
 describe("the effort deck's strip", () => {
-  it("lists the active pile in session order with each card's Needs you, the service cards after the efforts, and numbers the first nine", () => {
+  // Amber on a chip means a person waits on you: Your turn, as All PRs counts it. Merges, fixes, nudges, and other chores of yours never
+  // count, so an effort full of chores reads as quiet.
+  it("counts Your turn on each card's chip, and nothing else, with the service cards after the efforts and the first nine numbered", () => {
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
     const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
-    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[null, "Overview", 0, false], [1, "Shelf order", 5, false], [2, "Store pickup", 3, false],
-      [3, "One-offs", 3, false], [4, "folio · service", 2, true], [5, "atlas · service", 1, true], [6, "catalog · service", 1, true]]);
+    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[null, "Overview", 0, false], [1, "Shelf order", 0, false], [2, "Store pickup", 3, false],
+      [3, "One-offs", 2, false], [4, "folio · service", 0, true], [5, "atlas · service", 0, true], [6, "catalog · service", 0, true]]);
     // A card keeps its number after you flip away and a read reorders the server's pile: the session order wins.
     expect(stripChips([PICKUP, ONE_OFFS, SHELF, CATALOG], cards, SHELF).map((chip) => chip.name))
       .toEqual(["Overview", "Store pickup", "One-offs", "Shelf order", "catalog · service"]);
   });
 
-  it("ends with a service card for a repository with only threads, and Loose threads, gray, neither counting in Needs you", () => {
+  // A hold parks a PR: its feedback waits until you release it, so it doesn't make the chip amber.
+  it("leaves a held PR off its card's chip, though its feedback still waits", () => {
+    const view = inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Waiting on the slip printer", heldAt: NOW - DAY } } : {});
+    const pickup = card(view, PICKUP);
+    expect(line(pickup, url("quill", 211)).row?.yourTurn).not.toBeNull();
+    expect([pickup.yourTurn, stripChips([PICKUP], new Map([[PICKUP, pickup]]), null)[1]!.count]).toEqual([2, 2]);
+  });
+
+  it("ends with a service card for a repository with only threads, and Loose threads, gray, neither counting", () => {
     const view = inkwellDeck(inkwellThreads());
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
     expect(stripChips(view.active.map((item) => item.id), cards, SHELF).slice(-2).map((chip) => [chip.n, chip.name, chip.count, chip.service, chip.color]))
@@ -48,191 +65,183 @@ describe("Overview", () => {
     expect(overview.cards.map((item) => item.card.id)).toEqual([PICKUP, SHELF, ONE_OFFS]);
     // Service cards and Loose threads stay on the strip: Overview sums up efforts.
     expect(overviewScreen([PICKUP, FOLIO, SHELF, ATLAS, ONE_OFFS], cards).cards.map((item) => item.card.id)).toEqual([PICKUP, SHELF, ONE_OFFS]);
-    expect(overview.blockers.map((item) => item.ref)).toEqual(view.active.find((item) => item.id === PICKUP)!.blocked.map((item) => item.ref));
+    expect(overview.blockers.map((item) => item.ref)).toEqual(cardOf(view, PICKUP).blocked.map((item) => item.ref));
     const pickup = cards.get(PICKUP)!;
     const [first, second] = pickup.card.blocked;
-    const mixed = new Map(cards).set(PICKUP, { ...pickup, card: { ...pickup.card, blocked: [{ ...first!, since: null }, { ...second!, since: NOW - 10 * 86_400_000 }] } });
+    const mixed = new Map(cards).set(PICKUP, { ...pickup, card: { ...pickup.card, blocked: [{ ...first!, since: null }, { ...second!, since: NOW - 10 * DAY }] } });
     expect(overviewScreen([PICKUP], mixed).blockers.map((item) => item.ref)).toEqual([second!.ref, first!.ref]);
     expect(overviewScreen([], cards)).toEqual({ cards: [], blockers: [] });
-    expect(availability(context("overview")).seen.on).toBe(false);
-    expect(availability(context("overview")).accept.on).toBe(false);
     // Overview draws no rows: nothing to step through, advance, or act on, while ] still flips on.
     const on = availability(context("overview"));
-    expect([on["row-next"].on, on["row-next"].why, on.advance.on, on.merge.on, on.next.on]).toEqual([false, "no rows on Overview", false, false, true]);
-    expect(targets("merge", { cur: "overview", focused: null, selected: [] })).toEqual([]);
-    expect(advanceTarget({ cur: "overview", focused: null, selected: [] })).toBeNull();
+    expect([on.seen.on, on.accept.on, on["row-next"].on, on["row-next"].why, on.advance.on, on.merge.on, on.next.on]).toEqual([false, false, false, "no rows on Overview",
+      false, false, true]);
+    expect(targets("merge", { cur: "overview", focused: null })).toEqual([]);
+  });
+});
+
+describe("a card's moves", () => {
+  // Store pickup's three PRs wait on @otto-v's and @ines-v's requested changes; the two stacked on them wait on their parents, which is no move.
+  it("leads with whoever waits on you: Address, naming them, over every Your turn row", () => {
+    expect(moves(card(inkwellDeck(), PICKUP))).toEqual([["address", "@otto-v, @ines-v wait on you", "3 PRs · 1d", "Address", ["quill #210", "quill #211", "spine #155"]]]);
+    // A row its Address batch thread is working stays on Your turn with its state, as All PRs keeps it, so the move doesn't jump as it sends.
+    const working: Sent = { state: "working", threadId: "thr-batch", title: "Address feedback", detail: null, batchId: null };
+    const sent = inkwellDeck({}, (row) => row.number === 211 ? { sent: working, addressing: { threadId: "thr-batch", title: "Address feedback" } } : {});
+    expect(moves(card(sent, PICKUP))[0]![4]).toEqual(["quill #210", "spine #155", "quill #211"]);
+    // One row names itself.
+    const replied = inkwellDeck({}, (row) => row.number === 301 ? { yourTurn: null } : {});
+    expect(moves(card(replied, ONE_OFFS))[0]).toEqual(["address", "@theo-k waits on you", "folio #318 · 2d", "Address", ["folio #318"]]);
+  });
+
+  it("then what's one step from merged: Merge, its stack in order, then Confirm for notes you answered", () => {
+    expect(moves(card(inkwellDeck(), SHELF))[0]).toEqual(["merge", "4 ready to merge", "Ready to merge 1 · stacked 3", "Merge 4…",
+      ["folio #340", "folio #341", "folio #342", "folio #343"]]);
+    // You replied to folio #301's approval comment, so no person waits on you there; your Confirm still holds its merge.
+    const replied = inkwellDeck({}, (row) => row.number === 301 ? { yourTurn: null } : {});
+    expect(moves(card(replied, ONE_OFFS))[1]).toEqual(["confirm", "Approved; confirm its notes", "folio #301 · 2d", "Confirm…", ["folio #301"]]);
+  });
+
+  it("then your own blockers: Fix, saying which", () => {
+    expect(moves(card(inkwellDeck(), SHELF))[1]).toEqual(["fix", "Clear conflicts", "folio #330 · 2d", "Fix 1…", ["folio #330"]]);
+    expect(moves(card(inkwellDeck(), CATALOG))).toEqual([["fix", "Clear conflicts", "catalog #97 · 2d", "Fix 1…", ["catalog #97"]]]);
+    // Blockers of more than one kind say each.
+    const mixed = patched(inkwellDeck(), SHELF, (row) => row.number === 340 ? { section: "work", status: "CI failing" } : null);
+    expect(moves(cardScreen(mixed, none, { now: NOW })).find(([kind]) => kind === "fix")).toEqual(["fix", "Unblock 2 of yours", "CI failing 1 · Conflicts 1 · oldest 2d",
+      "Fix 2…", ["folio #340", "folio #330"]]);
+  });
+
+  // catalog #96 was asked of @mira-l and @theo-k two days ago: a nudge then is a chore. Four days on, a reviewer is holding it.
+  it("then a reviewer holding a PR 4 days or more: Nudge, naming who; a shorter wait is a chore for Advance, which never takes a move", () => {
+    const fresh = card(inkwellDeck(), ONE_OFFS);
+    expect([fresh.moves.map((move) => move.kind), fresh.chores]).toEqual([["address"], { prUrls: [url("catalog", 96)], text: "nudge 1" }]);
+    const held = cardScreen(patched(inkwellDeck(), ONE_OFFS, (row) => row.number === 96 ? { step: { ...row.step!, since: NOW - 5 * DAY } } : null), none, { now: NOW });
+    expect([moves(held)[1], held.chores.prUrls]).toEqual([["nudge", "@mira-l holds 1", "catalog #96 · 5d · @theo-k 1", "Nudge 1…", ["catalog #96"]], []]);
+    expect(card(inkwellDeck(), FOLIO)).toMatchObject({ moves: [], chores: { prUrls: [url("folio", 305), url("folio", 325)], text: "request 2" } });
+  });
+
+  // The rule is fixed, so the same card always reads in the same order; the card shows the first three, and keys still reach the rest.
+  it("ranks every kind in one fixed order, each row in the first move that takes it", () => {
+    const view = inkwellDeck({}, (row) => row.number === 301 ? { yourTurn: null } : {});
+    const rows = [...rowsOf(view, PICKUP), ...rowsOf(view, SHELF), ...rowsOf(view, ONE_OFFS).map((row) => row.number === 96 ? { ...row, step: { ...row.step!, since: NOW - 5 * DAY } } : row)];
+    const ranked = rankMoves(rows, "active", NOW);
+    expect(ranked.moves.map((move) => [move.kind, move.prUrls.length])).toEqual([["address", 4], ["merge", 4], ["confirm", 1], ["fix", 1], ["nudge", 1]]);
+    // Store pickup's code work waits on a person's feedback, so Address takes it, and Fix doesn't take it again.
+    expect(ranked.moves.find((move) => move.kind === "fix")!.prUrls).toEqual([url("folio", 330)]);
+  });
+
+  it("has nothing to move while everything waits on others or on a write of yours, and Release once every open PR is held", () => {
+    // Stacked PRs wait on their parents; a conflict whose fix is waiting out its Undo window is the write's until it lands.
+    const waiting = rankMoves(rowsOf(inkwellDeck(), PICKUP).filter((row) => row.section === "blocked"), "active", NOW);
+    expect(waiting).toEqual({ moves: [], chores: [] });
+    const asked = inkwellDeck({}, (row) => row.number === 330 ? { acted: { kind: "fix", state: "queued", at: NOW, batchId: "b1" } } : {});
+    expect(card(asked, SHELF).moves.map((move) => move.kind)).toEqual(["merge"]);
+    // A held effort moves nothing until you resume it, whoever waits on you.
+    expect([rankMoves(rowsOf(inkwellDeck(), SHELF), "held", NOW), rankMoves(rowsOf(inkwellDeck(), PICKUP), "held", NOW)]).toEqual([{ moves: [], chores: [] },
+      { moves: [], chores: [] }]);
+    const all = inkwellDeck({}, (row) => row.effort?.id === PICKUP ? { hold: { reason: "", heldAt: NOW - 3_600_000 } } : {});
+    expect(moves(card(all, PICKUP))).toEqual([["release", "All 5 PRs held", "held 1h", "Release 5…", ["quill #210", "quill #211", "quill #212", "spine #155", "spine #156"]]]);
+    // One held PR among moving ones is no move: it waits under Held.
+    const one = inkwellDeck({}, (row) => row.number === 156 ? { hold: { reason: "", heldAt: NOW } } : {});
+    expect([card(one, PICKUP).moves.map((move) => move.kind), card(one, PICKUP).held]).toEqual([["address"], 1]);
+  });
+});
+
+describe("the finish line", () => {
+  const ticket = (n: number, state: string, type: string, project: object = { id: "p1", name: "Shelf redesign", targetDate: "2026-10-14" }): [string, LinearDetail] =>
+    [`ABC-${n}`, { identifier: `ABC-${n}`, title: null, description: null, state: { name: state, type }, project: project as LinearDetail["project"], parent: null,
+      labels: [], url: null, updatedAt: null, cycle: { number: 41, name: null, endsAt: "2026-10-07T00:00:00.000Z" }, assignee: null, source: "key" }];
+  const shelf = (tickets: [string, LinearDetail][], merged: number[]) => card(inkwellDeck({ linear: new Map(tickets),
+    merges: merged.map((daysAgo, index) => ({ url: url("folio", 290 + index), at: NOW - daysAgo * DAY, effortId: SHELF })) }), SHELF);
+  const five = (project?: object) => [ticket(360, "In Review", "started", project), ticket(361, "Done", "completed", project), ticket(362, "In Review", "started", project),
+    ticket(363, "Todo", "unstarted", project), ticket(364, "Done", "completed", project)];
+
+  // Shelf order merged 4 PRs in two weeks, 2 a week, so its 5 open PRs land in about 2.5 weeks: 4 days after the project's target.
+  it("says how much is done, the project's target, and when the open PRs land at the last two weeks' pace, amber when that's past the target", () => {
+    expect(shelf(five(), [1, 4, 7, 10]).finish).toEqual({ done: "2 of 5 done", date: { text: "Target Oct 14 · 14d left", tone: "gray" },
+      eta: { text: "ETA Oct 18 at 2/wk", tone: "amber" },
+      answers: [["On track?", "Behind: ETA Oct 18, 4d after the target"], ["What's left", "3 open tickets: 2 In Review · 1 Todo · 5 open PRs"], ["Who holds it", "You 5"],
+        ["Moving?", "3 merged in 7d · 4 in 14d"], ["To Done", "5 open PRs · 3 open tickets"]] });
+    // At 5 a week, the same PRs land before the target, with days to spare.
+    expect(shelf(five(), [1, 1, 2, 3, 4, 5, 6, 8, 9, 13]).finish?.answers[0]).toEqual(["On track?", "On pace: ETA Oct 7, 7d to spare"]);
+  });
+
+  it("says how late a passed target is, in red, and gives no ETA with nothing merged in 14 days", () => {
+    const late = shelf(five({ id: "p1", name: "Shelf redesign", targetDate: "2026-02-27" }), [20]).finish!;
+    expect([late.date, late.eta, late.answers[0]]).toEqual([{ text: "Target Feb 27 · 215d late", tone: "red" }, null,
+      ["On track?", "Target Feb 27 passed 215d ago · nothing merged in 14d"]]);
+  });
+
+  it("falls back to the current cycle's end without a project target, and to no date without either", () => {
+    const cycle = shelf(five({ id: "p1", name: "Shelf redesign", targetDate: null }), [3]).finish!;
+    expect([cycle.date, cycle.eta?.text]).toEqual([{ text: "Cycle 41 · 7d left", tone: "gray" }, "ETA Dec 9 at 0.5/wk"]);
+    // A cycle that ended is no date to answer to.
+    const ended = five({ id: "p1", name: "Shelf redesign", targetDate: null }).map(([key, detail]): [string, LinearDetail] =>
+      [key, { ...detail, cycle: { number: 40, name: null, endsAt: "2026-09-20T00:00:00.000Z" } }]);
+    expect(shelf(ended, [3]).finish?.date).toBeNull();
+    // With no Linear data, it counts merged PRs instead, and says what it can't.
+    expect(card(inkwellDeck(), PICKUP).finish).toEqual({ done: "0 of 5 merged", date: null, eta: null,
+      answers: [["On track?", "No date, and nothing merged in 14d"], ["What's left", "5 open PRs · no Linear data"], ["Who holds it", "You 3"],
+        ["Moving?", "0 merged in 7d · 0 in 14d"], ["To Done", "5 open PRs"]] });
+  });
+
+  it("names who holds the open PRs: you, then each reviewer a next step waits on, but nobody for a held PR or one a thread is working", () => {
+    const shelf = cardScreen(patched(inkwellDeck(), SHELF, (row) => row.number === 330 ? { section: "nudge", nudge: ["mira-l"], step: { text: "Nudge @mira-l", owner: "reviewers", since: NOW - DAY } }
+      : row.number === 343 ? { section: "held", hold: { reason: "", since: NOW } } : row.number === 342 ? { section: "flight" } : null), none, { now: NOW });
+    expect(shelf.finish?.answers[2]).toEqual(["Who holds it", "You 2 · @mira-l 1"]);
+  });
+
+  // One-offs merge on their own, and a service card is no effort yet: neither has an outcome to finish.
+  it("draws no finish line on One-offs or a service card", () => {
+    expect([card(inkwellDeck(), ONE_OFFS).finish, card(inkwellDeck(), FOLIO).finish, availability(context(card(inkwellDeck(), FOLIO))).progress.on]).toEqual([null, null, false]);
+    expect(availability(context(card(inkwellDeck(), SHELF))).progress.on).toBe(true);
   });
 });
 
 describe("an effort card", () => {
-  it("files rows by the move they need, with one batch button per section, code work's asking each PR's thread for its fix", () => {
-    const shelf = card(inkwellDeck(), SHELF);
-    expect(lines(shelf)).toEqual({ merge: ["folio #340", "folio #341", "folio #342", "folio #343"], work: ["folio #330 [Work on folio #330]"] });
-    // Each line says only what its section doesn't: who approved a merge, whom a nudge asks, how many notes wait.
-    expect(shelf.sections[0]!.lines[0]!.info).toEqual({ text: "✓ @mira-l", tone: null });
-    expect(shelf.sections.map((section) => [section.key, section.count, section.action?.label ?? null, section.action?.key ?? null]))
-      .toEqual([["merge", 4, "Preview merge", "m"], ["work", 1, "Ask threads to fix (1)", "f"]]);
-    // Advance never includes a thread's work: that's the section's own button, which you press.
-    expect(shelf.advance).toEqual([]);
-    const pickup = card(inkwellDeck(), PICKUP);
-    expect(pickup.sections.find((section) => section.key === "blocked")!.lines.map((line) => [line.ref, line.needs, line.info?.text]))
-      .toEqual([["quill #212", false, "Merges after quill #210"], ["spine #156", false, "Merges after spine #155"]]);
-  });
-
-  it("keeps a row a read changed where you saw it, dimmed and out of Needs you, until you mark the card seen", () => {
+  // Moves follow the read, as All PRs does: nothing waits for Mark seen to move. Mark seen only settles what changed since you looked.
+  it("follows the read in its moves, and counts what changed since you marked it seen until you do", () => {
     const before = inkwellDeck();
-    const seen = { rows: { [SHELF]: cardSnapshot(before.active.find((item) => item.id === SHELF)!) }, at: {} };
+    const seen = { rows: { [SHELF]: cardSnapshot(cardOf(before, SHELF)) } };
     // folio #342 lost its approval on this read, so #343, stacked on it, no longer merges in order either.
     const after = inkwellDeck({}, (row) => row.number === 342 ? { attention: [], status: "Awaiting review", stage: "review" } : {});
     const shelf = card(after, SHELF, seen);
-    // Each says what changed and links where it goes: #342 to In flight, and #343, whose status stands, to Blocked behind it.
-    expect(lines(shelf).merge).toEqual(["folio #340", "folio #341", "folio #342 · dim dot {Behind #341 → Awaiting review} ⇢flight", "folio #343 · dim dot ⇢blocked"]);
-    expect([shelf.needsYou, shelf.sections[0]!.count, shelf.changed]).toEqual([3, 2, 2]);
-    // Where each lands on Mark seen holds its place, so the link has somewhere to go, and it's drawn in no section twice.
-    expect(shelf.sections.map((section) => [section.key, section.lines.map((line) => line.ref), section.arriving.map((item) => item.ref)])).toEqual([
-      ["merge", ["folio #340", "folio #341", "folio #342", "folio #343"], []], ["work", ["folio #330"], []], ["flight", [], ["folio #342"]], ["blocked", [], ["folio #343"]]]);
-    expect(shelf.sections[0]!.lines[2]!.to).toEqual({ key: "flight", title: "In flight", up: false });
-    expect(shelf.sections[0]!.lines[2]!.dot).toBe("Was Behind #341; now Awaiting review. Moves to In flight on Mark seen.");
-    // Mark seen takes the card as it is now, and the row settles where it belongs.
-    const marked = card(after, SHELF, { rows: { [SHELF]: cardSnapshot(after.active.find((item) => item.id === SHELF)!) }, at: {} });
-    expect(lines(marked).merge).not.toContain("folio #342 · dim dot [→ Awaiting review]");
-    expect(marked.changed).toBe(0);
+    expect([moves(shelf)[0]![4], shelf.changed]).toEqual([["folio #340", "folio #341"], 2]);
+    expect([line(shelf, url("folio", 342)).section, line(shelf, url("folio", 342)).needs]).toEqual(["flight", false]);
+    // Mark seen takes the card as it is now.
+    expect(card(after, SHELF, { rows: { [SHELF]: cardSnapshot(cardOf(after, SHELF)) } }).changed).toBe(0);
+    // A PR that left since you looked counts too, though no key takes it.
+    const left = card(inkwellDeck({}, (row) => row.number === 341 ? { effort: null } : {}), SHELF, seen);
+    expect([left.changed, line(left, url("folio", 341))]).toMatchObject([1, { ghost: true, needs: false }]);
   });
 
-  it("keeps a PR that left as a one-line ghost on its line, saying what became of it, and a new PR at its section's end, marked", () => {
-    const before = inkwellDeck();
-    const seen = { rows: { [SHELF]: cardSnapshot(before.active.find((item) => item.id === SHELF)!).filter((row) => row.prUrl !== url("folio", 343)) }, at: {} };
-    const after = inkwellDeck({}, (row) => row.number === 341 ? { effort: null } : {});
-    const ghost = (fates: Parameters<typeof card>[4]) => lines(card(after, SHELF, seen, undefined, fates)).merge;
-    expect(ghost({})).toEqual(["folio #340", "folio #341 · dim ghost [Left]", "folio #342", "folio #343 dot"]);
-    // A read that saw it merge says so, and when; one it found closed says so, as of when the view first drew it gone.
-    const pr341 = url("folio", 341);
-    expect(ghost({ gone: new Map([[pr341, { how: "merged", at: NOW - 20_000 }]]) })[1]).toBe("folio #341 · dim ghost [Merged · just now]");
-    expect(ghost({ gone: new Map([[pr341, { how: "merged", at: NOW - 3 * 3_600_000 }]]) })[1]).toBe("folio #341 · dim ghost [Merged · 3h ago]");
-    expect(ghost({ gone: new Map([[pr341, { how: "closed", at: null }]]), left: new Map([[pr341, NOW - 5_000]]) })[1]).toBe("folio #341 · dim ghost [Closed · just now]");
-    // Still open on another card, it names that card.
-    expect(ghost({ elsewhere: new Map([[pr341, "folio · service"]]) })[1]).toBe("folio #341 · dim ghost [→ folio · service]");
-    expect(card(after, SHELF, seen, undefined, { gone: new Map([[pr341, { how: "merged", at: NOW - 20_000 }]]) }).sections[0]!.lines[1]!.dot)
-      .toBe("Merged since you looked. Clears on Mark seen.");
-  });
-
-  it("never takes a row out from under you: a refresh changes a row in place, and one that arrived and then merged stays as a ghost", () => {
-    const shelfOf = (view: DeckView) => view.active.find((item) => item.id === SHELF)!;
-    const drawn = (view: DeckView, rows: ReturnType<typeof cardSnapshot>, fates: Parameters<typeof card>[4] = {}) =>
-      card(view, SHELF, { rows: { [SHELF]: rows }, at: {} }, undefined, fates).sections.flatMap((section) => section.lines.map((line) => `${line.ref}${line.ghost ? " ghost" : ""}`));
-    // You looked before #343 joined; a read brings it, and it joins the end of Merge.
-    let snapshot = cardSnapshot(shelfOf(inkwellDeck({}, (row) => row.number === 343 ? { effort: null } : {})));
-    const joined = inkwellDeck();
-    snapshot = withArrivals(snapshot, cardSnapshot(shelfOf(joined))) ?? snapshot;
-    const before = drawn(joined, snapshot);
-    expect(before).toEqual(["folio #340", "folio #341", "folio #342", "folio #343", "folio #330"]);
-    // Then a refresh finds #343 merged and #340 no longer approved, which blocks the two stacked on it: every line is where it was, the
-    // three that move saying where to and #343 that it merged.
-    const refreshed = inkwellDeck({}, (row) => row.number === 343 ? { effort: null } : row.number === 340 ? { attention: [], status: "Awaiting review", stage: "review" } : {});
-    const merged = new Map([[url("folio", 343), { how: "merged" as const, at: NOW - 5_000 }]]);
-    expect(drawn(refreshed, snapshot, { gone: merged }).map((line) => line.replace(" ghost", ""))).toEqual(before);
-    const lines343 = card(refreshed, SHELF, { rows: { [SHELF]: snapshot }, at: {} }, undefined, { gone: merged }).sections[0]!.lines;
-    expect(lines343.map((line) => [line.ref, line.ghost, line.trail?.text ?? null, line.to?.key ?? null])).toEqual([["folio #340", false, null, "flight"],
-      ["folio #341", false, null, "blocked"], ["folio #342", false, null, "blocked"], ["folio #343", true, "Merged · just now", null]]);
-  });
-
-  it("tells which rows a read changed, to flash, and what a row's Refresh found, for the hint bar", () => {
+  it("says what a row's Refresh found, in the hint bar", () => {
     const before = rowFacts(inkwellDeck());
     // folio #330's conflict cleared, so it's in flight, and folio #343 merged.
     const after = rowFacts(inkwellDeck({}, (row) => row.number === 330 ? { attention: [], status: "Ready to merge", stage: "ready", mergeable: true } as never
       : row.number === 343 ? { effort: null, status: "Merged" } as never : {}));
-    expect(changedRows(before, after)).toEqual([url("folio", 343), url("folio", 330)]);
-    expect(changedRows(after, after)).toEqual([]);
     const pr330 = url("folio", 330);
-    expect(refreshNote("folio #330", before.get(pr330)!, after.get(pr330)!, null)).toBe("folio #330: Conflicts → Ready to merge · moves to In flight on Mark seen");
+    expect(refreshNote("folio #330", before.get(pr330)!, after.get(pr330)!, null)).toBe("folio #330: Conflicts → Ready to merge · now in In flight");
     expect(refreshNote("folio #340", before.get(url("folio", 340))!, before.get(url("folio", 340))!, null)).toBe("Read folio #340 just now · no change");
     expect(refreshNote("folio #343", before.get(url("folio", 343))!, null, { how: "merged" })).toBe("folio #343: merged");
     expect(refreshNote("folio #343", before.get(url("folio", 343))!, null, null)).toBe("folio #343: left this card");
-  });
-
-  // A batch thread's claim is the row's news: it's In flight, and its link goes to the thread doing the work, over the start it came from.
-  // A sent PR's row says what its batch thread is doing and, once it ends, how, linking the thread either way; it needs you again then.
-  it("files a row a batch thread holds In flight with its state, links the thread however it ended, and says why a PR was left out", () => {
-    const sent = (state: Sent["state"], extra: Partial<Sent> = {}): Sent => ({ state, threadId: "thr-batch", title: "Address feedback on 2 PRs", detail: null, batchId: null, ...extra });
-    const held = (acted: "queued" | "sent" | "refused" | null, now: Sent | null) => inkwellDeck({}, (row) => row.number === 211 ? { sent: now,
-      addressing: now?.state === "working" || now?.state === "needs-you" ? { threadId: "thr-batch", title: "Address feedback on 2 PRs" } : null,
-      acted: acted && { kind: "address", state: acted, at: NOW, batchId: "b2" } } : {});
-    const line = (view: DeckView, details?: ReadonlyMap<string, string>) => card(view, PICKUP, none, details).sections.flatMap((section) => section.lines)
-      .find((item) => item.ref === "quill #211")!;
-    expect(line(held("sent", sent("working")))).toMatchObject({ section: "flight", dim: true, trail: { kind: "thread", text: "Working", threadId: "thr-batch" } });
-    expect(line(held(null, sent("needs-you")))).toMatchObject({ section: "flight", needs: false, trail: { kind: "thread", text: "Needs you", threadId: "thr-batch" } });
-    // Its thread ended: its feedback files it again, needing you, and the row still links the thread with BB's status for it.
-    expect(line(held(null, sent("idle")))).toMatchObject({ section: "work", needs: true, trail: { kind: "thread", text: "Idle", threadId: "thr-batch" } });
-    // Off Your turn and no longer addressed, the PR's own working thread leads, not the old batch's link.
-    expect(line(inkwellDeck({}, (row) => row.number === 211 ? { sent: sent("idle"), yourTurn: null,
-      threads: { origin: null, executor: { id: "thr-own", title: "Fix quill #211", active: false } } } : {}))).toMatchObject({ section: "work", trail: { kind: "thread", threadId: "thr-own" } });
-    // Its feedback still waits, but its own thread is at work on it now: In flight, and the old batch's Idle link no longer leads (b5b4758).
-    expect(line(inkwellDeck({}, (row) => row.number === 211 ? { sent: sent("idle"),
-      threads: { origin: null, executor: { id: "thr-own", title: "Fix quill #211", active: true } } } : {}))).toMatchObject({ section: "flight", trail: null });
-    // Waiting out its window, it says what it will do, with Undo; nothing holds it yet.
-    expect(line(held("queued", sent("sending", { threadId: null, batchId: "b2" })))).toMatchObject({ section: "work", trail: { kind: "acted", text: "Starting its batch thread…", undo: "b2" } });
-    // Dispatch refused it, or the last Address left it out: the server's reason, on the row.
-    expect(line(held("refused", sent("refused", { threadId: null, detail: "Its effort is on hold. Nothing was started." })))).toMatchObject({ trail: { kind: "acted", failed: true,
-      text: "Not sent: Its effort is on hold. Nothing was started." } });
-    expect(line(held(null, null), new Map([[url("quill", 211), "An agent is already working on it."]]))).toMatchObject({ trail: { kind: "acted", failed: true,
-      text: "Not sent: An agent is already working on it." } });
-  });
-
-  it("dims a row you acted on and offers Undo while its batch waits, keeps it dim once sent until Mark seen, and gives a refusal back to you", () => {
-    const acted = (state: "queued" | "sent" | "refused", at = NOW) => inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state, at, batchId: "b1" } } : {});
-    const nudge = (screen: CardScreen) => screen.sections.find((section) => section.key === "nudge")!;
-    expect(nudge(card(acted("queued"), ONE_OFFS)).lines[0]).toMatchObject({ needs: false, dim: true, trail: { kind: "acted", text: "Nudging…", undo: "b1" } });
-    expect(card(acted("queued"), ONE_OFFS).settleable).toBe(false);
-    const sent = card(acted("sent"), ONE_OFFS);
-    expect(nudge(sent).lines[0]).toMatchObject({ needs: false, dim: true, trail: { text: "Nudged", undo: null } });
-    expect(sent.settleable).toBe(true);
-    // Marked seen after it landed, it counts again (the server has moved it on by then).
-    const marked = card(acted("sent", NOW - 5), ONE_OFFS, { rows: {}, at: { [url("catalog", 96)]: NOW } });
-    expect(nudge(marked).lines[0]!.needs).toBe(true);
-    // Nothing is left for Mark seen then, so it isn't offered again for the rest of the day the write stays on the row.
-    expect(marked.settleable).toBe(false);
-    const refused = card(acted("refused"), ONE_OFFS, none, new Map([[url("catalog", 96), "@mira-l already reviewed it."]]));
-    expect(nudge(refused).lines[0]).toMatchObject({ needs: true, dim: false, trail: { text: "Not sent", failed: true, title: "@mira-l already reviewed it." } });
-    // A refusal never dimmed the row, so Mark seen has nothing to settle.
-    expect(refused.settleable).toBe(false);
-  });
-
-  it("marks a row whose last read failed, always, and one the last full read didn't list, so a stale row never reads as fresh", () => {
-    const view = inkwellDeck({}, (row) => row.number === 340 ? { failure: { at: new Date(NOW - 3_600_000).toISOString(), error: "timeout" } }
-      : row.number === 341 ? { stale: true, checkedAt: new Date(NOW - 11 * 60_000).toISOString() } : {});
-    const [fail, stale, fresh] = card(view, SHELF).sections[0]!.lines;
-    expect([fail!.checked, stale!.checked?.text, fresh!.checked]).toEqual([{ text: "read failed", failed: true,
-      title: "GitHub didn't answer its last read; its last good read was 25s ago. Refresh reads it again." }, "stale 11m", null]);
     // GitHub's rate limit shows in the top bar while it holds reads, and not after.
+    const view = inkwellDeck();
     expect(readText({ ...view, limitedUntil: NOW + 10 * 60_000 }, NOW)).toMatch(/^Rate-limited until .+ · Read 25s ago$/u);
     expect(readText({ ...view, limitedUntil: NOW - 1 }, NOW)).toBe("Read 25s ago");
   });
 
-  it("gives Advance only the safe moves drawn as needing you: never a merge, a thread's work, review notes, or a row dimmed until Mark seen", () => {
-    // One-offs' folio #301 and #318 wait on their review notes, which are confirmed one PR at a time: only catalog #96's nudge is Advance's.
-    expect([card(inkwellDeck(), SHELF).advance, card(inkwellDeck(), ONE_OFFS).advance, card(inkwellDeck(), PICKUP).advance]).toEqual([[], [url("catalog", 96)], []]);
-    // catalog #96 was in flight when you last marked One-offs seen. Now due a nudge, it waits dimmed where you saw it, so Advance, which
-    // plans exactly these PRs, leaves it out, as its count on the button does.
-    const view = inkwellDeck();
-    const seen = { rows: { [ONE_OFFS]: cardSnapshot(view.active.find((item) => item.id === ONE_OFFS)!)
-      .map((row) => row.prUrl === url("catalog", 96) ? { ...row, section: "flight", status: "In review" } : row) }, at: {} };
-    expect(card(view, ONE_OFFS, seen).advance).toEqual([]);
-  });
-
-  it("words each tile from the card: next steps, blocked, stats, threads, stored Linear details, people, and recent activity", () => {
+  it("words its panels and Overview from the card: threads, waits on others, open PRs by move, and stored Linear details", () => {
     const shelf = card(inkwellDeck(), SHELF);
-    expect(shelf.stats).toMatchObject({ open: 5, mergedWeek: 1, median: "6d", bar: [{ key: "ready", count: 4 }, { key: "fix", count: 1 }] });
+    expect(shelf.stats).toMatchObject({ open: 5, mergedWeek: 1, bar: [{ key: "ready", count: 4 }, { key: "fix", count: 1 }] });
     expect(shelf.linear).toEqual({ summary: "Shelf redesign", chips: [{ kind: "project", text: "Shelf redesign" }, { kind: "label", text: "shelves" }],
       bar: [{ name: "In Review", count: 1, tone: "blue" }], target: null, lines: [["States", "1 in review"], ["Read", "1 of 5 tickets"]] });
-    expect(shelf.next.items[0]).toMatchObject({ ref: "folio #340" });
+    expect(shelf.next).toBe("Merge");
     const pickup = card(inkwellDeck(), PICKUP);
     expect(pickup.threads[0]).toMatchObject({ title: "Store pickup", ref: "parent", age: "2h", dot: false });
     expect(pickup.blocked.map((item) => [item.ref, item.on, item.age])).toEqual([["quill #212", "quill #210", "3d"], ["spine #156", "spine #155", "3d"]]);
-    expect(pickup.people.summary).toBe("@otto-v waits on you");
-    expect(card(inkwellDeck(), PICKUP).linear).toEqual({ summary: "no Linear data", chips: [], bar: [], target: null, lines: [] });
+    expect(pickup.linear).toEqual({ summary: "no Linear data", chips: [], bar: [], target: null, lines: [] });
   });
 
-  it("words the Linear tile from what Linear gave: project and initiative chips, label tags, states, cycle, assignees, and target date", () => {
+  it("words the Linear panel from what Linear gave: project and initiative chips, label tags, states, cycle, assignees, and target date", () => {
     const detail = (identifier: string, patch: object) => ({ identifier, title: null, description: null, state: { name: "In Progress", type: "started" },
       project: { id: "p1", name: "Shelf redesign", targetDate: "2026-10-17", initiatives: [{ id: "i1", name: "Reading rooms" }] }, parent: null, labels: ["shelves"],
       cycle: { number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z" }, url: null, updatedAt: null, source: "key" as const, ...patch });
@@ -251,84 +260,53 @@ describe("an effort card", () => {
 });
 
 describe("held PRs on a card", () => {
-  const held = () => inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Waiting on the slip printer", heldAt: NOW - 2 * 86_400_000 } }
+  const held = () => inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Waiting on the slip printer", heldAt: NOW - 2 * DAY } }
     : row.number === 156 ? { hold: { reason: "", heldAt: NOW - 3_600_000 } } : {});
 
-  it("lists each held PR under Held with why and for how long, counts them for the header's chip, and in no other section", () => {
+  it("lists each held PR under its Held toggle, which ⇧H opens, and in no move or wait", () => {
     const pickup = card(held(), PICKUP);
-    expect(pickup.held).toBe(2);
-    const section = pickup.sections.find((item) => item.key === "held")!;
-    expect(section.lines.map((line) => [line.ref, line.info?.text, line.age, line.needs])).toEqual([["quill #211", "Waiting on the slip printer", "2d", false],
-      ["spine #156", "No reason given", "1h", false]]);
-    // Held comes last, after Blocked, and neither PR shows anywhere else on the card.
-    expect(pickup.sections.map((item) => item.key).at(-1)).toBe("held");
-    expect(pickup.sections.filter((item) => item.key !== "held").flatMap((item) => item.lines).map((line) => line.ref)).not.toEqual(
-      expect.arrayContaining(["quill #211"]));
+    expect([pickup.held, pickup.lines.filter((item) => item.section === "held").map((item) => item.ref)]).toEqual([2, ["quill #211", "spine #156"]]);
+    expect(pickup.moves.flatMap((move) => move.prUrls)).not.toContain(url("quill", 211));
     expect(pickup.blocked.map((item) => item.ref)).toEqual(["quill #212"]);
-    expect(card(inkwellDeck(), PICKUP).held).toBe(0);
-  });
-
-  it("counts held PRs in the card's status, so a card whose open PRs are all held never reads as having none", () => {
-    const all = inkwellDeck({}, (row) => row.effort?.id === PICKUP ? { hold: { reason: "", heldAt: NOW - 3_600_000 } } : {});
-    expect(all.active.find((item) => item.id === PICKUP)!.status).toEqual({ tone: "waiting", text: "5 held" });
-    expect(card(all, PICKUP).status).toEqual({ text: "5 held", tone: "blue" });
-  });
-
-  it("offers ⇧H to reach them wherever a card has one, says so in the hint bar, and says why not on a card without", () => {
-    const pickup = card(held(), PICKUP);
-    const on = availability(context(pickup));
-    expect(on.held.on).toBe(true);
-    expect(hintKeys(context(pickup), on)).toContainEqual(["⇧H", "held"]);
+    expect(availability(context(pickup)).held.on).toBe(true);
     const shelf = card(held(), SHELF);
-    expect([availability(context(shelf)).held.on, availability(context(shelf)).held.why]).toEqual([false, "nothing here is on hold"]);
-    expect(hintKeys(context(shelf), availability(context(shelf))).map(([key]) => key)).not.toContain("⇧H");
+    expect([shelf.held, availability(context(shelf)).held]).toEqual([0, { on: false, why: "nothing here is on hold" }]);
   });
 
-  it("releases from the row, the section, or l, each through the listing confirm, and only rows still held", () => {
+  it("releases with l, through the listing confirm, the focused held row, else every one still held", () => {
     const pickup = card(held(), PICKUP);
-    const section = pickup.sections.find((item) => item.key === "held")!;
-    expect(section.action).toMatchObject({ id: "release", label: "Release…", key: "l", count: 2, enabled: true });
-    expect(section.lines.map((line) => line.inline?.label)).toEqual(["Release", "Release"]);
-    const [slips, expired] = section.lines;
-    // l takes the focused held row, else every held row on the card; a focused row that isn't held doesn't narrow it.
-    expect(targets("release", { cur: pickup, focused: expired!, selected: [] }).map((line) => line.ref)).toEqual(["spine #156"]);
-    const other = pickup.sections[0]!.lines[0]!;
-    expect(targets("release", { cur: pickup, focused: other, selected: [] }).map((line) => line.ref)).toEqual(["quill #211", "spine #156"]);
-    expect(hintKeys(context(pickup, { focused: slips! }), availability(context(pickup, { focused: slips! })))).toContainEqual(["l", "release"]);
-    // A release waiting out its window dims its row, with Undo, and takes it out of the next one.
+    const [slips, expired] = pickup.lines.filter((item) => item.section === "held");
+    expect(targets("release", { cur: pickup, focused: expired! }).map((item) => item.ref)).toEqual(["spine #156"]);
+    // A focused row that isn't held doesn't narrow it.
+    expect(targets("release", { cur: pickup, focused: line(pickup, url("quill", 210)) }).map((item) => item.ref)).toEqual(["quill #211", "spine #156"]);
+    expect(slips!.needs).toBe(false);
+    // A release waiting out its window takes its row out of the next one.
     const queued = card(inkwellDeck({}, (row) => row.number === 211 ? { hold: { reason: "Printer", heldAt: NOW }, acted: { kind: "release", state: "queued", at: NOW, batchId: "b9" } }
-      : {}), PICKUP).sections.find((item) => item.key === "held")!;
-    expect(queued.lines[0]).toMatchObject({ dim: true, inline: null, trail: { kind: "acted", text: "Releasing…", undo: "b9" } });
-    expect([queued.action?.count, queued.action?.enabled]).toEqual([0, false]);
+      : {}), PICKUP);
+    expect([line(queued, url("quill", 211)).dim, targets("release", { cur: queued, focused: null })]).toEqual([true, []]);
     // A held effort's card writes nothing to GitHub, and a release writes nothing there either, so it still offers Release, and nothing else.
-    const paused = held();
-    const pausedCard = cardScreen({ ...paused.active.find((item) => item.id === PICKUP)!, pile: "held" }, none, { now: NOW });
-    const pausedHeld = pausedCard.sections.find((item) => item.key === "held")!;
-    expect([pausedHeld.lines.map((line) => line.inline?.id), pausedHeld.action?.enabled]).toEqual([["release", "release"], true]);
-    expect(pausedCard.sections.flatMap((item) => item.lines).filter((line) => line.inline?.id === "advance")).toEqual([]);
-    const pausedOn = availability(context(pausedCard));
-    expect([pausedOn.release.on, pausedOn.advance.on, pausedOn.nudge.on]).toEqual([true, false, false]);
+    const paused = cardScreen({ ...cardOf(held(), PICKUP), pile: "held" }, none, { now: NOW });
+    const on = availability(context(paused));
+    expect([on.release.on, on.advance.on, on.nudge.on, on.fix.on, paused.moves]).toEqual([true, false, false, false, []]);
   });
 });
 
 describe("a service card", () => {
-  it("files its rows by the move they need, as an effort's are, counts them as Needs you, and names each row's suggestion", () => {
+  it("names where each row's suggestion points", () => {
     const folio = card(inkwellDeck(), FOLIO);
-    expect(lines(folio)).toEqual({ request: ["folio #305", "folio #325"] });
-    expect(folio.needsYou).toBe(2);
-    expect(folio.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.signals])).toEqual([["folio #305", []], ["folio #325", ["→ Shelf order"]]]);
-    expect(card(inkwellDeck(), ATLAS).sections[0]!.lines[0]!.signals).toEqual(["→ new Delivery windows"]);
+    expect(folio.lines.map((item) => [item.ref, item.signals])).toEqual([["folio #305", []], ["folio #325", ["→ Shelf order"]]]);
+    expect(card(inkwellDeck(), ATLAS).lines[0]!.signals).toEqual(["→ new Delivery windows"]);
     expect(card(inkwellDeck(), SHELF).suggest).toEqual([]);
   });
 
   it("shows each suggestion over its rows once, with its strength, signals, and one button, and each PR's own signals", () => {
     const folio = card(inkwellDeck(), FOLIO);
-    expect(folio.suggest.map((group) => [group.key, group.title, group.strength, group.signals, group.button.label, group.lines.map((line) => [line.ref, line.signals])]))
+    expect(folio.suggest.map((group) => [group.key, group.title, group.strength, group.signals, group.button.label, group.lines.map((item) => [item.ref, item.signals])]))
       .toEqual([[`${FOLIO} effort:${SHELF}:high`, "Shelf order", "strong", ["ticket ABC-355", "prefix ABC"], "Put 1 in Shelf order", [["folio #325", ["ticket ABC-355", "prefix ABC"]]]],
         [`${FOLIO} none`, "No clear signal", null, [], "Pick per PR", [["folio #305", []]]]]);
     expect(folio.suggest.at(-1)!.reason).toBe("Pick an effort for each PR.");
     // A suggestion that spans two repositories shows on each of their cards, over the PRs on that card.
-    expect([ATLAS, CATALOG].map((id) => card(inkwellDeck(), id).suggest.map((group) => [group.key, group.button.label, group.lines.map((line) => line.ref)])))
+    expect([ATLAS, CATALOG].map((id) => card(inkwellDeck(), id).suggest.map((group) => [group.key, group.button.label, group.lines.map((item) => item.ref)])))
       .toEqual([[[`${ATLAS} new:ABC-210`, "New effort from 1…", ["atlas #410"]]], [[`${CATALOG} new:ABC-210`, "New effort from 1…", ["catalog #97"]]]]);
   });
 
@@ -340,38 +318,30 @@ describe("a service card", () => {
       { ...shelf!, key: `effort:${SHELF}:low`, confidence: "low", reason: "Same code area", signals: ["area inkwell/folio:shelves"] },
       { ...delivery!, confidence: "low" },
       { ...rest!, key: "one-off", target: { kind: "one-off" }, confidence: "medium", reason: "Standalone ticket that nothing else carries", signals: ["standalone ticket ABC-305"] }] } });
-    const folio = card(view, FOLIO);
-    expect(folio.suggest.map((group) => [group.title, group.strength, group.button.label, group.button.confirm])).toEqual([
+    expect(card(view, FOLIO).suggest.map((group) => [group.title, group.strength, group.button.label, group.button.confirm])).toEqual([
       ["Shelf order", "weak", "Put 1 in Shelf order…", true], ["One-offs", "moderate", "Mark 1 one-off", false]]);
     expect(card(view, ATLAS).suggest.map((group) => [group.title, group.strength, group.button.label, group.button.confirm]))
       .toEqual([["Delivery windows", "weak", "New effort from 1…", false]]);
     expect(card(inkwellDeck(), FOLIO).suggest.map((group) => group.button.confirm)).toEqual([false, false]);
-    // Across groups, Accept takes the rest and leaves each weak one for its own confirm, and says so; alone, its Accept opens that confirm.
-    const keys = folio.suggest.map((group) => group.key);
-    expect(acceptPlan(folio.suggest, keys)).toEqual({ take: [`${FOLIO} one-off`], left: "1 weak group left: accept it alone." });
-    expect(acceptPlan(folio.suggest, [keys[0]!])).toEqual({ take: [keys[0]], left: null });
   });
 
-  it("collapses a group you accepted to one line with Undo where it was, and keeps each row it moved where it was, saying where it went", () => {
+  it("collapses a group you accepted to one line with Undo where it was, which Mark seen settles", () => {
     const before = inkwellDeck();
-    const seen = { rows: { [FOLIO]: cardSnapshot(before.active.find((item) => item.id === FOLIO)!) }, at: {} };
+    const seen = { rows: { [FOLIO]: cardSnapshot(cardOf(before, FOLIO)) } };
     const [shelf, ...rest] = inkwellSuggestions();
     const after = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: rest } }, (row) => row.number === 325 ? { effort: INVENTORY_EFFORTS.shelf } : {});
     const key = `${FOLIO} ${shelf!.key}`;
-    const folio = card(after, FOLIO, seen, undefined, { accepted: new Map([[key, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)], index: 0 }]]),
-      moved: new Map([[url("folio", 325), "Shelf order"]]) });
+    const folio = card(after, FOLIO, seen, new Map([[key, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)], index: 0 }]]));
     expect(folio.suggest.map((group) => [group.title, group.accepted?.text ?? null, group.lines.length])).toEqual([["Moved", "1 PR → Shelf order", 0],
       ["No clear signal", null, 1]]);
-    // It moved at your click, so it's no news: no dot, and nothing counts as changed, but Mark seen is there to settle it.
-    expect(lines(folio).request).toEqual(["folio #305", "folio #325 · dim ghost [→ Shelf order]"]);
-    expect([folio.changed, folio.settleable, folio.needsYou]).toEqual([0, true, 1]);
+    expect([folio.settleable, folio.chores.prUrls]).toEqual([true, [url("folio", 305)]]);
   });
 
   // A17(6) and PLACE-LOSS #2: atlas #410 is the only PR on its service card, so moving it, or its merging on a poll, would take the card
   // and every result on it away under you. The card stays, empty, until you mark it seen.
-  it("keeps a service card whose last PR left as a stand-in with its ghost rows and accepted groups until Mark seen", () => {
+  it("keeps a service card whose last PR left as a stand-in with its accepted groups until Mark seen", () => {
     const before = inkwellDeck();
-    const snapshot = cardSnapshot(before.active.find((item) => item.id === ATLAS)!);
+    const snapshot = cardSnapshot(cardOf(before, ATLAS));
     expect(snapshot.map((row) => row.ref)).toEqual(["atlas #410"]);
     const after = inkwellDeck({}, (row) => row.repo === "inkwell/atlas" && row.number === 410 ? { effort: INVENTORY_EFFORTS.pickup } : {});
     expect(after.active.map((item) => item.id)).not.toContain(ATLAS);
@@ -379,9 +349,9 @@ describe("a service card", () => {
     const accepted: Accepted = new Map([[`${ATLAS} effort:${PICKUP}:high`, { actionId: "a1", text: "1 PR → Store pickup", prUrls: [url("atlas", 410)], index: 0 }]]);
     const [kept] = keptServiceCards(order, after.active, { [ATLAS]: snapshot }, accepted);
     expect([kept!.id, kept!.kind, kept!.name, kept!.needsYou, kept!.stats.open]).toEqual([ATLAS, "service", "atlas · service", 0, 0]);
-    const atlas = cardScreen(kept!, { rows: { [ATLAS]: snapshot }, at: {} }, { now: NOW, accepted, moved: new Map([[url("atlas", 410), "Store pickup"]]) });
-    expect(Object.values(lines(atlas)).flat()).toEqual(["atlas #410 · dim ghost [→ Store pickup]"]);
-    expect([atlas.suggest.map((group) => group.accepted?.text), atlas.settleable, atlas.status.text]).toEqual([["1 PR → Store pickup"], true, "No open PRs"]);
+    const atlas = cardScreen(kept!, { rows: { [ATLAS]: snapshot } }, { now: NOW, accepted });
+    expect([atlas.suggest.map((group) => group.accepted?.text), atlas.settleable, atlas.moves, atlas.lines.map((item) => [item.ref, item.ghost])])
+      .toEqual([["1 PR → Store pickup"], true, [], [["atlas #410", true]]]);
     // Mark seen leaves nothing to settle, so it goes; so does a card this session never showed, and one a read still draws.
     expect(keptServiceCards(order, after.active, { [ATLAS]: [] }, new Map())).toEqual([]);
     expect(keptServiceCards(order.filter((id) => id !== ATLAS), after.active, { [ATLAS]: snapshot }, accepted)).toEqual([]);
@@ -392,41 +362,50 @@ describe("a service card", () => {
     const [shelf, , rest] = inkwellSuggestions();
     const both = { ...shelf!, prs: [...shelf!.prs, rest!.prs[0]!] };
     const view = inkwellDeck({ classify: { oneOffsId: ONE_OFFS, groups: [both] } });
-    // You selected folio #325 and accepted Shelf order for it alone; folio #305 is still here.
-    const folio = card(view, FOLIO, none, undefined, { accepted: new Map([[`${FOLIO} ${shelf!.key}`, { actionId: "a1", text: "1 PR → Shelf order",
-      prUrls: [url("folio", 325)], index: 0 }]]) });
-    expect(folio.suggest.map((group) => [group.accepted, group.button.label, group.lines.map((line) => line.ref)])).toEqual([[null, "Put 2 in Shelf order",
+    // You accepted Shelf order for folio #325 alone; folio #305 is still here.
+    const folio = card(view, FOLIO, none, new Map([[`${FOLIO} ${shelf!.key}`, { actionId: "a1", text: "1 PR → Shelf order", prUrls: [url("folio", 325)], index: 0 }]]));
+    expect(folio.suggest.map((group) => [group.accepted, group.button.label, group.lines.map((item) => item.ref)])).toEqual([[null, "Put 2 in Shelf order",
       ["folio #305", "folio #325"]]]);
   });
 });
 
 describe("what the keys act on", () => {
-  it("takes the selection first, then the focused row when it has the move, then every row in the card with it, but one PR's notes", () => {
+  // A key does what its move's button does: the rows the move lists, so n never sweeps up the chores a reviewer isn't holding yet.
+  it("takes the focused row when it has the move, else the card's move of that kind, else every row with it, and one PR's notes at a time", () => {
+    // catalog #96 has waited 5 days, a move; folio #318 is a nudge from yesterday, a chore.
+    const nudges = cardScreen(patched(inkwellDeck(), ONE_OFFS, (row) => row.number === 96 ? { step: { ...row.step!, since: NOW - 5 * DAY } }
+      : row.number === 318 ? { section: "nudge", turn: { list: "other", addressable: "No feedback waits on you." }, yourTurn: null, nudge: ["otto-v"],
+        step: { text: "Nudge @otto-v", owner: "reviewers", since: NOW - DAY } } : null), none, { now: NOW });
+    expect([nudges.moves.map((move) => move.kind), nudges.chores.prUrls]).toEqual([["address", "nudge"], [url("folio", 318)]]);
+    expect(targets("nudge", { cur: nudges, focused: null }).map((item) => item.ref)).toEqual(["catalog #96"]);
+    expect(targets("nudge", { cur: nudges, focused: line(nudges, url("folio", 318)) }).map((item) => item.ref)).toEqual(["folio #318"]);
+    // A focused row without the move doesn't narrow it; with no Nudge move, n takes every nudge, chores included.
+    expect(targets("nudge", { cur: nudges, focused: line(nudges, url("folio", 301)) }).map((item) => item.ref)).toEqual(["catalog #96"]);
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    const all = oneOffs.sections.flatMap((section) => section.lines);
-    const [confirm301, confirm318, nudge96] = all;
-    expect(targets("nudge", { cur: oneOffs, focused: null, selected: [confirm301!, nudge96!] }).map((line) => line.ref)).toEqual(["catalog #96"]);
-    // A focused row without the move doesn't narrow it: n on a confirm row still nudges the card's one overdue review.
-    expect(targets("nudge", { cur: oneOffs, focused: confirm301!, selected: [] }).map((line) => line.ref)).toEqual(["catalog #96"]);
-    // Review notes are read one PR at a time: c takes the focused row's notes, else the card's first, and never a selection's.
-    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [] }).map((line) => line.ref)).toEqual(["folio #301"]);
-    expect(targets("confirm", { cur: oneOffs, focused: confirm318!, selected: [] }).map((line) => line.ref)).toEqual(["folio #318"]);
-    expect(targets("confirm", { cur: oneOffs, focused: null, selected: [confirm301!, confirm318!] }).map((line) => line.ref)).toEqual(["folio #301"]);
+    expect(targets("nudge", { cur: oneOffs, focused: null }).map((item) => item.ref)).toEqual(["catalog #96"]);
+    // Review notes are read one PR at a time: c takes the focused row's notes, else the card's first.
+    expect(targets("confirm", { cur: oneOffs, focused: null }).map((item) => item.ref)).toEqual(["folio #301"]);
+    expect(targets("confirm", { cur: oneOffs, focused: line(oneOffs, url("folio", 318)) }).map((item) => item.ref)).toEqual(["folio #318"]);
+    // spine #155's reviewer has said nothing new, so it's yours to fix, not Address's: f takes it alone, leaving Address's code work to Address.
+    const fix = card(inkwellDeck({}, (row) => row.number === 155 ? { yourTurn: null } : {}), PICKUP);
+    expect(targets("fix", { cur: fix, focused: null }).map((item) => item.ref)).toEqual(["spine #155"]);
+    expect(targets("fix", { cur: card(inkwellDeck(), PICKUP), focused: null }).map((item) => item.ref)).toEqual(["quill #210", "quill #211", "spine #155"]);
   });
 
   it("offers each action only where it can run, and says why it can't", () => {
     const shelf = card(inkwellDeck(), SHELF);
     const on = availability(context(shelf));
-    expect([on.merge.on, on.advance.on, on.nudge.on, on.nudge.why, on.accept.on, on.hold.on]).toEqual([true, false, false, "no nudge is due", false, true]);
+    expect([on.merge.on, on.fix.on, on.advance.on, on.advance.why, on.nudge.on, on.nudge.why, on.accept.on, on.hold.on]).toEqual([true, true, false, "no chores here", false,
+      "no nudge is due", false, true]);
     const oneOffs = availability(context(card(inkwellDeck(), ONE_OFFS)));
     expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on, oneOffs.promote.on, oneOffs.accept.on]).toEqual([false, "One-offs stays active", false, false, false]);
-    // A service card acts like an effort's, sorts its rows into efforts, and promotes, but never holds or completes: it isn't an effort yet.
+    // A service card sorts its focused row into an effort, and promotes, but never holds or completes: it isn't an effort yet.
     const folio = card(inkwellDeck(), FOLIO);
-    const focused = folio.sections[0]!.lines[0]!;
+    const focused = folio.lines[0]!;
     const sorting = availability(context(folio, { focused }));
-    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting.request.on, sorting.advance.on, sorting.promote.on, sorting.hold.on, sorting.hold.why,
-      sorting["new-effort"].on]).toEqual([true, true, true, true, true, true, false, "this card stays active", false]);
-    expect(availability(context(folio, { focused, selected: [focused] }))["new-effort"].on).toBe(true);
+    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting["new-effort"].on, sorting.request.on, sorting.advance.on, sorting.promote.on, sorting.hold.on,
+      sorting.hold.why]).toEqual([true, true, true, true, true, true, true, false, "this card stays active"]);
+    expect([availability(context(folio))["new-effort"].why, availability(context(folio)).move.why]).toEqual(["focus a row first", "focus a row first"]);
     // Loose threads holds only threads: nothing on it sorts, advances, promotes, or leaves the active pile.
     const loose = availability(context(card(inkwellDeck(inkwellThreads()), "loose")));
     expect([loose.advance.on, loose.promote.on, loose.promote.why, loose.hold.on, loose.hold.why, loose.accept.on]).toEqual([false, false,
@@ -442,72 +421,53 @@ describe("what the keys act on", () => {
     expect([refreshable.refresh.on, refreshable["hold-pr"].on]).toEqual([true, false]);
   });
 
-  // Address selected takes what you picked and nothing by focus alone: the key, the hint bar, and ⌘K offer it only with Your turn rows
-  // selected, on a live card, or in All PRs' selection.
-  it("offers Address selected, and b, only while the selection holds Your turn rows", () => {
+  // Advance clears chores, and only those: a merge, review notes, and a thread's work each keep their own move and key.
+  it("points a at the card's chores alone, never a merge, notes, or a thread's work, and at none while their write waits", () => {
+    expect([card(inkwellDeck(), SHELF).chores.prUrls, card(inkwellDeck(), ONE_OFFS).chores.prUrls, card(inkwellDeck(), PICKUP).chores.prUrls])
+      .toEqual([[], [url("catalog", 96)], []]);
+    const oneOffs = card(inkwellDeck(), ONE_OFFS);
+    expect(availability(context(oneOffs)).advance.on).toBe(true);
+    expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).toContainEqual(["a", "advance"]);
+    const queued = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
+    expect([queued.chores.prUrls, availability(context(queued)).advance.why]).toEqual([[], "no chores here"]);
+    const paused = cardScreen({ ...cardOf(inkwellDeck(), ONE_OFFS), pile: "held" }, none, { now: NOW });
+    expect(availability(context(paused)).advance.why).toBe("this card is paused");
+  });
+
+  // Address takes the rows ticked under its move and nothing by focus alone: the key, the hint bar, and ⌘K offer it only with Your turn
+  // rows ticked, on a live card, or in All PRs' selection.
+  it("offers Address, and b, only while Your turn rows are ticked", () => {
     const pickup = card(inkwellDeck(), PICKUP);
-    const rows = pickup.sections.flatMap((section) => section.lines);
-    const turn = rows.filter((line) => line.row?.turn.list === "turn");
-    const other = rows.filter((line) => line.row && line.row.turn.list !== "turn");
+    const turn = pickup.lines.filter((item) => item.row?.turn.list === "turn");
+    const other = pickup.lines.filter((item) => item.row && item.row.turn.list !== "turn");
     expect(turn.length && other.length).toBeTruthy();
     const on = (patch: Partial<KeyContext>, screen: CardScreen = pickup) => availability(context(screen, patch)).address;
     expect(on({ selected: turn })).toEqual({ on: true, why: "" });
-    expect(on({ focused: turn[0]! })).toEqual({ on: false, why: "select Your turn rows first" });
-    expect(on({ selected: other })).toEqual({ on: false, why: "select Your turn rows first" });
-    expect(hintKeys(context(pickup, { selected: turn }), availability(context(pickup, { selected: turn })))).toContainEqual(["b", "address selected"]);
+    expect(on({ focused: turn[0]! })).toEqual({ on: false, why: "no Your turn row is ticked" });
+    expect(on({ selected: other })).toEqual({ on: false, why: "no Your turn row is ticked" });
+    expect(hintKeys(context(pickup, { selected: turn }), availability(context(pickup, { selected: turn })))).toContainEqual(["b", "address"]);
+    // x ticks the focused Your turn row; ⇧X ticks them all again.
+    const ticks = availability(context(pickup, { focused: turn[0]! }));
+    expect([ticks.select.on, ticks["select-section"].on, availability(context(pickup, { focused: other[0]! })).select.on]).toEqual([true, true, false]);
     // A held card's rows wait with it.
     expect(on({ selected: turn }, { ...pickup, card: { ...pickup.card, pile: "held" } })).toEqual({ on: false, why: "this card is paused" });
     // A row you dismissed, or one its own thread is at work on, isn't on Your turn: All PRs lists neither, so Address takes neither here.
     const off = card(inkwellDeck({}, (row) => row.number === 211 ? { dismissed: true }
       : row.number === 155 ? { threads: { origin: null, executor: { id: "thr-own", title: "Fix spine #155", active: true } } } : {}), PICKUP);
-    const left = off.sections.flatMap((section) => section.lines).filter((line) => line.ref === "quill #211" || line.ref === "spine #155");
-    expect([left.length, on({ selected: left }, off)]).toEqual([2, { on: false, why: "select Your turn rows first" }]);
+    const left = off.lines.filter((item) => item.ref === "quill #211" || item.ref === "spine #155");
+    expect([left.length, on({ selected: left }, off), off.moves[0]!.prUrls]).toEqual([2, { on: false, why: "no Your turn row is ticked" }, [url("quill", 210)]]);
     const items = paletteItems(availability(context(pickup, { selected: turn })), [], { held: [], done: [] }, PICKUP, true);
     expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected", keys: ["b"], on: true });
     // All PRs: x selects the focused Your turn row, ⇧X all of Your turn, and b addresses the selection.
     const prs = (patch: NonNullable<KeyContext["prs"]>) => ({ ...context(pickup), view: "prs" as const, cur: null, prs: patch });
-    const none = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0 });
-    expect([availability(none).select.on, availability(none)["select-section"].on, availability(none).address]).toEqual([true, true,
+    const nothing = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0 });
+    expect([availability(nothing).select.on, availability(nothing)["select-section"].on, availability(nothing).address]).toEqual([true, true,
       { on: false, why: "select Your turn rows first" }]);
-    expect(hintKeys(none, availability(none))).toContainEqual(["x", "select"]);
+    expect(hintKeys(nothing, availability(nothing))).toContainEqual(["x", "select"]);
     const two = prs({ row: true, thread: false, moves: new Set(), selectable: false, turn: 5, picked: 2 });
     expect([availability(two).select.on, availability(two).address.on, availability(two).clear.on]).toEqual([false, true, true]);
     expect(hintKeys(two, availability(two))).toEqual([["b", "address selected"], ["g", "refresh"], ["esc", "clear"]]);
     expect(availability(prs({ row: false, thread: false, moves: new Set(), turn: 0, picked: 0 }))["select-section"]).toEqual({ on: false, why: "nothing is on Your turn" });
-  });
-
-  // "3 need you" and "2 blocked" in a card's header each show those rows alone. Acting on one there must not pull it out from under you.
-  it("cuts a card to the rows a header count names, and keeps one that stops matching until you show all", () => {
-    const pickup = card(inkwellDeck(), PICKUP);
-    expect(pickup.counts.map((part) => [part.key, part.n, part.text])).toEqual([["needs", 3, "3 need you"], ["blocked", 2, "2 blocked"]]);
-    const refs = (screen: CardScreen, filter: ReturnType<typeof rowFilter> | null) => filterSections(screen, filter).map((section) => [section.key,
-      section.lines.map((line) => line.ref)]);
-    const needs = rowFilter(pickup, "needs");
-    expect(refs(pickup, needs)).toEqual([["work", ["quill #210", "quill #211", "spine #155"]]]);
-    expect(refs(pickup, rowFilter(pickup, "blocked"))).toEqual([["blocked", ["quill #212", "spine #156"]]]);
-    expect(filterSections(pickup, null)).toBe(pickup.sections);
-    // Asked to fix, quill #210 dims and needs you no more; the filter you chose keeps it where it was, and a new one leaves it out.
-    const acted = card(inkwellDeck({}, (row) => row.number === 210 ? { acted: { kind: "nudge", state: "sent", at: NOW, batchId: "b1" } } : {}), PICKUP);
-    expect(refs(acted, needs)).toEqual([["work", ["quill #210", "quill #211", "spine #155"]]]);
-    expect(refs(acted, rowFilter(acted, "needs"))).toEqual([["work", ["quill #211", "spine #155"]]]);
-    // Esc shows all again, which the hint bar says; a count with nothing behind it offers nothing.
-    const on = availability(context(pickup, { filter: "needs" }));
-    expect([on.clear.on, on["only-needs"].on, on["only-blocked"].on]).toEqual([true, true, true]);
-    expect(hintKeys(context(pickup, { filter: "needs" }), on)).toContainEqual(["esc", "show all"]);
-    expect(availability(context(card(inkwellDeck(), SHELF)))["only-blocked"]).toEqual({ on: false, why: "nothing here is blocked" });
-  });
-
-  // The number on "N blocked" is a promise about what clicking it shows, so both count the rows as drawn until Mark seen.
-  it("counts Blocked as drawn, so a row a read moved in or out doesn't make the header's number and its rows disagree", () => {
-    // A row stacked on a PR that isn't ready to merge waits on it, in Blocked.
-    const decided = (number: number) => inkwellDeck({}, (row) => row.number === number ? { stackedOn: 999, status: "Behind #999", attention: [], yourTurn: null } : {});
-    const seenAs = (view: DeckView) => ({ rows: { [PICKUP]: cardSnapshot(view.active.find((item) => item.id === PICKUP)!) }, at: {} });
-    const header = (screen: CardScreen) => [screen.counts.find((part) => part.key === "blocked")?.text,
-      filterSections(screen, rowFilter(screen, "blocked")).flatMap((section) => section.lines.map((line) => line.ref))];
-    // quill #211 is blocked on a parent now; it waits in Work in threads until you mark the card seen.
-    expect(header(card(decided(211), PICKUP, seenAs(inkwellDeck())))).toEqual(["2 blocked", ["quill #212", "spine #156"]]);
-    // quill #210 isn't blocked now; it waits in Blocked until you mark the card seen.
-    expect(header(card(inkwellDeck(), PICKUP, seenAs(decided(210))))).toEqual(["3 blocked", ["quill #210", "quill #212", "spine #156"]]);
   });
 
   it("offers an effort's notes to edit, with ⇧N, and none on a service card", () => {
@@ -516,61 +476,29 @@ describe("what the keys act on", () => {
     expect(availability(context(card(inkwellDeck(), FOLIO))).notes).toEqual({ on: false, why: "only an effort keeps notes" });
   });
 
-  // A PR filed in an effort by mistake is a one-off: you move it out from the effort's own card, one row or a selection at a time.
-  it("moves a focused or selected row of an effort's card to One-offs, but never One-offs' own rows", () => {
+  // A PR filed in an effort by mistake is a one-off: you move it out from the effort's own card, one focused row at a time.
+  it("moves a focused row of an effort's card to One-offs, but never One-offs' own rows", () => {
     const shelf = card(inkwellDeck(), SHELF);
-    const row = shelf.sections[0]!.lines[0]!;
-    expect([availability(context(shelf, { focused: row }))["one-off"].on, availability(context(shelf, { selected: [row] }))["one-off"].on]).toEqual([true, true]);
-    expect(availability(context(shelf))["one-off"]).toEqual({ on: false, why: "focus or select a row" });
+    expect(availability(context(shelf, { focused: shelf.lines[0]! }))["one-off"].on).toBe(true);
+    expect(availability(context(shelf))["one-off"]).toEqual({ on: false, why: "focus a row first" });
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    expect(availability(context(oneOffs, { focused: oneOffs.sections[0]!.lines[0]! }))["one-off"]).toEqual({ on: false, why: "they're in One-offs" });
+    expect(availability(context(oneOffs, { focused: oneOffs.lines[0]! }))["one-off"]).toEqual({ on: false, why: "they're in One-offs" });
   });
 
-  it("gives each row whose next step is safe its own Advance, naming the step, and none to a merge, a thread's work, review notes, or a dimmed row", () => {
-    const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    expect(oneOffs.sections.flatMap((section) => section.lines).map((line) => [line.ref, line.inline?.label, line.inline?.title])).toEqual([
-      ["folio #301", "Notes…", "Read folio #301's review notes and what came after, then confirm or ask its thread (c)"],
-      ["folio #318", "Notes…", "Read folio #318's review notes and what came after, then confirm or ask its thread (c)"],
-      ["catalog #96", "Advance", "Nudge @mira-l @theo-k: lists it, then sends in 8 s with Undo (a)"]]);
-    const shelf = card(inkwellDeck(), SHELF);
-    expect(shelf.sections.flatMap((section) => section.lines).map((line) => line.inline)).toEqual([null, null, null, null, null]);
-    const queued = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
-    expect(queued.sections.find((section) => section.key === "nudge")!.lines[0]!.inline).toBeNull();
+  // Your confirmation of a PR's notes clears its merge gate on your word; taking it back is ⌘K's, from the focused row, and only where you gave one.
+  it("offers Revoke from ⌘K on a focused row carrying your confirmation, and nowhere else", () => {
+    const confirmed = card(inkwellDeck({}, (row) => row.number === 340 ? { confirmation: { at: NOW, evidence: false, current: true } } as never : {}), SHELF);
+    expect(availability(context(confirmed, { focused: line(confirmed, url("folio", 340)) })).revoke.on).toBe(true);
+    expect(availability(context(confirmed, { focused: line(confirmed, url("folio", 341)) })).revoke).toEqual({ on: false, why: "you haven't confirmed its notes" });
+    expect(availability(context(confirmed)).revoke).toEqual({ on: false, why: "focus a row first" });
   });
 
-  it("points a at the focused row when its step is safe, else at the card, and the hint bar says which", () => {
-    const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    const [confirm301, , nudge96] = oneOffs.sections.flatMap((section) => section.lines);
-    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [] })).toEqual({ scope: "row", prUrls: [url("catalog", 96)] });
-    expect(advanceTarget({ cur: oneOffs, focused: null, selected: [] })).toEqual({ scope: "card", prUrls: [url("catalog", 96)] });
-    expect(hintKeys(context(oneOffs, { focused: nudge96! }), availability(context(oneOffs, { focused: nudge96! })))).toContainEqual(["a", "advance row"]);
-    expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).toContainEqual(["a", "advance effort"]);
-    // The selection wins, and the confirm says why any of it is left out; a selection of review notes alone gives a nothing to run.
-    expect(advanceTarget({ cur: oneOffs, focused: confirm301!, selected: [confirm301!, nudge96!] }))
-      .toEqual({ scope: "selected", prUrls: [url("folio", 301), url("catalog", 96)] });
-    expect(advanceTarget({ cur: oneOffs, focused: nudge96!, selected: [confirm301!] })).toBeNull();
-    // A focused row with no safe step now, such as one whose nudge is waiting to send, leaves a to the card's others: here, none.
-    const acted = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
-    const waiting = acted.sections.find((section) => section.key === "nudge")!.lines[0]!;
-    expect(advanceTarget({ cur: acted, focused: waiting, selected: [] })).toBeNull();
-    // A merge keeps its own key, and a card with nothing safe offers no a at all.
+  it("keeps the hint bar to the card's moves and the few keys that apply now", () => {
     const shelf = card(inkwellDeck(), SHELF);
-    const merge = shelf.sections[0]!.lines[0]!;
-    expect([advanceTarget({ cur: shelf, focused: merge, selected: [] }), availability(context(shelf, { focused: merge })).advance.why]).toEqual([null, "nothing safe to run"]);
-    // A service card names itself.
-    const folio = card(inkwellDeck(), FOLIO);
-    expect(hintKeys(context(folio), availability(context(folio)))).toContainEqual(["a", "advance card"]);
-    // A held card advances nothing.
-    const paused = cardScreen({ ...inkwellDeck().active.find((item) => item.id === ONE_OFFS)!, pile: "held" }, none, { now: NOW });
-    expect([advanceTarget({ cur: paused, focused: null, selected: [] }), availability(context(paused)).advance.why]).toEqual([null, "this card is paused"]);
-  });
-
-  it("keeps the hint bar to the few keys that apply now", () => {
-    const shelf = card(inkwellDeck(), SHELF);
-    expect(hintKeys(context(shelf), availability(context(shelf)))).toEqual([["] →", "flip"], ["j ↓", "rows"], ["m", "merge"]]);
-    const focused = shelf.sections[0]!.lines[0]!;
-    expect(hintKeys(context(shelf, { focused }), availability(context(shelf, { focused })))).toEqual([["j ↓", "rows"], ["m", "preview merge"],
-      ["x", "select"], ["↵", "details"], ["g", "refresh"]]);
+    expect(hintKeys(context(shelf), availability(context(shelf)))).toEqual([["j ↓", "rows"], ["m", "merge"], ["f", "fix"], ["p", "progress"], ["] →", "flip"]]);
+    const focused = shelf.lines[0]!;
+    expect(hintKeys(context(shelf, { focused }), availability(context(shelf, { focused })))).toEqual([["j ↓", "rows"], ["m", "merge"], ["f", "fix"], ["g", "refresh"],
+      ["↵", "fold"]]);
   });
 
   it("lists every action in the palette with its key, and each effort to go to, resume, or reopen", () => {

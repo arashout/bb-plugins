@@ -134,12 +134,13 @@ describe("focus after an action or a dialog", () => {
 
 describe("stored place", () => {
   it("reads back what the session kept, and drops what it can't trust instead of failing", () => {
-    const place = { view: "prs", cur: "effort-shelf", order: ["effort-shelf", 3], views: { "effort-shelf": { anchor: { row: "u", at: 12 }, scrollTop: 300,
-      focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"], filter: { kind: "needs", prUrls: ["u", 4] } },
-      "effort-pickup": { filter: { kind: "everything" } }, broken: 7 } };
+    const place = { view: "prs", cur: "effort-shelf", order: ["effort-shelf", 3], views: { "effort-shelf": { anchor: { row: "inkwell/folio#340", at: 12 },
+      scrollTop: 300, focus: "inkwell/folio#340", unpicked: ["u", 4], open: ["progress"], panel: "held" },
+      // An earlier build's selection, details, tiles, and filter: this one keeps none of them, so they drop rather than mean something else.
+      "effort-pickup": { selected: ["u"], expanded: ["u"], tiles: ["next"], filter: { kind: "needs", prUrls: ["u"] }, panel: 7 }, broken: 7 } };
     expect(readPlace(JSON.stringify(place))).toEqual({ view: "prs", cur: "effort-shelf", order: ["effort-shelf"], views: { "effort-shelf": {
-      anchor: { row: "u", at: 12 }, scrollTop: 300, focus: "u", selected: ["u"], expanded: [], tiles: ["next"], open: ["flight"], filter: { kind: "needs", prUrls: ["u"] } },
-      "effort-pickup": { anchor: null, scrollTop: 0, focus: null, selected: [], expanded: [], tiles: [], open: [], filter: null } } });
+      anchor: { row: "inkwell/folio#340", at: 12 }, scrollTop: 300, focus: "inkwell/folio#340", unpicked: ["u"], open: ["progress"], panel: "held" },
+      "effort-pickup": { anchor: null, scrollTop: 0, focus: null, unpicked: [], open: [], panel: null } } });
     expect(readPlace("{not json")).toEqual({ view: "deck", cur: null, order: [], views: {} });
     expect(readPlace(null).view).toBe("deck");
   });

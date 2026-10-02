@@ -1,48 +1,42 @@
-// The effort deck's view model (plan amendment A15): pure functions from
-// deck_get's output, what each view last marked seen, and the view's own
-// state to what the deck draws. The server placed each row in its section and
-// counted Needs you with deck-shared.ts's one rule; this settles rows in
-// place until Mark seen (deck-place.ts), words them for one line, and says
-// which actions the keys, hint bar, ? sheet, and ⌘K offer right now. It
-// imports types, zero-import modules, All PRs' time format, and
-// approval-evidence.ts's wording (zod only), so no server module reaches the
-// browser (A12.1).
+// The effort deck's view model (plan amendment A15, effort card v2): pure
+// functions from deck_get's output, what each view last marked seen, and the
+// view's own state to what the deck draws. The server placed each row in its
+// section; this ranks a card's rows into its few moves (rankMoves), words its
+// finish line, counts Your turn for its strip chip, and says which actions the
+// keys, hint bar, ? sheet, and ⌘K offer right now. Moves and keys follow the
+// read as All PRs does; Mark seen only settles what changed since you looked
+// (deck-place.ts). It imports types, zero-import modules, All PRs' time
+// format, and approval-evidence.ts's wording (zod only), so no server module
+// reaches the browser (A12.1).
 import type { DeckCard, DeckRow, DeckView } from "./deck";
-import { BATCH_KINDS, cardTier, counted, DECK_SECTIONS, LOOSE_ID, needsYou, SEND_DELAY_MS, SERVICE_PREFIX, serviceGoal, serviceName, type ActedKind, type BatchKind,
-  type DeckPile, type DeckSection, type DeckWrite } from "./deck-shared";
-import { settleRows, type RowFilter, type SettledRow, type Shown } from "./deck-place";
+import { cardTier, DECK_SECTIONS, LOOSE_ID, SERVICE_PREFIX, serviceGoal, serviceName, yours, type DeckPile, type DeckSection, type DeckWrite }
+  from "./deck-shared";
+import { settleRows, type SettledRow, type Shown } from "./deck-place";
 import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./inventory-view-model";
 import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
 import { firstLine } from "./effort-notes";
-import { sentText } from "./your-turn";
 
 const DAY = 86_400_000;
 /** A Linear date or time as its calendar day, "Oct 17": a target or due date is a day, not a moment. */
-const calendarDay = (value: string) => new Date(Date.parse(value)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+const calendarDay = (value: string | number) => new Date(typeof value === "number" ? value : Date.parse(value))
+  .toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+/** Days from today to a Linear date or time's calendar day, in UTC as calendarDay words it: negative once it's past. */
+const daysTo = (value: string | number, now: number) =>
+  Math.floor((typeof value === "number" ? value : Date.parse(value.slice(0, 10))) / DAY) - Math.floor(now / DAY);
 /** Color only where the move is yours; gray waits on others or runs itself. */
 export type Tone = "green" | "violet" | "blue" | "amber" | "red" | "gray";
-export type SectionMeta = { title: string; tone: Tone; action: DeckActionId | null; button: string | null; help: string; fold?: boolean };
-export const SECTIONS: Record<DeckSection, SectionMeta> = {
-  merge: { title: "Merge", tone: "green", action: "merge", button: "Preview merge", help: "Approved, checks green, no conflicts, no feedback to address. The preview reads each PR again, and nothing merges until you press Merge or ⌘↵." },
-  confirm: { title: "Confirm review notes", tone: "violet", action: null, button: null, help: "An approval that said something, waiting on your reply on the PR or your Confirm, whatever CI says. A PR that mentions it is no reply; Confirm lists it as evidence. Each PR's notes are confirmed on their own after you read them, never by a batch or Advance." },
-  nudge: { title: "Nudge reviewers", tone: "blue", action: "nudge", button: "Nudge…", help: "Asked over a business day ago with no answer, or changes addressed and not asked again." },
-  request: { title: "Request a reviewer", tone: "blue", action: "request", button: "Request…", help: "Open, not a draft, and nobody is asked." },
-  ready: { title: "Mark ready", tone: "blue", action: "ready", button: "Mark ready…", help: "Drafts with green checks and no conflict." },
-  work: { title: "Work in threads", tone: "amber", action: "fix", button: "Ask threads to fix", help: "Conflicts, failing checks, and review feedback waiting on you. Each is fixed in its PR's thread; o opens it. Ask threads to fix sends each its own fix, or starts a worker for one with no thread, after 8 s with Undo. Nothing merges." },
-  flight: { title: "In flight", tone: "gray", action: null, button: null, fold: true, help: "In review under a business day, checks running, or a thread working on it. Nothing for you yet." },
-  blocked: { title: "Blocked", tone: "gray", action: null, button: null, help: "Waits on a parent PR." },
-  held: { title: "Held", tone: "gray", action: "release", button: "Release…", help: "PRs you held, with why and for how long. Nothing acts on one until you release it; Release lists each one first, then waits 8 s with Undo." },
+/** Each section's name, as a batch's confirm titles it. */
+export const SECTIONS: Record<DeckSection, { title: string }> = {
+  merge: { title: "Merge" }, confirm: { title: "Confirm review notes" }, nudge: { title: "Nudge reviewers" }, request: { title: "Request a reviewer" },
+  ready: { title: "Mark ready" }, work: { title: "Work in threads" }, flight: { title: "In flight" }, blocked: { title: "Blocked" }, held: { title: "Held" },
 };
 /** The batch each act key plans. */
 export const KIND_OF: Partial<Record<DeckActionId, DeckWrite>> = { nudge: "nudge", request: "request", ready: "ready", release: "release", fix: "fix" };
 const SECTION_OF: Partial<Record<DeckActionId, DeckSection>> = { merge: "merge", confirm: "confirm", nudge: "nudge", request: "request", ready: "ready", release: "held",
   fix: "work" };
-const ACTED: Record<ActedKind, [string, string]> = { confirm: ["Confirming…", "Confirmed handled"], nudge: ["Nudging…", "Nudged"],
-  request: ["Requesting…", "Review requested"], ready: ["Marking ready…", "Marked ready"], release: ["Releasing…", "Released"],
-  ask: ["Asking its thread…", "Asked its thread"], fix: ["Asking to fix…", "Asked to fix"], address: ["Starting its batch thread…", "Batch thread started"] };
-/** A held row Release can take: still held, and nothing you did to it waits for Mark seen. */
+/** A held row Release can take: still held, and nothing you did to it waits or runs. */
 const releasable = (line: Pick<DeckLine, "row" | "dim">) => !line.dim && !!line.row?.hold;
 /** Muted effort colors, picked by the effort's id so a card keeps its color across reads and sessions. */
 const EFFORT_COLORS = ["#5fb3b3", "#d3a35a", "#8c8fd9", "#d98ca8", "#9cb86a", "#6fa8d6", "#d9905f", "#b48ad6"];
@@ -60,151 +54,40 @@ export function effortColor(id: string, oneOff = false): string {
 const short = (repo: string) => repo.split("/").at(-1) ?? repo;
 export const refOf = (row: Pick<DeckRow, "repo" | "number">) => `${short(row.repo)} #${row.number}`;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const mentions = (logins: readonly string[]) => logins.map((login) => `@${login}`).join(" ");
+/** "You 3 · @mira-l 1": each value with how many times it comes, most first, then in the order each first came. */
+const tally = (values: readonly string[]) => [...values.reduce((map, value) => map.set(value, (map.get(value) ?? 0) + 1), new Map<string, number>())]
+  .sort((a, b) => b[1] - a[1]).map(([value, n]) => `${value} ${n}`).join(" · ");
 
-/** One row as the deck draws it on one line. */
+/** One row as the keys know it: a PR on the card now, or one that left since you marked the card seen, which only Mark seen counts. */
 export type DeckLine = {
   prUrl: string; ref: string; title: string;
-  /** The PR it's stacked on, when it has one. */
-  stacked: string | null;
-  section: string; tone: Tone;
-  /** Counts toward Needs you now: your move, not dimmed. */
+  /** Its section as the read has it; a row that left keeps the one you saw it in. */
+  section: DeckSection;
+  /** A move takes it now: an active card, a section whose move is yours, and no write of yours waiting on it or running. */
   needs: boolean;
-  /** You acted on it, a read changed it, or it left: it stays put and stops counting until Mark seen. */
+  /** It left, or a write of yours waits on it or runs: no key takes it. */
   dim: boolean; ghost: boolean;
-  /** Why it carries a change dot. */
-  dot: string | null;
-  /** What it says after its title: its section's detail, or what a read changed, "CI failing → Ready to merge". */
-  info: { text: string; tone: Tone | null } | null;
-  /** A read changed its state since you looked: it stays put, with the change in `info`, until Mark seen. */
-  change: { was: string; now: string } | null;
-  /** A read moved it to another section: it stays put, linking there, and moves on Mark seen. `up`: that section is above this one. */
-  to: { key: DeckSection; title: string; up: boolean } | null;
+  /** It changed, arrived, or left since you marked the card seen, which Mark seen settles. */
+  dot: boolean;
+  /** On a service card, where its suggestion points, and its own signals in a group. */
   signals: string[];
-  age: string | null; hot: boolean;
-  /** Its read, only when it isn't current: the last one failed, or the last full read didn't list it. */
-  checked: { text: string; title: string; failed: boolean } | null;
-  /** What you did to it, what became of it when it left ("Merged · just now"), or its thread. */
-  trail: { kind: "acted"; text: string; undo: string | null; failed: boolean; title: string | null; busy?: boolean } | { kind: "ghost"; text: string }
-    | { kind: "thread"; text: string; threadId: string } | null;
-  /** Its one inline action, on the row itself: Advance on a row whose safe next step is yours, Notes… on review notes, or Release on a held row. */
-  inline: { id: DeckActionId; label: string; title: string } | null;
   row: DeckRow | null;
 };
-/** What a view knows beyond deck_get: when each row was last marked seen, and what a refused or cut-off write said. */
-export type LineContext = { now: number; seenAt: Readonly<Record<string, number>>; details?: ReadonlyMap<string, string>;
-  /** Rows that left and a read found merged, with when, or closed (deck_get's `gone`), so a row that left says which. */
-  gone?: ReadonlyMap<string, { how: "merged" | "closed"; at: number | null }>;
-  /** When the view first drew each row that left as gone, for its age when the read gave none. */
-  left?: ReadonlyMap<string, number>;
-  /** The card each open PR is on now, by name, so a row that left for another card says where. */
-  elsewhere?: ReadonlyMap<string, string>;
-  /** PRs you moved to an effort from here, by the effort's name, until Mark seen: a row that left that way says where to, as news it isn't. */
-  moved?: ReadonlyMap<string, string>;
-  /** Each item of a batch sending now, as deck_batch_get read it last: newer than the read's `acted`. */
-  live?: ReadonlyMap<string, { kind: ActedKind; state: "pending" | "sending" | "sent" | "refused" | "unknown" }> };
+/** What a view knows beyond deck_get: the time, and when each row was last marked seen. */
+export type LineContext = { now: number; seenAt: Readonly<Record<string, number>> };
 
-function info(row: DeckRow, section: string): DeckLine["info"] {
-  switch (section) {
-    // Ready on your word alone says so, so it never reads as checked.
-    case "merge": { const approved = row.reviewers.filter((review) => review.state === "approved").map((review) => review.login);
-      return row.confirmation?.current ? { text: row.status, tone: "amber" } : approved.length ? { text: `✓ ${mentions(approved)}`, tone: null } : null; }
-    // Anything else holding the PR shows beside its notes: "CI failing · approval comment to address".
-    case "confirm": return { text: row.status.includes(" · ") ? row.status : plural(Math.max(1, row.notes), "note"), tone: "violet" };
-    case "nudge": return row.nudge.length ? { text: mentions(row.nudge), tone: null } : null;
-    case "request": return row.suggested.length ? { text: `suggest @${row.suggested[0]}`, tone: null } : null;
-    case "ready": return { text: "draft", tone: null };
-    case "work": return { text: row.status, tone: /CI|check/iu.test(row.status) ? "red" : "amber" };
-    case "blocked": return { text: row.waitsOn?.what ?? row.status, tone: "gray" };
-    case "held": return { text: row.hold?.reason || "No reason given", tone: "gray" };
-    default: return { text: row.status, tone: "gray" };
-  }
-}
+/** A write of yours waits out its Undo window on the row, or runs on it: no move takes it until that lands. */
+const busy = (row: Pick<DeckRow, "acted">) => row.acted?.state === "queued" || row.acted?.state === "sending";
 
-function checked(row: DeckRow, now: number): DeckLine["checked"] {
-  const good = row.checkedAt ? `; its last good read was ${age(Date.parse(row.checkedAt), now)} ago` : "";
-  if (row.failed) return { text: "read failed", failed: true, title: `GitHub didn't answer its last read${good}. Refresh reads it again.` };
-  return row.stale ? { text: `stale${row.checkedAt ? ` ${age(Date.parse(row.checkedAt), now)}` : ""}`, failed: false,
-    title: `The last full read didn't list it${good}.` } : null;
-}
-
-/** How long ago, as a ghost says it: "just now" for the last minute. */
-const ago = (at: number | null, now: number) => at === null ? "" : ` · ${now - at < 60_000 ? "just now" : `${age(at, now)} ago`}`;
-
-/**
- * One settled row as a line: a ghost keeps what you last saw and says what became of it, one you moved from here where it went; a changed
- * row stays in its old section with what changed, and links to the section it moves to on Mark seen.
- */
-export function deckLine(item: Shown<DeckRow>, pile: DeckPile, context: LineContext, signals: string[] = []): DeckLine {
+/** One settled row as a line: the read's row in its section now, or one that left, which only counts toward what Mark seen settles. */
+export function deckLine(item: Shown<DeckRow>, pile: DeckPile, signals: string[] = []): DeckLine {
   const row = item.row;
-  const settled = item.settled;
-  const section = item.section;
-  const seenAt = context.seenAt[item.prUrl];
-  const moved = item.ghost ? context.moved?.get(item.prUrl) ?? null : null;
-  const gone = item.ghost && !moved ? context.gone?.get(item.prUrl) ?? null : null;
-  const elsewhere = item.ghost && !moved && !gone ? context.elsewhere?.get(item.prUrl) ?? null : null;
-  const fate = gone ? `${gone.how === "merged" ? "Merged" : "Closed"}${ago(gone.at ?? context.left?.get(item.prUrl) ?? null, context.now)}`
-    : elsewhere ? `→ ${elsewhere}` : `Left${ago(context.left?.get(item.prUrl) ?? null, context.now)}`;
-  const change = item.change && item.change.was !== item.change.now ? item.change : null;
-  const to = row && settled && row.section !== settled.section ? { key: row.section, title: SECTIONS[row.section].title,
-    up: DECK_SECTIONS.indexOf(row.section) < DECK_SECTIONS.indexOf(section as DeckSection) } : null;
-  const acted = row?.acted ?? null;
-  const live = context.live?.get(item.prUrl) ?? null;
-  const dim = item.ghost || item.change !== null || (row !== null && !counted(row, seenAt));
-  const needs = !dim && row !== null && needsYou(row, pile, seenAt);
-  const since = row?.waitsOn?.since ?? row?.step?.since ?? null;
-  const shownAge = row && since !== null && section !== "merge" && section !== "flight" ? age(since, context.now) : null;
-  const tone: Tone = section === "work" && row ? info(row, section)!.tone! : SECTIONS[section as DeckSection]?.tone ?? "gray";
-  let trail: DeckLine["trail"] = null;
-  // Why the last Address didn't send it; else its sent thread, linked with BB's status for it, while it addresses the PR or the PR is on Your
-  // turn as All PRs lists it. After that, the PR's own working thread leads.
-  const left = acted ? null : context.details?.get(item.prUrl) ?? null;
-  const sent = row?.sent?.threadId && (row.addressing || row.turn.list === "turn") && (!acted || acted.kind === "address") ? row.sent : null;
-  if (left) trail = { kind: "acted", failed: true, undo: null, title: left, text: `Not sent: ${left}` };
-  else if (sent) trail = { kind: "thread", text: sentText(sent), threadId: sent.threadId! };
-  else if (live) trail = { kind: "acted", failed: live.state === "refused" || live.state === "unknown", undo: null, title: context.details?.get(item.prUrl) ?? null,
-    busy: live.state === "sending", text: live.state === "pending" ? "Queued" : live.state === "refused" ? "Not sent" : live.state === "unknown" ? "May not have sent"
-      : ACTED[live.kind][live.state === "sent" ? 1 : 0] };
-  else if (acted) {
-    const failed = acted.state === "refused" || acted.state === "unknown";
-    const said = context.details?.get(item.prUrl) ?? (acted.kind === "address" ? row?.sent?.detail : null) ?? null;
-    trail = { kind: "acted", failed, undo: acted.state === "queued" ? acted.batchId : null, title: said,
-      text: acted.state === "refused" ? acted.kind === "address" && said ? `Not sent: ${said}` : "Not sent" : acted.state === "unknown" ? "May not have sent"
-        : ACTED[acted.kind][acted.state === "sent" ? 1 : 0] };
-  } else if (item.ghost) trail = { kind: "ghost", text: moved ? `→ ${moved}` : fate };
-  else if (row?.thread && section === "work") trail = { kind: "thread", text: row.thread.title, threadId: row.thread.id };
-  const news = [change && `Was ${change.was}; now ${change.now}.`, to ? `Moves to ${to.title} on Mark seen.` : "Settles on Mark seen."].filter(Boolean).join(" ");
+  const dim = item.ghost || (row !== null && busy(row));
   return {
-    prUrl: item.prUrl, ref: row ? refOf(row) : settled!.ref, title: row?.title ?? settled!.title,
-    stacked: row?.stackedOn != null ? `${short(row.repo)} #${row.stackedOn}` : null, section, tone, needs, dim, ghost: item.ghost,
-    dot: moved ? null : item.ghost ? `${elsewhere ? `Moved to ${elsewhere}` : fate.replace(/ · .*$/u, "")} since you looked. Clears on Mark seen.`
-      : item.change ? news : item.arrived ? "New since you looked" : null,
-    info: change ? { text: `${change.was} → ${change.now}`, tone: null } : row ? info(row, section) : null, change, to,
-    signals, age: shownAge, checked: row ? checked(row, context.now) : null,
-    hot: needs && since !== null && context.now - since >= 4 * DAY, trail, row,
-    inline: inlineAction(row, section, pile, needs, dim),
+    prUrl: item.prUrl, ref: row ? refOf(row) : item.settled!.ref, title: row?.title ?? item.settled!.title,
+    section: row?.section ?? item.section as DeckSection, needs: !dim && row !== null && pile === "active" && yours(row.section), dim, ghost: item.ghost,
+    dot: item.ghost || item.change !== null || item.arrived, signals, row,
   };
-}
-
-/** A row's safe next step, as its inline Advance names it: one GitHub write, never a merge or a thread's work. */
-function stepText(row: DeckRow, kind: BatchKind): string {
-  switch (kind) {
-    case "nudge": return row.nudge.length ? `Nudge ${mentions(row.nudge)}` : "Nudge reviewers";
-    case "request": return row.suggested.length ? `Request @${row.suggested[0]}` : "Request a reviewer";
-    case "ready": return "Mark ready";
-  }
-}
-const WINDOW = `${Math.round(SEND_DELAY_MS / 1_000)} s`;
-function inlineAction(row: DeckRow | null, section: string, pile: DeckPile, needs: boolean, dim: boolean): DeckLine["inline"] {
-  if (!row) return null;
-  // A release writes nothing to GitHub, so a paused card offers it too, as it does Hold PR.
-  if (section === "held") return releasable({ row, dim })
-    ? { id: "release", label: "Release", title: `Release ${refOf(row)}: lists it, then waits ${WINDOW} with Undo (${ACTION.release.keys[0]})` } : null;
-  if (section === "confirm") return needs && pile === "active"
-    ? { id: "confirm", label: "Notes…", title: `Read ${refOf(row)}'s review notes and what came after, then confirm or ask its thread (${ACTION.confirm.keys[0]})` } : null;
-  const kind = BATCH_KINDS.find((candidate) => candidate === section);
-  return kind && needs && pile === "active"
-    ? { id: "advance", label: "Advance", title: `${stepText(row, kind)}: lists it, then sends in ${WINDOW} with Undo (${ACTION.advance.keys[0]})` } : null;
 }
 
 const settledOf = (row: DeckRow, section: string = row.section): SettledRow => ({ prUrl: row.prUrl, ref: refOf(row), title: row.title, section, status: row.status });
@@ -217,8 +100,8 @@ export const threadsKey = (cardId: string) => `threads:${cardId}`;
 
 /**
  * The service cards in the session's `order` that a read no longer draws, because their last PR left, as empty stand-ins while Mark seen
- * has something there to settle: a row you last saw there, now a ghost saying Left or → its effort, or a suggestion you accepted there,
- * with its Undo. So a service card stays put like an effort's card rather than going out from under you; Mark seen lets it go.
+ * has something there to settle: a row you last saw there, or a suggestion you accepted there, with its Undo. So a service card stays put
+ * like an effort's card rather than going out from under you; Mark seen lets it go.
  */
 export function keptServiceCards(order: readonly string[], active: readonly DeckCard[], seen: Readonly<Record<string, readonly SettledRow[]>>,
   accepted: Accepted): DeckCard[] {
@@ -227,18 +110,150 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
     && (!!seen[id]?.length || [...accepted.keys()].some((key) => key.startsWith(`${id} `)))).map((id) => {
     const repo = id.slice(SERVICE_PREFIX.length);
     return { id, key: id, name: serviceName(repo), goal: serviceGoal(repo), kind: "service", repo, oneOff: false, pile: "active", reason: "", since: 0,
-      status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, medianAgeMs: null, oldestWait: null },
+      status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, mergedFortnight: 0, medianAgeMs: null, oldestWait: null },
       progress: { merged: 0, open: 0 }, next: [], blocked: [],
       linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [] },
       people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [], notes: null };
   });
 }
 
-export type SectionScreen = { key: DeckSection; meta: SectionMeta; count: number; changed: number; lines: DeckLine[];
-  /** Rows a read moved here, still drawn where you saw them until Mark seen. */
-  arriving: { prUrl: string; ref: string }[];
-  /** Its one button, and how many rows it takes. */
-  action: { id: DeckActionId; label: string; key: string; count: number; enabled: boolean; why: string | null } | null };
+// ---------------------------------------------------------------------------
+// Moves: a card's few next moves, each one outcome, one verb, and one key.
+// ---------------------------------------------------------------------------
+
+/** What a move does, as the action its button and key run. */
+export type MoveKind = Extract<DeckActionId, "address" | "merge" | "confirm" | "fix" | "nudge" | "release">;
+/** One move: what it gets you, its detail in a line, its verb, and the rows it touches. Address's verb counts the rows you leave ticked. */
+export type Move = { kind: MoveKind; title: string; meta: string; verb: string; tone: Tone; prUrls: string[] };
+/** A reviewer holding a PR this long makes a move that names them; a shorter wait is a chore. */
+const HOLDS_MS = 4 * DAY;
+/** The move each section's rows make once Your turn has taken its own. */
+const MOVE_OF: Partial<Record<DeckSection, MoveKind>> = { merge: "merge", confirm: "confirm", work: "fix", nudge: "nudge" };
+const TONE_OF: Record<MoveKind, Tone> = { address: "amber", merge: "green", confirm: "green", fix: "blue", nudge: "gray", release: "gray" };
+const handles = (text: string | null | undefined) => [...new Set(text?.match(/@[\w-]+/gu) ?? [])];
+/** When a row's wait began: the feedback that waits on you, its next step, or what it waits on. */
+const since = (row: DeckRow) => row.yourTurn?.since ?? row.step?.since ?? row.waitsOn?.since ?? null;
+const oldest = (rows: readonly DeckRow[]) => rows.reduce<number | null>((first, row) => { const at = since(row); return at !== null && (first === null || at < first) ? at : first; }, null);
+/** A move's rows by state word, in the order they come, a stack's children as stacked: "Ready to merge 1 · stacked 3". */
+const states = (rows: readonly DeckRow[]) => {
+  const words = rows.map((row) => /^Behind #/u.test(row.status) ? "stacked" : row.status);
+  return [...new Set(words)].map((word) => `${word} ${words.filter((item) => item === word).length}`).join(" · ");
+};
+
+function move(kind: MoveKind, rows: readonly DeckRow[], now: number): Move {
+  const n = rows.length;
+  const first = oldest(rows);
+  const wait = first === null ? null : age(first, now);
+  // One row names itself, so the move reads without opening.
+  const make = (title: string, verb: string, ...detail: (string | null | false)[]): Move => ({ kind, title, verb, tone: TONE_OF[kind], prUrls: rows.map((row) => row.prUrl),
+    meta: [n === 1 && refOf(rows[0]!), ...detail].filter(Boolean).join(" · ") });
+  switch (kind) {
+    case "address": {
+      const who = [...new Set(rows.flatMap((row) => handles(row.yourTurn?.why)))];
+      const names = who.length > 2 ? `${who.slice(0, 2).join(", ")} +${who.length - 2}` : who.join(", ");
+      return make(who.length ? `${names} ${who.length === 1 ? "waits" : "wait"} on you` : "Feedback waits on you", "Address", n > 1 && plural(n, "PR"), wait);
+    }
+    case "merge": return make(n === 1 ? "Ready to merge" : `${n} ready to merge`, n === 1 ? "Merge…" : `Merge ${n}…`, n > 1 ? states(rows) : wait);
+    case "confirm": return make(n === 1 ? "Approved; confirm its notes" : `${n} approved; confirm their notes`, "Confirm…", n > 1 && plural(n, "PR"), wait);
+    case "fix": {
+      const words = [...new Set(rows.map((row) => row.status))];
+      const only = words.length === 1 ? words[0]! : null;
+      const title = only === "Conflicts" ? `Clear conflicts${n > 1 ? ` on ${n}` : ""}` : only === "CI failing" ? `Fix CI${n > 1 ? ` on ${n}` : ""}`
+        : `Unblock ${n === 1 ? "one" : n} of yours`;
+      return make(title, `Fix ${n}…`, only === "Conflicts" || only === "CI failing" ? null : n === 1 ? only : states(rows), wait && (n > 1 ? `oldest ${wait}` : wait));
+    }
+    case "nudge": {
+      // Who holds the most of them leads, named; the others follow with how many each holds.
+      const holders = [...rows.flatMap((row) => row.nudge.map((login) => `@${login}`)).reduce((map, login) => map.set(login, (map.get(login) ?? 0) + 1), new Map<string, number>())]
+        .sort((a, b) => b[1] - a[1]);
+      const lead = holders[0];
+      return make(lead ? `${lead[0]} holds ${lead[1]}` : `Reviewers hold ${n}`, holders.length === 1 ? `Nudge ${lead![0]}…` : `Nudge ${n}…`,
+        wait && (n > 1 ? `oldest ${wait}` : wait), ...holders.slice(1).map(([login, k]) => `${login} ${k}`));
+    }
+    case "release": return make(`All ${plural(n, "PR")} held`, `Release ${n}…`, `held ${age(rows.reduce((at, row) => Math.min(at, row.hold?.since ?? now), now), now)}`);
+  }
+}
+
+/**
+ * A card's moves, by one fixed rule, each row in the first that takes it: someone waits on you (Address); one step from merged (Merge,
+ * then Confirm); your own blockers (Fix); a reviewer holding it 4 days or more (Nudge, naming who). Linear and GitHub disagreeing comes
+ * next (Reconcile, from the Linear fields). Nudges under 4 days, requests, and ready marks are chores: Advance clears them, and they never
+ * take a move. With nothing to move and every open PR held, Release is the one move. A held effort moves nothing until you resume it. A
+ * row a write of yours waits on or runs takes no move until it lands, but Your turn keeps its rows with their state, as All PRs does.
+ */
+export function rankMoves(rows: readonly DeckRow[], pile: DeckPile, now: number): { moves: Move[]; chores: string[] } {
+  const active = pile === "active";
+  const turn = rows.filter((row) => active && row.turn.list === "turn");
+  const live = rows.filter((row) => active && !busy(row) && row.turn.list !== "turn");
+  const of = (kind: MoveKind) => live.filter((row) => MOVE_OF[row.section] === kind && (kind !== "nudge" || now - (since(row) ?? now) >= HOLDS_MS));
+  const moves = ([["address", turn], ...(["merge", "confirm", "fix", "nudge"] as const).map((kind) => [kind, of(kind)] as const)] as const)
+    .flatMap(([kind, list]) => list.length ? [move(kind, list, now)] : []);
+  const stuck = new Set(of("nudge"));
+  const chores = live.filter((row) => (row.section === "nudge" && !stuck.has(row)) || row.section === "request" || row.section === "ready");
+  const held = rows.filter((row) => row.section === "held");
+  if (!moves.length && held.length && held.length === rows.length) moves.push(move("release", held, now));
+  return { moves, chores: chores.map((row) => row.prUrl) };
+}
+
+// ---------------------------------------------------------------------------
+// The finish line: how much is done, the date it answers to, and when it lands at the pace of the last two weeks.
+// ---------------------------------------------------------------------------
+
+export type Finish = {
+  /** "4 of 12 done": Linear's completed tickets of those it read, else merged PRs of every PR a read saw. */
+  done: string;
+  /** The date it answers to and where it stands: the Linear project's target, else the current cycle's end; null with neither. */
+  date: { text: string; tone: Tone } | null;
+  /** When its open PRs merge at the last 14 days' pace, "ETA Oct 14 at 1.5/wk"; amber past the date. Null with nothing open or merged. */
+  eta: { text: string; tone: Tone } | null;
+  /** The p expand: on track, what's left, who holds it, is it moving, and what stands between it and Done, a line each. */
+  answers: [string, string][];
+};
+
+function finish(card: DeckCard, rows: readonly DeckRow[], now: number): Finish {
+  const { linear, stats } = card;
+  const doneTickets = linear.states.filter((state) => state.type === "completed").reduce((sum, state) => sum + state.count, 0);
+  const left = linear.states.filter((state) => state.type !== "completed" && state.type !== "canceled");
+  const leftTickets = left.reduce((sum, state) => sum + state.count, 0);
+  const project = linear.projects.find((item) => item.targetDate);
+  const cycle = linear.cycles.filter((item) => item.endsAt && daysTo(item.endsAt, now) >= 0)
+    .sort((a, b) => Date.parse(a.endsAt!) - Date.parse(b.endsAt!))[0];
+  const target = project ? { at: project.targetDate!, label: `Target ${calendarDay(project.targetDate!)}`, name: "the target" }
+    : cycle ? { at: cycle.endsAt!, label: cycle.name ?? `Cycle ${cycle.number}`, name: "the cycle's end" } : null;
+  const days = target ? daysTo(target.at, now) : null;
+  const date: Finish["date"] = !target || days === null ? null
+    : days < 0 ? { text: `${target.label} · ${-days}d late`, tone: "red" }
+    : { text: `${target.label} · ${days ? `${days}d left` : "today"}`, tone: days ? "gray" : "amber" };
+  const rate = stats.mergedFortnight / 2;
+  const at = rate > 0 && stats.open > 0 ? now + stats.open / rate * 7 * DAY : null;
+  const behind = at !== null && days !== null && days >= 0 ? daysTo(at, now) - days : null;
+  const eta: Finish["eta"] = at === null ? null : { text: `ETA ${calendarDay(at)} at ${Number.isInteger(rate) ? rate : rate.toFixed(1)}/wk`, tone: behind !== null && behind > 0 ? "amber" : "gray" };
+  // Who each open PR waits on: you, for your move or feedback that waits on you, else the reviewers its next step names. Held, in flight,
+  // and stacked PRs wait on nobody yet.
+  const holders = tally(rows.filter((row) => row.section !== "held" && row.section !== "flight").flatMap((row) => row.turn.list === "turn" || row.step?.owner === "you" ? ["You"]
+    : row.step?.owner === "reviewers" ? (row.nudge.length ? row.nudge : row.reviewers.filter((review) => review.state === "requested").map((review) => review.login))
+      .map((login) => `@${login}`) : []));
+  const held = rows.filter((row) => row.section === "held").length;
+  const active = card.threads.filter((thread) => thread.status === "active").length;
+  const paced = at === null ? null : calendarDay(at);
+  const track = !stats.open ? `No open PRs${leftTickets ? `; ${plural(leftTickets, "ticket")} still open` : ""}`
+    : target && days !== null && days < 0 ? `${target.label} passed ${-days}d ago${paced ? ` · ETA ${paced}` : " · nothing merged in 14d"}`
+    : target && behind !== null ? behind > 0 ? `Behind: ETA ${paced}, ${behind}d after ${target.name}` : `On pace: ETA ${paced}, ${-behind}d to spare`
+    : target ? `Nothing merged in 14d to pace ${target.name}`
+    : paced ? `No date in Linear · ETA ${paced}` : "No date, and nothing merged in 14d";
+  return {
+    done: linear.known ? `${doneTickets} of ${linear.known} done` : `${card.progress.merged} of ${card.progress.merged + stats.open} merged`,
+    date, eta,
+    answers: [["On track?", track],
+      ["What's left", [linear.known ? `${plural(leftTickets, "open ticket")}${left.length ? `: ${left.map((state) => `${state.count} ${state.name}`).join(" · ")}` : ""}` : null,
+        plural(stats.open, "open PR"), linear.known ? null : "no Linear data"].filter(Boolean).join(" · ")],
+      ["Who holds it", holders || "Nobody: the rest is held, in flight, or stacked"],
+      ["Moving?", `${stats.mergedWeek} merged in 7d · ${stats.mergedFortnight} in 14d`],
+      ["To Done", [`${plural(stats.open, "open PR")}${held ? ` (${held} held)` : ""}`, leftTickets ? plural(leftTickets, "open ticket") : null,
+        active ? plural(active, "active thread") : null].filter(Boolean).join(" · ")]],
+  };
+}
+
 /** How strongly a suggestion's signals point at its target, as its group says it. */
 export type Strength = "strong" | "moderate" | "weak";
 /** One of a service card's suggestions, with the card's rows it covers. */
@@ -261,29 +276,32 @@ export type SuggestGroup = {
 export type Accepted = ReadonlyMap<string, { actionId: string; text: string; prUrls: readonly string[]; index?: number }>;
 export type CardScreen = {
   card: DeckCard; color: string;
-  status: { text: string; tone: Tone };
-  /** The status line's parts on an active card, "3 need you · 2 blocked · 1 in flight": the first two show those rows alone. */
-  counts: { key: "needs" | "blocked" | "flight" | "held"; n: number; text: string }[];
-  /** Needs you now, the PRs Advance plans (the safe moves drawn as needing you), and what Mark seen would settle. */
-  needsYou: number; advance: string[]; changed: number; settleable: boolean;
-  /** Its PRs on hold now, which its header's Held chip counts and jumps to. */
+  /** Your turn: its open PRs where a person's feedback waits on you (turnOf), which its strip chip and header count. A held PR isn't. */
+  yourTurn: number;
+  /** Its moves, ranked (rankMoves), and the chores Advance clears, with what they are: "nudge 2 · ready 1". */
+  moves: Move[]; chores: { prUrls: string[]; text: string };
+  /** Every row the keys know: each open PR as the read has it, and each that left since you marked the card seen. */
+  lines: DeckLine[];
+  /** What changed here since you marked it seen, and whether Mark seen has anything else to settle: a suggestion you accepted. */
+  changed: number; settleable: boolean;
+  /** Its PRs on hold now, which its Held toggle lists. */
   held: number;
-  next: { items: { text: string; owner: string | null; prUrl: string | null; ref: string | null }[] };
+  /** Its finish line and p expand, on an effort with an outcome; null on One-offs and cards no effort backs. */
+  finish: Finish | null;
+  /** Overview's: its first next step, its waits on others, and its open PRs by the move each needs. */
+  next: string | null;
   blocked: { prUrl: string; ref: string; on: string; what: string; age: string | null; dot: boolean }[];
-  stats: { open: number; mergedWeek: number; median: string; oldest: { text: string; title: string } | null; bar: { key: string; label: string; count: number; tone: Tone }[] };
+  stats: { open: number; mergedWeek: number; bar: { key: string; label: string; count: number; tone: Tone }[] };
   threads: { id: string; title: string; ref: string; status: string; age: string | null; dot: boolean }[];
   /**
-   * Chips for its projects (▣), initiatives (◇), and labels (#), a bar of its tickets' states, and its top project's target, all on one line
-   * on a wide card; then one [label, value] line per field Linear gave.
+   * Chips for its projects (▣), initiatives (◇), and labels (#), a bar of its tickets' states, and its top project's target, all on one line;
+   * then one [label, value] line per field Linear gave.
    */
   linear: { summary: string; chips: { kind: "project" | "initiative" | "label"; text: string }[]; bar: { name: string; count: number; tone: Tone }[];
     target: string | null; lines: [string, string][] };
-  people: { summary: string; waitOnYou: { login: string; count: number; title: string }[]; youWaitOn: { login: string; count: number; title: string }[] };
-  recent: { summary: string; items: { text: string; age: string }[] };
-  sections: SectionScreen[];
   /** A service card's suggestions, in the classifier's order; empty on an effort's card. */
   suggest: SuggestGroup[];
-  /** An effort's notes: all of them, and the line the collapsed tile shows; null on a card no effort backs. */
+  /** An effort's notes: all of them, and their first line; null on a card no effort backs. */
   notes: { body: string; first: string; revision: number } | null;
 };
 
@@ -305,44 +323,27 @@ const BAR: { key: string; label: string; tone: Tone; of: readonly DeckSection[] 
   { key: "ready", label: "ready to merge", tone: "green", of: ["merge"] }, { key: "yours", label: "your other moves", tone: "blue", of: ["confirm", "nudge", "request", "ready"] },
   { key: "fix", label: "to fix", tone: "amber", of: ["work"] }, { key: "flight", label: "in flight", tone: "gray", of: ["flight"] },
   { key: "blocked", label: "blocked", tone: "gray", of: ["blocked"] }, { key: "held", label: "held", tone: "gray", of: ["held"] }];
-const ACTIVITY: Record<DeckCard["activity"][number]["kind"], string> = { merged: "Merged", approved: "Approved", changes: "Changes asked on", pushed: "Pushed" };
 
 /** Where a suggestion points, as a row's chip says it. */
 const pointer = (target: SuggestionGroup["target"]) => target?.kind === "effort" ? `→ ${target.name}` : target?.kind === "new" ? `→ new ${target.name}`
   : target?.kind === "one-off" ? "→ One-offs" : null;
-
-/** Whether a drawn row is one a header count counts and shows alone: it needs you, or it's in Blocked where you saw it. */
-const inCount = (kind: RowFilter["kind"], line: DeckLine) => kind === "needs" ? line.needs : line.section === "blocked" && !line.ghost;
+/** A chore's kind, as the Advance line counts it. */
+const CHORE: Partial<Record<DeckSection, string>> = { nudge: "nudge", request: "request", ready: "ready" };
 
 /**
- * A card as the deck draws it, with its rows settled against what you last marked seen. On a service card, each row names where its
- * suggestion points, and `accepted` collapses the suggestions you took.
+ * A card as the deck draws it: its moves and chores from the read, its finish line, and its rows against what you last marked seen,
+ * which only counts what changed. On a service card, each row names where its suggestion points, and `accepted` collapses the
+ * suggestions you took.
  */
-export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>>; at: Readonly<Record<string, number>> },
-  context: Omit<LineContext, "seenAt"> & { accepted?: Accepted }): CardScreen {
+export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string, readonly SettledRow[]>> }, context: { now: number; accepted?: Accepted }): CardScreen {
   const { now } = context;
-  const lineContext = { ...context, seenAt: seen.at };
   const current = card.sections.flatMap((section) => section.rows);
   const groupOf = new Map(card.suggestions.flatMap((group) => group.prs.map((pr) => [pr.prUrl, group] as const)));
-  const shown = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => {
+  const lines = settleRows(seen.rows[card.id], current, DECK_SECTIONS).map((item) => {
     const chip = pointer(groupOf.get(item.prUrl)?.target ?? null);
-    return deckLine(item, card.pile, lineContext, chip && !item.ghost ? [chip] : []);
+    return deckLine(item, card.pile, chip && !item.ghost ? [chip] : []);
   });
-  const byPr = new Map(shown.map((line) => [line.prUrl, line]));
-  const sections = DECK_SECTIONS.flatMap((key): SectionScreen[] => {
-    const lines = shown.filter((line) => line.section === key);
-    // A row a read moved here waits where you saw it; its place here says so, and its link there lands on it.
-    const arriving = shown.filter((line) => line.to?.key === key).map((line) => ({ prUrl: line.prUrl, ref: line.ref }));
-    if (!lines.length && !arriving.length) return [];
-    const meta = SECTIONS[key];
-    const count = lines.filter((line) => line.needs).length;
-    // Held rows never need you; Release takes the ones still held.
-    const takes = key === "held" ? lines.filter(releasable).length : count;
-    // Asking threads says how many it asks, since each PR gets a thread's work of its own.
-    const action = meta.action && meta.button ? { id: meta.action, label: key === "work" ? `${meta.button} (${takes})` : meta.button, key: ACTION[meta.action].keys[0]!, count: takes,
-      enabled: takes > 0 && (card.pile === "active" || key === "held"), why: takes ? null : "Nothing left here; dimmed rows settle on Mark seen" } : null;
-    return [{ key, meta, count, changed: lines.filter((line) => line.dot !== null).length, lines, arriving, action }];
-  });
+  const byPr = new Map(lines.map((line) => [line.prUrl, line]));
   const counts = (of: readonly DeckSection[]) => current.filter((row) => of.includes(row.section)).length;
   const threads = settleRows(seen.rows[threadsKey(card.id)], card.threads.map(threadRow)).filter((item) => !item.ghost).map((item) => {
     const thread = card.threads.find((candidate) => candidate.id === item.prUrl)!;
@@ -350,8 +351,6 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     return { id: thread.id, title: thread.title, ref: thread.role === "parent" ? "parent" : pr ? refOf(pr) : "", status: thread.status,
       age: thread.lastActivityAt === null ? null : age(thread.lastActivityAt, now), dot: item.change !== null || item.arrived };
   });
-  const people = (list: DeckCard["people"]["youWaitOn"]) => list.map((person) => ({ login: person.login, count: person.prs.length,
-    title: person.prs.map((pr) => `${pr.ref}${pr.since === null ? "" : `, ${age(pr.since, now)}`}`).join("; ") }));
   const { linear } = card;
   const tallies = (list: readonly { name: string; count: number }[]) => list.map((item) => `${item.name}${item.count > 1 ? ` ${item.count}` : ""}`).join(" · ");
   const top = linear.projects[0];
@@ -361,35 +360,21 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     ["Assignees", linear.assignees.map((person) => person.name).join(", ")],
     ["Target", linear.projects.flatMap((project) => project.targetDate ? [`${calendarDay(project.targetDate)} ${project.name}`] : []).join(" · ")],
     ["Parent", tallies(linear.parents)], ["Read", `${linear.known} of ${plural(linear.tickets, "ticket")}`]] as [string, string][]).filter(([, value]) => value);
-  const waitOnYou = people(card.people.waitOnYou), youWaitOn = people(card.people.youWaitOn);
-  const first = card.activity[0];
-  const needsYou = shown.filter((line) => line.needs).length;
-  const suggest = suggestGroups(card, shown, context.accepted ?? new Map());
-  // Worded from the rows as drawn, so the header, the strip, and the sections agree while rows wait for Mark seen.
-  const held = counts(["held"]), blocked = shown.filter((line) => inCount("blocked", line)).length;
-  const parts = ([["needs", needsYou, "need you"], ["blocked", blocked, "blocked"], ["flight", counts(["flight"]), "in flight"], ["held", held, "held"]] as const)
-    .flatMap(([key, n, word]) => n ? [{ key, n, text: `${n} ${word}` }] : []);
+  const suggest = suggestGroups(card, lines, context.accepted ?? new Map());
+  const { moves, chores } = rankMoves(current, card.pile, now);
   return {
     card, color: effortColor(card.id, card.oneOff),
-    status: card.pile === "held" ? { text: card.status.text, tone: "gray" }
-      : { text: parts.map((part) => part.text).join(" · ") || "No open PRs", tone: needsYou ? "amber" : blocked || held ? "blue" : current.length ? "green" : "gray" },
-    counts: card.pile === "held" ? [] : parts,
-    needsYou,
-    advance: shown.filter((line) => line.needs && (BATCH_KINDS as readonly string[]).includes(line.section)).map((line) => line.prUrl),
-    held,
-    changed: shown.filter((line) => line.dot !== null).length + threads.filter((thread) => thread.dot).length,
-    // Only a landed write's dim is Mark seen's to settle: a waiting write isn't done, and a refused one never dimmed. So are rows and
-    // suggestions you moved from here.
-    settleable: shown.some((line) => line.row?.acted?.state === "sent" && !counted(line.row, seen.at[line.prUrl]))
-      || shown.some((line) => line.ghost && !line.dot) || suggest.some((group) => group.accepted),
-    next: { items: card.next.map((item) => {
-      const row = item.prUrl ? current.find((candidate) => candidate.prUrl === item.prUrl) : undefined;
-      return { text: item.text, owner: item.owner, prUrl: row ? item.prUrl : null, ref: row ? refOf(row) : null };
-    }) },
+    yourTurn: current.filter((row) => row.turn.list === "turn").length,
+    moves, chores: { prUrls: chores, text: tally(chores.map((prUrl) => CHORE[byPr.get(prUrl)!.section]!)) },
+    lines,
+    changed: lines.filter((line) => line.dot).length + threads.filter((thread) => thread.dot).length,
+    settleable: suggest.some((group) => group.accepted),
+    held: counts(["held"]),
+    finish: card.kind === "effort" && !card.oneOff ? finish(card, current, now) : null,
+    next: card.next[0]?.text ?? null,
     blocked: card.blocked.map((item) => ({ prUrl: item.prUrl, ref: item.ref, on: item.on, what: item.what, age: item.since === null ? null : age(item.since, now),
-      dot: byPr.get(item.prUrl)?.dot != null })),
-    stats: { open: card.stats.open, mergedWeek: card.stats.mergedWeek, median: card.stats.medianAgeMs === null ? "—" : age(now - card.stats.medianAgeMs, now),
-      oldest: card.stats.oldestWait && { text: age(card.stats.oldestWait.since, now), title: `${card.stats.oldestWait.ref}: ${card.stats.oldestWait.text}` },
+      dot: !!byPr.get(item.prUrl)?.dot })),
+    stats: { open: card.stats.open, mergedWeek: card.stats.mergedWeek,
       bar: BAR.map((segment) => ({ key: segment.key, label: segment.label, tone: segment.tone, count: counts(segment.of) })).filter((segment) => segment.count) },
     threads,
     linear: { summary: linear.known === 0 ? "no Linear data" : [top?.name, target].filter(Boolean).join(" · ") || `${linear.known} of ${linear.tickets} tickets`,
@@ -399,13 +384,11 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
       bar: linear.states.map((state) => ({ name: state.name, count: state.count,
         tone: state.type === "completed" ? "green" as const : state.type === "started" ? "blue" as const : "gray" as const })),
       target, lines: linear.known ? linearLines : [] },
-    people: { waitOnYou, youWaitOn, summary: waitOnYou.length ? `@${waitOnYou[0]!.login} waits on you` : youWaitOn.length ? `you wait on ${youWaitOn.length}` : "nobody" },
-    recent: { summary: first ? `${ACTIVITY[first.kind]} ${first.ref} ${age(first.at, now)} ago` : "quiet",
-      items: card.activity.map((item) => ({ text: `${ACTIVITY[item.kind]} ${item.ref}${item.who ? ` · @${item.who}` : ""}`, age: age(item.at, now) })) },
-    sections, suggest,
+    suggest,
     notes: card.notes && { body: card.notes.body, first: firstLine(card.notes.body), revision: card.notes.revision },
   };
 }
+
 
 const STRENGTH: Record<NonNullable<SuggestionGroup["confidence"]>, Strength> = { high: "strong", medium: "moderate", low: "weak" };
 
@@ -413,16 +396,6 @@ const STRENGTH: Record<NonNullable<SuggestionGroup["confidence"]>, Strength> = {
 export function acceptLabel(target: SuggestionGroup["target"], n: number): string {
   return target?.kind === "effort" ? `Put ${n} in ${target.name}` : target?.kind === "new" ? `New effort from ${n}`
     : target?.kind === "one-off" ? `Mark ${n} one-off${n === 1 ? "" : "s"}` : "Pick per PR";
-}
-
-/**
- * What Accept takes from a selection across the groups `keys`. A weak group asks on its own, so across two or more groups Accept takes
- * the rest and leaves each weak one, and `left` says so; a lone weak group is taken, and its Accept opens its confirm.
- */
-export function acceptPlan(groups: readonly Pick<SuggestGroup, "key" | "button">[], keys: readonly string[]): { take: string[]; left: string | null } {
-  const weak = keys.length > 1 ? keys.filter((key) => groups.some((group) => group.key === key && group.button.confirm)) : [];
-  const n = weak.length;
-  return { take: keys.filter((key) => !weak.includes(key)), left: n ? `${n} weak group${n === 1 ? "" : "s"} left: accept ${n === 1 ? "it" : "each"} alone.` : null };
 }
 
 /**
@@ -456,42 +429,20 @@ function suggestGroups(card: DeckCard, shown: readonly DeckLine[], accepted: Acc
   return groups.filter((group) => group.lines.length || group.accepted);
 }
 
+
 /** Each open row's state and section in one read, by PR, to tell what a later read changed. */
 export type RowFacts = ReadonlyMap<string, { ref: string; status: string; section: DeckSection }>;
 export function rowFacts(view: Pick<DeckView, "active" | "held">): RowFacts {
   return new Map([...view.active, ...view.held].flatMap((card) => card.sections.flatMap((section) => section.rows.map((row) =>
     [row.prUrl, { ref: refOf(row), status: row.status, section: row.section }] as const))));
 }
-/** The rows a read changed since the one before it: its state or section moved, or it left. The deck flashes what changed on each. */
-export function changedRows(before: RowFacts, after: RowFacts): string[] {
-  return [...before].flatMap(([prUrl, was]) => {
-    const now = after.get(prUrl);
-    return !now || now.status !== was.status || now.section !== was.section ? [prUrl] : [];
-  });
-}
-/** What a row's Refresh found, in the hint bar: what changed and where the row goes, or that nothing did. */
+/** What a row's Refresh found, in the hint bar: what changed and where the row is now, or that nothing did. */
 export function refreshNote(ref: string, before: { status: string; section: DeckSection } | null, after: { status: string; section: DeckSection } | null,
   gone: { how: "merged" | "closed" } | null): string {
   if (!after) return `${ref}: ${gone ? (gone.how === "merged" ? "merged" : "closed") : "left this card"}`;
   if (!before || (before.status === after.status && before.section === after.section)) return `Read ${ref} just now · no change`;
-  const moved = before.section !== after.section ? `moves to ${SECTIONS[after.section].title} on Mark seen` : null;
+  const moved = before.section !== after.section ? `now in ${SECTIONS[after.section].title}` : null;
   return `${ref}: ${[before.status !== after.status && `${before.status} → ${after.status}`, moved].filter(Boolean).join(" · ")}`;
-}
-
-/** What a header count shows alone now: the rows that match, which the filter keeps until you show all. */
-export function rowFilter(screen: CardScreen, kind: RowFilter["kind"]): RowFilter {
-  return { kind, prUrls: screen.sections.flatMap((section) => section.lines).filter((line) => inCount(kind, line))
-    .map((line) => line.prUrl) };
-}
-/** A card's sections cut to what its filter shows: the rows it named, and any that match it now. */
-export function filterSections(screen: CardScreen, filter: RowFilter | null): SectionScreen[] {
-  if (!filter) return screen.sections;
-  const now = new Set(rowFilter(screen, filter.kind).prUrls);
-  const keep = (prUrl: string) => now.has(prUrl) || filter.prUrls.includes(prUrl);
-  return screen.sections.flatMap((section) => {
-    const lines = section.lines.filter((line) => keep(line.prUrl));
-    return lines.length ? [{ ...section, lines, arriving: section.arriving.filter((item) => keep(item.prUrl)) }] : [];
-  });
 }
 
 /** The top bar's read status: when the deck last read GitHub, and GitHub's rate limit while it holds reads. */
@@ -500,17 +451,20 @@ export function readText(view: Pick<DeckView, "checkedAt" | "refreshing" | "limi
   return `${limited}${view.refreshing ? "Reading now · " : ""}Read ${view.checkedAt ? `${age(Date.parse(view.checkedAt), now)} ago` : "never"}`;
 }
 
-/** One strip chip: Overview, then the active pile in session order, service cards after the efforts. `service`: no stored effort backs it. */
+/**
+ * One strip chip: Overview, then the active pile in session order, service cards after the efforts. `count` is Your turn, so amber means a
+ * person waits on you. `service`: no stored effort backs it.
+ */
 export type Chip = { id: string; n: number | null; name: string; color: string; count: number; ping: boolean; service: boolean };
 export function stripChips(order: readonly string[], cards: ReadonlyMap<string, CardScreen>, cur: string | null): Chip[] {
   return [{ id: "overview", n: null, name: "Overview", color: "", count: 0, ping: false, service: false }, ...order.filter((id) => cards.has(id)).map((id, index) => {
     const card = cards.get(id)!;
-    return { id, n: index < 9 ? index + 1 : null, name: card.card.name, color: card.color, count: card.needsYou, ping: id !== cur && card.changed > 0,
+    return { id, n: index < 9 ? index + 1 : null, name: card.card.name, color: card.color, count: card.yourTurn, ping: id !== cur && card.changed > 0,
       service: card.card.kind !== "effort" };
   })];
 }
 
-/** What the keys can act on: the view, the card or deck shown, the focused row, and the selection. */
+/** What the keys can act on: the view, the card or deck shown, the focused row, and the Your turn rows ticked for Address. */
 export type KeyContext = {
   view: "deck" | "prs";
   /** The card shown on the deck, or Overview. */
@@ -518,10 +472,9 @@ export type KeyContext = {
   /** The first service card, which u goes to; none when nothing open is outside an effort. */
   service?: string | null;
   focused: DeckLine | null;
+  /** On the deck, the Address move's rows you left ticked, which b takes. */
   selected: readonly DeckLine[];
   seenAvailable: boolean; undo: boolean; held: number; done: number;
-  /** The header count whose rows show alone. */
-  filter?: RowFilter["kind"] | null;
   /**
    * In All PRs: whether a row is focused, whether it has a thread, and the moves its inventory row offers; whether the focused row is on Your
    * turn, which x selects; how many rows Your turn lists, which ⇧X selects; and how many are selected, which b addresses.
@@ -531,40 +484,27 @@ export type KeyContext = {
 export type Availability = Record<DeckActionId, { on: boolean; why: string }>;
 
 /**
- * Which rows an act key would take: the selected rows with that move, else the focused row when it has it, else every row in the card
- * with it; for review notes, only one row. Only rows that need you count, or for Release, rows still held; a dimmed row waits for Mark seen.
+ * Which rows an act key would take: the focused row when it has that move, else the card's move of that kind, the rows its button lists,
+ * else every row on the card with it; for review notes, only one row. Only rows a move takes now count, or for Release, rows still held.
  */
-export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "focused" | "selected">): DeckLine[] {
+export function targets(id: DeckActionId, context: Pick<KeyContext, "cur" | "focused">): DeckLine[] {
   const section = SECTION_OF[id];
   if (!section) return [];
   // Overview draws no rows, so no key takes any from it.
   const card = context.cur === "overview" ? null : context.cur;
   const take = (lines: readonly DeckLine[]) => lines.filter((line) => (section === "held" ? releasable(line) : line.needs) && line.section === section);
-  // Review notes are read and confirmed one PR at a time: the focused row's, else the card's first, never a selection's.
-  if (id === "confirm") return context.focused && take([context.focused]).length ? [context.focused]
-    : card ? take(card.sections.flatMap((item) => item.lines)).slice(0, 1) : [];
-  if (context.selected.length) return take(context.selected);
   if (context.focused && take([context.focused]).length) return [context.focused];
-  return card ? take(card.sections.flatMap((item) => item.lines)) : [];
-}
-
-/**
- * What Advance takes now, which the a key, its buttons, and the hint bar share: the selection, which the confirm lists with why any of it
- * is left out; else the focused row, when its next step is a safe one; else every safe move on the card. Never a merge.
- */
-export function advanceTarget(context: Pick<KeyContext, "cur" | "focused" | "selected">): { scope: "selected" | "row" | "card"; prUrls: string[] } | null {
-  const card = context.cur;
-  if (!card || card === "overview" || card.card.pile !== "active") return null;
-  const safe = (line: DeckLine) => line.inline?.id === "advance";
-  if (context.selected.length) return context.selected.some(safe) ? { scope: "selected", prUrls: context.selected.map((line) => line.prUrl) } : null;
-  if (context.focused && safe(context.focused)) return { scope: "row", prUrls: [context.focused.prUrl] };
-  return card.advance.length ? { scope: "card", prUrls: card.advance } : null;
+  if (!card) return [];
+  const move = card.moves.find((item) => item.kind === id);
+  const list = take(card.lines).filter((line) => !move || move.prUrls.includes(line.prUrl));
+  // Review notes are read and confirmed one PR at a time: the focused row's, else the card's first, never a batch.
+  return id === "confirm" ? list.slice(0, 1) : list;
 }
 
 const NO_CARD = "open an effort card";
 const NOTHING = { merge: "nothing is ready to merge", confirm: "no notes are waiting", nudge: "no nudge is due", request: "every PR has a reviewer",
   ready: "no draft is ready", release: "nothing here is on hold", fix: "no PR here needs a thread's fix" } as const;
-/** The selected deck rows Address takes: live ones All PRs lists on Your turn. The listing says why any it can't take stays out. */
+/** The ticked deck rows Address takes: live ones All PRs lists on Your turn. The listing says why any it can't take stays out. */
 export const addressPicks = (selected: readonly DeckLine[]): DeckLine[] => selected.filter((line) => !line.dim && line.row?.turn.list === "turn");
 /** Every action's availability now, with why one can't run, for the keys, the hint bar, the ? sheet, and ⌘K. */
 export function availability(context: KeyContext): Availability {
@@ -573,8 +513,9 @@ export function availability(context: KeyContext): Availability {
   const card = deck && context.cur !== "overview" ? context.cur : null;
   const live = !!card && card.card.pile === "active";
   const service = !!card && card.card.kind === "service";
-  const scoped = selected.length ? selected.some((line) => !line.dim) : !!focused?.row && !focused.dim;
-  const sorting = service && scoped;
+  const row = deck ? !!focused?.row && !focused.ghost : !!context.prs?.row;
+  // A service card's rows move one at a time, from the focused row.
+  const sorting = service && row && !focused!.dim;
   // An effort's rows move to One-offs too, as an explicit move out of it; One-offs' own rows are there already.
   const leaves = !!card && card.card.kind === "effort" && !card.card.oneOff;
   const prs = context.prs;
@@ -585,73 +526,65 @@ export function availability(context: KeyContext): Availability {
   set("view", true); set("seen", deck && context.seenAvailable, deck ? "nothing changed here" : "Efforts only");
   set("hold-pile", deck && context.held > 0, deck ? "no effort is on hold" : "Efforts only");
   set("done-pile", deck && context.done > 0, deck ? "no effort is done" : "Efforts only");
-  set("advance", deck && advanceTarget(context) !== null, !card ? (deck ? NO_CARD : "Efforts only") : !live ? "this card is paused"
-    : selected.length ? "nothing selected has a safe step" : "nothing safe to run");
+  set("advance", live && card!.chores.prUrls.length > 0, !card ? (deck ? NO_CARD : "Efforts only") : !live ? "this card is paused" : "no chores here");
   const effort = card?.card.kind === "effort";
   const stays = card?.card.oneOff ? "One-offs stays active" : !effort ? "this card stays active" : "it's on hold";
   set("hold", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
   set("complete", live && !card!.card.oneOff && effort, card ? stays : deck ? NO_CARD : "Efforts only");
   set("held", !!card && card.held > 0, card ? "nothing here is on hold" : deck ? NO_CARD : "Efforts only");
+  set("progress", !!card?.finish, card ? "only an effort with an outcome has a finish line" : deck ? NO_CARD : "Efforts only");
   set("promote", service && card!.card.stats.open > 0, service ? "no open PRs here" : card ? "only a service card promotes" : deck ? NO_CARD : "Efforts only");
-  set("tiles", !!card, deck ? NO_CARD : "Efforts only");
   set("notes", !!card?.notes, card ? "only an effort keeps notes" : deck ? NO_CARD : "Efforts only");
   for (const id of ["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const) {
     if (!deck) { set(id, !!prs?.moves.has(id), prs?.row ? "the row has no such move" : "focus a row first"); continue; }
     set(id, (live || id === "release") && targets(id, context).length > 0, !card ? NO_CARD : NOTHING[id]);
   }
-  // Address takes the selection's Your turn rows, never a row by focus alone: you pick what one thread gets.
+  // Address takes the Your turn rows ticked for it, never a row by focus alone: you pick what one thread gets.
   const picked = deck ? addressPicks(selected).length : prs?.picked ?? 0;
-  set("address", (deck ? live : true) && picked > 0, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : "select Your turn rows first");
+  set("address", (deck ? live : true) && picked > 0, deck && !card ? NO_CARD : deck && !live ? "this card is paused" : deck ? "no Your turn row is ticked" : "select Your turn rows first");
   set("undo", context.undo, "nothing to undo");
-  const row = deck ? !!focused?.row && !focused.ghost : !!prs?.row;
-  // In All PRs, a row holds or refreshes only when its list offers it. Refresh takes the selection when there is one.
+  // In All PRs, a row holds or refreshes only when its list offers it. Refresh takes the selection there when there is one.
   set("hold-pr", deck ? row : !!prs?.moves.has("hold-pr"), deck || !row ? "focus a row first" : "the row has no such move");
-  set("refresh", deck ? row || selected.some((line) => !!line.row) : !!prs?.picked || !!prs?.moves.has("refresh"),
-    deck || !row ? "focus or select a row first" : "the row has no such move");
+  // Your confirmation of a PR's review notes clears its merge gate; taking it back makes the notes yours again. Only the deck offers it.
+  set("revoke", deck && !!focused?.row?.confirmation, !deck ? "Efforts only" : row ? "you haven't confirmed its notes" : "focus a row first");
+  set("refresh", deck ? row : !!prs?.picked || !!prs?.moves.has("refresh"), deck || !row ? "focus a row first" : "the row has no such move");
   set("row-next", !deck || context.cur !== "overview", "no rows on Overview"); set("row-prev", !deck || context.cur !== "overview", "no rows on Overview");
-  set("select", deck ? !!focused && !focused.dim : !!prs?.selectable, deck ? "focus a live row first" : "focus a Your turn row first");
-  set("select-section", deck ? !!focused : (prs?.turn ?? 0) > 0, deck ? "focus a row first" : "nothing is on Your turn");
-  set("expand", deck && !!focused, deck ? "focus a row first" : "Efforts only");
-  set("clear", selected.length > 0 || !!context.filter || (prs?.picked ?? 0) > 0, "nothing selected");
-  const count = (kind: RowFilter["kind"]) => !!card && (context.filter === kind || card.counts.some((part) => part.key === kind));
-  set("only-needs", count("needs"), card ? "nothing here needs you" : deck ? NO_CARD : "Efforts only");
-  set("only-blocked", count("blocked"), card ? "nothing here is blocked" : deck ? NO_CARD : "Efforts only");
+  const turnRow = !!focused && !focused.dim && focused.row?.turn.list === "turn";
+  set("select", deck ? turnRow : !!prs?.selectable, deck ? "focus a Your turn row first" : "focus a Your turn row first");
+  set("select-section", deck ? !!card && card.yourTurn > 0 : (prs?.turn ?? 0) > 0, "nothing is on Your turn");
+  set("expand", deck && !!card && card.moves.length > 0, deck ? (card ? "nothing to move here" : NO_CARD) : "Efforts only");
+  set("clear", selected.length > 0 || (prs?.picked ?? 0) > 0, "nothing ticked");
   set("open-thread", deck ? !!focused?.row?.thread : !!prs?.thread, row ? "the row has no thread" : "focus a row first");
   set("open-pr", row, "focus a row first");
   set("accept", sorting, service ? "focus a row first" : "only a service card's rows move from here");
-  set("move", sorting, service ? "focus or select a row" : "only a service card's rows move from here");
-  set("one-off", (service || leaves) && scoped, !card ? (deck ? NO_CARD : "Efforts only") : card.card.oneOff ? "they're in One-offs"
-    : service || leaves ? "focus or select a row" : "only an effort's or a service card's rows move from here");
-  set("new-effort", service && selected.length > 0, service ? "select rows first" : "only a service card's rows move from here");
+  set("move", sorting, service ? "focus a row first" : "only a service card's rows move from here");
+  set("one-off", (service || leaves) && row && !focused!.dim, !card ? (deck ? NO_CARD : "Efforts only") : card.card.oneOff ? "they're in One-offs"
+    : service || leaves ? "focus a row first" : "only an effort's or a service card's rows move from here");
+  set("new-effort", sorting, service ? "focus a row first" : "only a service card's rows move from here");
   set("rule", deck, "Efforts only");
   set("seed", deck, "Efforts only");
   set("palette", true); set("help", true);
   return out;
 }
 
+/** The verb a move's key says in the hint bar. */
+const HINT: Record<MoveKind, string> = { address: "address", merge: "merge", confirm: "confirm", fix: "fix", nudge: "nudge", release: "release" };
 /** The few keys that matter now, for the hint bar: [kbd, what it does]. */
 export function hintKeys(context: KeyContext, on: Availability): [string, string][] {
   const { focused } = context;
   const card = context.cur === "overview" ? null : context.cur;
   const pick = (...items: ([DeckActionId, string] | false)[]) => items.flatMap((item) => item && on[item[0]].on ? [[ACTION[item[0]].keys.join(" "), item[1]] as [string, string]] : []);
-  const move = (["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const).find((id) => on[id].on
-    && (context.view === "prs" || (!!focused && targets(id, { cur: null, focused, selected: [] }).length > 0)));
-  const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : move === "fix" ? "ask to fix"
-    : ACTION[move].title.replace("…", "").toLowerCase()] as
-    [DeckActionId, string] : false;
-  if (context.view === "prs") return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["refresh", "refresh"], ["clear", "clear"])
-    : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
-  // a takes the focused row when its step is safe, else the whole card: the hint says which.
-  const scope = advanceTarget(context)?.scope;
-  const advance: [DeckActionId, string] = ["advance", scope === "selected" ? "advance selected" : scope === "row" ? "advance row"
-    : card?.card.kind === "effort" ? "advance effort" : "advance card"];
-  // On the row, a says its safe step, so its own key needn't; a merge, or a release, keeps its own.
-  const rowHint = move === "merge" || move === "release" || move === "confirm" || move === "fix" ? moveHint : false;
-  if (context.selected.length) return [["x", "toggle"], ...pick(advance, ["address", "address selected"], ["accept", "accept"], ["move", "move…"], ["refresh", "refresh"], ["clear", "clear"])];
-  if (focused?.dim) return pick(["row-next", "rows"], ["undo", "undo"], ["expand", "details"], ["seen", "mark seen"]);
-  if (focused && card?.card.kind === "service") return pick(["row-next", "rows"], rowHint, advance, ["accept", "accept"], ["move", "move…"], ["expand", "details"]);
-  if (focused) return pick(["row-next", "rows"], rowHint, advance, ["select", "select"], ["expand", "details"], ["open-thread", "open thread"], ["refresh", "refresh"]);
-  return pick(["next", "flip"], ["row-next", "rows"], advance, context.filter ? ["clear", "show all"] : ["held", "held"], ["seen", "mark seen"], ["merge", "merge"]);
+  if (context.view === "prs") {
+    const move = (["merge", "confirm", "nudge", "request", "ready", "release", "fix"] as const).find((id) => on[id].on);
+    const moveHint = move ? [move, move === "merge" ? "preview merge" : move === "release" ? "release" : move === "fix" ? "ask to fix"
+      : ACTION[move].title.replace("…", "").toLowerCase()] as [DeckActionId, string] : false;
+    return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["refresh", "refresh"], ["clear", "clear"])
+      : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
+  }
+  // The card's moves, each by its key, in rank order; then its chores and its finish line.
+  const moves = (card?.moves ?? []).map((item) => [item.kind, HINT[item.kind]] as [DeckActionId, string]);
+  if (focused) return pick(["row-next", "rows"], ...moves, ["select", "tick"], ["open-thread", "open thread"], ["refresh", "refresh"], ["expand", "fold"]);
+  return pick(["row-next", "rows"], ...moves, ["advance", "advance"], ["progress", "progress"], ["next", "flip"], ["seen", "mark seen"]);
 }
 
 /** One palette entry: a registry action, or a go-to, resume, or reopen for one effort. */
