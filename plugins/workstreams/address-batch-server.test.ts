@@ -147,7 +147,8 @@ const spawned = (env: Env) => env.spawn.mock.calls.map(([args]) => args as unkno
   providerId: string; model: string; reasoningLevel: string; environment: unknown; pluginMetadata: { role: string; runIds: number[] } });
 /** The batch thread's work order, each PR's line by its number. */
 const orders = (env: Env) => new Map(spawned(env)[0]!.prompt.split("\n").filter((line) => line.startsWith('{"pr"'))
-  .map((line) => JSON.parse(line) as { url: string; checkout: string | null; worktreeFrom: string | null; threads: unknown }).map((order) => [Number(order.url.split("/").pop()), order]));
+  .map((line) => JSON.parse(line) as { url: string; checkout: string | null; worktreeFrom: string | null; mergeState: string; threads: unknown })
+  .map((order) => [Number(order.url.split("/").pop()), order]));
 /** A checkout the scan found with no PR linked. */
 const worktree = (path: string, githubRepo: string, branch: string): RawUnit => ({ path, dirName: path.split("/").pop()!, repo: githubRepo, githubRepo, branch,
   dirty: false, ahead: 0, behind: 0, lastCommitAt: null, defaultBranch: "main", pr: null, shipped: null, changedPaths: [], observed: { status: true, pr: true } });
@@ -221,6 +222,23 @@ describe("addressing Your turn PRs in one batch thread", () => {
       sent: { state: "working", threadId: "thr-batch-1", title: "Address feedback: folio #42, #43, #44" } });
     expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);
     expect((await env.card()).threads.map((thread) => thread.id)).toContain("thr-batch-1");
+  });
+
+  // The thread brings each PR's base in once its feedback is handled, so its line says what the row's facts show of the merge state,
+  // from GitHub's read at the start rather than a new one: a conflict, a branch behind its base, red checks, clean, or unknown while
+  // GitHub hasn't computed it.
+  it("gives each PR's line its merge state from its row's facts", async () => {
+    const env = await setup();
+    env.current.set(43, { ...env.current.get(43)!, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
+    env.current.set(44, { ...env.current.get(44)!, mergeStateStatus: "BEHIND" });
+    env.current.set(45, { ...env.current.get(45)!, mergeStateStatus: "UNSTABLE", checkConclusions: ["SUCCESS", "FAILURE"] });
+    env.current.set(46, { ...env.current.get(46)!, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" });
+    await env.refresh();
+    const plan = await env.plan([42, 43, 44, 45, 46].map(url));
+    await confirm(env, plan.batchId);
+    expect([...orders(env)].map(([number, order]) => [number, order.mergeState])).toEqual([[42, "clean"], [43, "conflicts"], [44, "behind"],
+      [45, "checks failing"], [46, "unknown"]]);
+    expect(env.reads.urls).toEqual([42, 43, 44, 45, 46].map(url));
   });
 
   // A PR the scan linked no checkout to still works where its branch already is, so the thread neither adds another worktree nor works on

@@ -143,7 +143,7 @@ import {
   withinPath,
 } from "./threads.js";
 import { startThread, type SpawnSdk } from "./spawn.js";
-import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS } from "./effort-recipes.js";
+import { addressBatchPrompt, addressBatchTitle, approvalFeedbackAsk, fixesFor, fixThreadAsk, FIX_WORDS, mergeStateFor } from "./effort-recipes.js";
 import { atWork, dismissalSchema, sentState, turnOf, yourTurn, type Dismissal, type Sent, type SentThread } from "./your-turn.js";
 import { MERGE_METHODS, mergeVerdict, shouldDeleteBranch, type DirectAction, type MergeMethod } from "./actions.js";
 import { sendRowMessage } from "./threadmessage.js";
@@ -4396,7 +4396,7 @@ export default async function plugin(bb: BbPluginApi) {
         const { origin, executor } = stop.threads(item.prUrl);
         return { prUrl: prWorkItemKey(item.prUrl), repo: prTarget(item.prUrl)?.slug ?? "", number: pr.number, title: pr.title,
           headOid: item.headOid!, headBranch: pr.headRefName, baseBranch: pr.baseRefName, checkout: path, worktreeFrom: source, feedback,
-          threads: { origin: ref(origin), executor: ref(executor) } };
+          mergeState: mergeStateFor(pr), threads: { origin: ref(origin), executor: ref(executor) } };
       }));
       const thread = await bb.sdk.threads.spawn({ ...(await modelFor("code")), projectId: place.projectId, title, prompt, environment: await contextWorkspace(hostId),
         ...(place.parentThreadId ? { parentThreadId: place.parentThreadId } : {}),
