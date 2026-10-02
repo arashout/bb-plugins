@@ -242,12 +242,38 @@ describe("the effort deck", () => {
       ["ABC-360", detail("ABC-360", "In Review", { project, labels: ["shelves"], assignee: "kai", cycle })],
       ["ABC-361", detail("ABC-361", "In Review", { parent: { identifier: "ABC-300", title: "Shelf order" }, labels: ["shelves"], assignee: "dana" })]]) }));
     // The effort's own ticket counts beside its PRs' tickets.
+    // Each ticket read keeps its own state type, priority, and points, for the rows' ticket chips and the p expand; an older row has none.
     expect(cardOf(view, INVENTORY_EFFORTS.shelf.id).linear).toEqual({ tickets: 6, known: 3, projects: [{ name: "Shelf order", count: 2, targetDate: "2026-10-17" }],
       initiatives: [{ name: "Reading rooms", count: 2 }], parents: [{ name: "ABC-300 Shelf order", count: 1 }],
       states: [{ name: "In Review", type: "started", count: 2 }, { name: "Done", type: "completed", count: 1 }], labels: [{ name: "shelves", count: 2 }],
-      cycles: [{ number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z", count: 2 }], assignees: [{ name: "dana", count: 2 }, { name: "kai", count: 1 }] });
+      cycles: [{ number: 42, name: null, endsAt: "2026-10-03T00:00:00.000Z", count: 2 }], assignees: [{ name: "dana", count: 2 }, { name: "kai", count: 1 }],
+      issues: [{ id: "ABC-300", type: "completed", priority: null, label: null, estimate: null }, { id: "ABC-360", type: "started", priority: null, label: null, estimate: null },
+        { id: "ABC-361", type: "started", priority: null, label: null, estimate: null }],
+      reconcile: { done: [], prUrls: [], merged: [] } });
     expect(cardOf(view, INVENTORY_EFFORTS.pickup.id).linear).toEqual({ tickets: 5, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [],
-      cycles: [], assignees: [] });
+      cycles: [], assignees: [], issues: [], reconcile: { done: [], prUrls: [], merged: [] } });
+  });
+
+  // Linear and GitHub disagreeing is a move of its own (Reconcile): a ticket done in Linear while its PR stays open wants a merge or a close,
+  // and an open ticket whose every PR merged wants Linear moved. Only a state Linear gave counts, and only merges the sync keeps fresh.
+  it("finds where Linear and GitHub disagree: done tickets with PRs open here, and open tickets every recent PR of which merged", () => {
+    const detail = (identifier: string, type: string, url: string | null = null): LinearDetail => ({ identifier, title: null, description: null,
+      state: { name: type, type }, project: null, parent: null, labels: [], url, updatedAt: null, source: "key" });
+    const shelf = INVENTORY_EFFORTS.shelf.id;
+    const merge = (number: number, daysAgo: number, tickets: string[]) => ({ url: url("folio", number), at: INVENTORY_NOW - daysAgo * DAY, effortId: shelf, tickets });
+    const view = deckView(input({ efforts: [effort("shelf", { tickets: ["ABC-300"] }), effort("pickup")],
+      merges: [merge(290, 2, ["ABC-390"]), merge(291, 3, ["ABC-391"]), merge(292, 5, ["ABC-392"]), merge(293, 20, ["ABC-393"]), merge(294, 1, ["ABC-370"]),
+        merge(295, 1, ["ABC-394"]), merge(296, 4, ["ABC-395"])],
+      linear: new Map([
+        // Done in Linear with folio #341 open; folio #342 open on a started ticket; the effort's own done ticket has no open PR.
+        ["ABC-361", detail("ABC-361", "completed")], ["ABC-362", detail("ABC-362", "started")], ["ABC-300", detail("ABC-300", "completed")],
+        // Open after their only PRs merged in the last 14 days, with Linear links; one canceled, one done, one merged 20 days ago.
+        ["ABC-390", detail("ABC-390", "started", "https://linear.app/inkwell/issue/ABC-390")], ["ABC-391", detail("ABC-391", "unstarted")],
+        ["ABC-392", detail("ABC-392", "canceled")], ["ABC-395", detail("ABC-395", "completed")], ["ABC-393", detail("ABC-393", "started")],
+        // Still open on Store pickup's quill #210, so not every PR of it merged.
+        ["ABC-370", detail("ABC-370", "started")]]) }));
+    expect(cardOf(view, shelf).linear.reconcile).toEqual({ done: ["ABC-361"], prUrls: [url("folio", 341)],
+      merged: [{ id: "ABC-390", url: "https://linear.app/inkwell/issue/ABC-390" }, { id: "ABC-391", url: null }] });
   });
 
   it("lists a done effort by name with what it merged and what is still open, without drawing its card", () => {

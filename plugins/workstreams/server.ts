@@ -4131,7 +4131,7 @@ export default async function plugin(bb: BbPluginApi) {
     const current = await board();
     const view = await inventoryGet(undefined, current);
     const pattern = compilePattern((await settings.get()).ticketPattern);
-    const merges = inventory.merges();
+    const merges = inventory.merges().map((merge) => ({ ...merge, tickets: prTickets(merge, pattern) }));
     // A merged PR's title and branch still place it by ticket after the board no longer lists it.
     const work = readWorkContext(current, pattern, false, merges.map((merge) => ({ prUrl: merge.url, title: merge.title, headRefName: merge.headRefName ?? "" })));
     // An archived effort still owns its PRs, so the deck lists it with the done efforts rather than lose them.
@@ -4162,8 +4162,10 @@ export default async function plugin(bb: BbPluginApi) {
       efforts: efforts.map((effort) => ({ id: effort.id, key: effort.key, name: effort.name, goal: effort.goal, oneOff: effort.id === oneOffs?.id,
         archived: !!effort.archivedAt, pile: effort.archivedAt ? { effortId: effort.id, pile: "done" as const, reason: "", since: effort.archivedAt } : piles.get(effort),
         parentThreadId: effort.coordinatorThreadId, tickets: effort.members.tickets, notes: effortNotes.get(effort.id) })),
-      merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id }] : []; }),
-      linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets)])]),
+      merges: merges.flatMap((merge) => { const owner = work.ownerForPr(merge.url); return owner ? [{ url: merge.url, at: merge.at, effortId: owner.id,
+        tickets: merge.tickets }] : []; }),
+      linear: linear.read([...new Set([...efforts.flatMap((effort) => effort.members.tickets), ...rows.flatMap((row) => row.tickets),
+        ...merges.flatMap((merge) => merge.tickets)])]),
       threads: new Map([...threadFacts].map(([id, facts]) => [id, { title: (facts.title ?? facts.titleFallback ?? id).slice(0, 200), status: facts.status,
         updatedAt: facts.updatedAt }])),
       homes: await threadHomes(efforts, work),

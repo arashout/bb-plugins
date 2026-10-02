@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pr } from "./contract.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
+import type { DeckView } from "./deck.js";
 import type { InventoryView } from "./inventory-view.js";
 import plugin from "./server.js";
 
@@ -37,6 +38,7 @@ async function setup(authored: Pr[], issues: Record<string, Issue>) {
     for (const match of query.matchAll(/(t\d+): issue\(id: "([^"]+)"\)/gu)) {
       const issue = issues[match[2]!];
       data[match[1]!] = issue ? { identifier: match[2], title: `Title of ${match[2]}`, state: { name: issue.state ?? "In Progress", type: "started" },
+        url: `https://linear.app/inkwell/issue/${match[2]}`,
         assignee: issue.assignee ? { name: issue.assignee, displayName: issue.assignee.toLowerCase() } : null,
         project: issue.project ? { id: issue.project.id, name: issue.project.name, description: issue.project.description ?? null,
           targetDate: issue.project.targetDate ?? null, initiatives: { nodes: (issue.project.initiatives ?? []).map((name) => ({ id: `init-${name}`, name })) } } : null } : null;
@@ -92,6 +94,18 @@ describe("Linear sync for your open PRs", () => {
     expect(env.asked().slice(1).sort()).toEqual(["ABC-380", "ABC-381", "ABC-383"]);
     expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
     expect(env.asked()).toHaveLength(4);
+  });
+
+  // A merged PR's ticket is read again after the merge, so the deck can say Linear still has it open.
+  it("shows the deck an effort's ticket still open in Linear after its only PR merged, with its Linear page", async () => {
+    const env = await setup([pr(313, "ABC-350 Footer year")], { "ABC-350": {}, "ABC-380": {} });
+    const labels = env.efforts.establish({ sourceKey: "ticket:ABC-380", name: "Shelf labels", goal: "", projectId: "project-folio", coordinatorState: "none",
+      members: { tickets: ["ABC-380"], prUrls: [] } });
+    env.bb.storage.database().prepare("INSERT INTO pr_merges (url, merged_at, title, head_ref) VALUES (?, ?, ?, ?)")
+      .run(url(300), Date.now() - 2 * DAY, "ABC-380 Print shelf labels", "reader/abc-380");
+    expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+    const card = (await env.call("deck_get", {}) as DeckView).active.find((item) => item.id === labels.id)!;
+    expect(card.linear.reconcile).toEqual({ done: [], prUrls: [], merged: [{ id: "ABC-380", url: "https://linear.app/inkwell/issue/ABC-380" }] });
   });
 });
 

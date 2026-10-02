@@ -7,8 +7,9 @@
 // card, else it opens on Overview, as the deck does, and "light" uses light
 // host colors (#effort-store-pickup,light), which want the browser's light
 // color scheme, since dark: follows it. "progress" opens the card's finish
-// line (#effort-shelf-order,progress), and "working" draws Store pickup while
-// Address plans its two ticked rows (#effort-store-pickup,working).
+// line (#effort-shelf-order,progress), "working" draws Store pickup while
+// Address plans its two ticked rows (#effort-store-pickup,working), and
+// "reconcile" shows the open PRs Reconcile names (#effort-shelf-order,reconcile).
 // The [ ] ← → keys, the strip's arrow buttons, and the next card's edge
 // flip it with the deck's own flip code (deck-flip.ts, bundled in), so the
 // motion shows too. Run: npx vite-node scripts/deck-preview.ts
@@ -33,16 +34,22 @@ const none = { rows: {}, at: {} };
 /** Sample notes, so the Notes tile shows: Shelf order's collapsed to their first line, Store pickup's open. */
 const NOTES: Record<string, string> = { "effort-shelf-order": "## Flags\n- shelf_v2 on for staff\n\nExperiment: sort by genre first.",
   "effort-store-pickup": "Pickup window copy waits on legal.\n\n- [ ] confirm hours with the stores" };
-/** Shelf order's tickets as Linear has them, with its project's target and the cycle they're in, so its finish line shows. */
+/**
+ * Shelf order's tickets as Linear has them, with priorities, points, its project's target, and the cycle they're in, so its finish line
+ * shows. ABC-361 and ABC-364 are Done while folio #341 and #330 stay open, and ABC-365 is open after folio #292 merged: Reconcile's lines.
+ */
 const DAY = 86_400_000;
-const ticket = (n: number, title: string, state: string, type: string): [string, LinearDetail] => [`ABC-${n}`, { identifier: `ABC-${n}`, title, description: null,
-  state: { name: state, type }, project: { id: "p1", name: "Shelf redesign", targetDate: "2026-10-14" }, parent: null, labels: ["shelves"], url: null, updatedAt: null,
-  cycle: { number: 41, name: null, endsAt: "2026-10-07T00:00:00.000Z" }, assignee: "Mira L", source: "agent" }];
-const linear = new Map([ticket(360, "Store shelf order", "In Review", "started"), ticket(361, "Read shelf order back", "Done", "completed"),
-  ticket(362, "Drag to reorder shelves", "In Review", "started"), ticket(363, "Undo a shelf move", "Todo", "unstarted"), ticket(364, "Keep shelf filters in the link", "Done", "completed")]);
+const ticket = (n: number, title: string, state: string, type: string, priority: number, estimate: number): [string, LinearDetail] => [`ABC-${n}`, { identifier: `ABC-${n}`,
+  title, description: null, state: { name: state, type }, project: { id: "p1", name: "Shelf redesign", targetDate: "2026-10-14" }, parent: null, labels: ["shelves"],
+  url: `https://linear.app/inkwell/issue/ABC-${n}`, updatedAt: null, cycle: { number: 41, name: null, endsAt: "2026-10-07T00:00:00.000Z" }, assignee: "Mira L",
+  priority, priorityLabel: null, estimate, source: "key" }];
+const linear = new Map([ticket(360, "Store shelf order", "In Review", "started", 2, 3), ticket(361, "Read shelf order back", "Done", "completed", 2, 2),
+  ticket(362, "Drag to reorder shelves", "In Review", "started", 1, 1), ticket(363, "Undo a shelf move", "Todo", "unstarted", 3, 2),
+  ticket(364, "Keep shelf filters in the link", "Done", "completed", 4, 1), ticket(365, "Label shelves by genre", "In Progress", "started", 3, 2)]);
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 /** Four Shelf order merges in the last two weeks, so its ETA paces at 2/wk. */
-const merges = [290, 291, 292, 293].map((number, index) => ({ url: url("folio", number), at: NOW - (1 + 3 * index) * DAY, effortId: "effort-shelf-order" }));
+const merges = [290, 291, 292, 293].map((number, index) => ({ url: url("folio", number), at: NOW - (1 + 3 * index) * DAY, effortId: "effort-shelf-order",
+  tickets: number === 292 ? ["ABC-365"] : [] }));
 const deck = inkwellDeck({ ...inkwellThreads(), linear, merges });
 /** All PRs' rows, which each move draws. */
 const lines = new Map(inventoryScreen(inkwellInventory(), { now: NOW, filter: null }).groups.flatMap((group) => group.lines.map((line) => [line.prUrl, line] as const)));
@@ -52,7 +59,7 @@ const cards = new Map(view.active.map((item) => [item.id, cardScreen(item, none,
 const ring = deckRing(order);
 /** Store pickup's Your turn rows, of which "working" leaves two ticked while Address plans. */
 const PICKED = new Set(["https://github.com/inkwell/quill/pull/210", "https://github.com/inkwell/quill/pull/211"]);
-const pane = (cur: string, working = false, progress = false) => {
+const pane = (cur: string, working = false, progress = false, reconcile = false) => {
   const card = cards.get(cur) ?? null;
   const ticked = (card?.moves.find((move) => move.kind === "address")?.prUrls ?? []).filter((prUrl) => !working || PICKED.has(prUrl));
   const selected = card?.lines.filter((line) => ticked.includes(line.prUrl)) ?? [];
@@ -65,7 +72,7 @@ const pane = (cur: string, working = false, progress = false) => {
     held: view.held.map((item) => ({ id: item.id, key: item.key, name: item.name, note: `${item.reason || "No reason given"} · ${item.stats.open} open` })),
     done: view.done.map((item) => ({ id: item.id, key: item.key, name: item.name, archived: item.archived, note: `${item.merged} merged · ${item.open} open` })),
     read: { text: "Read 25s ago", error: null }, seen: { changed: 0, available: false, note: null },
-    kit: { lines, picked: new Set(ticked), working: working ? PICKED : undefined }, open: new Set(progress ? ["progress"] : []),
+    kit: { lines, picked: new Set(ticked), working: working ? PICKED : undefined }, open: new Set([...progress ? ["progress"] : [], ...reconcile ? ["reconcile"] : []]),
     panel: cur === "effort-store-pickup" ? "notes" : null, pile: null,
     on, hints: hintKeys(context, on), flash: null, run: noop, onPalette: noop, onHelp: noop, onUndo: noop }));
 };
@@ -76,7 +83,7 @@ const ring = ${JSON.stringify(ring)};
 const frame = document.querySelector("[data-deck-frame]");
 const parts = decodeURIComponent(location.hash.slice(1)).split(",");
 if (parts.includes("light")) document.documentElement.className = "light";
-const variant = parts.includes("working") ? ":working" : parts.includes("progress") ? ":progress" : "";
+const variant = parts.includes("working") ? ":working" : parts.includes("progress") ? ":progress" : parts.includes("reconcile") ? ":reconcile" : "";
 const pane = (id) => (document.querySelector('template[data-card="' + CSS.escape(id + variant) + '"]')
   ?? document.querySelector('template[data-card="' + CSS.escape(id) + '"]')).content.cloneNode(true);
 const flips = flipper();
@@ -115,6 +122,7 @@ body{margin:0;background:var(--background);color:var(--foreground);font:13px/1.4
 ${ring.map((id) => `<template data-card="${id}">${pane(id)}</template>`).join("\n")}
 <template data-card="effort-store-pickup:working">${pane("effort-store-pickup", true)}</template>
 ${ring.map((id) => `<template data-card="${id}:progress">${pane(id, false, true)}</template>`).join("\n")}
+<template data-card="effort-shelf-order:reconcile">${pane("effort-shelf-order", false, false, true)}</template>
 <script type="module">${script}</script></body></html>`;
 const out = join(process.env.TMPDIR ?? tmpdir(), "deck-preview.html");
 writeFileSync(out, html);

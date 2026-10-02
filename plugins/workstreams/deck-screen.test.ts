@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckView } from "./deck.js";
 import { inkwellDeck, inkwellInventory, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, hintKeys, overviewScreen, paletteItems, stripChips, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { availability, cardScreen, hintKeys, overviewScreen, paletteItems, priorityOf, stripChips, type Accepted, type CardScreen, type KeyContext }
+  from "./deck-view-model.js";
 import { ConfirmBody, DeckPane, HelpBody, HintBar, NotesBody, PaletteBody, RuleBody, SeedBody, WeakBody, type ConfirmPlan, type DeckPaneProps } from "./deck-screen.js";
 import { notesScreen } from "./deck-view-model.js";
 import { inventoryScreen } from "./inventory-view-model.js";
@@ -133,7 +134,8 @@ describe("the effort deck's markup", () => {
     const html = pane(shelfLinear(), SHELF);
     expect(text(part(html, "data-deck-finish", "true"))).toContain("2 of 5 done · Target Oct 14 · 14d left · ETA Oct 18 at 2/wk");
     expect(html).toMatch(/<span class="text-amber-700 dark:text-amber-300">ETA Oct 18 at 2\/wk<\/span>/u);
-    expect([...html.matchAll(/data-deck-move="(\w+)"/gu)].map((match) => match[1])).toEqual(["merge", "fix"]);
+    // ABC-361 and ABC-364 are Done in Linear while folio #341 and #330 are open, so Reconcile ranks after them.
+    expect([...html.matchAll(/data-deck-move="(\w+)"/gu)].map((match) => match[1])).toEqual(["merge", "fix", "reconcile"]);
     expect(text(move(html, "merge"))).toContain("3 ready to merge Ready to merge 1 · stacked 2 Merge 3… m");
     expect(move(html, "merge")).toMatch(/data-deck-focus="act-merge"[^>]*class="[^"]*border-foreground bg-foreground/u);
     expect(button(html, "act-fix")).toEqual({ text: "Fix 1… f", disabled: false });
@@ -220,6 +222,32 @@ describe("the effort deck's markup", () => {
     expect(text(part(html, "data-deck-answers", "true"))).toContain("Behind: ETA Oct 18, 4d after the target");
     // One-offs merge on their own, so they draw no finish line.
     expect(pane(inkwellDeck(), ONE_OFFS)).not.toContain("data-deck-finish");
+  });
+
+  // Reconcile writes nothing: Show unfolds the open PRs of tickets Linear calls done, and the other line opens Linear to move a ticket.
+  it("draws Reconcile as a line per mismatch with its tickets and one button, Show unfolding its open PRs, and Open in Linear", () => {
+    const view = shelfLinear();
+    const merged = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, linear: { ...item.linear,
+      reconcile: { ...item.linear.reconcile, merged: [{ id: "ABC-365", url: "https://linear.app/inkwell/issue/ABC-365" }] } } } : item) };
+    const html = move(pane(merged, SHELF), "reconcile");
+    expect([...html.matchAll(/data-deck-mismatch="\w+"[^>]*>(.*?)<\/button><\/div>/gu)].map((match) => text(match[1]!).trim()))
+      .toEqual(["2 Done in Linear · 2 PRs open ABC-361, ABC-364 Show 2", "1 open with every PR merged ABC-365 Open in Linear ↗"]);
+    expect(html).toMatch(/title="Open ABC-365 in Linear"/u);
+    // Its rows fold until you show them, even as the card's only move; they're never ticked for Address.
+    expect(rows(html)).toEqual([]);
+    const shown = move(pane(merged, SHELF, { open: new Set(["reconcile"]) }), "reconcile");
+    expect([rows(shown), /type="checkbox"/u.test(shown), /aria-expanded="true"[^>]*>Show 2/u.test(shown)]).toEqual([["inkwell/folio#341", "inkwell/folio#330"], false, true]);
+  });
+
+  it("puts each row's ticket on a chip, with its Linear priority as a glyph", () => {
+    const view = shelfLinear();
+    const high = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, linear: { ...item.linear,
+      issues: item.linear.issues.map((issue) => issue.id === "ABC-360" ? { ...issue, priority: 2, label: "High" } : issue) } } : item) };
+    const merge = move(pane(high, SHELF), "merge");
+    // The glyph's bars are set apart by hair spaces, which text() would fold, so only the tags come out here.
+    expect([...merge.matchAll(/data-inventory-ticket="[^"]*"[^>]*title="([^"]*)"[^>]*>(.*?)<\/span><\/span>/gu)]
+      .map((match) => [match[1], match[2]!.replace(/<[^>]+>/gu, " ").replace(/ +/gu, " ").trim()]))
+      .toEqual([["ABC-360 · High priority", `${priorityOf({ priority: 2, label: null })!.glyph} ABC-360`], ["ABC-361", "ABC-361"], ["ABC-362", "ABC-362"]]);
   });
 
   it("gives an effort Hold and Complete, One-offs neither, and a held effort Resume with nothing to move", () => {
@@ -423,7 +451,7 @@ describe("the deck's dialogs", () => {
     for (const group of ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"]) expect(help).toContain(group);
     expect(help).toContain("Merges run only from the fresh preview, on a click or ⌘↵.");
     // ? says how moves rank, in the order a card shows them, each with its keys.
-    expect(help).toContain("How moves rank Someone waits on you b One step from merged m c Your blockers f A reviewer holds it 4+ days n");
+    expect(help).toContain("How moves rank Someone waits on you b One step from merged m c Your blockers f A reviewer holds it 4+ days n Linear and GitHub disagree");
   });
 });
 

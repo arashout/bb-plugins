@@ -638,7 +638,9 @@ Each card gives a one-line `status`; `stats` (open PRs, ready to merge, merged
 in the last 7 days, median PR age, and the oldest wait); `progress` (merges a
 read saw against open PRs); up to three `next` steps (the oldest moves of the
 user's, then the oldest waits, never a held PR); `blocked`, oldest first; a `linear` rollup of the stored Linear details of its
-tickets (`known` 0 means no Linear data); `people` (reviewers the user waits
+tickets (`known` 0 means no Linear data), with each ticket's state type, priority, and points (`issues`) and where Linear and GitHub
+disagree (`reconcile`: tickets Done in Linear with PRs on the card still open, and open tickets whose PRs all merged in the last 14
+days); `people` (reviewers the user waits
 on, and reviewers whose requested changes wait on the user); its parent and PR
 `threads`, read-only; the week's merges, reviews, and pushes; its rows by
 section; and on an effort's card, its Markdown `notes` (`body`, `revision`),

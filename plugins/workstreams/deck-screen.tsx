@@ -12,7 +12,8 @@ import type { BatchItem, Skipped } from "./deck-batch";
 import type { LiveItems } from "./deck-flow";
 import type { SeedProposal } from "./linear-seed";
 import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
-import type { Availability, CardScreen, Chip, DeckLine, Finish, Move, NotesScreen, OverviewScreen, PaletteItem, Strength, SuggestGroup, Tone } from "./deck-view-model";
+import type { Availability, CardScreen, Chip, DeckLine, Finish, Mismatch, Move, NotesScreen, OverviewScreen, PaletteItem, Strength, SuggestGroup, TicketChip, Tone }
+  from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
 import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
@@ -232,6 +233,8 @@ function Stack({ behind, run, children }: { behind: readonly Chip[]; run: Run; c
  */
 export type RowKit = { lines: ReadonlyMap<string, InventoryLine>; picked: ReadonlySet<string>; live?: LiveItems; left?: ReadonlyMap<string, string>;
   working?: ReadonlySet<string>; reading?: ReadonlySet<string>;
+  /** Each row's ticket chip, which the card fills in from its screen. */
+  tickets?: ReadonlyMap<string, TicketChip>;
   /** Why the last Address started nothing. */
   refusal?: string | null };
 /** A footer toggle's panel, one open at a time. */
@@ -241,23 +244,36 @@ export type Panel = "notes" | "threads" | "linear" | "held" | "all";
 function Rows({ prUrls, kit, run, turn }: { prUrls: readonly string[]; kit: RowKit; run: Run; turn?: boolean }) {
   const lines = prUrls.flatMap((prUrl) => kit.lines.get(prUrl) ?? []);
   return lines.length ? <SimpleInventoryList groups={[{ key: "rows", label: "", effortId: null, lines }]} kind={turn ? "turn" : "other"} busyKey={null}
-    selected={kit.picked} live={kit.live} notes={kit.left} working={kit.working} reading={kit.reading}
+    selected={kit.picked} live={kit.live} notes={kit.left} working={kit.working} reading={kit.reading} tickets={kit.tickets}
     onSelect={(line, shift) => run({ kind: "select", prUrl: line.prUrl, shift })} onOpenPr={(url) => run({ kind: "open", url })}
     onOpenThread={(id) => run({ kind: "thread", id })} onOpenEffort={() => undefined} onUndo={(batchId) => run({ kind: "undo-batch", batchId })}
     // A row's Nudge opens the deck's listing confirm for it, as n does: the deck never writes on one click.
     onNudge={(line) => run({ kind: "row", id: "nudge", prUrl: line.prUrl })} onRefresh={(line) => run({ kind: "row", id: "refresh", prUrl: line.prUrl })} /> : null;
 }
 
+/** A Reconcile line's one button: Show folds the open PRs it names; the other opens its first ticket's Linear page, when Linear gave one. */
+function MismatchButton({ line, shown, run, className }: { line: Mismatch; shown: boolean; run: Run; className: string }) {
+  return line.kind === "done" ? <button type="button" data-deck-focus="move-reconcile" aria-expanded={shown} title={`${shown ? "Hide" : "Show"} their open PRs`}
+    onClick={() => run({ kind: "fold", key: "reconcile" })} className={className}>{line.button}</button>
+    : line.url ? <button type="button" title={`Open ${line.tickets[0]} in Linear`} onClick={() => run({ kind: "open", url: line.url! })} className={className}>{line.button}</button>
+    : null;
+}
+
 /**
  * One move: its outcome and a line of detail, which fold its rows, and its one verb with its key. Address starts at once for the rows you
  * leave ticked, with 8 s to Undo; every other verb opens its listing confirm or the fresh merge preview first. The first move leads.
+ * Reconcile writes nothing: a line per mismatch, each with its tickets and one button.
  */
 function MoveBlock({ move, lead, shown, kit, on, run }: { move: Move; lead: boolean; shown: boolean; kit: RowKit; on: Availability; run: Run }) {
   const face = cn(BUTTON, "h-7 px-2.5", lead ? PRIMARY : TONE[move.tone].button);
   const picked = move.prUrls.filter((prUrl) => kit.picked.has(prUrl)).length;
   return <li data-deck-move={move.kind} className="relative min-w-0 rounded-[10px] py-1 pl-3">
     <span aria-hidden className={cn("absolute bottom-1.5 left-0 top-1.5 w-[3px] rounded-full", TONE[move.tone].edge)} />
-    <div className="flex min-h-10 items-center gap-3 pr-1">
+    {move.kind === "reconcile" ? move.lines?.map((line) => <div key={line.kind} data-deck-mismatch={line.kind} className="flex min-h-10 items-center gap-3 pr-1">
+      <div className="min-w-0 flex-1"><b className="block truncate text-[13px] font-semibold leading-5">{line.text}</b>
+        <span className="block truncate text-[11.5px] text-muted-foreground" title={line.tickets.join(", ")}>{line.tickets.join(", ")}</span></div>
+      <MismatchButton line={line} shown={shown} run={run} className={cn(BUTTON, "h-7 px-2.5", TONE.gray.button)} /></div>)
+    : <div className="flex min-h-10 items-center gap-3 pr-1">
       <button type="button" data-deck-focus={`move-${move.kind}`} aria-expanded={shown} onClick={() => run({ kind: "fold", key: move.kind })}
         title={shown ? "Hide its rows (↵)" : "Show its rows (↵)"} className={cn("min-w-0 flex-1 rounded text-left", RING)}>
         <b className="block truncate text-[13px] font-semibold leading-5">{move.title}</b>
@@ -267,7 +283,7 @@ function MoveBlock({ move, lead, shown, kit, on, run }: { move: Move; lead: bool
         title={on.address.on ? "Starts one thread for the ticked PRs now, with 8 s to Undo. Nothing merges. (b)" : `Address: ${on.address.why}`}
         onClick={() => run({ kind: "action", id: "address" })} className={face}>Address {picked}<Kbd inverted={lead}>{ACTION.address.keys[0]}</Kbd></button>
         : <ActionButton id={move.kind} on={on} run={run} label={move.verb} primary={lead} className={face} />}
-    </div>
+    </div>}
     {move.kind === "address" && kit.refusal ? <p role="alert" data-deck-refusal className="truncate pb-1 text-[12px] text-destructive" title={kit.refusal}>{kit.refusal}</p> : null}
     {shown ? <Rows prUrls={move.prUrls} kit={kit} run={run} turn={move.kind === "address"} /> : null}
   </li>;
@@ -377,7 +393,9 @@ export function Card({ screen, kit, open, panel, run, on, notes, markdown }: { s
   const bare = card.kind !== "effort" && card.stats.open === 0;
   const live = screen.lines.filter((line) => line.row).length;
   const top = screen.moves.slice(0, 3), over = screen.moves.slice(3);
+  const reconcile = over.find((item) => item.kind === "reconcile");
   const chores = screen.chores.prUrls;
+  const rows: RowKit = { ...kit, tickets: screen.tickets };
   const toggles = ([["notes", screen.notes ? "Notes" : null], ["threads", screen.threads.length ? `Threads ${screen.threads.length}` : null],
     ["linear", card.linear.known ? `Linear ${card.linear.known}` : null], ["held", screen.held ? `Held ${screen.held}` : null],
     ["all", live ? `All ${live} PRs` : null]] as [Panel, string | null][]).filter(([, label]) => label);
@@ -403,13 +421,16 @@ export function Card({ screen, kit, open, panel, run, on, notes, markdown }: { s
     </div>
     {screen.finish ? <FinishLine finish={screen.finish} open={open.has("progress")} run={run} /> : null}
     {bare ? <div className="mt-2.5"><ThreadList threads={screen.threads} run={run} /></div> : <>
-      {/* The first move's rows show until you fold them; the others' when you open them. */}
+      {/* The first move's rows show until you fold them; the others', and Reconcile's always, when you open them. */}
       {top.length ? <ol data-deck-moves className="mt-2 grid list-none gap-1">{top.map((item, index) => <MoveBlock key={item.kind} move={item} lead={index === 0}
-        shown={(index === 0) !== open.has(item.kind)} kit={kit} on={on} run={run} />)}</ol>
+        shown={item.kind !== "reconcile" && index === 0 ? !open.has(item.kind) : open.has(item.kind)} kit={rows} on={on} run={run} />)}</ol>
         : chores.length ? null : <p data-deck-empty className="px-2 py-3 text-[12px] text-muted-foreground">{held ? "On hold: nothing here acts until you resume it." : "Nothing to move."}</p>}
       {over.length ? <div data-deck-also className="flex flex-wrap items-center gap-1.5 px-3 py-1 text-[12px]"><span className="w-12 text-[11px] text-muted-foreground">Also</span>
         {over.map((item) => <span key={item.kind} title={item.meta} className="inline-flex min-w-0 items-center gap-1.5">
-          <ActionButton id={item.kind} on={on} run={run} label={item.verb} /><span className="truncate text-[11.5px] text-muted-foreground">{item.title}</span></span>)}</div> : null}
+          {item.kind === "reconcile" ? item.lines?.map((line) => <MismatchButton key={line.kind} line={line} shown={open.has(item.kind)} run={run}
+            className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")} />) : <ActionButton id={item.kind} on={on} run={run} label={item.verb} />}
+          <span className="truncate text-[11.5px] text-muted-foreground">{item.title}</span></span>)}</div> : null}
+      {reconcile && open.has(reconcile.kind) ? <Rows prUrls={reconcile.prUrls} kit={rows} run={run} /> : null}
       {chores.length ? <div data-deck-advance className="grid">
         <div className="flex min-h-9 items-center gap-2 px-3 text-[12px]">
           <button type="button" data-deck-focus="chores" aria-expanded={open.has("chores")} onClick={() => run({ kind: "fold", key: "chores" })}
@@ -417,14 +438,14 @@ export function Card({ screen, kit, open, panel, run, on, notes, markdown }: { s
             <span className="w-12 shrink-0 text-[11px] text-muted-foreground">Chores</span><span className="truncate text-muted-foreground">{screen.chores.text}</span></button>
           <ActionButton id="advance" on={on} run={run} label={`Advance ${chores.length}`} />
         </div>
-        {open.has("chores") ? <Rows prUrls={chores} kit={kit} run={run} /> : null}
+        {open.has("chores") ? <Rows prUrls={chores} kit={rows} run={run} /> : null}
       </div> : null}
       {toggles.length ? <div data-deck-toggles className="mt-1.5 flex flex-wrap gap-1 border-t border-border/50 pt-1.5">
         {toggles.map(([key, label]) => <button key={key} type="button" data-deck-focus={`panel-${key}`} aria-pressed={panel === key} onClick={() => run({ kind: "panel", key })}
           className={cn(GHOST, panel === key && "bg-foreground/[0.08] text-foreground")}>{label}</button>)}
       </div> : null}
       {panel && toggles.some(([key]) => key === panel) ? <div data-deck-panel={panel} className={cn(GROUP_CARD, "mt-1.5 px-3 py-2")}>
-        <PanelBody panel={panel} screen={screen} kit={kit} on={on} run={run} notes={notes ?? null} markdown={markdown} /></div> : null}
+        <PanelBody panel={panel} screen={screen} kit={rows} on={on} run={run} notes={notes ?? null} markdown={markdown} /></div> : null}
     </>}
   </section>;
 }
@@ -879,7 +900,7 @@ export function HelpBody({ items }: { items: readonly PaletteItem[] }) {
 }
 /** The rule rankMoves follows, as ? says it: each rank, its keys, and its color. */
 const RANK: readonly [string, string, Tone][] = [["Someone waits on you", "b", "amber"], ["One step from merged", "m c", "green"], ["Your blockers", "f", "blue"],
-  ["A reviewer holds it 4+ days", "n", "gray"]];
+  ["A reviewer holds it 4+ days", "n", "gray"], ["Linear and GitHub disagree", "", "gray"]];
 
 // ---------------------------------------------------------------------------
 // The whole deck.

@@ -97,11 +97,14 @@ export function HowThisWorks({ board, now }: { board: Board | null; now: number 
         <p>
           After Overview, Efforts shows one card per effort. Flip with [ and ] (or ← and →), or press 1–9. A card opens on
           its finish line, how many tickets are done, its date, and its ETA at the last two weeks&apos; pace (p opens what&apos;s
-          left, who holds it, and whether it&apos;s moving), then up to three moves. Each move is one outcome, one verb,
-          and one key, over the PRs it touches in All PRs&apos; own rows. Moves rank by one rule: someone waits on you
-          (Address, b), one step from merged (Merge, m, then Confirm, c), your blockers (Fix, f), then a reviewer holding a
-          PR four days or more (Nudge, n, naming who). Chores, the other nudges, requests, and ready marks, wait on one
-          Advance line, a, which never turns amber. Notes, Threads, Linear, Held, and All PRs open under the card.
+          left, by Linear priority and points too, who holds it, and whether it&apos;s moving), then up to three moves. Each
+          move is one outcome, one verb, and one key, over the PRs it touches in All PRs&apos; own rows, each row with its
+          ticket and that ticket&apos;s priority. Moves rank by one rule: someone waits on you (Address, b), one step from
+          merged (Merge, m, then Confirm, c), your blockers (Fix, f), a reviewer holding a PR four days or more (Nudge, n,
+          naming who), then Linear and GitHub disagreeing (Reconcile: Show the open PRs of tickets Done in Linear, or open
+          Linear for a ticket still open after its PRs merged; it writes nothing). Chores, the other nudges, requests, and
+          ready marks, wait on one Advance line, a, which never turns amber. Notes, Threads, Linear, Held, and All PRs open
+          under the card.
         </p>
         <p>
           A strip chip counts Your turn: open PRs where a person&apos;s feedback waits on you. A held PR doesn&apos;t count.

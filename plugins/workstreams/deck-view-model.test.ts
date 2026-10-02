@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckCard, DeckRow, DeckView } from "./deck.js";
 import { inkwellDeck, inkwellSuggestions, inkwellThreads, INVENTORY_EFFORTS, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
-import { availability, cardScreen, notesScreen, cardSnapshot, hintKeys, keptServiceCards, overviewScreen, paletteItems, rankMoves, readText, refreshNote, rowFacts,
-  stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
+import { availability, cardScreen, notesScreen, cardSnapshot, hintKeys, keptServiceCards, overviewScreen, paletteItems, priorityOf, rankMoves, readText, refreshNote,
+  rowFacts, stripChips, targets, type Accepted, type CardScreen, type KeyContext } from "./deck-view-model.js";
 import { DECK_ACTIONS } from "./deck-keys.js";
 import type { LinearDetail } from "./linear.js";
 import type { Sent } from "./your-turn.js";
@@ -143,6 +143,29 @@ describe("a card's moves", () => {
     const one = inkwellDeck({}, (row) => row.number === 156 ? { hold: { reason: "", heldAt: NOW } } : {});
     expect([card(one, PICKUP).moves.map((move) => move.kind), card(one, PICKUP).held]).toEqual([["address"], 1]);
   });
+
+  // Reconcile writes nothing to Linear or GitHub: Show unfolds the open PRs of tickets Linear calls done, to merge or close them, and Linear
+  // opens a ticket still open after its PRs merged, to move it there.
+  it("then Linear and GitHub disagreeing: Reconcile, one line per mismatch with its tickets and one button, after Nudge", () => {
+    const reconcile = { done: ["ABC-361", "ABC-364"], prUrls: [url("folio", 341), url("folio", 330)],
+      merged: [{ id: "ABC-365", url: "https://linear.app/inkwell/issue/ABC-365" }, { id: "ABC-366", url: null }] };
+    const shelf = cardScreen({ ...cardOf(inkwellDeck(), SHELF), linear: { ...cardOf(inkwellDeck(), SHELF).linear, reconcile } }, none, { now: NOW });
+    expect(moves(shelf)).toEqual([["merge", "4 ready to merge", "Ready to merge 1 · stacked 3", "Merge 4…", ["folio #340", "folio #341", "folio #342", "folio #343"]],
+      ["fix", "Clear conflicts", "folio #330 · 2d", "Fix 1…", ["folio #330"]],
+      ["reconcile", "Linear and GitHub disagree", "2 Done in Linear · 2 PRs open · 2 open with every PR merged", "Show 2", ["folio #341", "folio #330"]]]);
+    expect(shelf.moves[2]!.lines).toEqual([{ kind: "done", text: "2 Done in Linear · 2 PRs open", tickets: ["ABC-361", "ABC-364"], button: "Show 2", url: null },
+      { kind: "merged", text: "2 open with every PR merged", tickets: ["ABC-365", "ABC-366"], button: "Open in Linear ↗", url: "https://linear.app/inkwell/issue/ABC-365" }]);
+    // Either mismatch alone is its one line; with none, there's no move, and the hint bar never offers a key it doesn't have.
+    const merged = rankMoves([], "active", NOW, { done: [], prUrls: [], merged: [{ id: "ABC-365", url: null }] });
+    expect(merged.moves.map((move) => [move.kind, move.meta, move.prUrls])).toEqual([["reconcile", "1 open with every PR merged", []]]);
+    expect(rankMoves(rowsOf(inkwellDeck(), SHELF), "active", NOW, { done: [], prUrls: [], merged: [] }).moves.map((move) => move.kind)).toEqual(["merge", "fix"]);
+    expect(hintKeys(context(shelf), availability(context(shelf))).map(([, what]) => what)).toEqual(["rows", "merge", "fix", "progress", "flip"]);
+    // A held effort reconciles nothing until you resume it, as it moves nothing else. Every PR held is still a mismatch to see: Release
+    // leads only with nothing else to move, and waits under Held.
+    expect(rankMoves(rowsOf(inkwellDeck(), SHELF), "held", NOW, reconcile).moves).toEqual([]);
+    const held = inkwellDeck({}, (row) => row.effort?.id === SHELF ? { hold: { reason: "", heldAt: NOW } } : {});
+    expect(rankMoves(rowsOf(held, SHELF), "active", NOW, reconcile).moves.map((move) => move.kind)).toEqual(["reconcile"]);
+  });
 });
 
 describe("the finish line", () => {
@@ -193,6 +216,41 @@ describe("the finish line", () => {
   it("draws no finish line on One-offs or a service card", () => {
     expect([card(inkwellDeck(), ONE_OFFS).finish, card(inkwellDeck(), FOLIO).finish, availability(context(card(inkwellDeck(), FOLIO))).progress.on]).toEqual([null, null, false]);
     expect(availability(context(card(inkwellDeck(), SHELF))).progress.on).toBe(true);
+  });
+});
+
+describe("Linear priority and points", () => {
+  // Linear's own priority icon climbs with urgency; Urgent is the one that alarms. No priority draws nothing rather than a dash on every row.
+  it("draws each Linear priority as a glyph and Linear's word for it, and no priority as nothing", () => {
+    expect([1, 2, 3, 4].map((priority) => priorityOf({ priority, label: null }))).toEqual([{ glyph: "!", label: "Urgent", tone: "red" },
+      { glyph: "▂\u200a▄\u200a▆", label: "High", tone: "gray" }, { glyph: "▂\u200a▄", label: "Medium", tone: "gray" }, { glyph: "▂", label: "Low", tone: "gray" }]);
+    expect([priorityOf({ priority: 0, label: "No priority" }), priorityOf({ priority: null, label: null }), priorityOf(undefined)]).toEqual([null, null, null]);
+    // Linear's word wins, so a workspace that says Normal reads Normal.
+    expect(priorityOf({ priority: 3, label: "Normal" })?.label).toBe("Normal");
+  });
+
+  const ticket = (n: number, type: string, priority: number | null, estimate: number | null): [string, LinearDetail] => [`ABC-${n}`, { identifier: `ABC-${n}`,
+    title: null, description: null, state: { name: type, type }, project: null, parent: null, labels: [], url: null, updatedAt: null, source: "key", priority,
+    priorityLabel: null, estimate }];
+  const shelf = () => card(inkwellDeck({ linear: new Map([ticket(360, "started", 2, 3), ticket(361, "completed", 2, 2), ticket(362, "started", 1, 1),
+    ticket(363, "unstarted", 3, null), ticket(364, "completed", 0, 2)]) }), SHELF);
+
+  it("puts each row's ticket on a chip with its priority's glyph, and a ticket Linear hasn't read on a plain one", () => {
+    const chips = shelf().tickets;
+    expect([chips.get(url("folio", 340)), chips.get(url("folio", 342)), chips.get(url("folio", 330))]).toEqual([
+      { text: "ABC-360", glyph: "▂\u200a▄\u200a▆", title: "ABC-360 · High priority", tone: "gray" }, { text: "ABC-362", glyph: "!", title: "ABC-362 · Urgent priority", tone: "red" },
+      { text: "ABC-364", glyph: null, title: "ABC-364", tone: "gray" }]);
+    const plain = card(inkwellDeck(), PICKUP).tickets;
+    expect(plain.get(url("quill", 210))).toEqual({ text: "ABC-370", glyph: null, title: "ABC-370", tone: "gray" });
+    // A row naming two tickets shows the first and how many more.
+    const two = cardScreen(patched(inkwellDeck(), SHELF, (row) => row.number === 340 ? { tickets: ["ABC-360", "ABC-361"] } : null), none, { now: NOW });
+    expect(two.tickets.get(url("folio", 340))).toEqual({ text: "ABC-360 +1", glyph: null, title: "ABC-360 · ABC-361", tone: "gray" });
+  });
+
+  it("says in the p expand what's left by priority, most urgent first, and the points left of all the points estimated", () => {
+    expect(shelf().finish?.answers[2]).toEqual(["Left", "1 Urgent · 1 High · 1 Medium · 4 of 8 pts left"]);
+    // With no priority or points from Linear, there's no line for them.
+    expect(card(inkwellDeck(), SHELF).finish?.answers.map(([label]) => label)).toEqual(["On track?", "What's left", "Who holds it", "Moving?", "To Done"]);
   });
 });
 

@@ -112,7 +112,8 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
     return { id, key: id, name: serviceName(repo), goal: serviceGoal(repo), kind: "service", repo, oneOff: false, pile: "active", reason: "", since: 0,
       status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, mergedFortnight: 0, medianAgeMs: null, oldestWait: null },
       progress: { merged: 0, open: 0 }, next: [], blocked: [],
-      linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [] },
+      linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [], issues: [],
+        reconcile: { done: [], prUrls: [], merged: [] } },
       people: { youWaitOn: [], waitOnYou: [] }, threads: [], activity: [], sections: [], suggestions: [], notes: null };
   });
 }
@@ -122,14 +123,24 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
 // ---------------------------------------------------------------------------
 
 /** What a move does, as the action its button and key run. */
-export type MoveKind = Extract<DeckActionId, "address" | "merge" | "confirm" | "fix" | "nudge" | "release">;
-/** One move: what it gets you, its detail in a line, its verb, and the rows it touches. Address's verb counts the rows you leave ticked. */
-export type Move = { kind: MoveKind; title: string; meta: string; verb: string; tone: Tone; prUrls: string[] };
+type ActKind = Extract<DeckActionId, "address" | "merge" | "confirm" | "fix" | "nudge" | "release">;
+/** Reconcile runs no action: its buttons show rows or open Linear, so it has no key. */
+export type MoveKind = ActKind | "reconcile";
+/**
+ * One Reconcile line: what disagrees, its tickets, and its one button. `done`: tickets Linear completed, whose Show unfolds the open PRs
+ * that name them; `merged`: open tickets whose PRs all merged, whose button opens the first one's Linear page, when Linear gave one.
+ */
+export type Mismatch = { kind: "done" | "merged"; text: string; tickets: string[]; button: string; url: string | null };
+/**
+ * One move: what it gets you, its detail in a line, its verb, and the rows it touches. Address's verb counts the rows you leave ticked.
+ * Reconcile's lines say each mismatch with its own button.
+ */
+export type Move = { kind: MoveKind; title: string; meta: string; verb: string; tone: Tone; prUrls: string[]; lines?: Mismatch[] };
 /** A reviewer holding a PR this long makes a move that names them; a shorter wait is a chore. */
 const HOLDS_MS = 4 * DAY;
 /** The move each section's rows make once Your turn has taken its own. */
-const MOVE_OF: Partial<Record<DeckSection, MoveKind>> = { merge: "merge", confirm: "confirm", work: "fix", nudge: "nudge" };
-const TONE_OF: Record<MoveKind, Tone> = { address: "amber", merge: "green", confirm: "green", fix: "blue", nudge: "gray", release: "gray" };
+const MOVE_OF: Partial<Record<DeckSection, ActKind>> = { merge: "merge", confirm: "confirm", work: "fix", nudge: "nudge" };
+const TONE_OF: Record<ActKind, Tone> = { address: "amber", merge: "green", confirm: "green", fix: "blue", nudge: "gray", release: "gray" };
 const handles = (text: string | null | undefined) => [...new Set(text?.match(/@[\w-]+/gu) ?? [])];
 /** When a row's wait began: the feedback that waits on you, its next step, or what it waits on. */
 const since = (row: DeckRow) => row.yourTurn?.since ?? row.step?.since ?? row.waitsOn?.since ?? null;
@@ -140,7 +151,7 @@ const states = (rows: readonly DeckRow[]) => {
   return [...new Set(words)].map((word) => `${word} ${words.filter((item) => item === word).length}`).join(" · ");
 };
 
-function move(kind: MoveKind, rows: readonly DeckRow[], now: number): Move {
+function move(kind: ActKind, rows: readonly DeckRow[], now: number): Move {
   const n = rows.length;
   const first = oldest(rows);
   const wait = first === null ? null : age(first, now);
@@ -174,26 +185,55 @@ function move(kind: MoveKind, rows: readonly DeckRow[], now: number): Move {
   }
 }
 
+/** Reconcile, from where deck.ts found Linear and GitHub disagree: a line per mismatch, or no move when they agree. It writes nothing. */
+function reconcile({ done, prUrls, merged }: DeckCard["linear"]["reconcile"]): Move | null {
+  const lines: Mismatch[] = [
+    ...done.length ? [{ kind: "done" as const, text: `${done.length} Done in Linear · ${plural(prUrls.length, "PR")} open`, tickets: done,
+      button: `Show ${prUrls.length}`, url: null }] : [],
+    ...merged.length ? [{ kind: "merged" as const, text: `${merged.length} open with every PR merged`, tickets: merged.map((ticket) => ticket.id), button: "Open in Linear ↗",
+      url: merged.find((ticket) => ticket.url)?.url ?? null }] : []];
+  return lines.length ? { kind: "reconcile", title: "Linear and GitHub disagree", meta: lines.map((line) => line.text).join(" · "), verb: lines[0]!.button,
+    tone: "gray", prUrls, lines } : null;
+}
+
 /**
  * A card's moves, by one fixed rule, each row in the first that takes it: someone waits on you (Address); one step from merged (Merge,
- * then Confirm); your own blockers (Fix); a reviewer holding it 4 days or more (Nudge, naming who). Linear and GitHub disagreeing comes
- * next (Reconcile, from the Linear fields). Nudges under 4 days, requests, and ready marks are chores: Advance clears them, and they never
- * take a move. With nothing to move and every open PR held, Release is the one move. A held effort moves nothing until you resume it. A
- * row a write of yours waits on or runs takes no move until it lands, but Your turn keeps its rows with their state, as All PRs does.
+ * then Confirm); your own blockers (Fix); a reviewer holding it 4 days or more (Nudge, naming who); then Linear and GitHub disagreeing
+ * (Reconcile, from `disagree`). Nudges under 4 days, requests, and ready marks are chores: Advance clears them, and they never take a move.
+ * With nothing to move and every open PR held, Release is the one move. A held effort moves nothing until you resume it. A row a write of
+ * yours waits on or runs takes no move until it lands, but Your turn keeps its rows with their state, as All PRs does.
  */
-export function rankMoves(rows: readonly DeckRow[], pile: DeckPile, now: number): { moves: Move[]; chores: string[] } {
+export function rankMoves(rows: readonly DeckRow[], pile: DeckPile, now: number, disagree?: DeckCard["linear"]["reconcile"]): { moves: Move[]; chores: string[] } {
   const active = pile === "active";
   const turn = rows.filter((row) => active && row.turn.list === "turn");
   const live = rows.filter((row) => active && !busy(row) && row.turn.list !== "turn");
-  const of = (kind: MoveKind) => live.filter((row) => MOVE_OF[row.section] === kind && (kind !== "nudge" || now - (since(row) ?? now) >= HOLDS_MS));
+  const of = (kind: ActKind) => live.filter((row) => MOVE_OF[row.section] === kind && (kind !== "nudge" || now - (since(row) ?? now) >= HOLDS_MS));
   const moves = ([["address", turn], ...(["merge", "confirm", "fix", "nudge"] as const).map((kind) => [kind, of(kind)] as const)] as const)
     .flatMap(([kind, list]) => list.length ? [move(kind, list, now)] : []);
+  const mismatch = active && disagree ? reconcile(disagree) : null;
+  if (mismatch) moves.push(mismatch);
   const stuck = new Set(of("nudge"));
   const chores = live.filter((row) => (row.section === "nudge" && !stuck.has(row)) || row.section === "request" || row.section === "ready");
   const held = rows.filter((row) => row.section === "held");
   if (!moves.length && held.length && held.length === rows.length) moves.push(move("release", held, now));
   return { moves, chores: chores.map((row) => row.prUrl) };
 }
+
+// ---------------------------------------------------------------------------
+// Linear priority: a glyph on each row's ticket chip, and what's left by priority in the p expand.
+// ---------------------------------------------------------------------------
+
+type Issue = DeckCard["linear"]["issues"][number];
+/** Linear's priorities, 1 Urgent to 4 Low: a glyph after Linear's own climbing bars, hair spaces apart, its word, and red for Urgent alone. */
+const PRIORITY: Record<number, { glyph: string; label: string; tone: Tone }> = { 1: { glyph: "!", label: "Urgent", tone: "red" },
+  2: { glyph: "▂\u200a▄\u200a▆", label: "High", tone: "gray" }, 3: { glyph: "▂\u200a▄", label: "Medium", tone: "gray" }, 4: { glyph: "▂", label: "Low", tone: "gray" } };
+/** A ticket's priority as drawn, in Linear's word when it gave one; none for no priority (0) or a ticket Linear hasn't read. */
+export function priorityOf(issue: Pick<Issue, "priority" | "label"> | undefined): { glyph: string; label: string; tone: Tone } | null {
+  const known = issue?.priority ? PRIORITY[issue.priority] : undefined;
+  return known ? { ...known, label: issue!.label ?? known.label } : null;
+}
+/** A row's ticket chip: its first ticket and how many more it names, with the first's priority as a glyph. */
+export type TicketChip = { text: string; glyph: string | null; title: string; tone: Tone };
 
 // ---------------------------------------------------------------------------
 // The finish line: how much is done, the date it answers to, and when it lands at the pace of the last two weeks.
@@ -235,6 +275,12 @@ function finish(card: DeckCard, rows: readonly DeckRow[], now: number): Finish {
       .map((login) => `@${login}`) : []));
   const held = rows.filter((row) => row.section === "held").length;
   const active = card.threads.filter((thread) => thread.status === "active").length;
+  // What's left by Linear's priority, most urgent first, and its points of all the points estimated on tickets not canceled.
+  const open = linear.issues.filter((issue) => issue.type !== null && issue.type !== "completed" && issue.type !== "canceled");
+  const points = (list: readonly Issue[]) => list.reduce((sum, issue) => sum + (issue.estimate ?? 0), 0);
+  const estimated = linear.issues.filter((issue) => issue.estimate !== null && issue.type !== "canceled");
+  const priorities = [...[1, 2, 3, 4].flatMap((rank) => { const list = open.filter((issue) => issue.priority === rank); return list.length ? [`${list.length} ${priorityOf(list[0])!.label}`] : []; }),
+    estimated.length ? `${points(open)} of ${plural(points(estimated), "pt")} left` : null].filter(Boolean).join(" · ");
   const paced = at === null ? null : calendarDay(at);
   const track = !stats.open ? `No open PRs${leftTickets ? `; ${plural(leftTickets, "ticket")} still open` : ""}`
     : target && days !== null && days < 0 ? `${target.label} passed ${-days}d ago${paced ? ` · ETA ${paced}` : " · nothing merged in 14d"}`
@@ -247,6 +293,7 @@ function finish(card: DeckCard, rows: readonly DeckRow[], now: number): Finish {
     answers: [["On track?", track],
       ["What's left", [linear.known ? `${plural(leftTickets, "open ticket")}${left.length ? `: ${left.map((state) => `${state.count} ${state.name}`).join(" · ")}` : ""}` : null,
         plural(stats.open, "open PR"), linear.known ? null : "no Linear data"].filter(Boolean).join(" · ")],
+      ...priorities ? [["Left", priorities] as [string, string]] : [],
       ["Who holds it", holders || "Nobody: the rest is held, in flight, or stacked"],
       ["Moving?", `${stats.mergedWeek} merged in 7d · ${stats.mergedFortnight} in 14d`],
       ["To Done", [`${plural(stats.open, "open PR")}${held ? ` (${held} held)` : ""}`, leftTickets ? plural(leftTickets, "open ticket") : null,
@@ -280,6 +327,8 @@ export type CardScreen = {
   yourTurn: number;
   /** Its moves, ranked (rankMoves), and the chores Advance clears, with what they are: "nudge 2 · ready 1". */
   moves: Move[]; chores: { prUrls: string[]; text: string };
+  /** Each open row's ticket chip, by PR; a row naming no ticket has none. */
+  tickets: ReadonlyMap<string, TicketChip>;
   /** Every row the keys know: each open PR as the read has it, and each that left since you marked the card seen. */
   lines: DeckLine[];
   /** What changed here since you marked it seen, and whether Mark seen has anything else to settle: a suggestion you accepted. */
@@ -361,11 +410,18 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     ["Target", linear.projects.flatMap((project) => project.targetDate ? [`${calendarDay(project.targetDate)} ${project.name}`] : []).join(" · ")],
     ["Parent", tallies(linear.parents)], ["Read", `${linear.known} of ${plural(linear.tickets, "ticket")}`]] as [string, string][]).filter(([, value]) => value);
   const suggest = suggestGroups(card, lines, context.accepted ?? new Map());
-  const { moves, chores } = rankMoves(current, card.pile, now);
+  const { moves, chores } = rankMoves(current, card.pile, now, linear.reconcile);
+  const issues = new Map(linear.issues.map((issue) => [issue.id, issue]));
+  const tickets = new Map(current.flatMap((row) => {
+    const [first, ...rest] = row.tickets;
+    const priority = first ? priorityOf(issues.get(first)) : null;
+    return first ? [[row.prUrl, { text: `${first}${rest.length ? ` +${rest.length}` : ""}`, glyph: priority?.glyph ?? null,
+      title: [row.tickets.join(" · "), priority && `${priority.label} priority`].filter(Boolean).join(" · "), tone: priority?.tone ?? "gray" }] as const] : [];
+  }));
   return {
     card, color: effortColor(card.id, card.oneOff),
     yourTurn: current.filter((row) => row.turn.list === "turn").length,
-    moves, chores: { prUrls: chores, text: tally(chores.map((prUrl) => CHORE[byPr.get(prUrl)!.section]!)) },
+    moves, chores: { prUrls: chores, text: tally(chores.map((prUrl) => CHORE[byPr.get(prUrl)!.section]!)) }, tickets,
     lines,
     changed: lines.filter((line) => line.dot).length + threads.filter((thread) => thread.dot).length,
     settleable: suggest.some((group) => group.accepted),
@@ -568,7 +624,7 @@ export function availability(context: KeyContext): Availability {
 }
 
 /** The verb a move's key says in the hint bar. */
-const HINT: Record<MoveKind, string> = { address: "address", merge: "merge", confirm: "confirm", fix: "fix", nudge: "nudge", release: "release" };
+const HINT: Record<ActKind, string> = { address: "address", merge: "merge", confirm: "confirm", fix: "fix", nudge: "nudge", release: "release" };
 /** The few keys that matter now, for the hint bar: [kbd, what it does]. */
 export function hintKeys(context: KeyContext, on: Availability): [string, string][] {
   const { focused } = context;
@@ -582,7 +638,7 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
       : pick(["row-next", "rows"], moveHint, ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
   }
   // The card's moves, each by its key, in rank order; then its chores and its finish line.
-  const moves = (card?.moves ?? []).map((item) => [item.kind, HINT[item.kind]] as [DeckActionId, string]);
+  const moves = (card?.moves ?? []).flatMap((item) => item.kind === "reconcile" ? [] : [[item.kind, HINT[item.kind]] as [DeckActionId, string]]);
   if (focused) return pick(["row-next", "rows"], ...moves, ["select", "tick"], ["open-thread", "open thread"], ["refresh", "refresh"], ["expand", "fold"]);
   return pick(["row-next", "rows"], ...moves, ["advance", "advance"], ["progress", "progress"], ["next", "flip"], ["seen", "mark seen"]);
 }

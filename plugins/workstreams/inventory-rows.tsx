@@ -1,6 +1,7 @@
 import { sendable, type InventoryLine, type LineAction } from "./inventory-view-model";
 import { BUTTON, CHECKBOX, GROUP_CARD, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
 import type { LiveItems } from "./deck-flow";
+import type { TicketChip } from "./deck-view-model";
 import { sentText, type Sent } from "./your-turn";
 import { cn } from "./lib/utils";
 
@@ -27,6 +28,8 @@ export type SimpleRowsProps = {
   working?: ReadonlySet<string>; live?: LiveItems;
   /** ↻ on a row reads it from GitHub again; the rows reading now spin. */
   onRefresh?(line: InventoryLine): void; reading?: ReadonlySet<string>;
+  /** A deck card's ticket chip for each row, by PR, with its Linear priority. */
+  tickets?: ReadonlyMap<string, TicketChip>;
 };
 const CHIP = "inline-flex h-5 min-w-0 max-w-72 items-center gap-1 rounded px-1.5 text-[11px]";
 /** One PR's row, taller than the deck's: the PR in its own column, then the title on a line of its own with the why, chips, and action under it. */
@@ -72,6 +75,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
           const refresh = props.onRefresh ? line.actions.find((action) => action.id === "refresh") : undefined;
           const reading = !!props.reading?.has(line.prUrl);
           const box = mine && !!props.onSelect;
+          const ticket = props.tickets?.get(line.prUrl);
           return <li key={line.prUrl} data-inventory-row={`${line.slug}#${line.number}`} data-inventory-selected={picked || undefined} tabIndex={-1}
             data-inventory-working={working || undefined} aria-busy={working || undefined}
             className={cn("group min-w-0 rounded-md hover:bg-foreground/[0.03] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500",
@@ -87,6 +91,9 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                 <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
                   <span className="min-w-0" title={info}>{info}</span>
                   <span className="ml-auto flex min-w-0 max-w-full items-center gap-1.5">
+                    {ticket ? <span data-inventory-ticket={ticket.text} title={ticket.title} className={cn(CHIP, "shrink-0 px-1 text-muted-foreground")}>
+                      {ticket.glyph ? <span aria-hidden className={cn("text-[10px] font-bold leading-none", TONE[ticket.tone].text)}>{ticket.glyph}</span> : null}
+                      <span className="truncate">{ticket.text}</span></span> : null}
                     {refresh ? <button type="button" tabIndex={-1} data-inventory-action="refresh" disabled={reading || !refresh.enabled} aria-busy={reading || undefined}
                       aria-label={reading ? `Reading ${line.slug}#${line.number} from GitHub` : refresh.title} title={reading ? "Reading GitHub now…" : refresh.why ?? `${refresh.title} (g)`}
                       onClick={() => props.onRefresh!(line)} className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded text-[12px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground disabled:hover:bg-transparent",

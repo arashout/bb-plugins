@@ -19,7 +19,7 @@ import { effortNotesSchema, NO_NOTES, type EffortNotes } from "./effort-notes.js
 import type { InventoryRow } from "./inventory-view.js";
 import { userConfirmationSchema } from "./approval-evidence.js";
 import { inventoryLine, rowTurn, type ActionId } from "./inventory-view-model.js";
-import type { LinearDetail } from "./linear.js";
+import { LINEAR_MERGED_MS, type LinearDetail } from "./linear.js";
 import { sentSchema, turnSchema, yourTurnSchema, type Turn } from "./your-turn.js";
 
 /** Merged this week, and how far back recent activity reaches. */
@@ -96,7 +96,16 @@ export const deckCardSchema = z.object({
     initiatives: tally, parents: tally,
     states: z.array(z.object({ name: z.string(), type: z.string().nullable(), count: z.number() }).strict()), labels: tally,
     cycles: z.array(z.object({ number: z.number(), name: z.string().nullable(), endsAt: z.string().nullable(), count: z.number() }).strict()),
-    assignees: tally }).strict(),
+    assignees: tally,
+    /** Each ticket read, for the rows' ticket chips and the p expand: its state type, Linear's priority (0 none, 1 Urgent to 4 Low) and word, and points. */
+    issues: z.array(z.object({ id: z.string(), type: z.string().nullable(), priority: z.number().nullable(), label: z.string().nullable(),
+      estimate: z.number().nullable() }).strict()),
+    /**
+     * Where Linear and GitHub disagree (Reconcile): tickets Linear completed while PRs here are open, and those PRs; open tickets every PR of
+     * which merged in the last 14 days, with their Linear pages.
+     */
+    reconcile: z.object({ done: z.array(z.string()), prUrls: z.array(z.string()),
+      merged: z.array(z.object({ id: z.string(), url: z.string().nullable() }).strict()) }).strict() }).strict(),
   /** Reviewers you wait on, and reviewers whose requested changes wait on you. */
   people: z.object({ youWaitOn: z.array(personSchema), waitOnYou: z.array(personSchema) }).strict(),
   /**
@@ -161,8 +170,8 @@ export type DeckInput = {
   now: number;
   efforts: readonly DeckEffortInput[];
   rows: readonly DeckRowInput[];
-  /** Merges a read saw, with the effort that owns each. */
-  merges: readonly { url: string; at: number; effortId: string }[];
+  /** Merges a read saw, with the effort that owns each and the tickets its title and branch name. */
+  merges: readonly { url: string; at: number; effortId: string; tickets?: readonly string[] }[];
   linear: ReadonlyMap<string, LinearDetail>;
   threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
   /** Every visible thread, with the evidence that places it on one card. */
@@ -272,6 +281,13 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
     .map((row) => ({ text: row.waitsOn?.what ?? row.step?.text ?? row.status, owner: row.waitsOn?.on ?? row.step?.owner ?? null, prUrl: row.prUrl }));
   const tickets = [...new Set([...effort.tickets, ...rows.flatMap(({ input: row }) => row.tickets)])].sort();
   const details = tickets.flatMap((ticket) => input.linear.get(ticket) ?? []);
+  // Linear and GitHub disagree: a ticket Linear completed while a PR here is open, and an open ticket no open PR names whose PRs merged in
+  // the last 14 days, the merges the sync keeps fresh. A ticket Linear never read disagrees with nothing.
+  const typeOf = (ticket: string) => input.linear.get(ticket)?.state?.type ?? null;
+  const done = tickets.filter((ticket) => typeOf(ticket) === "completed" && rows.some(({ input: row }) => row.tickets.includes(ticket)));
+  const named = new Set(input.rows.flatMap((row) => row.tickets));
+  const merged = [...new Set(merges.filter((merge) => now - merge.at <= LINEAR_MERGED_MS).flatMap((merge) => merge.tickets ?? []))].sort()
+    .filter((ticket) => !named.has(ticket) && ![null, "completed", "canceled"].includes(typeOf(ticket)));
   const threads = new Map<string, DeckCard["threads"][number]>();
   const parent = effort.parentThreadId ? input.threads.get(effort.parentThreadId) : undefined;
   if (parent) threads.set(effort.parentThreadId!, { id: effort.parentThreadId!, title: parent.title, role: "parent", prUrl: null, status: parent.status,
@@ -323,7 +339,11 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
         const cycle = details.find((detail) => String(detail.cycle?.number) === name)!.cycle!;
         return { number: cycle.number, name: cycle.name, endsAt: cycle.endsAt, count };
       }),
-      assignees: tallies(details.flatMap((detail) => detail.assignee ? [detail.assignee] : [])) },
+      assignees: tallies(details.flatMap((detail) => detail.assignee ? [detail.assignee] : [])),
+      issues: tickets.flatMap((id) => { const detail = input.linear.get(id); return detail ? [{ id, type: detail.state?.type ?? null,
+        priority: detail.priority ?? null, label: detail.priorityLabel ?? null, estimate: detail.estimate ?? null }] : []; }),
+      reconcile: { done, prUrls: DECK_SECTIONS.flatMap(inSection).filter((row) => row.tickets.some((ticket) => done.includes(ticket))).map((row) => row.prUrl),
+        merged: merged.map((ticket) => ({ id: ticket, url: input.linear.get(ticket)?.url ?? null })) } },
     people: people(rows),
     // Threads on open work come first; the rest, on merged work or none, wait behind More.
     threads: [...threads.values()].sort((a, b) => Number(b.role === "parent") - Number(a.role === "parent") || Number(b.prUrl !== null) - Number(a.prUrl !== null)
