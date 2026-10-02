@@ -21,12 +21,12 @@ if (!existsSync(css)) throw new Error("Run bb plugin build first: the preview re
 const noop = () => {};
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const choice = (id: string, name: string, patch: Partial<ThreadEffortPicker["choices"][number]> = {}): ThreadEffortPicker["choices"][number] =>
-  ({ key: `effort:${id}`, id, name, oneOff: false, held: false, needsYou: 0, signal: null, score: 0, ...patch });
+  ({ key: `effort:${id}`, id, name, oneOff: false, held: false, yourTurn: 0, signal: null, score: 0, ...patch });
 const picker: ThreadEffortPicker = {
-  chip: { kind: "effort", effortId: "effort-shelf-order", name: "Shelf order", oneOff: false, needsYou: 5, card: "effort-shelf-order" },
-  choices: [choice("effort-shelf-order", "Shelf order", { needsYou: 5 }), choice("effort-store-pickup", "Store pickup", { signal: "ABC-121 in the title", score: 3, needsYou: 3 }),
-    choice("effort-catalog", "Catalog pages", { signal: "Linear project “Catalog”", score: 2, needsYou: 1 }), choice("effort-gift-cards", "Gift cards", { held: true }),
-    choice("effort-one-offs", "One-offs", { oneOff: true, needsYou: 3 }), choice("effort-reading-lists", "Reading lists")],
+  chip: { kind: "effort", effortId: "effort-shelf-order", name: "Shelf order", oneOff: false, yourTurn: 5, card: "effort-shelf-order" },
+  choices: [choice("effort-shelf-order", "Shelf order", { yourTurn: 5 }), choice("effort-store-pickup", "Store pickup", { signal: "ABC-121 in the title", score: 3, yourTurn: 3 }),
+    choice("effort-catalog", "Catalog pages", { signal: "Linear project “Catalog”", score: 2, yourTurn: 1 }), choice("effort-gift-cards", "Gift cards", { held: true }),
+    choice("effort-one-offs", "One-offs", { oneOff: true, yourTurn: 3 }), choice("effort-reading-lists", "Reading lists")],
   linked: [{ url: url("folio", 340), ref: "folio #340", title: "ABC-360 Store shelf order", effortId: "effort-shelf-order", effortName: "Shelf order", sourceIds: ["ticket:ABC-360"],
     also: [] }, { url: url("catalog", 96), ref: "catalog #96", title: "ABC-121 Show series order", effortId: "effort-store-pickup", effortName: "Store pickup",
     sourceIds: ["ticket:ABC-121"], also: ["catalog #97", "1 checkout"] }],

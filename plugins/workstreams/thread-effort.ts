@@ -20,12 +20,12 @@ export const threadEffortPickerSchema = z.object({
      */
     kind: z.enum(["effort", "service", "none"]),
     effortId: z.string().nullable(), name: z.string(), oneOff: z.boolean(),
-    /** Needs you on its card: an effort's, or a service's, whose PRs count as any effort's do. */
-    needsYou: z.number(),
+    /** Your turn on its card, as the deck's strip chip counts it: an effort's, or a service's, whose PRs count as any effort's do. */
+    yourTurn: z.number(),
     /** The deck card it opens: an effort's id, a repository's service card, or null. */
     card: z.string().nullable(),
   }).strict(),
-  choices: z.array(z.object({ key: z.string(), id: z.string(), name: z.string(), oneOff: z.boolean(), held: z.boolean(), needsYou: z.number(),
+  choices: z.array(z.object({ key: z.string(), id: z.string(), name: z.string(), oneOff: z.boolean(), held: z.boolean(), yourTurn: z.number(),
     /** The strongest signal that points the thread at it, and the signals' summed weight; null and 0 when none does. */
     signal: z.string().nullable(), score: z.number() }).strict()),
   linked: z.array(z.object({ url: z.string(), ref: z.string(), title: z.string(), effortId: z.string().nullable(), effortName: z.string().nullable(),
@@ -123,18 +123,18 @@ export function threadEffortChip(input: {
   coordinates: { id: string; name: string; oneOff: boolean } | null;
   /** Where the deck places the thread; null for a loose thread, or an effort the deck no longer has. */
   home: { kind: "effort"; effort: { id: string; name: string; oneOff: boolean } } | { kind: "service"; repo: string } | null;
-  /** Needs you on the effort's or service's card; null when the deck draws no card for it. */
-  needsYou: (cardId: string) => number | null;
+  /** Your turn on the effort's or service's card; null when the deck draws no card for it. */
+  yourTurn: (cardId: string) => number | null;
 }): ThreadEffortPicker["chip"] {
   const effort = input.own ?? input.coordinates ?? (input.home?.kind === "effort" ? input.home.effort : null);
   if (effort) {
-    const needs = input.needsYou(effort.id);
-    return { kind: "effort", effortId: effort.id, name: effort.name, oneOff: effort.oneOff, needsYou: needs ?? 0, card: needs === null ? null : effort.id };
+    const turn = input.yourTurn(effort.id);
+    return { kind: "effort", effortId: effort.id, name: effort.name, oneOff: effort.oneOff, yourTurn: turn ?? 0, card: turn === null ? null : effort.id };
   }
   if (input.home?.kind === "service") {
-    const needs = input.needsYou(serviceId(input.home.repo));
-    return { kind: "service", effortId: null, name: serviceName(input.home.repo), oneOff: false, needsYou: needs ?? 0,
-      card: needs === null ? null : serviceId(input.home.repo) };
+    const turn = input.yourTurn(serviceId(input.home.repo));
+    return { kind: "service", effortId: null, name: serviceName(input.home.repo), oneOff: false, yourTurn: turn ?? 0,
+      card: turn === null ? null : serviceId(input.home.repo) };
   }
-  return { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null };
+  return { kind: "none", effortId: null, name: "No effort", oneOff: false, yourTurn: 0, card: null };
 }

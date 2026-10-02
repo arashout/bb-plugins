@@ -100,7 +100,7 @@ const NO_JEV = { state: "idle" as const, keys: [], name: null };
  * then a new effort by the typed name unless one has it exactly.
  */
 export function moveItems(efforts: readonly { id: string; name: string }[], query: string): PickerItem[] {
-  const choice = (key: string, name: string, oneOff: boolean) => ({ key, id: key, name, oneOff, held: false, needsYou: 0, signal: null, score: 0 });
+  const choice = (key: string, name: string, oneOff: boolean) => ({ key, id: key, name, oneOff, held: false, yourTurn: 0, signal: null, score: 0 });
   const items = pickerItems({ picker: { choices: [...efforts.map((effort) => choice(effort.id, effort.name, false)), choice(ONE_OFFS, "One-offs", true)], jev: false },
     currentKey: null, query, mode: "effort", linkable: [], linkedUrl: null, jev: NO_JEV });
   const rank = (item: PickerItem) => item.kind !== "effort" ? 2 : item.oneOff ? 1 : 0;

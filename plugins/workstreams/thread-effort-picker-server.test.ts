@@ -1,6 +1,7 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Pr } from "./contract.js";
+import type { DeckView } from "./deck.js";
 import { createEffortPileStore } from "./effort-piles.js";
 import { createEffortStore } from "./effort-store.js";
 import { parsePrList } from "./gh.js";
@@ -74,10 +75,10 @@ async function setup() {
 const signals = (picker: ThreadEffortPicker) => picker.choices.map((choice) => [choice.name, choice.signal]);
 
 describe("the thread effort chip and popover's read", () => {
-  it("names the effort the thread's own linked PRs are in, with its card's Needs you, and lists only efforts the deck draws", async () => {
+  it("names the effort the thread's own linked PRs are in, with its card's Your turn, and lists only efforts the deck draws", async () => {
     const env = await setup();
     const direct = await env.picker("thr-direct");
-    expect(direct.chip).toEqual({ kind: "effort", effortId: env.shelf.id, name: "Shelf order", oneOff: false, needsYou: 1, card: env.shelf.id });
+    expect(direct.chip).toEqual({ kind: "effort", effortId: env.shelf.id, name: "Shelf order", oneOff: false, yourTurn: 0, card: env.shelf.id });
     expect(direct.linked.map((item) => [item.ref, item.effortName, item.sourceIds])).toEqual([
       ["folio #313", null, [`pr:${url(313)}`]], ["folio #314", "Shelf order", ["ticket:ABC-341"]]]);
     // The done Quill export takes no work, so it isn't offered; held Gift cards is, marked held.
@@ -108,10 +109,14 @@ describe("the thread effort chip and popover's read", () => {
     expect(env.efforts.owner("prUrl", url(316))?.id).toBe(env.pickup.id);
   });
 
-  it("falls back to the repository's service card, and opens it with its Needs you: #313, #316, and #317, which no effort has, each want a reviewer", async () => {
+  // The chip counts what the deck's strip chip counts: Your turn, where a person waits on you. #313, #316, and #317, which no effort has, each
+  // want a reviewer, a chore of yours, so the service card reads 0, not the 3 moves that are yours.
+  it("falls back to the repository's service card, and opens it with its Your turn, which leaves out chores", async () => {
     const env = await setup();
-    expect((await env.picker("thr-service")).chip).toEqual({ kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 3,
+    expect((await env.picker("thr-service")).chip).toEqual({ kind: "service", effortId: null, name: "folio · service", oneOff: false, yourTurn: 0,
       card: "service:inkwell/folio" });
+    const folio = (await env.harness.callRpc("deck_get", {}) as DeckView).active.find((card) => card.id === "service:inkwell/folio")!;
+    expect([folio.yourTurn, folio.needsYou]).toEqual([0, 3]);
   });
 
   it("suggests from a ticket in the title and from the parent thread's effort, and says No effort with nothing linked", async () => {
@@ -126,7 +131,7 @@ describe("the thread effort chip and popover's read", () => {
     const env = await setup();
     env.metadata["thr-direct"] = { ...env.metadata["thr-direct"], workEffortId: env.pickup.id };
     const own = await env.picker("thr-direct");
-    expect(own.chip).toMatchObject({ kind: "effort", name: "Store pickup", needsYou: 0, card: env.pickup.id });
+    expect(own.chip).toMatchObject({ kind: "effort", name: "Store pickup", yourTurn: 0, card: env.pickup.id });
     expect(own.jev).toBe(false);
     await env.harness.behavior.setSettings({ typesafeApiKey: "synthetic-test-value" });
     expect((await env.picker("thr-direct")).jev).toBe(true);

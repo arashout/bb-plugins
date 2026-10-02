@@ -67,7 +67,7 @@ describe("the effort deck's markup", () => {
   it("draws the strip in session order with each card's number, color dot, and Your turn, the service cards last and dashed, and both piles", () => {
     const html = pane(inkwellDeck(), SHELF);
     const chips = [...html.matchAll(/data-deck-chip="([^"]+)"[^>]*>(.*?)<\/button>/gu)].map((match) => text(match[2]!).trim());
-    expect(chips).toEqual(["Overview", "1 Shelf order 0", "2 Store pickup 3", "3 One-offs 2", "4 folio · service 0", "5 atlas · service 0", "6 catalog · service 0"]);
+    expect(chips).toEqual(["Overview", "1 Store pickup 3", "2 Shelf order 0", "3 One-offs 2", "4 folio · service 0", "5 atlas · service 0", "6 catalog · service 0"]);
     expect(html).toMatch(/data-deck-chip="service:inkwell\/folio" title="folio · service: 0 your turn \(4\)" class="[^"]*border-dashed/u);
     // Only a chip where a person waits on you turns amber.
     expect(html).toMatch(/data-deck-chip="effort-store-pickup"[^>]*>.*?<span class="[^"]*bg-amber-500\/10[^"]*">3<\/span>/u);
@@ -271,7 +271,7 @@ describe("the effort deck's markup", () => {
     const layers = [...html.matchAll(/data-deck-layer="(\d)"([^>]*)>/gu)].map((match) => `${match[1]}${/aria-hidden="true"/u.test(match[2]!) ? " hidden" : ""} ${
       /transform:([^;"]+)/u.exec(match[2]!)![1]}`);
     expect(layers).toEqual(["1 translateX(14px) scale(0.98)", "2 hidden translateX(18px) scale(0.96)", "3 hidden translateX(22px) scale(0.94)"]);
-    expect(html).toMatch(/<button type="button" tabindex="-1" data-deck-peek="effort-store-pickup" title="Next: Store pickup \(\] or →\)" aria-label="Next effort: Store pickup"/u);
+    expect(html).toMatch(/<button type="button" tabindex="-1" data-deck-peek="effort-one-offs" title="Next: One-offs \(\] or →\)" aria-label="Next effort: One-offs"/u);
     // The deepest edge's room is a gutter on the stack's right, inside the deck's width, and nothing peeks below.
     expect(html).toMatch(/<div class="mb-2.5" style="padding-right:22px"><div data-deck-stack="true"/u);
     expect(html).not.toMatch(/padding-bottom/u);

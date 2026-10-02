@@ -122,7 +122,7 @@ function everyBadge(): { where: string; badge: Badge }[] {
     ["the thread effort popover", renderToStaticMarkup(createElement(PickerBody, { mode: "effort", query: "", highlight: 0, busy: false, current: null, notice: null,
       error: null, listId: "picker", linked: [], confirm: null, onQuery: noop, onKeyDown: noop, onPick: noop, onHighlight: noop, onLinkMode: noop, onMove: noop,
       onConfirmMove: noop, onCancelMove: noop, onOpenPr: noop,
-      items: [{ kind: "effort", key: "effort:shelf", id: "shelf", name: "Shelf order", oneOff: false, held: false, needsYou: 2, signal: "has folio #340", score: 3,
+      items: [{ kind: "effort", key: "effort:shelf", id: "shelf", name: "Shelf order", oneOff: false, held: false, yourTurn: 2, signal: "has folio #340", score: 3,
         suggested: true, current: false }, { kind: "new", name: "" }] }))],
   ];
   return renders.flatMap(([where, html]) => badges(html).map((badge) => ({ where, badge })));

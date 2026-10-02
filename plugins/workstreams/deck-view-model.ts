@@ -112,7 +112,7 @@ export function keptServiceCards(order: readonly string[], active: readonly Deck
     && (!!seen[id]?.length || [...accepted.keys()].some((key) => key.startsWith(`${id} `)))).map((id) => {
     const repo = id.slice(SERVICE_PREFIX.length);
     return { id, key: id, name: serviceName(repo), goal: serviceGoal(repo), kind: "service", repo, oneOff: false, pile: "active", reason: "", since: 0,
-      status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, stats: { open: 0, ready: 0, mergedWeek: 0, mergedFortnight: 0, medianAgeMs: null, oldestWait: null },
+      status: { tone: "quiet", text: "No open PRs" }, needsYou: 0, yourTurn: 0, stats: { open: 0, ready: 0, mergedWeek: 0, mergedFortnight: 0, medianAgeMs: null, oldestWait: null },
       progress: { merged: 0, open: 0 }, next: [], blocked: [],
       linear: { tickets: 0, known: 0, projects: [], initiatives: [], parents: [], states: [], labels: [], cycles: [], assignees: [], issues: [],
         reconcile: { done: [], prUrls: [], merged: [] } },
@@ -424,7 +424,7 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
   }));
   return {
     card, color: effortColor(card.id, card.oneOff),
-    yourTurn: current.filter((row) => row.turn.list === "turn").length,
+    yourTurn: card.yourTurn,
     moves, chores: { prUrls: chores, text: tally(chores.map((prUrl) => CHORE[byPr.get(prUrl)!.section]!)) }, tickets,
     lines,
     changed: lines.filter((line) => line.dot).length + threads.filter((thread) => thread.dot).length,

@@ -10,10 +10,10 @@ const noop = () => {};
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, '"').replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ").trim();
 const url = (repo: string, number: number) => `https://github.com/inkwell/${repo}/pull/${number}`;
 const choice = (id: string, name: string, patch: Partial<ThreadEffortPicker["choices"][number]> = {}): ThreadEffortPicker["choices"][number] =>
-  ({ key: `effort:${id}`, id, name, oneOff: false, held: false, needsYou: 0, signal: null, score: 0, ...patch });
+  ({ key: `effort:${id}`, id, name, oneOff: false, held: false, yourTurn: 0, signal: null, score: 0, ...patch });
 const PICKER: ThreadEffortPicker = {
-  chip: { kind: "effort", effortId: "shelf", name: "Shelf order", oneOff: false, needsYou: 5, card: "shelf" },
-  choices: [choice("shelf", "Shelf order", { needsYou: 5 }), choice("pickup", "Store pickup", { signal: "ABC-121 in the title", score: 3, needsYou: 3 }),
+  chip: { kind: "effort", effortId: "shelf", name: "Shelf order", oneOff: false, yourTurn: 5, card: "shelf" },
+  choices: [choice("shelf", "Shelf order", { yourTurn: 5 }), choice("pickup", "Store pickup", { signal: "ABC-121 in the title", score: 3, yourTurn: 3 }),
     choice("gifts", "Gift cards", { held: true })],
   linked: [{ url: url("folio", 340), ref: "folio #340", title: "ABC-360 Store shelf order", effortId: "shelf", effortName: "Shelf order", sourceIds: ["ticket:ABC-360"], also: [] },
     { url: url("folio", 96), ref: "folio #96", title: "ABC-121 Show series order", effortId: "pickup", effortName: "Store pickup", sourceIds: ["ticket:ABC-121"], also: [] }],
@@ -33,21 +33,22 @@ function body(patch: Partial<PickerBodyProps> = {}, items: PickerItem[] = picker
 const options = (html: string) => [...html.matchAll(/role="option"[^>]*data-picker-item="([^"]+)"[^>]*>(.*?)<\/div>(?=<div|<\/div>)/gu)].map((match) => text(match[2]!));
 
 describe("the thread's effort chip", () => {
-  it("shows the effort's color dot, name, and Needs you, opens its card, and splits off the ⌄ that opens the popover", () => {
+  // Its count is the deck's strip chip's: Your turn, so amber means a person waits on you.
+  it("shows the effort's color dot, name, and Your turn, opens its card, and splits off the ⌄ that opens the popover", () => {
     const html = bar();
     expect(html).toContain(`background:${effortColor("shelf")}`);
-    expect(html).toMatch(/data-effort-chip="effort"[^>]*title="Shelf order, 5 need you. Open its card"/u);
+    expect(html).toMatch(/data-effort-chip="effort"[^>]*title="Shelf order, 5 your turn. Open its card"/u);
     expect(text(html)).toBe("Shelf order 5 ⌄");
     expect(html).toMatch(/data-effort-open[^>]*aria-label="Change the thread&#x27;s effort"/u);
   });
 
-  it("names a service fallback with a hollow dot and its Needs you, which opens its card, and a thread with no effort without a count", () => {
-    const service = bar({ chip: { kind: "service", effortId: null, name: "folio · service", oneOff: false, needsYou: 2, card: "service:inkwell/folio" } });
+  it("names a service fallback with a hollow dot and its Your turn, which opens its card, and a thread with no effort without a count", () => {
+    const service = bar({ chip: { kind: "service", effortId: null, name: "folio · service", oneOff: false, yourTurn: 2, card: "service:inkwell/folio" } });
     // The same hollow amber dot the deck gives a service card.
     expect(service).toMatch(/border-dashed[^"]*" style="border-color:#d3a35a"/u);
     expect(text(service)).toBe("folio · service 2 ⌄");
-    expect(service).toContain("folio · service, 2 need you. Open its card");
-    expect(text(bar({ chip: { kind: "none", effortId: null, name: "No effort", oneOff: false, needsYou: 0, card: null } }))).toBe("No effort ⌄");
+    expect(service).toContain("folio · service, 2 your turn. Open its card");
+    expect(text(bar({ chip: { kind: "none", effortId: null, name: "No effort", oneOff: false, yourTurn: 0, card: null } }))).toBe("No effort ⌄");
   });
 
   it("offers Undo beside the chip after a pick, and never a Save", () => {

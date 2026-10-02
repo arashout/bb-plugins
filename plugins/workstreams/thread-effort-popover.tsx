@@ -1,5 +1,5 @@
 // The thread's effort chip and its popover (plan amendment A17.2): the chip
-// above the composer names the thread's effort with its color and Needs you
+// above the composer names the thread's effort with its color and Your turn
 // and opens its card; its ⌄ opens a small popover to type-filter efforts,
 // suggested ones first, create one from the typed name, link a PR, or leave
 // the effort. A pick applies at once, with an Undo beside the chip; nothing
@@ -17,7 +17,7 @@ import { cn, POINTER_CURSORS } from "./lib/utils";
 
 type Chip = ThreadEffortPicker["chip"];
 type Linked = ThreadEffortPicker["linked"][number];
-const NEEDS = "min-w-4 rounded-full bg-amber-500/10 px-1.5 text-center text-[10.5px] font-semibold tabular-nums text-amber-800 dark:text-amber-200";
+const TURN = "min-w-4 rounded-full bg-amber-500/10 px-1.5 text-center text-[10.5px] font-semibold tabular-nums text-amber-800 dark:text-amber-200";
 
 function Dot({ chip }: { chip: Pick<Chip, "kind" | "effortId" | "oneOff"> }) {
   // A service card's hollow amber dot, as the deck draws it; gray for no effort.
@@ -28,8 +28,8 @@ function Dot({ chip }: { chip: Pick<Chip, "kind" | "effortId" | "oneOff"> }) {
 
 /** What the chip opens, in words, for its title and label. */
 export function chipLabel(chip: Chip): string {
-  const needs = chip.needsYou ? `, ${chip.needsYou} need${chip.needsYou === 1 ? "s" : ""} you` : "";
-  return chip.card === null ? `${chip.name}. Choose an effort` : `${chip.name}${needs}. Open its card`;
+  const turn = chip.yourTurn ? `, ${chip.yourTurn} your turn` : "";
+  return chip.card === null ? `${chip.name}. Choose an effort` : `${chip.name}${turn}. Open its card`;
 }
 
 export type ThreadEffortBarProps = {
@@ -64,7 +64,7 @@ export function ThreadEffortBar(props: ThreadEffortBarProps) {
             className={cn("inline-flex min-w-0 items-center gap-1.5 rounded-l-md px-1.5 hover:bg-foreground/[0.06] hover:text-foreground", RING,
               chip.kind === "effort" && "text-foreground")}>
             <Dot chip={chip} /><span className="truncate">{chip.name}</span>
-            {chip.needsYou ? <span className={NEEDS}>{chip.needsYou}</span> : null}
+            {chip.yourTurn ? <span className={TURN}>{chip.yourTurn}</span> : null}
           </button>
           <PopoverPrimitive.Trigger asChild>
             <button type="button" data-effort-open aria-label="Change the thread's effort" title="Change the thread's effort"
@@ -127,7 +127,7 @@ function ItemRow({ item, current }: { item: PickerItem; current: boolean }) {
       <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 pl-2 text-[11px] text-muted-foreground">
         {item.suggested && item.signal ? <span className="min-w-0 truncate" title={item.signal}>{item.signal}</span> : null}
         {item.held ? <span className="shrink-0">on hold</span> : null}
-        {!item.suggested && item.needsYou ? <span className={NEEDS}>{item.needsYou}</span> : null}
+        {!item.suggested && item.yourTurn ? <span className={TURN}>{item.yourTurn}</span> : null}
         {item.current ? <span aria-label="The thread's effort" className="shrink-0 text-foreground">✓</span> : null}
         {current ? <Kbd>↵</Kbd> : null}
       </span>

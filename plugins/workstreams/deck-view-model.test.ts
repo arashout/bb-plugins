@@ -30,12 +30,12 @@ const line = (screen: CardScreen, prUrl: string) => screen.lines.find((item) => 
 
 describe("the effort deck's strip", () => {
   // Amber on a chip means a person waits on you: Your turn, as All PRs counts it. Merges, fixes, nudges, and other chores of yours never
-  // count, so an effort full of chores reads as quiet.
-  it("counts Your turn on each card's chip, and nothing else, with the service cards after the efforts and the first nine numbered", () => {
+  // count, so an effort full of chores reads as quiet, and a first read puts it after one where people wait.
+  it("counts Your turn on each card's chip, and nothing else, most first, with the service cards after the efforts and the first nine numbered", () => {
     const view = inkwellDeck();
     const cards = new Map(view.active.map((item) => [item.id, card(view, item.id)]));
     const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
-    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[null, "Overview", 0, false], [1, "Shelf order", 0, false], [2, "Store pickup", 3, false],
+    expect(chips.map((chip) => [chip.n, chip.name, chip.count, chip.service])).toEqual([[null, "Overview", 0, false], [1, "Store pickup", 3, false], [2, "Shelf order", 0, false],
       [3, "One-offs", 2, false], [4, "folio · service", 0, true], [5, "atlas · service", 0, true], [6, "catalog · service", 0, true]]);
     // A card keeps its number after you flip away and a read reorders the server's pile: the session order wins.
     expect(stripChips([PICKUP, ONE_OFFS, SHELF, CATALOG], cards, SHELF).map((chip) => chip.name))
@@ -608,8 +608,8 @@ describe("what the keys act on", () => {
       done: [{ id: "effort-store-hours", name: "Store hours", archived: false }, { id: "effort-old", name: "Old", archived: true }] }, SHELF, true);
     expect(items.filter((item) => item.action).map((item) => item.key)).toEqual(DECK_ACTIONS.filter((action) => action.id !== "jump").map((action) => action.id));
     expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Overview", "", true],
-      ["Go to Shelf order", "1", false],
-      ["Go to Store pickup", "2", true], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],
+      ["Go to Store pickup", "1", true],
+      ["Go to Shelf order", "2", false], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],
       ["Go to catalog · service", "6", true], ["Resume Gift cards", "", true], ["Reopen Store hours", "", true], ["Reopen Old", "", false]]);
   });
 });

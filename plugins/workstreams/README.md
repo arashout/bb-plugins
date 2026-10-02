@@ -59,7 +59,7 @@ Workstreams starts planning and context threads with the **Planning model** sett
 ## Organize work from a thread
 
 The effort chip above the thread composer shows the thread's effort: its
-color dot, its name, and how many of its PRs need you. Select the chip to open
+color dot, its name, and its Your turn count. Select the chip to open
 that effort's card on the deck. A thread without an effort of its own shows the
 card the deck puts it on: the effort its linked PRs are in, else the service
 card of the repository most of its PRs are in, such as `folio · service`, with

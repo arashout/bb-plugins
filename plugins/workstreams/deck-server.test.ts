@@ -168,7 +168,7 @@ describe("the effort deck on the server", () => {
     const shared = (await env.rpc("thread_effort_context", { threadId: "thr-clone-a", seen: {} }) as ThreadEffortReady).picker!;
     expect([shared.chip.name, shared.chip.card, shared.linked.map((item) => item.ref)]).toEqual(["No effort", null, ["folio #403"]]);
     const own = (await env.rpc("thread_effort_context", { threadId: "thr-scratch", seen: {} }) as ThreadEffortReady).picker!;
-    expect([own.chip.name, own.chip.card, own.chip.needsYou]).toEqual(["folio · service", "service:inkwell/folio", 1]);
+    expect([own.chip.name, own.chip.card, own.chip.yourTurn]).toEqual(["folio · service", "service:inkwell/folio", 0]);
     // Archiving Shelf order drops it from "Shelf notes", whose chip then says No effort, so the thread is on Loose threads, not lost.
     const { scopes } = await env.rpc("effort_admin_list", null) as { scopes: Record<string, string> };
     expect(await env.rpc("effort_admin_archive", { effortKey: env.effort.key, archived: true, expectedScope: scopes[env.effort.key] })).toMatchObject({ ok: true });

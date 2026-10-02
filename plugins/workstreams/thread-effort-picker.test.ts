@@ -4,14 +4,14 @@ import type { ThreadEffortPicker } from "./thread-effort.js";
 import { MAX_SUGGESTED, pickedText, pickerItems, pickerStep, startHighlight, type JevAnswer, type PickerItem } from "./thread-effort-picker.js";
 
 const choice = (key: string, name: string, patch: Partial<ThreadEffortPicker["choices"][number]> = {}): ThreadEffortPicker["choices"][number] =>
-  ({ key: `effort:${key}`, id: key, name, oneOff: false, held: false, needsYou: 0, signal: null, score: 0, ...patch });
+  ({ key: `effort:${key}`, id: key, name, oneOff: false, held: false, yourTurn: 0, signal: null, score: 0, ...patch });
 const PICKER: ThreadEffortPicker = {
-  chip: { kind: "effort", effortId: "shelf", name: "Shelf order", oneOff: false, needsYou: 2, card: "shelf" },
+  chip: { kind: "effort", effortId: "shelf", name: "Shelf order", oneOff: false, yourTurn: 2, card: "shelf" },
   choices: [
     choice("gifts", "Gift cards", { held: true }),
     choice("one-offs", "One-offs", { oneOff: true }),
     choice("pickup", "Store pickup", { signal: "ABC-121 in the title", score: 3 }),
-    choice("shelf", "Shelf order", { signal: "has folio #340", score: 6, needsYou: 2 }),
+    choice("shelf", "Shelf order", { signal: "has folio #340", score: 6, yourTurn: 2 }),
     choice("hours", "Store hours", { signal: "parent thread's effort", score: 2 }),
     choice("catalog", "Catalog pages", { signal: "ticket ABC-130", score: 1 }),
   ],

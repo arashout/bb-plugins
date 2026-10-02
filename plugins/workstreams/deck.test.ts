@@ -50,16 +50,19 @@ describe("the effort deck", () => {
       "folio #325": "request" });
   });
 
-  it("orders the active pile by Needs you with One-offs after every effort, and the service cards after them, whose moves count as Needs you too", () => {
+  // The pile leads with where a person waits on you, Your turn, as the strip chips count: Shelf order's five moves of yours are chores and
+  // merges, so Store pickup's three PRs with feedback come first.
+  it("orders the active pile by Your turn with One-offs after every effort, and the service cards after them, whose moves count as Needs you too", () => {
     const loose = [url("folio", 301), url("folio", 318), url("catalog", 96), url("catalog", 97), url("atlas", 410), url("folio", 305)];
-    const view = deckView(input({ efforts: [effort("pickup"), effort("shelf"), { ...effort("shelf"), ...ONE_OFFS, key: "one-offs", oneOff: true,
+    const view = deckView(input({ efforts: [effort("shelf"), effort("pickup"), { ...effort("shelf"), ...ONE_OFFS, key: "one-offs", oneOff: true,
       pile: { effortId: ONE_OFFS.id, pile: "active", reason: "", since: 0 } }] }, (row) => loose.includes(row.prUrl) ? { effort: ONE_OFFS } : {}));
-    expect(view.active.map((card) => [card.name, card.needsYou])).toEqual([["Shelf order", 5], ["Store pickup", 3], ["One-offs", 6], ["folio · service", 1]]);
+    expect(view.active.map((card) => [card.name, card.yourTurn, card.needsYou])).toEqual([["Store pickup", 3, 3], ["Shelf order", 0, 5], ["One-offs", 2, 6],
+      ["folio · service", 0, 1]]);
     // folio #325 has no effort, and its move is yours all the same: nothing open is outside a card, or outside the count.
     expect(view.counts).toEqual({ needsYou: 15, held: 0, done: 0 });
   });
 
-  it("puts each open PR no effort owns on its repository's service card, most Needs you first, with the classifier's suggestions cut to its PRs", () => {
+  it("puts each open PR no effort owns on its repository's service card, most Your turn first, with the classifier's suggestions cut to its PRs", () => {
     const signal = (effortId: string | null) => [{ kind: "ticket" as const, effortId, text: "ticket ABC-210" }];
     const pr = (repo: string, number: number) => ({ prUrl: url(repo, number), repo: `inkwell/${repo}`, number, title: `Change ${number}`, signals: signal(null) });
     // One suggestion spans two repositories: each card shows the part of it that is on that card.
@@ -67,7 +70,7 @@ describe("the effort deck", () => {
       signals: ["ticket ABC-210"], tickets: ["ABC-210"], prs: [pr("atlas", 410), pr("catalog", 97)] }];
     const view = deckView(input({ classify: { groups, oneOffsId: null } }));
     expect(view.active.map((card) => [card.name, card.kind, card.repo, card.needsYou, card.stats.open])).toEqual([
-      ["Shelf order", "effort", null, 5, 5], ["Store pickup", "effort", null, 3, 5],
+      ["Store pickup", "effort", null, 3, 5], ["Shelf order", "effort", null, 5, 5],
       ["folio · service", "service", "inkwell/folio", 4, 4], ["catalog · service", "service", "inkwell/catalog", 2, 2], ["atlas · service", "service", "inkwell/atlas", 1, 1]]);
     const service = (repo: string) => view.active.find((card) => card.repo === `inkwell/${repo}`)!;
     expect(service("folio")).toMatchObject({ id: "service:inkwell/folio", key: "service:inkwell/folio", pile: "active", oneOff: false, suggestions: [] });
@@ -319,7 +322,7 @@ describe("threads on the effort deck", () => {
 
   it("puts every thread on a card: its effort's, its repository's service card, or Loose threads last", () => {
     const view = inkwellDeck(inkwellThreads());
-    expect(view.active.map((card) => [card.name, card.kind])).toEqual([["Shelf order", "effort"], ["Store pickup", "effort"], ["One-offs", "effort"],
+    expect(view.active.map((card) => [card.name, card.kind])).toEqual([["Store pickup", "effort"], ["Shelf order", "effort"], ["One-offs", "effort"],
       ["folio · service", "service"], ["atlas · service", "service"], ["catalog · service", "service"], ["quill · service", "service"], ["Loose threads", "loose"]]);
     // Nothing is outside a card: every thread the deck was handed is on one, and on only one of the cards it places by evidence.
     const placed = everyThread(view);

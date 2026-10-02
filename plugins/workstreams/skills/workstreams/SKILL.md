@@ -354,10 +354,10 @@ parent; the merge notice names it. Keep the thread-briefs plugin's
 worker threads itself.
 
 The effort chip above a thread's composer names the thread's effort with its
-color and Needs you count, and opens that effort's card on the deck. Without an
+color and Your turn count, and opens that effort's card on the deck. Without an
 effort of its own or one it coordinates, it names the card the deck places the
 thread on (see the effort deck's threads): an effort, a `<repo> · service`
-card with that card's Needs you count, or No effort for a loose thread. The
+card with that card's Your turn count, or No effort for a loose thread. The
 popover's linked PRs are the ones the thread records and the PR in its exact
 checkout, which assigning the thread takes in; a link only by branch name or
 worked path doesn't count.
@@ -604,12 +604,14 @@ cards included. Held and done efforts pause. A row the user acted
 on (`acted`) stops counting while its write waits or runs, and once it lands
 until the view marks its row seen: `deck_get` takes `seen`, when the view last
 marked each PR's row seen. A refusal stays theirs, and a mark older than a day
-is history. `deck-shared.ts` holds this one rule for every view.
+is history. `deck-shared.ts` holds this one rule for every view. Each card's
+`yourTurn` counts its rows All PRs lists on Your turn (`turn.list` `turn`),
+where a person's feedback waits on the user; the strip chip shows it.
 
-- `active`: one card per active effort, most Needs you first, One-offs after
+- `active`: one card per active effort, most Your turn first, One-offs after
   the rest, then one service card per repository with open PRs that no effort
   owns (`kind` `service`, `repo`, id `service:<owner/repo>`, named
-  `<repo> · service`), most Needs you first. Nothing stores a service card; the
+  `<repo> · service`), most Your turn first. Nothing stores a service card; the
   read model draws it, so every open PR is on a card and an explicit effort
   always wins. Its `suggestions` are `classify_get`'s groups cut to its PRs.
   `deck_batch_plan` takes its id as the `effortId`, and it is always active.

@@ -3100,7 +3100,7 @@ export default async function plugin(bb: BbPluginApi) {
     return efforts;
   }
 
-  /** `seen` also reads what the composer's effort chip and popover show (see threadEffortPickerSchema), with Needs you counted as the deck counts it. */
+  /** `seen` also reads what the composer's effort chip and popover show (see threadEffortPickerSchema), with Your turn counted as the deck counts it. */
   async function threadEffortContext(threadId: string, seen?: Readonly<Record<string, number>>): Promise<z.infer<typeof threadEffortContextSchema>> {
     try {
       const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
@@ -3197,7 +3197,7 @@ export default async function plugin(bb: BbPluginApi) {
     const deck = deckView(read);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE)?.id ?? null;
     const brief = (effort: EstablishedEffort) => ({ id: effort.id, name: effort.name, oneOff: effort.id === oneOffs });
-    const needs = (effortId: string) => deck.active.find((card) => card.id === effortId)?.needsYou ?? (deck.held.some((card) => card.id === effortId) ? 0 : null);
+    const turn = (effortId: string) => deck.active.find((card) => card.id === effortId)?.yourTurn ?? (deck.held.some((card) => card.id === effortId) ? 0 : null);
     const ownerOf = (url: string) => { const owner = work.ownerForPr(url); const effort = owner && effortStore.get(owner.id); return effort && !effort.archivedAt ? effort : null; };
     const ref = (url: string) => { const target = prTarget(url); return target ? `${target.slug.split("/").at(-1)} #${target.number}` : url; };
     const linked = input.direct.map(({ url, title }) => {
@@ -3224,7 +3224,7 @@ export default async function plugin(bb: BbPluginApi) {
     const placed = evidence ? threadHome(evidence) : null;
     const homeEffort = placed?.kind === "effort" ? effortStore.get(placed.id) : null;
     const chip = threadEffortChip({ own: input.intended && !input.intended.archivedAt ? brief(input.intended) : null, coordinates: coordinates && brief(coordinates),
-      home: homeEffort && !homeEffort.archivedAt ? { kind: "effort", effort: brief(homeEffort) } : placed?.kind === "service" ? placed : null, needsYou: needs });
+      home: homeEffort && !homeEffort.archivedAt ? { kind: "effort", effort: brief(homeEffort) } : placed?.kind === "service" ? placed : null, yourTurn: turn });
     // Efforts the deck draws a card for: not archived or done.
     const open = effortStore.list().filter((effort) => !effort.archivedAt && piles.get(effort).pile !== "done");
     const ticketOwner = (ticket: string) => {
@@ -3260,7 +3260,7 @@ export default async function plugin(bb: BbPluginApi) {
       const key = keyOf(effort);
       if (!key) return [];
       const signal = signals.get(effort.id);
-      return [{ key, ...brief(effort), held: piles.get(effort).pile === "held", needsYou: needs(effort.id) ?? 0,
+      return [{ key, ...brief(effort), held: piles.get(effort).pile === "held", yourTurn: turn(effort.id) ?? 0,
         signal: signal?.signal ?? null, score: signal?.score ?? 0 }];
     }).sort((a, b) => a.name.localeCompare(b.name));
     const { typesafeApiKey } = await settings.get();
