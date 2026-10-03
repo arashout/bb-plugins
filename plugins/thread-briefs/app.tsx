@@ -12,7 +12,6 @@ import {
   experimental_useSidebarThreads,
   useBbNavigate,
   useComposer,
-  useComposerView,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -690,9 +689,9 @@ const REFRESHER_BANNER_ID = "re-entry";
  */
 function ReentryRefresher() {
   const rpc = useRpc<typeof rpcContract>();
-  const view = useComposerView();
   const composer = useComposer();
-  const threadId = view.scope.kind === "thread" ? view.scope.threadId : null;
+  const threadId =
+    composer.scope.kind === "thread" ? composer.scope.threadId : null;
 
   const [state, setState] = useState<RefresherState | null>(null);
   const [isDismissed, setIsDismissed] = useState(false);
@@ -744,7 +743,7 @@ function ReentryRefresher() {
     dismissRef.current = dismiss;
   }, [dismiss]);
   useEffect(
-    () => composer.experimental_onSubmitted(() => dismissRef.current()),
+    () => composer.onSubmitted(() => dismissRef.current()),
     [composer],
   );
 
@@ -753,7 +752,7 @@ function ReentryRefresher() {
   // agent — makes the sentence describe a position that is already moving.
   // Hidden rather than dismissed: nothing was read, so nothing is recorded, and
   // the card is still owed when the thread goes quiet again.
-  if (view.run.isRunning) return null;
+  if (composer.isRunning) return null;
 
   return (
     // The card chrome is drawn here rather than taken from the host's

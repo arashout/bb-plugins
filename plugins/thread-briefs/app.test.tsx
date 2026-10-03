@@ -870,7 +870,7 @@ describe("the re-entry refresher", () => {
    * The banner beside a button that submits through the same composer.
    *
    * The harness has no "press Enter" driver, so a send is staged the only way
-   * a plugin can stage one: through `experimental_submit`, which fires the same
+   * a plugin can stage one: through `submit`, which fires the same
    * submission listeners bb's own send does.
    */
   const withProbe = (Banner: ComponentType) =>
@@ -881,7 +881,7 @@ describe("the re-entry refresher", () => {
           <Banner />
           <button
             type="button"
-            onClick={() => void composer.experimental_submit({ experimental_data: null })}
+            onClick={() => void composer.submit({ experimental_data: null })}
           >
             send
           </button>

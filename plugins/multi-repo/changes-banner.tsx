@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_Icon as Icon,
   useBbNavigate,
-  useComposerView,
+  useComposer,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -71,12 +71,13 @@ function summarize(repos: readonly RepoChanges[]): Summary {
  * it — so a workspace that appears after the first read starts the timer then.
  */
 export function ChangesBanner() {
-  const view = useComposerView();
+  const composer = useComposer();
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   // The registration scopes this to `"thread"`, so the narrowing always holds;
   // it is here because the scope union is what the hook returns.
-  const threadId = view.scope.kind === "thread" ? view.scope.threadId : null;
+  const threadId =
+    composer.scope.kind === "thread" ? composer.scope.threadId : null;
 
   /** Null until the first read answers; `[]` means "no workspace here". */
   const [repos, setRepos] = useState<readonly RepoChanges[] | null>(null);
