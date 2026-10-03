@@ -420,7 +420,7 @@ so a sweep running up to an hour late is invisible.
 | Auto-archive | a `17 * * * *` `bb.background.schedule` over `threads.list`, `planArchives` deciding purely, `threads.archive` doing it, and `autoArchivedAt` on the brief row remembering it |
 | Brief UI | a `threadPanelAction` tab, opened by an `experimental_threadHeaderAction` button through `useBbNavigate().openThreadPanel` |
 | Board | a `navPanel` with an `experimental_sidebarAccessory`, one `listBriefCards` call joined on the client to `experimental_useSidebarThreads`, the view in component state and mirrored to local storage (*not* the panel's `subPath` — see above), and every rule — columns, order, drops, view parsing — pure in `board.ts` |
-| Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `experimental_onSubmitted` for the send that retires it |
+| Re-entry refresher | an `app.composer.customize({banners})` card scoped to `thread`, `chrome: "bare"`, deciding nothing itself: one `getRefresher` call on mount, `onSubmitted` for the send that retires it |
 | Sidebar sections | `bb.sdk.threadSections` + `threads.update({sectionId})`, with `thread-list`'s own `organizationMode` / `manualSectionOrder` preferences set through `bb.sdk.plugins.callRpc` |
 | Thread titles | `threads.update({title})`, gated on `planRename` comparing the thread's title against the one this plugin last wrote |
 
@@ -440,7 +440,7 @@ refresher exists for.
 
 The one thing the client decides is when to stop showing it, because that is the
 one input the server cannot see: a send, through
-`useComposer().experimental_onSubmitted`.
+`useComposer().onSubmitted`.
 
 ### Why a content script rather than a list fork
 
