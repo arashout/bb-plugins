@@ -159,7 +159,9 @@ a live half and a stored half, and the live half wins:
   describes the last turn that finished.
 - otherwise, from the stored brief:
   - a manual status override in force → that status, whatever the fields say
-  - `nextStep` **and** `blockedOn` both empty → **done**
+  - `nextStep` **and** `blockedOn` both empty → **done**. The parser blanks
+    `nextStep` when the model's own `finished` verdict is `true` and no
+    `blockedOn` is named — see [The finished verdict](#the-finished-verdict)
   - `blockedOn` non-empty, or `nextStepActor` is `other` → **waiting-on-other**
   - otherwise → **waiting-on-me**
 
@@ -176,12 +178,14 @@ clears if you click the one that is already pinned. It moves the sidebar
 section as well as the row, because sections are keyed on this status.
 
 **Why it exists.** The derivation reads the brief's prose, and the prose can
-record a `nextStep` that is addressed to you and carried out somewhere the
-transcript cannot see — "reload an open client and confirm the panel tab
-opens", "check the rollout landed", "confirm the glyph looks right". Doing it
-leaves no trace for any summary to read, so **Re-summarize** just writes the
-same unresolved instruction back and the thread is **waiting-on-me** forever.
-The pin is the only way to say you did it.
+record a `nextStep` that is genuinely owed and then carried out somewhere the
+transcript cannot see — "merge PR #12 once approved", "grant the service
+account access", "land the upstream fix". Doing it leaves no trace for any
+summary to read, so **Re-summarize** just writes the same unresolved instruction
+back and the thread is **waiting-on-other** or **waiting-on-me** forever. The
+pin is the only way to say you did it. (An agent's "reload and confirm the panel
+opens" is a different case: that is a hand-over, not an obligation, and the
+[finished verdict](#the-finished-verdict) reads it as done without a pin.)
 
 The pin sits *in front of* the derivation rather than editing the fields it
 reads. Blanking `nextStep` in storage would not work: `renderTranscript` feeds
@@ -213,13 +217,36 @@ Briefs are not re-summarized to pick the field up: old rows gain an actor on
 their next natural summary. To see how far that has spread, compare the rows
 that have one against the total.
 
+### The finished verdict
+
 Beyond that guard, **done** is only as good as the summarizer's bar for
 "finished", and the prompt sets that bar at **whether anybody owes the thread an
 action** — something a person or team must do, that will not happen on its own,
 and that would be dropped if the brief did not record it.
 
-That test cuts both ways, and the prompt names both halves because each has its
-own failure:
+The model is asked that question directly, as a boolean `finished`, and asked
+it **before** `nextStep`. It used to be inferred from `nextStep` coming back
+empty, and that was why finished threads were almost never done: `nextStep` is
+requested as "the single most concrete next action", and a model asked for one
+finds one — "try it out", "merge when ready", the follow-up the agent offered as
+it signed off — so the empty string was returned for almost nothing. A yes/no on
+the state of the work is a question small models answer far more reliably, and
+putting it first in the object means the step is written after the verdict
+rather than the verdict being read off the step.
+
+The parser makes the verdict stick: `finished: true` beside a non-empty
+`nextStep` resolves in favour of `finished`, blanking the step (and its actor),
+so the thread derives `done` and `reconcileStage` reads an `implementation`
+stage as `review`. The one thing that overrules it is `blockedOn` — a named
+blocker is the higher bar, so a model that says finished while naming an open
+review keeps the step and the thread stays **waiting-on-other**. `finished:
+false` beside an empty `nextStep` is left alone: nothing names what is owed, so
+the fields still read as done, exactly as before the key existed. A reply
+without the key, or with one the parser cannot read, falls back to the old
+reading of `nextStep` on its own.
+
+That test cuts three ways, and the prompt names each because each has its own
+failure:
 
 - An obligation **outside the chat** still counts, and is the one that gets
   silently dropped: a PR open for review or merge, a patch carried on a fork
@@ -230,6 +257,14 @@ own failure:
   in a few days", "keep an eye on it", "confirm it behaves in real use" — has no
   owner and no definite outcome, so it does not keep a thread open. Neither does
   work the transcript puts out of scope, nor an idea nobody adopted.
+- **Handing finished work over is not owing an action.** An agent that has done
+  what was asked and signs off with "try it out", "reload and check", "let me
+  know if anything looks off" or "want me to also…?" is handing the result over,
+  and the user will see it by using it. That thread is finished. Only a question
+  the work cannot proceed without keeps it open — a choice between options the
+  agent put to the user and did not get, a credential it asked for, a decision
+  it stopped on. An offer of further work nobody took up goes in `currentState`
+  if it is worth remembering, not in `nextStep`.
 
 The second half exists because the first, on its own, made `done` a function of
 the agent's closing rhetoric rather than of the work. Agents habitually hedge
@@ -238,6 +273,17 @@ when they sign off — "worth a glance", "I'd flag this as open" — and a bar o
 finished thread out of Done. Two threads that had both shipped and rolled out
 landed in different sections purely because one agent volunteered a caveat. The
 prompt now says to judge the state of the work, not the tone of the sign-off.
+
+The third exists because the first two still left `done` nearly unreachable.
+Nearly every agent turn that finishes something ends by handing it over, and
+"try it and tell me if it looks right" is concrete, addressed to the user, and
+would not happen on its own — it passed the owed-action test to the letter, so a
+thread whose work had entirely landed read **waiting-on-me** until someone
+pinned it. The hand-over rule says what the test should have said all along:
+once the asked-for work is made, looking at it is not a debt the thread holds.
+If it turns out to be broken, the next turn is activity, and the next brief
+reopens the thread on its own. `done` is "the agent has nothing left to do and
+is waiting on nobody", not "nobody will ever touch this again".
 
 `blockedOn` carries a **higher** bar than `nextStep`, because it is the field
 that jams the door: any non-empty value forces **waiting-on-other**, and
@@ -251,8 +297,9 @@ chased, it is not blocked.
 A thread whose brief disagrees with this bar is usually one written before the
 bar changed: **Re-summarize** from the Brief panel. That re-reads the
 transcript under the current prompt, but note it also feeds the old brief back
-as a starting point, so a wrong `blockedOn` can survive if the transcript still
-reads as though it were true.
+as a starting point — labelled as something to re-test rather than carry
+forward — so a wrong `blockedOn` can survive if the transcript still reads as
+though it were true.
 
 ## The re-entry refresher
 
@@ -777,6 +824,12 @@ no preference writes.
   out: expected if the step happened outside the thread, because nothing in the
   transcript can record that. Pin the status to **Done** in the Brief panel —
   see [Overriding the status by hand](#overriding-the-status-by-hand).
+- A thread stuck on **Waiting on you** whose next step is just the agent's
+  sign-off — "try it out", "let me know if you want changes": a brief written
+  before the [finished verdict](#the-finished-verdict) existed, or a summarizer
+  that ignored the key. **Re-summarize**; if it comes back the same, check
+  `bb plugin logs thread-briefs` for a model that is not returning `finished`
+  at all.
 - A thread that will not stay in the section you drag it to: sections are keyed
   on status and nothing feeds an assignment back into a brief, so the next
   reconcile undoes the move. Pin the status instead.

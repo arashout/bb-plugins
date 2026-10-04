@@ -7,7 +7,10 @@ import {
   normalizeRefresher,
   normalizeTitle,
   parseSummary,
+  normalizeFinished,
+  reconcileNextStep,
   reconcileStage,
+  SYSTEM_PROMPT,
 } from "./summarize.js";
 import { MAX_REFRESHER_LENGTH, MAX_TITLE_LENGTH } from "./contract.js";
 import {
@@ -276,6 +279,125 @@ describe("reconcileStage", () => {
 
   it("leaves review where it is", () => {
     expect(reconcileStage("review", "")).toBe("review");
+  });
+});
+
+describe("normalizeFinished", () => {
+  it("reads a JSON boolean", () => {
+    expect(normalizeFinished(true)).toBe(true);
+    expect(normalizeFinished(false)).toBe(false);
+  });
+
+  it("tolerates a quoted answer, since JSON mode does not stop a model quoting one", () => {
+    expect(normalizeFinished("true")).toBe(true);
+    expect(normalizeFinished(" Yes ")).toBe(true);
+    expect(normalizeFinished("done")).toBe(true);
+    expect(normalizeFinished("false")).toBe(false);
+    expect(normalizeFinished("open")).toBe(false);
+  });
+
+  it("is unknown for anything else, so an old or odd reply falls back to nextStep", () => {
+    expect(normalizeFinished(undefined)).toBeUndefined();
+    expect(normalizeFinished(null)).toBeUndefined();
+    expect(normalizeFinished(1)).toBeUndefined();
+    expect(normalizeFinished("mostly")).toBeUndefined();
+  });
+});
+
+describe("reconcileNextStep", () => {
+  it("lets a finished verdict clear a step the model wrote anyway", () => {
+    expect(
+      reconcileNextStep({ finished: true, nextStep: "Try it out", blockedOn: "" }),
+    ).toBe("");
+  });
+
+  it("keeps the step while a blocker is named, whatever the verdict says", () => {
+    // blockedOn is the higher bar, and a blocked thread must never read as done.
+    expect(
+      reconcileNextStep({
+        finished: true,
+        nextStep: "Merge PR #12",
+        blockedOn: "PR #12 review",
+      }),
+    ).toBe("Merge PR #12");
+  });
+
+  it("leaves an unfinished thread's step alone", () => {
+    expect(
+      reconcileNextStep({ finished: false, nextStep: "Run the tests", blockedOn: "" }),
+    ).toBe("Run the tests");
+  });
+
+  it("does not manufacture a step for an unfinished thread that named none", () => {
+    expect(reconcileNextStep({ finished: false, nextStep: "", blockedOn: "" })).toBe("");
+  });
+
+  it("changes nothing when the model gave no verdict", () => {
+    expect(
+      reconcileNextStep({ finished: undefined, nextStep: "Run the tests", blockedOn: "" }),
+    ).toBe("Run the tests");
+  });
+});
+
+describe("parseSummary finished", () => {
+  it("asks the model for the verdict before the step", () => {
+    const finishedAt = SYSTEM_PROMPT.indexOf('"finished"');
+    const nextStepAt = SYSTEM_PROMPT.indexOf('"nextStep"');
+    expect(finishedAt).toBeGreaterThan(-1);
+    expect(finishedAt).toBeLessThan(nextStepAt);
+  });
+
+  it("reads a hand-over sign-off as done, not waiting on you", () => {
+    // The commonest way a finished thread stayed open: the agent built the
+    // thing and signed off with "try it", and the model dutifully recorded
+    // that as the next step with the user as its actor.
+    const parsed = parseSummary(
+      reply({
+        ...full,
+        finished: true,
+        nextStep: "Reload the client and check the panel opens",
+        nextStepActor: "me",
+      }),
+      null,
+    );
+    expect(parsed.nextStep).toBe("");
+    expect(parsed.nextStepActor).toBeUndefined();
+    expect(parsed.blockedOn).toBe("");
+    // And the stage reconciliation sees the cleared step.
+    expect(parsed.stage).toBe("review");
+  });
+
+  it("keeps a blocked thread blocked even when the model calls it finished", () => {
+    const parsed = parseSummary(
+      reply({
+        ...full,
+        finished: true,
+        nextStep: "Merge once approved",
+        nextStepActor: "other",
+        blockedOn: "review of PR #12",
+      }),
+      null,
+    );
+    expect(parsed.nextStep).toBe("Merge once approved");
+    expect(parsed.nextStepActor).toBe("other");
+    expect(parsed.blockedOn).toBe("review of PR #12");
+    expect(parsed.stage).toBe("implementation");
+  });
+
+  it("keeps the step of a thread the model calls unfinished", () => {
+    const parsed = parseSummary(reply({ ...full, finished: false }), null);
+    expect(parsed.nextStep).toBe("Run the tests");
+    expect(parsed.stage).toBe("implementation");
+  });
+
+  it("behaves exactly as before when the key is missing", () => {
+    expect(parseSummary(reply(full), null)).toEqual({ ...full, refresher: null });
+  });
+
+  it("does not store the verdict itself", () => {
+    expect(parseSummary(reply({ ...full, finished: true }), null)).not.toHaveProperty(
+      "finished",
+    );
   });
 });
 

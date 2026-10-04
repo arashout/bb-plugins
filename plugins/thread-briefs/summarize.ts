@@ -18,7 +18,8 @@ Return ONLY a JSON object with exactly these keys:
   "title"         A name for this thread, 4-6 words, that someone scanning a sidebar would recognise a day later. Name the work, not the conversation: the subsystem, file, or feature plus what is being done to it. No trailing punctuation, no quotes, no "thread"/"discussion"/"chat", no leading verb like "Add" unless adding is genuinely the whole job.
   "goal"          One line: what this thread is actually trying to achieve. Not the opening prompt restated — the underlying objective, as it stands now.
   "currentState"  What exists now, including half-finished work. Name the concrete artifacts (files, branches, PRs) where the transcript names them.
-  "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan. Empty string if nobody owes this thread an action.
+  "finished"      true or false. true when the work this thread set out to do is made and has landed as far as this thread can carry it, and nobody owes the thread an action — the rules below say what counts. Decide this before "nextStep": when it is true, "nextStep" and "blockedOn" are both the empty string.
+  "nextStep"      The single most concrete next action, phrased so the reader could start it without thinking. ONE action, not a plan. Empty string when "finished" is true.
   "nextStepActor" Who has to take that next step. One of: "me" if only the user can (try it and report back, decide between options, reply to someone, merge, grant access), "agent" if the agent could carry on unprompted, "other" if it depends on someone or something outside this thread (a review, a colleague, an upstream fix, a rollout).
   "blockedOn"     The party or artifact the thread is waiting on, when someone could go chase it. Empty string otherwise.
   "constraints"   Facts learned during the thread that would break a naive re-plan: API limits, rejected approaches, assumptions proven wrong. Empty string if none.
@@ -27,7 +28,7 @@ Return ONLY a JSON object with exactly these keys:
   "refresherFull"  The same thing for someone who has been away for days: two or three sentences, with enough named detail to stand on its own.
 
 Rules:
-- Every field is a string except "nextStepActor", which is one of the three words above. Keep each to one or two lines.
+- Every field is a string except "finished", which is a JSON boolean, and "nextStepActor", which is one of the three words above. Keep each to one or two lines.
 - The two "refresher" fields are prose, not labelled fields: flowing sentences, no "Goal:" / "Next:" prefixes, no bullet points, no headings. Write them as you would say them to the person over their shoulder as they sit back down.
 - Write them in that order — what you were doing, how far it got, what to do next — and name things concretely: the file, the branch, the PR, the command. "You were partway through the sidebar sections" is useless; "the section sync lands but the order is not pinned yet" is the point.
 - Mention what is blocking, or a constraint learned in the thread, ONLY when it changes what to do next. A blocker that has already been routed around is history, not orientation.
@@ -36,10 +37,13 @@ Rules:
 - "title" describes what the thread turned out to be about, not what its opening message asked for. A thread that set out to fix a test and ended up rewriting the scheduler is named for the scheduler.
 - Omit "nextStepActor" entirely when "nextStep" is the empty string — there is no actor for a step that does not exist.
 - When "blockedOn" is non-empty, "nextStepActor" is "other".
-- A thread is finished when nobody owes it an action. For any candidate next step, ask: must a person or team actually do this, will it not happen on its own, and would it be dropped if this brief did not record it? Yes to all three — that is "nextStep", and the thread is not done. Otherwise "nextStep" is the empty string. Never invent one; a brief that manufactures work devalues every real item next to it.
+- Decide "finished" first, and decide it from the state of the work, not from the last message. A thread is finished when what it set out to do is made and has landed as far as this thread can carry it, and nobody owes it an action. For any candidate next step, ask: must a person or team actually do this, will it not happen on its own, and would it be dropped if this brief did not record it? Yes to all three — that is "nextStep", "finished" is false, and the thread is not done. Otherwise "finished" is true and "nextStep" is the empty string. Never invent one; a brief that manufactures work devalues every real item next to it.
+- Handing finished work over is not owing an action. An agent that has done what was asked and signs off with "try it out", "reload and check", "let me know if anything looks off" or "want me to also…?" is handing the result over, not asking for something the work needs: the user will see the result by using it, and the brief's job is to say it landed. That thread is finished. Only a question the work cannot proceed without keeps it open — a choice between options the agent put to the user and did not get, a credential or access it asked for, a decision it stopped on.
+- An offer of further work the user has not taken up is an idea, not an obligation, however sensible it sounds. Keep it in "currentState" if it is worth remembering, and leave "nextStep" empty.
+- The previous brief's "nextStep", when one is shown, is a claim to re-test, not to carry forward. If the transcript since shows it carried out, or it would not pass these rules today, drop it.
 - An action can be owed outside the chat, and those are the ones that get silently dropped: a PR open for review or merge, a patch carried on a fork or side branch until it lands upstream, a temporary workaround to undo, a build or rollout to finish and confirm, a question put to someone who has not answered. Recording these is not inventing work — the transcript already named them.
-- Nothing is owed to the passage of time. Open-ended watching has no owner and no definite outcome — "check back in a few days", "keep an eye on it", "confirm it behaves in real use" — and does NOT keep a thread open. Nor does work the transcript puts out of scope, nor an idea raised and not adopted. Judge the state of the work, not the tone of the sign-off: agents habitually hedge when they finish ("worth a glance", "I'd flag this as open"), and an item nobody must act on does not block done however the transcript labels it. Keep anything worth remembering in "currentState" or "constraints".
-- "stage" and "nextStep" describe the same thread and must agree. An empty "nextStep" means nothing is owed, which is only true once the work is made — so the stage is "review". Never return "implementation" alongside an empty "nextStep".
+- Nothing is owed to the passage of time. Open-ended watching has no owner and no definite outcome — "check back in a few days", "keep an eye on it", "confirm it behaves in real use" — and does NOT keep a thread open. Nor does work the transcript puts out of scope, nor an idea raised and not adopted. Judge the state of the work, not the tone of the sign-off: agents habitually hedge when they finish ("worth a glance", "I'd flag this as open"), and an item nobody must act on does not block "finished" however the transcript labels it. Keep anything worth remembering in "currentState" or "constraints".
+- "stage", "finished" and "nextStep" describe the same thread and must agree. A true "finished" or an empty "nextStep" means nothing is owed, which is only true once the work is made — so the stage is "review". Never return "implementation" alongside an empty "nextStep".
 - "blockedOn" is held to a higher bar than "nextStep": name a party or artifact someone could go chase — a specific review, a person, an upstream fix, a running build, an access grant. Never a duration, never "real usage" or "more data". If you cannot say who would be chased, leave it empty.
 - Use empty strings, not "none" / "N/A" / "nothing".
 - Write plainly and specifically. No preamble, no hedging, no restating these instructions.
@@ -160,6 +164,65 @@ function normalizeActor(
   if (nextStep === "" || typeof value !== "string") return undefined;
   const parsed = nextStepActorSchema.safeParse(value.trim().toLowerCase());
   return parsed.success ? parsed.data : undefined;
+}
+
+const FINISHED_WORDS = new Set(["true", "yes", "finished", "done"]);
+const UNFINISHED_WORDS = new Set(["false", "no", "open", "unfinished", "ongoing"]);
+
+/**
+ * The model's own answer to "is this thread finished?", or `undefined` when it
+ * gave none we can read.
+ *
+ * Asked as a boolean rather than inferred from an empty `nextStep` because the
+ * two questions pull a model in opposite directions. `nextStep` is asked for as
+ * "the single most concrete next action", and a model asked for one almost
+ * always finds one — "try it out", "merge when ready", a follow-up it offered
+ * at sign-off — so a bar of "leave this string empty" was cleared by almost
+ * nothing, and done was the rarest status on the board however much work had
+ * landed. A direct yes/no on the state of the work, answered *before* the
+ * next step is written, is a question small models get right far more often,
+ * and {@link reconcileNextStep} makes the answer stick.
+ *
+ * Undefined is a first-class value: a brief written before the key existed,
+ * or a model that skipped it, falls back to reading `nextStep` on its own.
+ * Strings are tolerated because JSON mode does not stop a model quoting a
+ * boolean.
+ */
+export function normalizeFinished(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const word = value.trim().toLowerCase();
+  if (FINISHED_WORDS.has(word)) return true;
+  if (UNFINISHED_WORDS.has(word)) return false;
+  return undefined;
+}
+
+/**
+ * The `nextStep` a summary lands on once reconciled with its own `finished`.
+ *
+ * `finished: true` beside a non-empty `nextStep` is the contradiction this
+ * exists for, and it resolves in favour of `finished`: the prompt asks the
+ * model to settle whether anything is owed before naming a step, and a step it
+ * writes anyway is, in practice, the hand-over phrase or the offered follow-up
+ * the rules told it not to record. Keeping the step would make `finished`
+ * decorative and leave `done` exactly as rare as before.
+ *
+ * `blockedOn` is the one thing that overrules it. It is held to a higher bar
+ * than `nextStep` — a named party or artifact someone could chase — and
+ * `deriveStatus` guarantees a blocked thread never reads as done. A model that
+ * says finished while naming an open review is more likely wrong about the
+ * first, so the step stays and the thread stays blocked.
+ *
+ * `finished: false` with an empty `nextStep` is left alone: nothing names what
+ * is owed, so the fields still read as done, exactly as they did before the key
+ * existed. A "waiting on you" with nothing to do would be worse.
+ */
+export function reconcileNextStep(args: {
+  finished: boolean | undefined;
+  nextStep: string;
+  blockedOn: string;
+}): string {
+  return args.finished === true && args.blockedOn === "" ? "" : args.nextStep;
 }
 
 const stripTrailingPunctuation = (text: string) =>
@@ -295,7 +358,12 @@ export function parseSummary(
   }
   const record = raw as Record<string, unknown>;
 
-  const nextStep = normalizeField(record.nextStep);
+  const blockedOn = normalizeField(record.blockedOn);
+  const nextStep = reconcileNextStep({
+    finished: normalizeFinished(record.finished),
+    nextStep: normalizeField(record.nextStep),
+    blockedOn,
+  });
 
   // A pinned stage short-circuits both the fallback and the reconciliation: the
   // prompt promises the user's pick is returned whatever the transcript says,
@@ -318,7 +386,7 @@ export function parseSummary(
     currentState: normalizeField(record.currentState),
     nextStep,
     nextStepActor: normalizeActor(record.nextStepActor, nextStep),
-    blockedOn: normalizeField(record.blockedOn),
+    blockedOn,
     constraints: normalizeField(record.constraints),
     stage,
     refresher: normalizeRefresher({

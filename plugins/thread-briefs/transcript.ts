@@ -73,7 +73,7 @@ export function renderTranscript(input: TranscriptInput): string {
     const previous = input.previousBrief;
     parts.push(
       [
-        "Previous brief (update it; keep what is still true, correct what is not):",
+        "Previous brief (update it; keep what is still true, correct what is not; re-test its nextStep against the transcript rather than carrying it forward):",
         // Fed back so the name only moves when the work moved. Without it the
         // model renames from scratch every summary and a settled thread
         // wobbles between synonyms in the sidebar.

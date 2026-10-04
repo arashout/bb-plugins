@@ -6,9 +6,13 @@ every thread a short, durable **brief**, generated outside the working chat:
 
 - **goal** — what the thread is actually trying to achieve
 - **currentState** — what exists now, including half-done work
+- **finished** — the summarizer's own verdict, asked before `nextStep`: is the
+  work this thread set out to do made and landed, with nobody owing it an
+  action? Not stored; it settles `nextStep` in the parser
 - **nextStep** — the single most concrete next action, or empty when nobody owes
   the thread one. An open PR, a patch carried on a fork, or a workaround still in
-  place is owed; open-ended watching is not
+  place is owed; open-ended watching is not, and neither is an agent's hand-over
+  ("try it out", "want me to also…?") once the asked-for work is done
 - **nextStepActor** — who has to take it: `me`, `agent`, or `other`. The one
   judgement the status needs that the prose cannot supply, since "test it and
   tell me" and "keep going" read alike
@@ -30,11 +34,23 @@ once the work is made, so a `stage` of `implementation` beside one is read as
 `review`. Without it an agent's closing summary of what it built lands as
 "Implementation — Done". A pinned stage is exempt; a pin is returned as given.
 
+`done` itself hangs on `nextStep` being empty, and that turned out to be the
+wrong thing to ask a model for. `nextStep` is requested as "the single most
+concrete next action", and a model asked for one finds one — the agent's "try it
+and tell me", the follow-up it offered at sign-off — so a bar of "leave this
+string empty" was cleared by almost nothing and finished threads sat in Waiting
+on you indefinitely. The prompt now asks a direct yes/no, `finished`, *before*
+the step, with the bar set at the state of the work rather than the last
+message, and the parser lets a `true` clear whatever `nextStep` came back beside
+it. `blockedOn` overrules it the other way: a named blocker is the higher bar,
+and a blocked thread never reads as done.
+
 Either can be pinned by hand in the Brief panel, anchored to the thread's
 activity cursor so the pin retires on the next real turn. The status pin is what
-closes a thread whose next step was carried out somewhere the transcript cannot
-see — "reload a client and confirm the panel opens" leaves nothing for a summary
-to read, so the derivation would say `waiting-on-me` forever.
+closes a thread whose genuinely owed next step was carried out somewhere the
+transcript cannot see — a PR merged by hand, an access grant made — which leaves
+nothing for a summary to read, so the derivation would say `waiting-on-other`
+forever.
 
 ## Install
 
