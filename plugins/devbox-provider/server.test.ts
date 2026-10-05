@@ -179,6 +179,27 @@ describe("machines", () => {
     expect(await provider.validate!({ inputs: {} } as never)).toMatchObject({ action: "refuse" });
   });
 
+  it("reports a slow devbox as available and a refusal as unavailable", async () => {
+    const { provider, incus } = await setup({ token: "dbx_abc" });
+    expect(await provider.availability!()).toEqual({ status: "available" });
+
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      vi.mocked(incus.client.ping).mockImplementationOnce(
+        (signal: AbortSignal) =>
+          new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason))),
+      );
+      const slow = provider.availability!();
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(await slow).toEqual({ status: "available" });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    vi.mocked(incus.client.ping).mockRejectedValueOnce(new Error("devbox refused the connection token"));
+    expect(await provider.availability!()).toMatchObject({ status: "unavailable", message: expect.stringContaining("refused") });
+  });
+
   it("creates, asks for the Tailscale sign-in, and bootstraps as dev", async () => {
     const { provider, incus, bootstrap, harness, bb } = await setup({
       token: "dbx_abc",

@@ -161,6 +161,7 @@ const SHORT_EXEC_TIMEOUT_MS = 60 * 1000;
 const AUTH_URL_TIMEOUT_MS = 2 * 60 * 1000;
 const RECONNECT_TIMEOUT_MS = 2 * 60 * 1000;
 const POLL_MS = 3000;
+const AVAILABILITY_TIMEOUT_MS = 7000;
 
 export interface DevboxProviderDeps {
   incusFactory: (cfg: IncusConfig) => IncusClient;
@@ -523,12 +524,27 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
         if ((cfg.token?.trim() ?? "") === "") {
           return { status: "setup-required", message: "Connect devbox in Settings → Plugins → Devbox machines." };
         }
+        // Core gives this check 10 s and refuses a create on anything but
+        // available. A slow answer is not a no: a cold connection, or the
+        // first request after devbox-gate restarts (which trusts a fresh
+        // certificate into Incus), can take seconds. Only a definite refusal
+        // reports unavailable; a create that then cannot reach devbox fails
+        // with the real error in its log.
+        const deadline = new AbortController();
+        const timer = setTimeout(() => deadline.abort(new Error("timed out")), AVAILABILITY_TIMEOUT_MS);
+        const signal = deadline.signal;
         try {
-          const { incus } = await connection(AbortSignal.timeout(4000));
-          await incus.ping(AbortSignal.timeout(4000));
+          const { incus } = await connection(signal);
+          await incus.ping(signal);
           return { status: "available" };
         } catch (error) {
+          if (signal.aborted) {
+            bb.log.warn(`devbox did not answer the availability check within ${AVAILABILITY_TIMEOUT_MS} ms`);
+            return { status: "available" };
+          }
           return { status: "unavailable", message: errorMessage(error) };
+        } finally {
+          clearTimeout(timer);
         }
       },
       async validate() {
