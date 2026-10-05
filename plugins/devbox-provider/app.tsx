@@ -11,7 +11,10 @@ interface Status {
   project: string | null;
   devboxUrl: string;
   signIns: Array<{ machine: string; url: string; since: number }>;
+  machines: Array<{ hostId: string; name: string; phase: string; status: string }>;
 }
+
+const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 
 function DevboxSection() {
   const rpc = useRpc<typeof rpcContract>();
@@ -19,6 +22,7 @@ function DevboxSection() {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [name, setName] = useState("");
 
   const refetch = useCallback(() => {
     rpc.call("status").then(
@@ -32,6 +36,15 @@ function DevboxSection() {
   useEffect(refetch, [refetch]);
   useRealtime("connection-changed", refetch);
   useRealtime("signins-changed", refetch);
+  useRealtime("machines-changed", refetch);
+  // Creation moves through phases the plugin does not signal; poll while
+  // anything is still on its way.
+  const settling = status !== null && status.machines.some((m) => m.phase !== "active" || m.status !== "connected");
+  useEffect(() => {
+    if (!settling) return;
+    const timer = setInterval(refetch, 5000);
+    return () => clearInterval(timer);
+  }, [settling, refetch]);
 
   const open = (url: string) => {
     if (!navigate.openUrl(url)) window.open(url, "_blank", "noopener");
@@ -61,6 +74,22 @@ function DevboxSection() {
     }
   };
 
+  const trimmed = name.trim();
+  const nameOk = trimmed === "" || NAME_PATTERN.test(trimmed);
+  const create = async () => {
+    setBusy(true);
+    try {
+      await rpc.call("createMachine", trimmed === "" ? {} : { name: trimmed });
+      setName("");
+      setError(null);
+      refetch();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (status === null) {
     return <p className="text-sm text-muted-foreground">{error ?? "Loading…"}</p>;
   }
@@ -75,7 +104,7 @@ function DevboxSection() {
                 {" "}to project <code>{status.project}</code>
               </>
             ) : null}
-            . New machines can be added under Settings → Machines.
+            .
           </p>
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void disconnect()}>
             Disconnect
@@ -91,6 +120,44 @@ function DevboxSection() {
           </Button>
         </div>
       )}
+
+      {status.connected ? (
+        <div className="flex flex-col gap-2">
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (nameOk) void create();
+            }}
+          >
+            <input
+              className="h-8 flex-1 rounded-md border border-border bg-transparent px-2 text-sm"
+              placeholder="Machine name (optional)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              aria-invalid={!nameOk}
+            />
+            <Button size="sm" type="submit" disabled={busy || !nameOk}>
+              Create machine
+            </Button>
+          </form>
+          {!nameOk ? (
+            <p className="text-xs text-destructive">Lowercase letters, digits and dashes, starting with a letter.</p>
+          ) : null}
+          {status.machines.length > 0 ? (
+            <ul className="flex flex-col gap-1">
+              {status.machines.map((m) => (
+                <li key={m.hostId} className="flex items-center justify-between gap-4">
+                  <code>{m.name}</code>
+                  <span className="text-muted-foreground">
+                    {m.phase === "active" ? m.status : m.phase}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
 
       {status.signIns.length > 0 ? (
         <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
@@ -115,7 +182,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "devbox",
     title: "devbox",
-    description: "Your devbox project and machines waiting for Tailscale sign-in.",
+    description: "Your devbox project, its machines, and any waiting for Tailscale sign-in.",
     component: DevboxSection,
   });
 });

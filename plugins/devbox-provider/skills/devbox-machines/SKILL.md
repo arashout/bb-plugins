@@ -24,7 +24,8 @@ https://devbox.boreray-eel.ts.net/connect.
 bb machine create --provider devbox --inputs '{"name":"mybox"}'
 ```
 
-`name` is optional (default `bb-<6 hex>`); `image` overrides the image
+Or, for the user: Settings → Plugins → Devbox machines → Create machine
+(bb's Settings → Machines → Add machine only offers manual setup). `name` is optional (default `bb-<6 hex>`); `image` overrides the image
 alias. Creation waits for the user to **sign the machine in to Tailscale**:
 the link is printed in the creation log (`bb machine show <host-id>`) and
 listed under Settings → Plugins → Devbox machines. Relay it to the user; do

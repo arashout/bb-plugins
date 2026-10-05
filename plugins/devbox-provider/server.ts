@@ -52,6 +52,13 @@ export type MachineResource = z.infer<typeof resourceSchema>;
 const signInSchema = z.object({ machine: z.string(), url: z.string(), since: z.number() });
 export type SignIn = z.infer<typeof signInSchema>;
 
+const machineSummarySchema = z.object({
+  hostId: z.string(),
+  name: z.string(),
+  phase: z.string(),
+  status: z.string(),
+});
+
 export const rpcContract = defineRpcContract({
   status: {
     input: z.null(),
@@ -60,7 +67,15 @@ export const rpcContract = defineRpcContract({
       project: z.string().nullable(),
       devboxUrl: z.string(),
       signIns: z.array(signInSchema),
+      machines: z.array(machineSummarySchema),
     }),
+  },
+  // bb's Settings → Machines offers only manual setup for adding a machine,
+  // so the plugin's settings section starts a standalone create itself,
+  // exactly as `bb machine create --provider devbox` does.
+  createMachine: {
+    input: z.object({ name: machineInputsSchema.shape.name }).strict(),
+    output: z.object({ hostId: z.string() }),
   },
   connect: {
     input: z.null(),
@@ -119,6 +134,7 @@ export const SETTING_DESCRIPTORS = {
 
 export const SIGNINS_CHANGED = "signins-changed";
 export const CONNECTION_CHANGED = "connection-changed";
+export const MACHINES_CHANGED = "machines-changed";
 
 const ROOT_ENV = {
   HOME: "/root",
@@ -273,7 +289,20 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
           const stored = connectionRecord.safeParse(await bb.storage.kv.get(CONNECTION_KEY));
           project = stored.success && stored.data.tokenFingerprint === tokenFingerprint(token) ? stored.data.project : null;
         }
-        return { connected: token !== "", project, devboxUrl: cfg.devboxUrl, signIns: await signIns() };
+        const hosts = await bb.sdk.hosts.list();
+        const machines = hosts
+          .filter((h) => h.machineProviderId === PROVIDER_ID)
+          .map((h) => ({ hostId: h.id, name: h.name, phase: h.lifecycle.phase, status: h.status }));
+        return { connected: token !== "", project, devboxUrl: cfg.devboxUrl, signIns: await signIns(), machines };
+      },
+      async createMachine({ name }) {
+        const host = await bb.sdk.hosts.experimental_create({
+          machineProviderId: PROVIDER_ID,
+          inputs: name === undefined ? {} : { name },
+          wait: false,
+        });
+        bb.realtime.publish(MACHINES_CHANGED, { hostId: host.id });
+        return { hostId: host.id };
       },
       async connect() {
         const cfg = await settings.get();
@@ -539,6 +568,8 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
         } catch (error) {
           signal.throwIfAborted();
           return { status: "failed", message: errorMessage(error) };
+        } finally {
+          bb.realtime.publish(MACHINES_CHANGED, { key });
         }
       },
       async reconcileCleanup({ key, signal }) {

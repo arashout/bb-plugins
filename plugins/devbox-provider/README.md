@@ -1,8 +1,11 @@
 # Devbox machines
 
 Create [devbox](https://github.com/bitcomplete/devbox) machines from bb.
-Connect your devbox project once; after that **Devbox** is a machine type
-under Settings → Machines, like any other.
+Connect your devbox project once, then create machines from the plugin's
+settings section (Settings → Plugins → Devbox machines) or with
+`bb machine create --provider devbox`. bb's own Settings → Machines → Add
+machine offers only manual setup, so it does not list Devbox; machines
+created here appear there like any other once they exist.
 
 ## How it works
 

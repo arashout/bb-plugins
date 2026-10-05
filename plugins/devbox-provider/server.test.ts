@@ -53,6 +53,15 @@ async function setup(options: { token?: string; tailscale?: Array<Record<string,
     appUrl: APP_URL,
     settings: options.token === undefined ? {} : { token: options.token },
   });
+  harness.sdk.stub("hosts.list", async () => [
+    { id: "host_box", name: "box", machineProviderId: "devbox", lifecycle: { phase: "creating" }, status: "disconnected" },
+    { id: "host_other", name: "laptop", machineProviderId: null, lifecycle: { phase: "active" }, status: "connected" },
+  ]);
+  const created: unknown[] = [];
+  harness.sdk.stub("hosts.experimental_create", async (args: unknown) => {
+    created.push(args);
+    return { id: "host_new" };
+  });
   const bootstrap = vi.fn(async () => ({ hostId: "host_devbox" }));
   Object.assign(bb.experimental_machines, { bootstrap });
   const incus = fakeIncus(options.tailscale ?? [{ BackendState: "Running", Self: { DNSName: "box.ts.net." } }]);
@@ -75,7 +84,7 @@ async function setup(options: { token?: string; tailscale?: Array<Record<string,
   const route = harness.registrations.httpRoutes.find((r) => r.path === "/connect/callback")!;
   const app = new Hono().get("/cb", route.handler);
   const callback = (query: Record<string, string>) => app.request(`/cb?${new URLSearchParams(query)}`);
-  return { bb, harness, provider, incus, incusFactory, bootstrap, callback, route, fetchImpl };
+  return { bb, harness, provider, incus, incusFactory, bootstrap, callback, route, fetchImpl, created };
 }
 
 describe("connect", () => {
@@ -150,6 +159,20 @@ describe("connect", () => {
 });
 
 describe("machines", () => {
+  it("lists only devbox machines and creates one standalone", async () => {
+    const { harness, created } = await setup({ token: "dbx_abc" });
+    expect(await harness.callRpc("status", null)).toMatchObject({
+      machines: [{ hostId: "host_box", name: "box", phase: "creating", status: "disconnected" }],
+    });
+    expect(await harness.callRpc("createMachine", { name: "mybox" })).toEqual({ hostId: "host_new" });
+    expect(await harness.callRpc("createMachine", {})).toEqual({ hostId: "host_new" });
+    expect(created).toEqual([
+      { machineProviderId: "devbox", inputs: { name: "mybox" }, wait: false },
+      { machineProviderId: "devbox", inputs: {}, wait: false },
+    ]);
+    await expect(harness.callRpc("createMachine", { name: "Bad Name" })).rejects.toThrow();
+  });
+
   it("needs a connection first", async () => {
     const { provider } = await setup();
     expect(await provider.availability!()).toMatchObject({ status: "setup-required" });
