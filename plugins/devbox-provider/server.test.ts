@@ -62,6 +62,11 @@ async function setup(options: { token?: string; tailscale?: Array<Record<string,
     created.push(args);
     return { id: "host_new" };
   });
+  const renamed: unknown[] = [];
+  harness.sdk.stub("hosts.update", async (args: unknown) => {
+    renamed.push(args);
+    return {};
+  });
   const bootstrap = vi.fn(async () => ({ hostId: "host_devbox" }));
   Object.assign(bb.experimental_machines, { bootstrap });
   const incus = fakeIncus(options.tailscale ?? [{ BackendState: "Running", Self: { DNSName: "box.ts.net." } }]);
@@ -84,7 +89,7 @@ async function setup(options: { token?: string; tailscale?: Array<Record<string,
   const route = harness.registrations.httpRoutes.find((r) => r.path === "/connect/callback")!;
   const app = new Hono().get("/cb", route.handler);
   const callback = (query: Record<string, string>) => app.request(`/cb?${new URLSearchParams(query)}`);
-  return { bb, harness, provider, incus, incusFactory, bootstrap, callback, route, fetchImpl, created };
+  return { bb, harness, provider, incus, incusFactory, bootstrap, callback, route, fetchImpl, created, renamed };
 }
 
 describe("connect", () => {
@@ -160,15 +165,19 @@ describe("connect", () => {
 
 describe("machines", () => {
   it("lists only devbox machines and creates one standalone", async () => {
-    const { harness, created } = await setup({ token: "dbx_abc" });
+    const { harness, created, renamed } = await setup({ token: "dbx_abc" });
     expect(await harness.callRpc("status", null)).toMatchObject({
       machines: [{ hostId: "host_box", name: "box", phase: "creating", status: "disconnected" }],
     });
     expect(await harness.callRpc("createMachine", { name: "mybox" })).toEqual({ hostId: "host_new" });
     expect(await harness.callRpc("createMachine", {})).toEqual({ hostId: "host_new" });
-    expect(created).toEqual([
-      { machineProviderId: "devbox", inputs: { name: "mybox" }, wait: false },
-      { machineProviderId: "devbox", inputs: {}, wait: false },
+    expect(created[0]).toEqual({ machineProviderId: "devbox", inputs: { name: "mybox" }, wait: false });
+    // Unnamed: the plugin picks the name, so bb and Incus agree from the start.
+    const picked = (created[1] as { inputs: { name: string } }).inputs.name;
+    expect(picked).toMatch(/^devbox-[0-9a-z]{6}$/u);
+    expect(renamed).toEqual([
+      { hostId: "host_new", name: "mybox" },
+      { hostId: "host_new", name: picked },
     ]);
     await expect(harness.callRpc("createMachine", { name: "Bad Name" })).rejects.toThrow();
   });
@@ -223,6 +232,9 @@ describe("machines", () => {
     expect(incus.instances.get("box")?.config[KEY_CONFIG]).toBe("key-1");
     expect(checkpoint).toHaveBeenCalledWith({ name: "box", key: "key-1", project: "dylan" });
     expect(r.lines.join("")).toContain("https://login.tailscale.com/a/abc");
+    // The server is reached from inside the machine before bootstrap.
+    const reach = incus.execs.find((e) => e.options.command.includes("bb-reach-server"));
+    expect(reach?.options.command.at(-1)).toBe("https://bb.example/health");
     expect(seenSignIn).toMatchObject({ signIns: [{ machine: "box", url: "https://login.tailscale.com/a/abc" }] });
     expect(await harness.callRpc("status", null)).toMatchObject({ signIns: [] });
     expect(realtime).toHaveBeenCalled();

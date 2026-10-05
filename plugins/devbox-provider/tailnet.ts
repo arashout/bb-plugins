@@ -65,3 +65,20 @@ done
 // Run as root before removal. Logging out takes the node off the tailnet
 // rather than leaving it to expire; failure is not worth stopping for.
 export const LOGOUT_COMMAND = ["sh", "-c", "tailscale logout >/dev/null 2>&1 || true"];
+
+// Run as root with the server's address. A node that has just signed in can
+// take a moment before it reaches its peers, and bb's installer gives up on
+// the first connection timeout, so wait until the server answers at all
+// (any HTTP status will do) before bootstrapping.
+export const REACH_SERVER_SCRIPT = `
+set -u
+i=0
+until curl -sS -o /dev/null --max-time 10 "$1"; do
+  i=$((i + 1))
+  if [ "$i" -ge 18 ]; then
+    echo "this machine cannot reach $1 over the tailnet" >&2
+    exit 1
+  fi
+  sleep 5
+done
+`;

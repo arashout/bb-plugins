@@ -5,7 +5,7 @@
 // leaves a bearer token in the `token` secret setting. Every Incus call goes
 // through devbox-gate with that token (incus.ts). Core installs and enrolls
 // the daemon through the exec transport here, as it does for any machine.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { defineRpcContract, type BbPluginApi, type MachineExecutor } from "@get-bb/plugin-sdk";
 import type {
   PluginMachineProviderProgress,
@@ -26,6 +26,7 @@ import {
   LOGOUT_COMMAND,
   parseTailscaleStatus,
   PREPARE_SCRIPT,
+  REACH_SERVER_SCRIPT,
   START_LOGIN_SCRIPT,
   STATUS_COMMAND,
   type TailscaleStatus,
@@ -163,6 +164,7 @@ const RECONNECT_TIMEOUT_MS = 2 * 60 * 1000;
 const POLL_MS = 3000;
 const AVAILABILITY_TIMEOUT_MS = 7000;
 const STATUS_ATTEMPTS = 5;
+const REACH_TIMEOUT_MS = 4 * 60 * 1000;
 const PREPARE_ATTEMPTS = 3;
 
 export interface DevboxProviderDeps {
@@ -299,11 +301,21 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
         return { connected: token !== "", project, devboxUrl: cfg.devboxUrl, signIns: await signIns(), machines };
       },
       async createMachine({ name }) {
+        // Name the container here rather than leaving it to create, and give
+        // bb's machine the same name now: core labels a machine
+        // "<provider> <host id>" until create returns, which matched nothing
+        // in Incus or on the tailnet.
+        const machineName = name ?? `devbox-${randomBytes(4).readUInt32BE(0).toString(36).padStart(6, "0").slice(-6)}`;
         const host = await bb.sdk.hosts.experimental_create({
           machineProviderId: PROVIDER_ID,
-          inputs: name === undefined ? {} : { name },
+          inputs: { name: machineName },
           wait: false,
         });
+        try {
+          await bb.sdk.hosts.update({ hostId: host.id, name: machineName });
+        } catch (error) {
+          bb.log.warn(`could not name machine ${host.id} ${machineName}: ${errorMessage(error)}`);
+        }
         bb.realtime.publish(MACHINES_CHANGED, { hostId: host.id });
         return { hostId: host.id };
       },
@@ -524,6 +536,21 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
       report.log(`on the tailnet as ${status.dnsName || name}\n`);
     }
 
+    async function waitForServer(incus: IncusClient, name: string, report: PluginMachineProviderProgress, signal: AbortSignal) {
+      const appUrl = bb.server.experimental_appUrl;
+      if (appUrl === null) return;
+      report.step("Reaching bb over the tailnet");
+      const target = new URL("/health", appUrl).toString();
+      const { exitCode, output } = await asRoot(incus, name)(
+        ["sh", "-c", REACH_SERVER_SCRIPT, "bb-reach-server", target],
+        signal,
+        REACH_TIMEOUT_MS,
+      );
+      if (exitCode !== 0) {
+        throw new Error(output.trim().split("\n").pop() || `${name} cannot reach ${target}`);
+      }
+    }
+
     async function bootstrap(incus: IncusClient, resource: MachineResource, report: PluginMachineProviderProgress, signal: AbortSignal) {
       report.step("Installing the bb daemon");
       const startedAt = deps.now();
@@ -614,6 +641,7 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
           await checkpoint(resource);
           await prepare(incus, name, report, signal);
           await joinTailnet(incus, name, cfg.signInTimeoutMinutes, report, signal);
+          await waitForServer(incus, name, report, signal);
           await bootstrap(incus, resource, report, signal);
           return { status: "created", name, resource };
         } catch (error) {
@@ -658,6 +686,7 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
         await checkpoint(owned);
         await prepare(incus, owned.name, report, signal);
         await joinTailnet(incus, owned.name, cfg.signInTimeoutMinutes, report, signal);
+        await waitForServer(incus, owned.name, report, signal);
         await bootstrap(incus, owned, report, signal);
         return { resource: owned };
       },
