@@ -27,7 +27,7 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `baseUrl` | `https://api.openai.com/v1` | OpenAI-compatible endpoint. Either the API root or the full `/chat/completions` URL works; trailing slashes are fine. |
-| `apiKey` | _(unset, secret)_ | Bearer token for that endpoint. The plugin reports `needs-configuration` until it is set. |
+| `apiKey` | _(unset, secret)_ | Bearer token for that endpoint. The plugin reports `needs-configuration` until it is set here or in the [server's environment](#deployment-wide-defaults). |
 | `model` | `gpt-4o-mini` | Model used for summarizing. Any small instruction-following model works. |
 | `jsonMode` | `true` | Send `response_format: {type: "json_object"}`. Turn **off** for endpoints that reject it (many local servers do). |
 | `quietSeconds` | `120` | How long a thread must be quiet before it is **re**-summarized. A thread's first brief does not wait for it — see [When a brief is regenerated](#when-a-brief-is-regenerated). |
@@ -39,6 +39,27 @@ Set these with `bb plugin config thread-briefs set <key> <value>`.
 
 The key is a secret setting, so it stays on the server and is never sent to the
 frontend.
+
+### Deployment-wide defaults
+
+A deployment that runs one server per developer can give every server the same
+summarizer through the server process's environment, so nobody has to find and
+paste a key:
+
+| Variable | Stands in for |
+| --- | --- |
+| `THREAD_BRIEFS_API_KEY` | `apiKey` |
+| `THREAD_BRIEFS_BASE_URL` | `baseUrl` |
+| `THREAD_BRIEFS_MODEL` | `model` |
+| `THREAD_BRIEFS_JSON_MODE` | `jsonMode` (`true`/`false`, `1`/`0`, `on`/`off`) |
+
+A stored setting always wins over the variable, so a developer can point their
+own server elsewhere; `bb plugin config thread-briefs unset <key>` returns to
+the deployment's value. The non-secret variables become the settings' defaults,
+so the settings form shows what is in use. The key is never a default — a
+default is part of the form — and is resolved only when a request is made.
+The variables are read when the plugin loads, so a change to them takes a
+server restart.
 
 Worked example, Fireworks:
 
@@ -728,7 +749,8 @@ no preference writes.
   unknown icon name, so the ring registrations did not take. The client predates
   `app.experimental_icons`, or the app bundle is stale — rebuild with
   `bb plugin build` and reload.
-- Briefs stuck on "Summarizing…": check `apiKey` is set and
+- Briefs stuck on "Summarizing…": check `apiKey` is set, or
+  `THREAD_BRIEFS_API_KEY` in the server's environment, and
   `bb plugin logs thread-briefs` for HTTP errors from `baseUrl`.
 - A brief that describes work already finished: read the **Summarized …** line
   under the status. Briefs are only rewritten after `quietSeconds` of quiet, so

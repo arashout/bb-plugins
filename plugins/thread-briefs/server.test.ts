@@ -137,6 +137,113 @@ describe("registrations", () => {
   });
 });
 
+/**
+ * A deployment can hand every server one summarizer through the environment;
+ * a developer's own settings still win. The env is read when the plugin loads.
+ */
+describe("deployment environment", () => {
+  const ENV_KEYS = [
+    "THREAD_BRIEFS_API_KEY",
+    "THREAD_BRIEFS_BASE_URL",
+    "THREAD_BRIEFS_MODEL",
+    "THREAD_BRIEFS_JSON_MODE",
+  ] as const;
+  const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  function envHost(fetchMock: ReturnType<typeof fakeCompletion>, settings: Record<string, string>) {
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    return createFakePluginHost({
+      pluginId: "thread-briefs",
+      settings,
+      sdk: {
+        threads: {
+          get: async () => thread,
+          list: async () => [thread],
+          output: async () => ({ output: "done" }),
+          conversationOutline: async () => ({
+            items: [
+              { id: "1", role: "user", preview: "Build a briefs plugin", attachmentSummary: null },
+            ],
+            maxSeq: 1,
+          }),
+        },
+      },
+    });
+  }
+
+  async function summarizeOnce(h: ReturnType<typeof envHost>) {
+    await h.harness.behavior.callRpc("refresh", { threadId: "thr_1" });
+    await waitFor(async () => {
+      const result = (await h.harness.behavior.callRpc("getBrief", {
+        threadId: "thr_1",
+      })) as BriefState;
+      return result.state === "ready" ? result : null;
+    });
+  }
+
+  it("uses the environment's key and endpoint when nothing is stored", async () => {
+    process.env.THREAD_BRIEFS_API_KEY = "shared-key";
+    process.env.THREAD_BRIEFS_BASE_URL = "https://shared.test/v1";
+    process.env.THREAD_BRIEFS_MODEL = "shared-model";
+    process.env.THREAD_BRIEFS_JSON_MODE = "false";
+    const fetchMock = fakeCompletion(SUMMARY);
+    const h = envHost(fetchMock, {});
+    try {
+      await plugin(h.bb);
+      expect(h.harness.needsConfigurationMessages).toEqual([]);
+      await summarizeOnce(h);
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe("https://shared.test/v1/chat/completions");
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer shared-key");
+      const body = JSON.parse(String(init.body));
+      expect(body.model).toBe("shared-model");
+      expect(body.response_format).toBeUndefined();
+    } finally {
+      await h.harness.lifecycle.dispose();
+    }
+  });
+
+  it("lets a stored setting override the environment", async () => {
+    process.env.THREAD_BRIEFS_API_KEY = "shared-key";
+    process.env.THREAD_BRIEFS_BASE_URL = "https://shared.test/v1";
+    const fetchMock = fakeCompletion(SUMMARY);
+    const h = envHost(fetchMock, { apiKey: "my-key", baseUrl: "https://mine.test/v1" });
+    try {
+      await plugin(h.bb);
+      await summarizeOnce(h);
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe("https://mine.test/v1/chat/completions");
+      expect(new Headers(init.headers).get("authorization")).toBe("Bearer my-key");
+    } finally {
+      await h.harness.lifecycle.dispose();
+    }
+  });
+
+  it("still reports needs-configuration with no key anywhere", async () => {
+    const h = envHost(fakeCompletion(SUMMARY), {});
+    try {
+      await plugin(h.bb);
+      expect(h.harness.needsConfigurationMessages.join(" ")).toMatch(/THREAD_BRIEFS_API_KEY/u);
+    } finally {
+      await h.harness.lifecycle.dispose();
+    }
+  });
+});
+
 describe("summarizing", () => {
   let current: Awaited<ReturnType<typeof host>> | null = null;
 

@@ -87,6 +87,12 @@ The summarizer talks to any OpenAI-compatible `/chat/completions` endpoint. See
 [`skills/thread-briefs/SKILL.md`](skills/thread-briefs/SKILL.md) for every
 setting, the regeneration triggers, and how to diagnose it.
 
+A deployment running a server per developer can hand them all one summarizer
+instead: set `THREAD_BRIEFS_API_KEY`, and optionally `THREAD_BRIEFS_BASE_URL`,
+`THREAD_BRIEFS_MODEL` and `THREAD_BRIEFS_JSON_MODE`, in the server's environment.
+A developer's own setting still wins; `bb plugin config thread-briefs unset
+<key>` goes back to the deployment's.
+
 ## Where briefs show up
 
 **Sidebar row** — a **ring** showing the stage: one of four quarters filled per

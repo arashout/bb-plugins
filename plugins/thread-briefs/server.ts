@@ -37,6 +37,12 @@ import {
   requestSummary,
   type CompletionConfig,
 } from "./summarize.js";
+import {
+  ENV_API_KEY,
+  resolveApiKey,
+  resolveCompletion,
+  settingDefaults,
+} from "./config.js";
 import { endsWithQuestion, renderTranscript, type OutlineItem } from "./transcript.js";
 import {
   mergeSectionOrder,
@@ -133,18 +139,39 @@ interface SidebarGroupingState {
 export { rpcContract };
 
 export default async function plugin(bb: BbPluginApi) {
+  // The server's environment can carry deployment-wide summarizer defaults
+  // (THREAD_BRIEFS_*), so a fleet of servers shares one key and endpoint. A
+  // stored setting wins over them; see config.ts.
+  const env = process.env;
+  const envDefaults = settingDefaults(env);
   const settings = bb.settings.define({
     baseUrl: {
       type: "string",
       label: "API base URL (root or full /chat/completions endpoint)",
-      default: "https://api.openai.com/v1",
+      description:
+        "Unset, the server's THREAD_BRIEFS_BASE_URL is used when the deployment sets one.",
+      default: envDefaults.baseUrl,
     },
-    apiKey: { type: "string", label: "API key", secret: true },
-    model: { type: "string", label: "Model", default: "gpt-4o-mini" },
+    apiKey: {
+      type: "string",
+      label: "API key",
+      description:
+        "Unset, the server's THREAD_BRIEFS_API_KEY is used when the deployment sets one.",
+      secret: true,
+    },
+    model: {
+      type: "string",
+      label: "Model",
+      description:
+        "Unset, the server's THREAD_BRIEFS_MODEL is used when the deployment sets one.",
+      default: envDefaults.model,
+    },
     jsonMode: {
       type: "boolean",
       label: "Request JSON mode",
-      default: true,
+      description:
+        "Send response_format json_object. Turn off for endpoints that reject it. The deployment's THREAD_BRIEFS_JSON_MODE sets the default.",
+      default: envDefaults.jsonMode,
     },
     quietSeconds: {
       type: "number",
@@ -199,13 +226,14 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  /** Whether a summary can be requested at all: a key stored or in the environment. */
+  const hasApiKey = (values: { apiKey?: unknown }): boolean =>
+    resolveApiKey(values.apiKey, env) !== null;
+
   const initial = await settings.get();
-  if (
-    typeof initial.apiKey !== "string" ||
-    initial.apiKey.trim() === ""
-  ) {
+  if (!hasApiKey(initial)) {
     bb.status.needsConfiguration(
-      `Set an API key with \`bb plugin config ${bb.pluginId} set apiKey <key>\`, then reload.`,
+      `Set an API key with \`bb plugin config ${bb.pluginId} set apiKey <key>\` (or ${ENV_API_KEY} in the server's environment), then reload.`,
     );
   }
 
@@ -370,19 +398,13 @@ export default async function plugin(bb: BbPluginApi) {
   // ------------------------------------------------------------- summarizing
 
   const completionConfig = async (): Promise<CompletionConfig> => {
-    const values = await settings.get();
-    const apiKey = typeof values.apiKey === "string" ? values.apiKey.trim() : "";
-    if (apiKey === "") {
+    const config = resolveCompletion(await settings.get(), env);
+    if (config === null) {
       throw Object.assign(new Error("no API key configured"), {
         name: "NeedsConfigurationError",
       });
     }
-    return {
-      baseUrl: values.baseUrl,
-      apiKey,
-      model: values.model,
-      jsonMode: values.jsonMode,
-    };
+    return config;
   };
 
   /**
@@ -613,8 +635,7 @@ export default async function plugin(bb: BbPluginApi) {
   const briefState = async (threadId: string): Promise<BriefState> => {
     const stored = await readBrief(threadId);
     if (stored === null) {
-      const values = await settings.get();
-      if (typeof values.apiKey !== "string" || values.apiKey.trim() === "") {
+      if (!hasApiKey(await settings.get())) {
         return {
           state: "unconfigured",
           message: "Add an API key in this plugin's settings to generate briefs.",
@@ -1095,7 +1116,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (thread.visibility === "hidden") return;
     void (async () => {
       const values = await settings.get();
-      if (typeof values.apiKey !== "string" || values.apiKey.trim() === "") return;
+      if (!hasApiKey(values)) return;
       // Except on a thread with no brief at all: the opening prompt is enough
       // for a goal, a discovery-stage ring and a sidebar section, and waiting
       // for the turn to end means a long first turn spends its whole length
@@ -1132,7 +1153,7 @@ export default async function plugin(bb: BbPluginApi) {
    */
   bb.background.schedule("brief-sweep", SWEEP_CRON, async () => {
     const values = await settings.get();
-    if (typeof values.apiKey !== "string" || values.apiKey.trim() === "") return;
+    if (!hasApiKey(values)) return;
 
     const threads = await bb.sdk.threads.list({ limit: SWEEP_LIMIT });
     const quietBefore = Date.now() - Math.max(1, values.quietSeconds) * 1000;
