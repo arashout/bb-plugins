@@ -256,6 +256,31 @@ describe("machines", () => {
     expect(defaultMachineName("key-9")).toMatch(/^bb-[0-9a-f]{6}$/u);
   });
 
+  it("rides out a failed status read while waiting for sign-in", async () => {
+    const { provider, incus, bootstrap } = await setup({
+      token: "dbx_abc",
+      tailscale: [
+        { BackendState: "NeedsLogin", AuthURL: "https://login.tailscale.com/a/abc" },
+        { BackendState: "Running", Self: { DNSName: "box.ts.net." } },
+      ],
+    });
+    const exec = vi.mocked(incus.client.exec);
+    const real = exec.getMockImplementation()!;
+    let statusReads = 0;
+    exec.mockImplementation(async (name, options) => {
+      if (options.command[0] === "tailscale" && options.command[1] === "status") {
+        statusReads += 1;
+        if (statusReads === 2) throw new Error("Unexpected server response: 500");
+      }
+      return real(name, options);
+    });
+    const r = report();
+    const result = await provider.create({ inputs: { name: "box" }, key: "k", attempt: 1, checkpoint: async () => {}, report: r, signal: signal() } as never);
+    expect(result).toMatchObject({ status: "created" });
+    expect(r.lines.join("")).toContain("failed (Unexpected server response: 500); retrying");
+    expect(bootstrap).toHaveBeenCalled();
+  });
+
   it("refuses a machine that joined the tailnet as a tag", async () => {
     const { provider, bootstrap } = await setup({
       token: "dbx_abc",

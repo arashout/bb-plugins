@@ -162,6 +162,8 @@ const AUTH_URL_TIMEOUT_MS = 2 * 60 * 1000;
 const RECONNECT_TIMEOUT_MS = 2 * 60 * 1000;
 const POLL_MS = 3000;
 const AVAILABILITY_TIMEOUT_MS = 7000;
+const STATUS_ATTEMPTS = 5;
+const PREPARE_ATTEMPTS = 3;
 
 export interface DevboxProviderDeps {
   incusFactory: (cfg: IncusConfig) => IncusClient;
@@ -416,11 +418,44 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
 
     async function prepare(incus: IncusClient, name: string, report: PluginMachineProviderProgress, signal: AbortSignal) {
       report.step("Waiting for the machine to boot");
-      const { exitCode } = await asRoot(incus, name)(["sh", "-c", PREPARE_SCRIPT], signal, PREPARE_TIMEOUT_MS, (c) => report.log(c));
+      const { exitCode } = await retrying("preparing the machine", PREPARE_ATTEMPTS, report, signal, () =>
+        asRoot(incus, name)(["sh", "-c", PREPARE_SCRIPT], signal, PREPARE_TIMEOUT_MS, (c) => report.log(c)),
+      );
       if (exitCode !== 0) throw new Error(`machine ${name} did not finish booting (exit ${exitCode})`);
     }
 
-    async function tailscaleStatus(incus: IncusClient, name: string, signal: AbortSignal): Promise<TailscaleStatus> {
+    // Runs an idempotent step again when it fails for a reason other than
+    // being cancelled. One blip in a reverse proxy or an Incus websocket
+    // must not end a twenty-minute wait for someone to sign in.
+    async function retrying<T>(
+      what: string,
+      attempts: number,
+      report: PluginMachineProviderProgress,
+      signal: AbortSignal,
+      step: () => Promise<T>,
+    ): Promise<T> {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await step();
+        } catch (error) {
+          signal.throwIfAborted();
+          if (attempt >= attempts) throw error;
+          report.log(`${what} failed (${errorMessage(error)}); retrying\n`);
+          await deps.sleep(POLL_MS, signal);
+        }
+      }
+    }
+
+    async function tailscaleStatus(
+      incus: IncusClient,
+      name: string,
+      report: PluginMachineProviderProgress,
+      signal: AbortSignal,
+    ): Promise<TailscaleStatus> {
+      return retrying("reading tailscale status", STATUS_ATTEMPTS, report, signal, () => readTailscaleStatus(incus, name, signal));
+    }
+
+    async function readTailscaleStatus(incus: IncusClient, name: string, signal: AbortSignal): Promise<TailscaleStatus> {
       const { exitCode, output } = await asRoot(incus, name)(STATUS_COMMAND, signal);
       try {
         return parseTailscaleStatus(output);
@@ -445,13 +480,13 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
       signal: AbortSignal,
     ): Promise<void> {
       report.step("Joining the tailnet");
-      let status = await tailscaleStatus(incus, name, signal);
+      let status = await tailscaleStatus(incus, name, report, signal);
       if (status.backendState !== "Running") {
         // A machine that was signed in before needs a moment to reconnect.
         const settleBy = deps.now() + RECONNECT_TIMEOUT_MS;
         while (status.backendState === "Starting" && deps.now() < settleBy) {
           await deps.sleep(POLL_MS, signal);
-          status = await tailscaleStatus(incus, name, signal);
+          status = await tailscaleStatus(incus, name, report, signal);
         }
       }
       if (status.backendState !== "Running") {
@@ -462,7 +497,7 @@ export function createDevboxProviderPlugin(deps: DevboxProviderDeps): (bb: BbPlu
         const doneBy = deps.now() + timeoutMinutes * 60 * 1000;
         try {
           for (;;) {
-            status = await tailscaleStatus(incus, name, signal);
+            status = await tailscaleStatus(incus, name, report, signal);
             if (status.backendState === "Running") break;
             if (status.authUrl !== "" && status.authUrl !== shown) {
               shown = status.authUrl;
