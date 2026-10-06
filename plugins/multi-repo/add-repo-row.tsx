@@ -7,13 +7,19 @@
  * project is created. The row does not know which — `onAdd` either commits
  * or appends, and reports back a sentence or nothing.
  *
+ * Not a `<form>`. The new-project form wraps this row, and a form inside a
+ * form is invalid HTML — the browser gives the inner Add button to the outer
+ * form, so pressing it created the project without its repos, or navigated
+ * the page. The row is a block with its own button and Enter handler instead,
+ * which behaves the same on the panel where there is no outer form.
+ *
  * The directory preview and the duplicate check run here, before any server
  * call, with the same helpers the server uses. Not because the server's check
  * is optional — it is the boundary — but because "this name is already
  * taken" should appear as the URL is typed, not after a round trip.
  */
 import { useId, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import type { KeyboardEvent } from "react";
 import type { DiscoveredCheckout, RepoSeed } from "./contract.js";
 import { dirFromUrl, isSafeSegment, normalizeRemoteUrl } from "./names.js";
 
@@ -93,8 +99,7 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
     return result;
   }, [suggestions, existing]);
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
+  const submit = () => {
     if (!ready) return;
     setSubmitting(true);
     setServerError(null);
@@ -114,8 +119,17 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
       .finally(() => setSubmitting(false));
   };
 
+  // Enter in any of the three fields adds, and must not reach an enclosing
+  // form, where it would read as "create the project".
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    submit();
+  };
+
   return (
-    <form onSubmit={submit} className="space-y-2">
+    <div className="space-y-2">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
         <div className="min-w-0 flex-1">
           <input
@@ -127,6 +141,7 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
             spellCheck={false}
             autoComplete="off"
             disabled={disabled || submitting}
+            onKeyDown={onKeyDown}
             onChange={(event) => {
               setUrl(event.target.value);
               setServerError(null);
@@ -149,6 +164,7 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
           spellCheck={false}
           autoComplete="off"
           disabled={disabled || submitting}
+          onKeyDown={onKeyDown}
           onChange={(event) => {
             setDir(event.target.value);
             setServerError(null);
@@ -163,12 +179,14 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
           spellCheck={false}
           autoComplete="off"
           disabled={disabled || submitting}
+          onKeyDown={onKeyDown}
           onChange={(event) => setBranch(event.target.value)}
         />
         <button
-          type="submit"
+          type="button"
           className="bg-primary text-primary-foreground shrink-0 rounded-md px-2.5 py-1 text-xs disabled:opacity-50"
           disabled={!ready}
+          onClick={submit}
         >
           {submitting ? "Adding…" : action}
         </button>
@@ -181,6 +199,6 @@ export function AddRepoRow({ suggestions, existing, onAdd, action = "Add", disab
             : `${offered.length} checkouts on this machine are not in the set yet; the URL field will offer them.`}
         </p>
       )}
-    </form>
+    </div>
   );
 }
