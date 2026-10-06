@@ -56,7 +56,7 @@ export default async function plugin(bb: BbPluginApi) {
       };
       const textual = diff.files.filter((f) => !f.binary && f.loadMode !== "too_large");
       // ponytail: loads every file up front; lazy-load per file if big diffs get slow
-      const files: DiffFile[] = await Promise.all(
+      const entries: DiffFile[] = await Promise.all(
         textual.map(async (f) => ({
           path: f.path,
           changeKind: f.changeKind,
@@ -66,6 +66,18 @@ export default async function plugin(bb: BbPluginApi) {
           newText: f.changeKind === "deleted" ? "" : await side(f.path, "new"),
         })),
       );
+      // "all" can list one path twice: deleted in a commit, then re-added uncommitted. Show it as one modification.
+      const byPath = new Map<string, DiffFile>();
+      for (const f of entries) {
+        const prev = byPath.get(f.path);
+        byPath.set(
+          f.path,
+          prev === undefined
+            ? f
+            : { ...f, changeKind: "modified", additions: prev.additions + f.additions, deletions: prev.deletions + f.deletions, oldText: prev.oldText || f.oldText, newText: f.newText || prev.newText },
+        );
+      }
+      const files = [...byPath.values()];
       host
         .call("warm", { root, paths: files.filter((f) => f.newText !== "").map((f) => path.join(root, f.path)) }, { hostId: env.hostId })
         .catch((error) => bb.log.warn(`Language server warm-up failed: ${error}`));
