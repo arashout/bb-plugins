@@ -87,7 +87,7 @@ export function effortReadSummary(screen: CardScreen, prs: readonly PrStatus[]):
   if (screen.card.pile === "held") return `On hold${screen.card.reason ? `: ${screen.card.reason}` : "."}`;
   const needs = screen.threads.filter((t) => threadStatus(t).text === "Needs you").length;
   const failed = screen.threads.filter((t) => threadStatus(t).text === "Failed").length;
-  const ready = screen.lines.filter((l) => l.row && !l.ghost && l.section === "merge" && !l.dim && !l.row.waitsOn && !prs.find((p) => p.prUrl === l.prUrl)?.held).length;
+  const ready = screen.lines.filter((l) => l.row && !l.ghost && l.section === "merge" && !l.dim && !l.row.waitsOn && l.row.stackedOn === null && !prs.find((p) => p.prUrl === l.prUrl)?.held).length;
   const parts = [needs ? `${needs} ${needs === 1 ? "thread needs" : "threads need"} your answer` : null,
     screen.yourTurn ? `${screen.yourTurn} ${screen.yourTurn === 1 ? "PR needs" : "PRs need"} your feedback response` : null,
     ready ? `${ready} ready to merge` : null, failed ? `${failed} ${failed === 1 ? "worker failed" : "workers failed"}` : null].filter(Boolean);

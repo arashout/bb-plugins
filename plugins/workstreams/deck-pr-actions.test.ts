@@ -58,4 +58,12 @@ describe("acting directly on a card's PR", () => {
     expect(cardPrIntent(pickup, prUrl, "restart", idle)).toEqual({ kind: "restart", prUrl });
   });
 
+  it("can advance Other open PRs without an unanswered-feedback gate or an old thread", () => {
+    const oneOffs = screen("effort-one-offs"), prUrl = url("catalog", 96), other = rows.get(prUrl)!;
+    expect(other.turn.list).toBe("other");
+    expect(cardPrIntent(oneOffs, prUrl, "restart", { ...other, threads: [], sent: null })).toEqual({ kind: "restart", prUrl });
+    const paused = { ...oneOffs, card: { ...oneOffs.card, pile: "held" as const } };
+    expect(cardPrIntent(paused, prUrl, "restart", other)).toBeNull();
+  });
+
 });

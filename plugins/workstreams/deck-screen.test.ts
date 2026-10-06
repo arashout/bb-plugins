@@ -94,7 +94,7 @@ describe("the effort deck's markup", () => {
     expect(text(html)).toContain("1 ready to merge");
     expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(3);
     expect(text(html)).not.toMatch(/Action matrix|Aging blockers/u);
-    expect(html).not.toContain(`data-deck-pr-status="${url("folio", 340)}"`);
+    expect(html).toContain(`data-deck-pr-status="${url("folio", 340)}"`);
     expect(html).toContain(`data-deck-pr-status="${url("folio", 343)}"`);
     expect(text(html)).toContain("Wait for the store launch");
     expect(html).not.toMatch(/data-deck-card|data-deck-pr-action|data-deck-moves/u);

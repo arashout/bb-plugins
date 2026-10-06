@@ -24,8 +24,8 @@ export function cardPrActions(screen: CardScreen, prUrl: string, inventory: Inve
   const actions: CardPrAction[] = [];
   const add = (id: CardPrActionId, label: string, why: string | null, title: string, tone: Tone = "blue", secondary = false) =>
     actions.push({ id, label, enabled: why === null, why, title, tone, secondary });
-  if (!held && !stopped && (inventory.sent?.state === "idle" || inventory.sent?.state === "failed" || inventory.authored && inventory.primary === "thread" && !inventory.threads.some((t) => t.active)))
-    add("restart", "Start fresh thread", busy, `Start a new conversation to advance ${line.ref}; previous threads stay as they are`, "blue");
+  if (!held && !stopped && (row.turn.list !== "turn" || inventory.sent?.state === "idle" || inventory.sent?.state === "failed"))
+    add("restart", "Start fresh thread", writing ? "Another action on this PR is starting" : null, `Start a new conversation to advance ${line.ref}; previous threads stay as they are`, "blue");
   if (!held && !stopped && row.turn.list === "turn") add("address", "Address feedback", busy ?? (!sendable(inventory) ? "This feedback cannot be addressed yet" : null),
     `Address feedback on ${line.ref} in one worker thread, with Undo`, "amber");
   if (held && !stopped) add("release", "Release hold…", busy, `Review and release the hold on ${line.ref}`, "gray");

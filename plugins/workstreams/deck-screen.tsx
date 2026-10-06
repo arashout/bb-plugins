@@ -907,7 +907,7 @@ export function Overview({ screen, run, live }: { screen: OverviewScreen; run: R
   const active = [...screen.cards].sort((a, b) => needs(b) - needs(a));
   const tile = (item: CardScreen, held = false) => {
     const prs = prStatuses(item, live);
-    const needingResponse = new Set(item.lines.filter((l) => l.row?.turn.list === "turn" || l.row?.section === "merge" && !l.dim && !l.row.waitsOn).map((l) => l.prUrl));
+    const needingResponse = new Set(item.lines.filter((l) => l.row?.turn.list === "turn" || l.row?.section === "merge" && !l.dim && !l.row.waitsOn && l.row.stackedOn === null).map((l) => l.prUrl));
     const attention = prs.filter((pr) => needingResponse.has(pr.prUrl) || pr.held || pr.advance || pr.thread && ["Needs you", "Failed"].includes(pr.thread.status.text));
     const threads = item.threads.filter((thread) => ["Needs you", "Failed"].includes(threadStatus(thread).text));
     const linked = new Set(attention.flatMap((pr) => pr.thread ? [pr.thread.id] : []));
