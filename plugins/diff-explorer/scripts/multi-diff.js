@@ -50,13 +50,26 @@ class DocumentItem {
 
 class EditorViewModel {
   constructor(documents, instantiationService) {
+    this.instantiationService = instantiationService;
     this.activeDiffItem = observableValue(this, undefined);
     this.activeDiffItem.setCache = (value, tx) => this.activeDiffItem.set(value, tx);
-    this.items = constObservable(documents.map((d) => new DocumentItem(d, this, instantiationService)));
-    // Pre-set so the widget does not focus and scroll to the first change on load.
-    this.activeDiffItem.set(this.items.get()[0], undefined);
+    this.items = observableValue(this, []);
+    this.setDocuments(documents);
     this.isLoading = constObservable(false);
     this.contextKeys = undefined;
+  }
+  // Keeps the item, and so its editor and scroll place, of every document whose models are unchanged.
+  setDocuments(documents) {
+    const previous = this.items.get();
+    const next = documents.map(
+      (d) =>
+        previous.find((item) => item.documentDiffItem.modified === d.modified) ??
+        new DocumentItem(d, this, this.instantiationService),
+    );
+    this.items.set(next, undefined);
+    // Pre-set so the widget does not focus and scroll to the first change on load.
+    if (!next.includes(this.activeDiffItem.get())) this.activeDiffItem.set(next[0], undefined);
+    for (const item of previous) if (!next.includes(item)) item.dispose();
   }
   dispose() {
     for (const item of this.items.get()) item.dispose();
@@ -71,7 +84,7 @@ export function createMultiDiffEditor(element, documents) {
   // monaco.editor.create does this; without it the theme stylesheet (token and diff colors) is never injected.
   const theme = StandaloneServices.get(IStandaloneThemeService).registerEditorContainer(element);
   const viewModel = new EditorViewModel(documents, instantiationService);
-  const labels = new Map(documents.map((d) => [d.modified.uri.toString(), d.label]));
+  let labels = new Map(documents.map((d) => [d.modified.uri.toString(), d.label]));
   const dimension = observableValue("dimension", undefined);
   const viewModelSource = observableValue("viewModel", undefined);
   const widget = instantiationService.createInstance(
@@ -95,6 +108,10 @@ export function createMultiDiffEditor(element, documents) {
   // Like VS Code: create the widget empty, then attach the view model.
   viewModelSource.set(viewModel, undefined);
   return {
+    update(documents) {
+      labels = new Map(documents.map((d) => [d.modified.uri.toString(), d.label]));
+      viewModel.setDocuments(documents);
+    },
     dispose() {
       resize.disconnect();
       widget.dispose();

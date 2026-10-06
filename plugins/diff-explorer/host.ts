@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { hostContract, type Location } from "./contract";
+import { hostContract, hostSignals, type Location } from "./contract";
 
 const TS = ["npx", "--yes", "-p", "typescript", "-p", "typescript-language-server", "typescript-language-server", "--stdio"];
 
@@ -166,9 +166,25 @@ function serverFor(root: string, cmd: string[]) {
   return server;
 }
 
+// ponytail: one watcher per workspace root for the worker's lifetime; dispose idle roots if watcher count matters
+const watches = new Map<string, Promise<{ dispose(): Promise<void> }>>();
+
 export default experimental_defineHostEntry({
   contract: hostContract,
+  experimental_signals: hostSignals,
   handlers: {
+    async watch({ root }, context) {
+      if (!watches.has(root)) {
+        const watch = context.experimental_watch(
+          { rootPath: root, ignoredPaths: ["node_modules", ".git/objects"], debounceMs: 500, maxWaitMs: 2000 },
+          (event) => (event.kind === "watch-error" ? undefined : context.experimental_emitSignal("changed", { root })),
+        );
+        watches.set(root, watch);
+        watch.catch(() => watches.delete(root));
+      }
+      await watches.get(root);
+      return null;
+    },
     async definition({ root, path: file, line, column }) {
       const spec = SERVERS[path.extname(file).toLowerCase()];
       if (spec === undefined) return { locations: [] };
@@ -189,8 +205,10 @@ export default experimental_defineHostEntry({
       return { content: await readFile(file, "utf8") };
     },
   },
-  dispose() {
+  async dispose() {
     for (const server of servers.values()) server.dispose();
     servers.clear();
+    await Promise.all([...watches.values()].map((watch) => watch.then((w) => w.dispose(), () => undefined)));
+    watches.clear();
   },
 });

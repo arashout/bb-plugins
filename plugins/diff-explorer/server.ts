@@ -1,14 +1,15 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { hostContract, rpcContract, type DiffFile } from "./contract";
+import { hostContract, hostSignals, rpcContract, type DiffFile } from "./contract";
 
 // Path installs run server.ts from the plugin root; git and npm installs run the bundled dist/server.js.
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MONACO_DIR = path.join(path.basename(HERE) === "dist" ? path.dirname(HERE) : HERE, "monaco");
 
 export default async function plugin(bb: BbPluginApi) {
-  const host = bb.hosts.experimental_client({ contract: hostContract });
+  const host = bb.hosts.experimental_client({ contract: hostContract, experimental_signals: hostSignals });
+  host.experimental_onSignal("changed", ({ payload }) => bb.realtime.publish("changed", payload));
 
   async function environment(environmentId: string) {
     const env = await bb.sdk.environments.get({ environmentId });
@@ -78,6 +79,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
       }
       const files = [...byPath.values()];
+      host.call("watch", { root }, { hostId: env.hostId }).catch((error) => bb.log.warn(`File watch failed: ${error}`));
       host
         .call("warm", { root, paths: files.filter((f) => f.newText !== "").map((f) => path.join(root, f.path)) }, { hostId: env.hostId })
         .catch((error) => bb.log.warn(`Language server warm-up failed: ${error}`));

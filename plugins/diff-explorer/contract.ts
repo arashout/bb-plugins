@@ -27,7 +27,14 @@ export const hostContract = defineRpcContract({
     input: z.object({ root: z.string().startsWith("/"), paths: z.array(z.string().startsWith("/")) }),
     output: z.null(),
   },
+  watch: {
+    input: z.object({ root: z.string().startsWith("/") }),
+    output: z.null(),
+  },
 });
+
+export const changedPayload = z.object({ root: z.string() });
+export const hostSignals = { changed: { payload: changedPayload } };
 
 const diffFile = z.object({
   path: z.string(),

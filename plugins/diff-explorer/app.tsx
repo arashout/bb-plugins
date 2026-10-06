@@ -6,6 +6,7 @@ import {
   experimental_Icon as Icon,
   experimental_useCodeTheme,
   useBbNavigate,
+  useRealtime,
   useRpc,
   type PluginThreadHeaderActionProps,
   type PluginThreadPanelProps,
@@ -39,7 +40,10 @@ type MultiDiffDocument = {
 };
 type Bundle = {
   monaco: MonacoApi;
-  createMultiDiffEditor(element: HTMLElement, documents: MultiDiffDocument[]): { dispose(): void };
+  createMultiDiffEditor(
+    element: HTMLElement,
+    documents: MultiDiffDocument[],
+  ): { update(documents: MultiDiffDocument[]): void; dispose(): void };
 };
 let bundlePromise: Promise<Bundle> | null = null;
 
@@ -131,29 +135,59 @@ const HEADER_HEIGHT = 40;
 
 function MultiDiff({ bundle, panelId, root, files }: { bundle: Bundle; panelId: string; root: string; files: DiffFile[] }) {
   const container = useRef<HTMLDivElement>(null);
+  const editor = useRef<ReturnType<Bundle["createMultiDiffEditor"]> | null>(null);
+  // Models per path, updated in place on refresh so each file keeps its editor and your scroll place.
+  const models = useRef(new Map<string, { original: Monaco.editor.ITextModel; modified: Monaco.editor.ITextModel }>());
+
   useEffect(() => {
-    const { monaco, createMultiDiffEditor } = bundle;
+    const created = bundle.createMultiDiffEditor(container.current!, []);
+    editor.current = created;
+    const owned = models.current;
+    return () => {
+      created.dispose();
+      for (const m of owned.values()) {
+        m.original.dispose();
+        m.modified.dispose();
+      }
+      owned.clear();
+    };
+  }, [bundle]);
+
+  useEffect(() => {
+    const { monaco } = bundle;
+    const current = models.current;
     const documents = files.map((file) => {
       const abs = `${root.replace(/\/$/, "")}/${file.path}`;
-      const language = languageFor(monaco, file.path);
+      let m = current.get(abs);
+      if (m === undefined) {
+        const language = languageFor(monaco, file.path);
+        m = {
+          original: monaco.editor.createModel(file.oldText, language, monaco.Uri.from({ scheme: OLD, authority: panelId, path: abs })),
+          modified: monaco.editor.createModel(file.newText, language, monaco.Uri.from({ scheme: NEW, authority: panelId, path: abs })),
+        };
+        current.set(abs, m);
+      } else {
+        if (m.original.getValue() !== file.oldText) m.original.setValue(file.oldText);
+        if (m.modified.getValue() !== file.newText) m.modified.setValue(file.newText);
+      }
       return {
-        original: monaco.editor.createModel(file.oldText, language, monaco.Uri.from({ scheme: OLD, authority: panelId, path: abs })),
-        modified: monaco.editor.createModel(file.newText, language, monaco.Uri.from({ scheme: NEW, authority: panelId, path: abs })),
+        ...m,
         label: `${file.path} · ${file.changeKind}`,
         options: DIFF_OPTIONS,
         // Placeholder height until the widget renders the file; ~ changed lines plus collapsed-region rows.
         estimatedHeight: HEADER_HEIGHT + (file.additions + file.deletions + 8) * LINE_HEIGHT,
       };
     });
-    const editor = createMultiDiffEditor(container.current!, documents);
-    return () => {
-      editor.dispose();
-      for (const d of documents) {
-        d.original.dispose();
-        d.modified.dispose();
-      }
-    };
+    editor.current!.update(documents);
+    const kept = new Set(documents.map((d) => d.modified));
+    for (const [abs, m] of current) {
+      if (kept.has(m.modified)) continue;
+      m.original.dispose();
+      m.modified.dispose();
+      current.delete(abs);
+    }
   }, [bundle, panelId, root, files]);
+
   return <div ref={container} className="h-full" />;
 }
 
@@ -214,15 +248,29 @@ function DiffsPanel({ threadId }: PluginThreadPanelProps) {
     };
   }, [rpc, threadId, target, reload]);
 
+  const current = useRef({ target, root: data?.root });
+  current.current = { target, root: data?.root };
+  useRealtime("changed", (payload) => {
+    if ((payload as { root: string }).root !== current.current.root) return;
+    rpc.call("load", { threadId, target }).then(
+      (loaded) => {
+        if (current.current.target !== target) return;
+        setData((prev) => (prev !== null && JSON.stringify(prev) === JSON.stringify(loaded) ? prev : loaded));
+      },
+      (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+    );
+  });
+
   useEffect(() => {
     monaco?.editor.setTheme(mode === "dark" ? "vs-dark" : "vs");
   }, [monaco, mode]);
 
+  const environmentId = data?.environmentId ?? null;
   useEffect(() => {
-    if (data === null) return;
+    if (environmentId === null) return;
     panels.set(panelId, {
       rpc,
-      environmentId: data.environmentId,
+      environmentId,
       setError,
       push(from, to) {
         const at = from.getPosition();
@@ -239,7 +287,7 @@ function DiffsPanel({ threadId }: PluginThreadPanelProps) {
         if (model.uri.scheme === FILE && model.uri.authority === panelId) model.dispose();
       }
     };
-  }, [panelId, rpc, data, monaco]);
+  }, [panelId, rpc, environmentId, monaco]);
 
   const back = useCallback(() => {
     setStack((s) => s.slice(0, -1));
