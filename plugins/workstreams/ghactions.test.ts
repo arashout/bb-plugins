@@ -170,7 +170,7 @@ describe("readLiveMerge", () => {
   });
 
   it("shows a mixed approval note even after its inline thread is resolved and code moves on", async () => {
-    const body = "The inline change is good. Also update the member-facing copy before merge.";
+    const body = "The inline change is good. Also update the reader-facing copy before merge.";
     const run = fakeGh((args) => {
       if (args[1] === "view") return { ok: true, stdout: JSON.stringify(view) };
       if (args[1] === "list") return { ok: true, stdout: "[]" };
