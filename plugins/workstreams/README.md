@@ -181,9 +181,14 @@ lists the keys. On other views, ⌘K goes to a view, and ? opens How this works.
   on your Confirm; both still hold the merge, and Address leaves them out.
   **Nudge** appears only where a reviewer has waited long
   enough, and the server checks again before it sends. Your turn rows offer
-  none. All PRs never confirms
-  review notes or merges; those run from the effort's card. Each effort's name
-  opens that card.
+  none. All PRs exposes review confirmations, holds, and merge previews;
+  each effort's name opens its read card.
+  Select **Other open PRs** individually or with its heading checkbox, then
+  **Advance selected** to review the exact scope and start one fresh thread.
+  Mixed selections across both lists work too. Holds, stopped efforts, and
+  changed heads are skipped; older workers stay untouched. **Plan Advance All**
+  instead creates a prioritized plan for every open, unheld PR, independent of
+  selection.
 - **Efforts admin:** Administer explicitly saved efforts from one list.
   Create an effort without starting a thread, edit its name and goal, archive
   it, or restore it. Archived efforts retain their work and history. **Merge into…**

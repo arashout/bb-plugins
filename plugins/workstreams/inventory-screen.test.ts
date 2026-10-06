@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { inkwellDeck, inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
-import { PrActionControls, InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
+import { AdvanceSelectionBody, PrActionControls, InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
 import { COLUMN, CONTENT, GROUP_CARD } from "./deck-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./merge-preview-dialog.js";
 import type { Sent } from "./your-turn.js";
@@ -489,5 +489,36 @@ describe("PR workbench advancement", () => {
     expect(html(true)).toMatch(/data-inventory-plan-all="true" disabled="" aria-busy="true"/u);
     expect(html(false, "Cannot start the planning thread")).toContain('role="alert"');
     expect(text(html(false))).toContain("Plan Advance All");
+  });
+});
+
+
+describe("advancing an Other or mixed PR selection", () => {
+  const other = splitInventory(SCREEN).other.flatMap((g) => g.lines);
+  const render = (lines: InventoryLine[]) => renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, error: null, ...CALLBACKS,
+    selected: new Set(lines.map((l) => l.prUrl)), onSelect: noop, onSelectAll: noop, onSelectOther: noop, onAddress: noop, onAdvance: noop, onClear: noop }));
+
+  it("offers group selection and Advance selected for Other PRs and selections crossing both lists", () => {
+    for (const lines of [other, [other[0]!, splitInventory(SCREEN).turn[0]!.lines[0]!]]) {
+      const html = render(lines);
+      expect(html).toContain('data-inventory-action="advance-selected"');
+      expect(html).not.toContain('data-inventory-action="address"');
+      expect(html).not.toContain("Address takes Your turn rows only.");
+      for (const l of lines) expect(rowOf(html, `${l.slug}#${l.number}`)).toContain('data-inventory-selected="true"');
+    }
+    expect(render([])).toContain('aria-label="Select every Other open PR"');
+    expect(render(other)).toContain('aria-label="Clear Other open PRs selection"');
+  });
+
+  it("previews exactly the selected PRs, marks holds as excluded, and blocks confirmation while starting", () => {
+    const lines = [other[0]!, { ...other[1]!, hold: { reason: "Waiting for migration" } } as InventoryLine];
+    const body = (busy: boolean) => renderToStaticMarkup(createElement(AdvanceSelectionBody, { lines, busy, error: null, onConfirm: noop, onCancel: noop }));
+    const html = body(false);
+    for (const l of lines) expect(text(html)).toContain(`${l.repo} #${l.number}`);
+    expect(text(html)).toContain("Excluded: on hold — Waiting for migration");
+    expect(text(html)).toContain("Advance 1 in one thread");
+    expect(text(html)).toContain("Nothing merges");
+    expect(text(html)).not.toContain(`${other[2]!.repo} #${other[2]!.number}`);
+    expect(body(true)).toMatch(/<button type="button" disabled=""[^>]*>[\s\S]*Starting…/u);
   });
 });

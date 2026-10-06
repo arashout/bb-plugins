@@ -17,7 +17,7 @@ const SUGGESTIONS = rowSuggestions(inkwellInventorySuggestions(), {});
 const noop = () => {};
 const pane = (extra: Record<string, unknown> = {}) => renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, busyKey: null, error: null, onView: noop,
   onPalette: noop, onHelp: noop, onOpenPr: noop, onOpenThread: noop, onOpenEffort: noop, onNudge: noop, selected: new Set<string>(), onSelect: noop, onSelectAll: noop,
-  onAddress: noop, onClear: noop, ...extra }));
+  onAddress: noop, onAdvance: noop, onClear: noop, ...extra }));
 const text = (html: string) => html.replace(/<[^>]+>/gu, " ").replace(/&quot;/gu, '"').replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 const rowOf = (html: string, ref: string) => { const start = html.indexOf(`data-inventory-row="${ref}"`); return html.slice(start, html.indexOf("data-inventory-row=", start + 20)); };
 
@@ -69,13 +69,13 @@ describe("moving selected PRs to an effort", () => {
     expect(names("one-offs")).toEqual(["One-offs"]);
   });
 
-  // Address starts a thread on each PR it takes, so it takes a selection only when every row is a Your turn row it can take. Move takes any.
-  it("offers Address only when every selected row is a Your turn row, says why otherwise, and offers Move to effort… either way", () => {
+  // Mixed selections can advance or move together; Address stays specific to unanswered feedback.
+  it("offers Advance and Move for mixed selections, and Address as well for Your turn", () => {
     const move = { open: false, onOpenChange: noop, efforts: [], busy: false, onMove: async () => null };
     const mixed = pane({ selected: new Set([url("quill", 210), url("catalog", 96)]), move });
-    expect(mixed).toMatch(/<button type="button" data-inventory-action="address" disabled="" title="Address takes Your turn rows only\."[^>]*>Address<kbd/u);
-    expect(mixed).toMatch(/role="status" data-inventory-refusal[^>]*class="[^"]*text-muted-foreground"[^>]*>Address takes Your turn rows only\.</u);
-    expect(text(mixed)).toContain("2 selected Address b Move to effort… e Refresh (2) g");
+    expect(mixed).not.toContain('data-inventory-action="address"');
+    expect(mixed).not.toContain("data-inventory-refusal");
+    expect(text(mixed)).toContain("2 selected Advance selected Move to effort… e Refresh (2) g");
     const turn = pane({ selected: new Set([url("quill", 210), url("folio", 301)]), move });
     expect(turn).toMatch(/data-inventory-action="address" title="Starts one thread for them now, with 8 s to Undo\. Nothing merges\."[^>]*>Address 2<kbd/u);
     expect(turn).not.toContain("data-inventory-refusal");

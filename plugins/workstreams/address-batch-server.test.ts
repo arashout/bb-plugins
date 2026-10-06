@@ -180,6 +180,58 @@ async function confirm(env: Env, batchId: string | null, during?: () => Promise<
 const claims = (env: Env) => createRunStore(env.bb.storage.database() as never).recent(0).filter((run) => run.action === "address-feedback")
   .map((run) => [run.prNumber, run.status]);
 
+describe("advancing selected open PRs in one fresh context", () => {
+  const targets = (...numbers: number[]) => numbers.map((n) => ({ prUrl: url(n), headOid: HEAD }));
+
+  it("advances Other PRs together, including an archived worker, and links only the selected scope", async () => {
+    const env = await setup();
+    for (const n of [42, 44]) env.current.set(n, pr(n, { reviewDecision: "APPROVED" }));
+    env.threads.set("thr-42", { ...env.threads.get("thr-42")!, archivedAt: Date.now() });
+    await env.refresh(); expect(await env.turn()).not.toContain(42); expect(await env.turn()).not.toContain(44);
+    const result = await env.rpc("inventory_advance_selected", { targets: targets(42, 44, 42) });
+    expect(result).toEqual({ ok: true, threadId: "thr-batch-1", count: 2, skipped: [] });
+    expect(spawned(env)).toHaveLength(1);
+    expect(spawned(env)[0]).toMatchObject({ parentThreadId: "thr-coordinator", projectId: PROJECT,
+      pluginMetadata: { role: "worker", prUrls: [url(42), url(44)] } });
+    const prompt = spawned(env)[0]!.prompt;
+    expect(prompt).toContain(url(42)); expect(prompt).toContain(url(44)); expect(prompt).not.toContain(url(43));
+    expect(prompt).toContain("Do not merge"); expect(prompt).toContain("do not resume or message an older worker");
+    expect(env.send).not.toHaveBeenCalled(); expect(env.threads.get("thr-42")!.archivedAt).not.toBeNull();
+    const inventory = await env.rpc("inventory_get", {}) as InventoryView;
+    const rows = inventory.groups.flatMap((g) => g.rows);
+    expect(rows.find((r) => r.number === 42)?.sent?.threadId).toBe("thr-batch-1");
+    expect(rows.find((r) => r.number === 44)?.sent?.threadId).toBe("thr-batch-1");
+    expect(rows.find((r) => r.number === 43)?.sent?.threadId).not.toBe("thr-batch-1");
+  });
+
+  it("skips holds, stopped efforts and changed heads while advancing the remaining mixed selection", async () => {
+    const env = await setup();
+    env.current.set(44, pr(44, { reviewDecision: "APPROVED" })); await env.refresh();
+    await env.rpc("pr_hold_set", { prUrl: url(42), held: true, reason: "Later" });
+    await env.rpc("effort_hold", { effortKey: env.spine.id, reason: "Labels later" });
+    const result = await env.rpc("inventory_advance_selected", { targets: [...targets(42, 43, 44, 46), { prUrl: url(45), headOid: "0".repeat(40) }] });
+    expect(result).toMatchObject({ ok: true, count: 2, skipped: [
+      { prUrl: url(42), reason: expect.stringMatching(/hold/iu) },
+      { prUrl: url(46), reason: expect.stringMatching(/hold/iu) },
+      { prUrl: url(45), reason: expect.stringContaining("New commits") },
+    ] });
+    expect(spawned(env)[0]).toMatchObject({ pluginMetadata: { prUrls: [url(43), url(44)] } });
+    const prompt = spawned(env)[0]!.prompt;
+    for (const n of [42, 45, 46]) expect(prompt).not.toContain(url(n));
+    expect(env.reads.urls).not.toContain(url(42)); expect(env.reads.urls).not.toContain(url(46));
+  });
+
+  it("rechecks a hold that arrives during fresh reads and starts nothing when all selected PRs are held", async () => {
+    const env = await setup();
+    env.reads.during = async (prUrl) => { if (prUrl === url(43)) await env.rpc("pr_hold_set", { prUrl: url(42), held: true, reason: "Pause" }); };
+    expect(await env.rpc("inventory_advance_selected", { targets: targets(42, 43) })).toMatchObject({ ok: true, count: 1,
+      skipped: [{ prUrl: url(42), reason: expect.stringMatching(/hold/iu) }] });
+    expect(spawned(env)[0]).toMatchObject({ pluginMetadata: { prUrls: [url(43)] } });
+    expect(await env.rpc("inventory_advance_selected", { targets: targets(42) })).toMatchObject({ ok: false });
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("addressing Your turn PRs in one batch thread", () => {
 
   it("starts a fresh context for an archived worker without restoring or messaging it", async () => {
