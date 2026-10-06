@@ -36,6 +36,7 @@ export type ThreadEffortBarProps = {
   /** Null while the first read runs. */
   chip: Chip | null;
   readError: string | null;
+  busy?: boolean;
   onRetry(): void;
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -67,8 +68,8 @@ export function ThreadEffortBar(props: ThreadEffortBarProps) {
             {chip.yourTurn ? <span className={TURN}>{chip.yourTurn}</span> : null}
           </button>
           <PopoverPrimitive.Trigger asChild>
-            <button type="button" data-effort-open aria-label="Change the thread's effort" title="Change the thread's effort"
-              className={cn("rounded-r-md border-l border-border/70 px-1.5 hover:bg-foreground/[0.06] hover:text-foreground", RING)}>⌄</button>
+            <button type="button" data-effort-open disabled={props.busy} aria-label="Change the thread's effort" title="Change the thread's effort"
+              className={cn("rounded-r-md border-l border-border/70 px-1.5 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50", RING)}>⌄</button>
           </PopoverPrimitive.Trigger>
         </div>
       </PopoverPrimitive.Anchor>
@@ -81,7 +82,7 @@ export function ThreadEffortBar(props: ThreadEffortBarProps) {
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
-    {props.flash ? <span role="status" aria-live="polite" className="flex min-w-0 items-center gap-1.5">
+    {props.busy ? <span role="status" aria-live="polite">Saving effort…</span> : props.flash ? <span role="status" aria-live="polite" className="flex min-w-0 items-center gap-1.5">
       <span className="truncate">{props.flash.text}</span>
       {props.flash.undo ? <button type="button" data-effort-undo onClick={props.onUndo}
         className={cn("shrink-0 rounded px-1 font-medium text-foreground underline-offset-2 hover:underline", RING)}>Undo</button> : null}

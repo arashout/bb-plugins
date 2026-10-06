@@ -33,7 +33,7 @@ import { createEffortNotesStore, EFFORT_NOTES_MIGRATION, effortNotesContract } f
 import { deckRows, deckSeenSchema, deckView, deckViewSchema, type DeckInput, type DeckView } from "./deck.js";
 import { threadHome, type ThreadEvidence } from "./deck-homes.js";
 import { createDeckBatches, DECK_BATCH_MIGRATION, deckBatchContract, planBatch, type BatchItem, type BatchThread, type DeckBatch, type PlanRow } from "./deck-batch.js";
-import { DECK_CHANGED, SERVICE_PREFIX, type DeckPile, type RowActed } from "./deck-shared.js";
+import { DECK_CHANGED, SERVICE_PREFIX, serviceId, type DeckPile, type RowActed } from "./deck-shared.js";
 import { createSeedStore, LINEAR_SEED_MIGRATION, linearSeedContract, seedProposals } from "./linear-seed.js";
 import { prTickets, ruleFor, suggestEfforts, type ClassifyPr, type Rule } from "./effort-classify.js";
 import { classifyContract, createAssignmentStore, EFFORT_ASSIGNMENT_FROM_MIGRATION, EFFORT_ASSIGNMENT_MIGRATIONS, EFFORT_RULE_MIGRATION, ONE_OFFS,
@@ -57,6 +57,7 @@ import { INVENTORY_ACTIONS, INVENTORY_QUESTIONS, inventoryRow, inventoryRowSchem
   type InventoryRow, type InventoryView }
   from "./inventory-view.js";
 import { createInventoryActions, suggestReviewers, type ActionRecord, type ActionResult } from "./inventory-actions.js";
+import { rowTurn } from "./inventory-view-model.js";
 import { DEFAULT_ATTENTION_THRESHOLDS, prAttention, type AttentionClock } from "./pr-attention.js";
 import { stackParent } from "./pr-backlog.js";
 import { WORK_CONVERSATION_MIGRATIONS } from "./work-conversation.js";
@@ -490,6 +491,8 @@ export const rpcContract = defineRpcContract({
 });
 
 export type Board = z.infer<typeof boardSchema>;
+/** Ownership and inventory facts; the picker needs no scan health, coordinator probes, or board UI metadata. */
+type EffortBoard = Pick<Board, "groups" | "efforts" | "prInventory" | "prHolds">;
 export type BoardMode = z.infer<typeof modeSchema>;
 export type Prefs = z.infer<typeof prefsSchema>;
 export type WireGroup = z.infer<typeof groupSchema>;
@@ -733,6 +736,7 @@ export default async function plugin(bb: BbPluginApi) {
       default: 60,
     },
   });
+  type WorkstreamSettings = Awaited<ReturnType<typeof settings.get>>;
   const modelFor = async (role: ModelRole): Promise<ModelChoice> => {
     const { codeModel, planningModel } = await settings.get();
     return parseModelSetting(role === "code" ? codeModel : planningModel);
@@ -1528,8 +1532,8 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function surfaceRules(): Promise<{ rules: SurfaceRule[]; warning: string | null }> {
-    const { surfaceRules: table } = await settings.get();
+  async function surfaceRules(config?: WorkstreamSettings): Promise<{ rules: SurfaceRule[]; warning: string | null }> {
+    const { surfaceRules: table } = config ?? await settings.get();
     return parseSurfaceRules(typeof table === "string" ? table : DEFAULT_SURFACE_RULES);
   }
 
@@ -1538,7 +1542,7 @@ export default async function plugin(bb: BbPluginApi) {
    * decisions alone. No model is called here: `board_get` must be cheap enough
    * to serve every realtime refresh.
    */
-  async function readPlacement(): Promise<{
+  async function readPlacement(config?: WorkstreamSettings): Promise<{
     labelled: { label: string; cluster: SummarizedCluster; fit: number }[];
     clusters: Cluster[];
     linearProjects: Record<string, string | null>;
@@ -1548,15 +1552,15 @@ export default async function plugin(bb: BbPluginApi) {
     /** What `rollOneOffs` needs: overrides, and team names from the setting and from Linear. */
     roll: Parameters<typeof rollOneOffs>[1];
   }> {
-    const { ticketPattern, typesafeApiKey, anthropicApiKey, assignmentConfidenceThreshold, teamNames: teamNamesText } =
-      await settings.get();
+    config ??= await settings.get();
+    const { ticketPattern, typesafeApiKey, anthropicApiKey, assignmentConfidenceThreshold, teamNames: teamNamesText } = config;
     const units = readUnits();
     const pattern = compilePattern(ticketPattern);
-    const overrides = await readOverrides();
+    const [overrides, teams, linearTeamNames, { rules, warning }] = await Promise.all([
+      readOverrides(), knownTeams(), bb.storage.kv.get<Record<string, string>>("linearTeamNames"), surfaceRules(config),
+    ]);
     const warnings = new Set<string>();
-    const { rules, warning } = await surfaceRules();
     if (warning !== null) warnings.add(warning);
-    const teams = await knownTeams();
     const linkbacks = readLinkbacks();
     const tickets = ticketsOf(ticketFinder(pattern, units, { teams, linkbacks }), units);
     const linearProjects = cachedProjects(tickets);
@@ -1611,7 +1615,7 @@ export default async function plugin(bb: BbPluginApi) {
       roll: {
         overrides,
         teamNames: teamNames.names,
-        linearTeamNames: (await bb.storage.kv.get<Record<string, string>>("linearTeamNames")) ?? {},
+        linearTeamNames: linearTeamNames ?? {},
         surfaceRules: rules,
       },
     };
@@ -1705,14 +1709,15 @@ export default async function plugin(bb: BbPluginApi) {
     return effortMemberHash(effort.clusters);
   }
 
-  async function hierarchy(): Promise<{
+  async function hierarchy(config?: WorkstreamSettings): Promise<{
     groups: BoardGroup[];
     mode: BoardMode;
     surfaces: string[];
     warnings: string[];
   }> {
-    const { assignmentConfidenceThreshold } = await settings.get();
-    const placement = await readPlacement();
+    config ??= await settings.get();
+    const { assignmentConfidenceThreshold } = config;
+    const placement = await readPlacement(config);
     const { mode, rules, warnings } = placement;
     const grouped = mode !== "basic";
     const { efforts, containers } = boardEfforts(placement, grouped);
@@ -1838,16 +1843,19 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Now, the attention thresholds in settings, and the server's UTC offset, which business days count by. */
-  async function attentionClock(): Promise<AttentionClock> {
-    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = await settings.get();
+  async function attentionClock(config?: WorkstreamSettings): Promise<AttentionClock> {
+    const { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays } = config ?? await settings.get();
     const now = Date.now();
     return { now, thresholds: { draftIdleDays, nudgeAfterBusinessDays, stuckAfterDays }, utcOffsetMinutes: -new Date(now).getTimezoneOffset() };
   }
 
-  async function board(): Promise<Board> {
-    const { groups, mode, surfaces, warnings } = await hierarchy();
-    const { rules } = await surfaceRules();
-    const pattern = compilePattern((await settings.get()).ticketPattern);
+  async function board(): Promise<Board>;
+  async function board(checkCoordinators: false, config?: WorkstreamSettings): Promise<EffortBoard>;
+  async function board(checkCoordinators = true, config?: WorkstreamSettings): Promise<Board | EffortBoard> {
+    config ??= await settings.get();
+    const { groups, mode, surfaces, warnings } = await hierarchy(config);
+    const { rules } = await surfaceRules(config);
+    const pattern = compilePattern(config.ticketPattern);
     const links = threadLinks(groups.flatMap((group) => group.clusters), pattern);
     const threadsOf = new Map<string, z.infer<typeof threadLinkSchema>[]>();
     for (const [threadId, linked] of links) {
@@ -1889,14 +1897,14 @@ export default async function plugin(bb: BbPluginApi) {
         ),
       })),
     }));
-    const established = await Promise.all(effortStore.list().map(async (effort) => {
+    const established = checkCoordinators ? await Promise.all(effortStore.list().map(async (effort) => {
       if (!effort.coordinatorThreadId) return effort;
       try {
         const thread = await bb.sdk.threads.get({ threadId: effort.coordinatorThreadId });
         const state = thread.archivedAt === null && thread.deletedAt === null ? "ready" : "unavailable";
         return state === effort.coordinatorState ? effort : effortStore.save({ ...effort, coordinatorState: state });
       } catch { return { ...effort, coordinatorState: "unavailable" as const }; }
-    }));
+    })) : effortStore.list();
     const scannedInventory = inventory.read();
     const storedInventory = { ...scannedInventory, entries: scannedInventory.entries.map((entry) => ({ ...entry, pr: withApprovalFeedback(entry.pr) })) };
     const inventoryTickets = storedInventory.entries.flatMap((entry) => ticketsIn(`${entry.pr.title}\n${entry.pr.headRefName ?? ""}`, pattern));
@@ -1912,9 +1920,18 @@ export default async function plugin(bb: BbPluginApi) {
         staleness: freshest(members.map((entry) => stalenessOf(entry.pr.createdAt ?? null, Date.now()))), surfaces: [], risk: "none" };
     });
     const context = readWorkContext({ groups: [...wired, ...remoteGroups], prInventory: { entries: storedInventory.entries } }, pattern);
-    const clock = await attentionClock();
+    const clock = await attentionClock(config);
     const holds = prHolds.list();
     const statesSince = inventory.statesSince();
+    const snapshot: EffortBoard = {
+      prHolds: holds, efforts: established, groups: [...wired, ...remoteGroups],
+      prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
+        ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
+        attention: prAttention({ ...entry.pr, stackedOn: stackParent(entry, storedInventory.entries)?.pr.number ?? null },
+          { holds, effort: context.ownerForPr(entry.pr.url), since: statesSince.get(entry.pr.url.toLowerCase()) ?? {} }, clock),
+      })), refreshing: inventoryRefreshing || inventoryTargeting },
+    };
+    if (!checkCoordinators) return snapshot;
     const prThreadLinks: Board["prThreadLinks"] = {};
     for (const url of context.items.keys()) {
       const ids = context.directThreadIds(url).filter((id) => threadFacts.has(id))
@@ -1924,10 +1941,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (ids.length) prThreadLinks[url] = ids;
     }
     return {
-      prHolds: holds,
-      efforts: established,
+      ...snapshot,
       prThreadLinks,
-      groups: [...wired, ...remoteGroups],
       depth: Math.max(hierarchyDepth(groups), remoteGroups.length > 0 ? 1 : 0),
       surfaces,
       mode,
@@ -1940,18 +1955,13 @@ export default async function plugin(bb: BbPluginApi) {
         return observation === null ? [] : [[url.toLowerCase(), observation]];
       })),
       scanning,
-      prInventory: { ...storedInventory, entries: storedInventory.entries.map((entry) => ({ ...entry,
-        ...(inventoryEffort(entry.pr, wired, established, pattern) ?? remoteMembership.get(prWorkItemKey(entry.pr.url)) ?? {}),
-        attention: prAttention({ ...entry.pr, stackedOn: stackParent(entry, storedInventory.entries)?.pr.number ?? null },
-          { holds, effort: context.ownerForPr(entry.pr.url), since: statesSince.get(entry.pr.url.toLowerCase()) ?? {} }, clock),
-      })), refreshing: inventoryRefreshing || inventoryTargeting },
       warnings: [
         ...((await bb.storage.kv.get<string[]>("warnings")) ?? []),
         ...warnings,
       ].slice(0, 50),
       threadCoverage: threadCoverage(threadFacts.size, links),
       health: {
-        refreshMinutes: (await settings.get()).refreshMinutes,
+        refreshMinutes: config.refreshMinutes,
         enrichment: enrichmentSchema.nullable().catch(null).parse((await bb.storage.kv.get<unknown>("lastEnrichment")) ?? null),
       },
       runs: runs.recent(Date.now() - ROW_RUN_MS),
@@ -3092,7 +3102,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { threads };
   }
 
-  function availableWorkEfforts(current: Board): ThreadEffortReady["efforts"] {
+  function availableWorkEfforts(current: EffortBoard): ThreadEffortReady["efforts"] {
     const efforts: ThreadEffortReady["efforts"] = [];
     for (const group of current.groups) {
       if (group.level !== "effort" || outsideGrouping(group.key) || efforts.some((effort) => effort.key === group.key)) continue;
@@ -3112,14 +3122,16 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** `seen` also reads what the composer's effort chip and popover show (see threadEffortPickerSchema), with Your turn counted as the deck counts it. */
-  async function threadEffortContext(threadId: string, seen?: Readonly<Record<string, number>>): Promise<z.infer<typeof threadEffortContextSchema>> {
+  async function threadEffortContext(threadId: string, seen?: Readonly<Record<string, number>>, read?: EffortBoard): Promise<z.infer<typeof threadEffortContextSchema>> {
     try {
-      const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
+      const [thread, metadata, config] = await Promise.all([
+        bb.sdk.threads.get({ threadId, include: "environment" }), bb.sdk.threads.getPluginMetadata({ threadId }), settings.get(),
+      ]);
       if (thread.deletedAt !== null) return { ok: false, error: "That thread no longer exists." };
-      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
       const linkedPrUrl = typeof metadata.linkedPrUrl === "string" ? canonicalPrUrl(metadata.linkedPrUrl) : null;
-      const current = await board();
-      const pattern = compilePattern((await settings.get()).ticketPattern);
+      // The effort picker needs ownership, not the health of every coordinator. Writes always validate a fresh snapshot.
+      const current = read ?? await board(false, config);
+      const pattern = compilePattern(config.ticketPattern);
       const work = readWorkContext(current, pattern, true);
       const known = new Map([...work.items.values()].flatMap((item) => canonicalPrUrl(item.key) ? [[item.key,
         { url: item.key, label: item.remote ?? item.locals[0] ?? item.key, paths: item.paths, tickets: item.tickets }] as const] : []));
@@ -3189,7 +3201,7 @@ export default async function plugin(bb: BbPluginApi) {
       const recorded = new Set([linkedPrUrl, typeof metadata.prUrl === "string" ? canonicalPrUrl(metadata.prUrl) : null, ...checkout]);
       const direct = [...new Set([...linked, ...sources.flatMap((source) => source.prUrls)])].filter((url) => recorded.has(url) || work.linksForPr(url, false)
         .some((link) => link.threadId === threadId && (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket"))).sort();
-      const picker = seen && await threadEffortPicker({ threadId, thread, metadata, pattern, work, sources, efforts, intended,
+      const picker = seen && await threadEffortPicker({ current, config, threadId, thread, metadata, pattern, work, sources, efforts, intended,
         direct: direct.map((url) => ({ url, title: known.get(url)!.label })), seen });
       return { ok: true, sources, efforts, linkablePrs: [...known.values()].sort((a, b) => a.label.localeCompare(b.label))
         .map((pr) => ({ url: pr.url, label: `${new URL(pr.url).pathname.slice(1).replace("/pull/", " #")} · ${pr.label}` })), linkedPrUrl,
@@ -3199,16 +3211,32 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The composer chip's effort, the efforts the deck draws a card for with the signals that point the thread at each, and its linked PRs. */
-  async function threadEffortPicker(input: { threadId: string; thread: { title: string | null; titleFallback: string | null; parentThreadId: string | null };
+  async function threadEffortPicker(input: { current: EffortBoard; config: WorkstreamSettings; threadId: string; thread: { title: string | null; titleFallback: string | null; parentThreadId: string | null };
     metadata: Record<string, unknown>; pattern: RegExp; work: ReturnType<typeof readWorkContext>; sources: ThreadEffortReady["sources"];
     efforts: ThreadEffortReady["efforts"]; intended: EstablishedEffort | null; direct: { url: string; title: string }[]; seen: Readonly<Record<string, number>> }):
     Promise<ThreadEffortPicker> {
     const { threadId, work, sources } = input;
-    const read = await deckInput(input.seen);
-    const deck = deckView(read);
+    // Reuse this context's board, and only read this thread's intent. No full deck or other threads' metadata is needed.
+    const [view, classifiedRead, homes] = await Promise.all([
+      inventoryGet(undefined, input.current, input.config), classifyGet(input.current, input.config),
+      threadHomes(input.current.efforts.filter((effort) => !effort.mergedInto),
+        readWorkContext(input.current, input.pattern, false, inventory.merges().map((merge) => ({
+          prUrl: merge.url, title: merge.title, headRefName: merge.headRefName ?? "",
+        }))), { threadId, metadata: input.metadata }),
+    ]);
+    const turns = new Map(input.current.efforts.filter((effort) => !effort.archivedAt && !effort.mergedInto && piles.get(effort).pile !== "done")
+      .map((effort) => [effort.id, 0]));
+    for (const group of view.groups) for (const row of group.rows) {
+      const id = group.effort?.id ?? serviceId(row.repo);
+      if (!group.effort) turns.set(id, turns.get(id) ?? 0);
+      if (turns.has(id) && rowTurn(row, group.effort?.pile ?? "active").list === "turn") turns.set(id, turns.get(id)! + 1);
+    }
+    const evidence = homes.find((thread) => thread.id === threadId);
+    const placed = evidence ? threadHome(evidence) : null;
+    if (placed?.kind === "service") turns.set(serviceId(placed.repo), turns.get(serviceId(placed.repo)) ?? 0);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE)?.id ?? null;
     const brief = (effort: EstablishedEffort) => ({ id: effort.id, name: effort.name, oneOff: effort.id === oneOffs });
-    const turn = (effortId: string) => deck.active.find((card) => card.id === effortId)?.yourTurn ?? (deck.held.some((card) => card.id === effortId) ? 0 : null);
+    const turn = (cardId: string) => turns.get(cardId) ?? null;
     const ownerOf = (url: string) => { const owner = work.ownerForPr(url); const effort = owner && effortStore.get(owner.id); return effort && !effort.archivedAt ? effort : null; };
     const ref = (url: string) => { const target = prTarget(url); return target ? `${target.slug.split("/").at(-1)} #${target.number}` : url; };
     const linked = input.direct.map(({ url, title }) => {
@@ -3231,8 +3259,6 @@ export default async function plugin(bb: BbPluginApi) {
     });
     const coordinates = effortStore.list().find((effort) => !effort.archivedAt && effort.coordinatorThreadId === threadId) ?? null;
     // Where the deck places the thread, by the same evidence and rule.
-    const evidence = read.homes.find((thread) => thread.id === threadId);
-    const placed = evidence ? threadHome(evidence) : null;
     const homeEffort = placed?.kind === "effort" ? effortStore.get(placed.id) : null;
     const chip = threadEffortChip({ own: input.intended && !input.intended.archivedAt ? brief(input.intended) : null, coordinates: coordinates && brief(coordinates),
       home: homeEffort && !homeEffort.archivedAt ? { kind: "effort", effort: brief(homeEffort) } : placed?.kind === "service" ? placed : null, yourTurn: turn });
@@ -3255,7 +3281,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const classified = linked.flatMap((pr) => {
       if (pr.effortId) return [];
-      const group = deck.active.flatMap((card) => card.suggestions).find((item) => item.prs.some((row) => row.prUrl === pr.url));
+      const group = classifiedRead.groups.find((item) => item.prs.some((row) => row.prUrl === pr.url));
       const target = group?.target;
       if (target?.kind !== "effort" || !group!.confidence) return [];
       const own = group!.prs.find((row) => row.prUrl === pr.url)!.signals.find((signal) => signal.effortId === target.effortId);
@@ -3274,7 +3300,7 @@ export default async function plugin(bb: BbPluginApi) {
       return [{ key, ...brief(effort), held: piles.get(effort).pile === "held", yourTurn: turn(effort.id) ?? 0,
         signal: signal?.signal ?? null, score: signal?.score ?? 0 }];
     }).sort((a, b) => a.name.localeCompare(b.name));
-    const { typesafeApiKey } = await settings.get();
+    const { typesafeApiKey } = input.config;
     return { chip, choices, linked, jev: typeof typesafeApiKey === "string" && typesafeApiKey.trim() !== "" };
   }
 
@@ -3282,6 +3308,10 @@ export default async function plugin(bb: BbPluginApi) {
     const { workEffortId } = await bb.sdk.threads.getPluginMetadata({ threadId });
     return typeof workEffortId === "string" ? workEffortId : null;
   };
+  async function savedThreadEffort(threadId: string, reconcile = false, duringSet = false) {
+    const current = reconcile ? await reconcileThreadIntent(threadId, duringSet) : undefined;
+    return threadEffortContext(threadId, {}, current);
+  }
   const withUndo = (context: z.infer<typeof threadEffortContextSchema>, undoId: string) => context.ok ? { ...context, undoId } : context;
 
   /** See thread_effort_undo. Every check runs before the first write, so a refusal changes nothing. */
@@ -3334,16 +3364,16 @@ export default async function plugin(bb: BbPluginApi) {
     intentClaims.set(threadId, (intentClaims.get(threadId) ?? []).filter((claim) => claim.at < undo.at));
     bb.realtime.publish(BOARD_CHANGED, { scanning });
     deckChanged();
-    return threadEffortContext(threadId);
+    return threadEffortContext(threadId, {});
   }
 
-  async function reconcileThreadIntent(threadId: string, duringSet = false): Promise<void> {
+  async function reconcileThreadIntent(threadId: string, duringSet = false): Promise<EffortBoard | undefined> {
     if (disposal.signal.aborted || !hasIntent(threadId)) return;
     if (intentChanging.has(threadId) && !duringSet) { intentRecheck.add(threadId); return; }
     const epoch = intentEpoch.get(threadId) ?? 0;
     const evidenceVersion = intentEvidenceVersion;
     const scanned = readUnits();
-    const current = await board();
+    const current = await board(false);
     const pattern = compilePattern((await settings.get()).ticketPattern);
     const freshPaths = new Set(scanned.filter((unit) => unit.observed?.pr === true).map((unit) => unit.path));
     const work = workItemIndex(
@@ -3395,6 +3425,8 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
     }
+    // With no membership change this is already the post-save snapshot. Claims require a fresh ownership read.
+    return claimed ? undefined : current;
   }
 
   /** Runs after every board sync. */
@@ -3589,9 +3621,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Suggestions for your open PRs no effort owns, from what the board already read: nothing is read again, and nothing moves. */
-  async function classifyGet(read?: Board) {
+  async function classifyGet(read?: EffortBoard, config?: WorkstreamSettings) {
     const current = read ?? await board();
-    const pattern = compilePattern((await settings.get()).ticketPattern);
+    const pattern = compilePattern((config ?? await settings.get()).ticketPattern);
     const work = readWorkContext(current, pattern);
     const oneOffs = effortStore.source(ONE_OFFS_SOURCE);
     const units = current.groups.flatMap((group) => group.clusters.flatMap((cluster) => cluster.units));
@@ -4086,9 +4118,9 @@ export default async function plugin(bb: BbPluginApi) {
    * The PR inventory: every open PR you author, and every open PR an unarchived effort names as a member, grouped by the effort that owns
    * it, explicitly or through its ticket. It reads only what the board keeps: the inventory's reads and checkouts.
    */
-  async function inventoryGet(only?: InventoryQuestion, read?: Board): Promise<InventoryView> {
+  async function inventoryGet(only?: InventoryQuestion, read?: EffortBoard, config?: WorkstreamSettings): Promise<InventoryView> {
     const current = read ?? await board();
-    const work = readWorkContext(current, compilePattern((await settings.get()).ticketPattern));
+    const work = readWorkContext(current, compilePattern((config ?? await settings.get()).ticketPattern));
     const owner = (prUrl: string) => { const found = work.ownerForPr(prUrl); return found && { id: found.id, name: found.name }; };
     const claims = addressHeld();
     const sentOf = addressSent();
@@ -4142,14 +4174,17 @@ export default async function plugin(bb: BbPluginApi) {
    * through a checkout other threads share never counts, as the classifier never counts one. An archived effort places nothing, as the
    * thread's chip names none, so its threads go where the rest of their evidence says.
    */
-  async function threadHomes(efforts: readonly EstablishedEffort[], work: ReturnType<typeof readWorkContext>): Promise<ThreadEvidence[]> {
+  async function threadHomes(efforts: readonly EstablishedEffort[], work: ReturnType<typeof readWorkContext>,
+    only?: { threadId: string; metadata: Record<string, unknown> }): Promise<ThreadEvidence[]> {
     const kept = efforts.filter((effort) => !effort.archivedAt);
     const live = new Set(kept.map((effort) => effort.id));
     const coordinates = new Map(kept.flatMap((effort) => effort.coordinatorThreadId ? [[effort.coordinatorThreadId, effort.id] as const] : []));
     // A thread's intent lives in its metadata; only the few threads with one are read.
-    const intents = new Map(await Promise.all(intentIds().filter((id) => threadFacts.has(id)).map(async (id) => {
-      try { const effortId = await intentOf(id); return [id, effortId && live.has(effortId) ? effortId : null] as const; } catch { return [id, null] as const; }
-    })));
+    const selectedIntent = typeof only?.metadata.workEffortId === "string" ? only.metadata.workEffortId : null;
+    const intents = only ? new Map([[only.threadId, selectedIntent && live.has(selectedIntent) ? selectedIntent : null]])
+      : new Map(await Promise.all(intentIds().filter((id) => threadFacts.has(id)).map(async (id) => {
+        try { const effortId = await intentOf(id); return [id, effortId && live.has(effortId) ? effortId : null] as const; } catch { return [id, null] as const; }
+      })));
     const own = new Map<string, Set<string>>();
     for (const url of work.items.keys()) for (const link of work.linksForPr(url, false))
       if (link.sources.some((source) => source !== "cluster") || link.tier === "started" || link.tier === "ticket") own.set(link.threadId, (own.get(link.threadId) ?? new Set()).add(url));
@@ -4158,7 +4193,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const facts of threadFacts.values()) if (facts.environmentPath) runners.set(trim(facts.environmentPath), (runners.get(trim(facts.environmentPath)) ?? 0) + 1);
     const scanned = readUnits();
     const repoOf = (unit: RawUnit | undefined) => unit?.githubRepo?.toLowerCase() ?? null;
-    return [...threadFacts.values()].map((facts) => {
+    return [...threadFacts.values()].filter((facts) => !only || facts.id === only.threadId).map((facts) => {
       const path = facts.environmentPath ? trim(facts.environmentPath) : null;
       const alone = path && runners.get(path) === 1 ? scanned.find((unit) => trim(unit.path) === path) : undefined;
       const urls = new Set(own.get(facts.id));
@@ -5078,8 +5113,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!context.ok) return context;
       if (existing && context.threadEffort?.key === existing.key) {
         db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
-        await reconcileThreadIntent(threadId, true);
-        return threadEffortContext(threadId);
+        return savedThreadEffort(threadId, true, true);
       }
       if (existing) return { ok: false as const,
         error: "That create request already made an effort, but the thread assignment changed or failed. Choose the existing effort from the picker." };
@@ -5104,8 +5138,7 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare(`INSERT OR IGNORE INTO thread_work_intent_ids (thread_id) VALUES (?)`).run(threadId);
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      await reconcileThreadIntent(threadId, true);
-      return withUndo(await threadEffortContext(threadId), undoId);
+      return withUndo(await savedThreadEffort(threadId, true, true), undoId);
     }),
     thread_effort_suggest: async ({ threadId }) => {
       const context = await threadEffortContext(threadId);
@@ -5164,8 +5197,7 @@ export default async function plugin(bb: BbPluginApi) {
       const undoId = offerUndo(threadId, { at, intent: { prior, next } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      if (destinationKey !== null) await reconcileThreadIntent(threadId, true);
-      return withUndo(await threadEffortContext(threadId), undoId);
+      return withUndo(await savedThreadEffort(threadId, destinationKey !== null, true), undoId);
     }),
     thread_effort_move: async ({ threadId, sourceIds, destinationKey, expectedScope }) => {
       const context = await threadEffortContext(threadId);
@@ -5204,8 +5236,7 @@ export default async function plugin(bb: BbPluginApi) {
         .map(([ownerId, members]) => ({ ownerId, members })) }, ...established ? {} : { created: moved.id } });
       bb.realtime.publish(BOARD_CHANGED, { scanning });
       deckChanged();
-      if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
-      return withUndo(await threadEffortContext(threadId), undoId);
+      return withUndo(await savedThreadEffort(threadId, hasIntent(threadId)), undoId);
     },
     thread_effort_link_pr: async ({ threadId, prUrl }) => {
       const context = await threadEffortContext(threadId);
@@ -5219,8 +5250,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadPrUrls.set(threadId, [...new Set([...(threadPrUrls.get(threadId) ?? []), canonical])]);
       prFreshnessLinks.add("");
       announceThreads();
-      if (hasIntent(threadId)) await reconcileThreadIntent(threadId);
-      return withUndo(await threadEffortContext(threadId), undoId);
+      return withUndo(await savedThreadEffort(threadId, hasIntent(threadId)), undoId);
     },
     thread_effort_undo: ({ threadId, undoId }) => serialIntent(threadId, () => undoThreadEffort(threadId, undoId)),
     inventory_restart_thread: ({ prUrl, headOid, projectId }) => restartPrThread(prUrl, headOid, projectId),

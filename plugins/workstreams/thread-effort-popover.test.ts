@@ -114,3 +114,11 @@ describe("the thread effort popover", () => {
     expect(body({ notice: "1 linked PR group has work assigned to another effort." })).toMatch(/role="status"/u);
   });
 });
+
+
+it("shows saving feedback beside the chip and prevents starting another pick", () => {
+  const html = bar({ busy: true, flash: { text: "In Shelf order", undo: true } });
+  expect(text(html)).toContain("Saving effort…");
+  expect(html).toMatch(/data-effort-open[^>]*disabled/u);
+  expect(html).not.toContain("data-effort-undo");
+});

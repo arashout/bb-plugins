@@ -7,6 +7,7 @@ import { PickerBody, ThreadEffortBar } from "./thread-effort-popover";
 import { pickerActionForKey } from "./deck-keys";
 import { DECK_CHANGED, SEND_DELAY_MS } from "./deck-shared";
 import { readSeen, SEEN_KEY } from "./deck-place";
+import { createThreadEffortRefresh } from "./thread-effort-refresh";
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -47,23 +48,31 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   const [flash, setFlash] = useState<{ text: string; undoId: string | null } | null>(null);
   const [confirming, setConfirming] = useState<ThreadEffortPicker["linked"][number] | null>(null);
   const flashTimer = useRef<number | null>(null);
-  const requestId = useRef(0);
+  const refresh = useRef<ReturnType<typeof createThreadEffortRefresh<ThreadEffortContext>> | null>(null);
+  const saving = useRef(false);
   const createRequest = useRef<{ name: string; id: string } | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listId = useId();
 
-  /** `list`: the popover lists this read too. */
-  const refetch = useCallback((list = false) => {
-    const request = ++requestId.current;
-    void rpc.call("thread_effort_context", { threadId, seen: seenAt() }).then((result) => {
-      if (request !== requestId.current) return;
-      if (result.ok) { setContext(result); setReadError(null); if (list) setSnapshot(result); } else setReadError(result.error);
-    }, (cause: unknown) => { if (request === requestId.current) setReadError(errorMessage(cause)); });
-  }, [rpc, threadId]);
+  /** Realtime changes coalesce; a completed read still paints even when another refresh is queued. */
+  const refetch = useCallback((list = false) => refresh.current?.request(list), []);
   useEffect(() => {
-    refetch();
-    return () => { requestId.current++; if (flashTimer.current !== null) window.clearTimeout(flashTimer.current); };
-  }, [refetch]);
+    const reader = createThreadEffortRefresh({
+      read: () => rpc.call("thread_effort_context", { threadId, seen: seenAt() }),
+      apply: (result, list) => {
+        if (result.ok) { setContext(result); setReadError(null); if (list) setSnapshot(result); }
+        else setReadError(result.error);
+      },
+      failed: (cause) => setReadError(errorMessage(cause)),
+    });
+    refresh.current = reader;
+    reader.request();
+    return () => {
+      reader.dispose();
+      if (refresh.current === reader) refresh.current = null;
+      if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    };
+  }, [rpc, threadId]);
   useRealtime("board-changed", () => refetch());
   useRealtime(DECK_CHANGED, () => refetch());
 
@@ -75,7 +84,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   };
   const reset = () => { setMode("effort"); setQuery(""); setHighlight(-1); setError(null); setConfirming(null); };
   const openChange = (next: boolean) => {
-    if (busy) return;
+    if (saving.current && next) return;
     if (next) { reset(); setJev(NO_JEV); setJevNotice(null); setSnapshot(context); refetch(true); }
     setOpen(next);
   };
@@ -87,20 +96,32 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
   const current = picker?.choices.find((choice) => choice.key === currentKey) ?? null;
   const items: PickerItem[] = listed && picker ? pickerItems({ picker, currentKey, query, mode, linkable: listed.linkablePrs, linkedUrl: listed.linkedPrUrl, jev }) : [];
 
-  /** One change: applied now, then the chip reads again, and its Undo waits beside the chip. A refusal stays in the popover. */
+  /** Close on a pick, show Saving beside the chip, then use the authoritative response. A refusal reopens the picker. */
   const apply = async (call: () => Promise<ThreadEffortContext>, text: string) => {
+    if (saving.current) return;
+    saving.current = true;
+    refresh.current?.hold();
     setBusy(true);
+    setOpen(false);
     setError(null);
     let result: ThreadEffortContext;
     try { result = await call(); } catch (cause) { result = { ok: false, error: errorMessage(cause) }; }
+    if (!result.ok) {
+      setError(result.error);
+      setOpen(true);
+      refetch(true);
+    } else {
+      setContext(result);
+      setSnapshot(result);
+      setReadError(null);
+      reset();
+      say(text, result.undoId ?? null);
+      // Older servers may omit the picker; current saves return the updated chip themselves.
+      if (!result.picker) refetch();
+    }
+    saving.current = false;
     setBusy(false);
-    if (!result.ok) { setError(result.error); refetch(true); return; }
-    const changed = result;
-    setContext((previous) => ({ ...changed, picker: previous?.picker }));
-    setOpen(false);
-    reset();
-    say(text, result.undoId ?? null);
-    refetch();
+    refresh.current?.resume();
   };
 
   const pick = async (item: PickerItem | undefined) => {
@@ -153,13 +174,9 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
 
   const undo = async () => {
     const undoId = flash?.undoId;
-    if (!undoId) return;
+    if (!undoId || saving.current) return;
     setFlash(null);
-    try {
-      const result = await rpc.call("thread_effort_undo", { threadId, undoId });
-      say(result.ok ? "Undone." : result.error);
-    } catch (cause) { say(errorMessage(cause)); }
-    refetch();
+    await apply(() => rpc.call("thread_effort_undo", { threadId, undoId }), "Undone.");
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -178,7 +195,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     if (confirming) { setConfirming(null); return true; }
     const step = pickerStep("pick-back", { highlight, count: items.length, mode });
     if (step && "mode" in step) { setMode("effort"); setQuery(""); setHighlight(-1); setError(null); return true; }
-    return busy;
+    return false;
   };
   const onCard = () => {
     const card = chip?.card ?? null;
@@ -186,7 +203,7 @@ function ThreadEffortForThread({ threadId }: { threadId: string }) {
     else navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(card)}` });
   };
 
-  return <ThreadEffortBar chip={chip} readError={readError} onRetry={() => refetch()} open={open} onOpenChange={openChange} onCard={onCard}
+  return <ThreadEffortBar chip={chip} busy={busy} readError={readError} onRetry={() => refetch()} open={open} onOpenChange={openChange} onCard={onCard}
     onEscape={onEscape} inputRef={inputRef} flash={flash && { text: flash.text, undo: flash.undoId !== null }} onUndo={() => void undo()}>
     {listed && picker ? <PickerBody mode={mode} query={query} items={items} highlight={highlight} busy={busy} linked={picker.linked}
       current={current && { id: current.id, name: current.name }} notice={jevNotice ?? listed.inheritanceNotice} error={error} listId={listId} inputRef={inputRef}

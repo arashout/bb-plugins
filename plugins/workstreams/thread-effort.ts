@@ -44,7 +44,7 @@ export const threadEffortContextSchema = z.discriminatedUnion("ok", [
     linkablePrs: z.array(z.object({ url: z.string(), label: z.string() })), linkedPrUrl: z.string().nullable(),
     threadEffort: z.object({ key: z.string(), name: z.string() }).nullable(),
     inheritanceNotice: z.string().nullable(),
-    /** Only thread_effort_context reads it; a change returns the context without it. */
+    /** Reads and successful changes include the picker, so a save immediately updates the chip. */
     picker: threadEffortPickerSchema.optional(),
     /** What a change returns for thread_effort_undo to take it back. */
     undoId: z.string().optional() }),

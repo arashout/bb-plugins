@@ -70,7 +70,7 @@ async function setup() {
   expect((await harness.runCli(["refresh"])).exitCode).toBe(0);
   const context = async (threadId: string) => await harness.callRpc("thread_effort_context", { threadId, seen: {} }) as ThreadEffortReady;
   const picker = async (threadId: string) => (await context(threadId)).picker!;
-  return { harness, metadata, efforts, shelf, gifts, pickup, context, picker };
+  return { harness, metadata, authored, efforts, piles, shelf, gifts, pickup, context, picker };
 }
 const signals = (picker: ThreadEffortPicker) => picker.choices.map((choice) => [choice.name, choice.signal]);
 
@@ -136,4 +136,60 @@ describe("the thread effort chip and popover's read", () => {
     await env.harness.behavior.setSettings({ typesafeApiKey: "synthetic-test-value" });
     expect((await env.picker("thr-direct")).jev).toBe(true);
   });
+});
+
+
+describe("effort read and save latency boundaries", () => {
+  it("reads only the requested thread, even when other efforts have coordinators and thread intents", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.shelf, coordinatorThreadId: "thr-title", coordinatorState: "ready" });
+    const gets = env.harness.inspection.sdk.callsTo("threads.get").length;
+    const metadataReads = env.harness.inspection.sdk.callsTo("threads.getPluginMetadata").length;
+    const result = await env.context("thr-direct");
+    expect(result.ok).toBe(true);
+    expect(result.picker!.chip.name).toBe("Shelf order");
+    expect(env.harness.inspection.sdk.callsTo("threads.get").slice(gets)).toHaveLength(1);
+    expect(env.harness.inspection.sdk.callsTo("threads.getPluginMetadata").slice(metadataReads)).toHaveLength(1);
+  });
+
+  it("returns the saved chip and Undo in the write response, and updates them when the assignment is removed or undone", async () => {
+    const env = await setup();
+    const context = await env.context("thr-direct");
+    const key = context.picker!.choices.find((choice) => choice.name === "Store pickup")!.key;
+    const saved = await env.harness.callRpc("thread_effort_set", { threadId: "thr-direct", destinationKey: key,
+      expectedScope: threadEffortAssignmentScope(context, key) }) as ThreadEffortReady;
+    expect(saved.picker!.chip).toMatchObject({ kind: "effort", name: "Store pickup", card: env.pickup.id });
+    expect(saved.undoId).toBeTypeOf("string");
+    const removed = await env.harness.callRpc("thread_effort_set", { threadId: "thr-direct", destinationKey: null,
+      expectedScope: threadEffortAssignmentScope(saved, null) }) as ThreadEffortReady;
+    expect(removed.threadEffort).toBeNull();
+    expect(removed.picker!.chip).toEqual((await env.context("thr-direct")).picker!.chip);
+    const undone = await env.harness.callRpc("thread_effort_undo", { threadId: "thr-direct", undoId: removed.undoId! }) as ThreadEffortReady;
+    expect(undone.picker!.chip.name).toBe("Store pickup");
+    const created = await env.harness.callRpc("thread_effort_create", { threadId: "thr-title", name: "Shelf follow-up",
+      requestId: "ef2e3e25-c6cd-4c63-8da8-eac5d73203e4", expectedScope: threadEffortAssignmentScope(await env.context("thr-title"), null) }) as ThreadEffortReady;
+    expect(created.picker!.chip).toMatchObject({ kind: "effort", name: "Shelf follow-up" });
+  });
+});
+
+
+it("keeps Your turn counts and card links equal to the deck for active, held, and done efforts", async () => {
+  const env = await setup();
+  env.authored[1] = { ...env.authored[1]!, reviewDecision: "CHANGES_REQUESTED",
+    latestReviews: [{ login: "mira", state: "CHANGES_REQUESTED", submittedAt: "2026-09-22T15:00:00Z" }] };
+  expect((await env.harness.runCli(["refresh"])).exitCode).toBe(0);
+  let chip = (await env.picker("thr-direct")).chip;
+  let deck = await env.harness.callRpc("deck_get", {}) as DeckView;
+  expect(chip.yourTurn).toBe(1);
+  expect(chip.yourTurn).toBe(deck.active.find((card) => card.id === env.shelf.id)!.yourTurn);
+  env.piles.move(env.shelf, "hold", "Waiting on review");
+  chip = (await env.picker("thr-direct")).chip;
+  deck = await env.harness.callRpc("deck_get", {}) as DeckView;
+  expect(chip.yourTurn).toBe(0);
+  expect(chip.yourTurn).toBe(deck.held.find((card) => card.id === env.shelf.id)!.yourTurn);
+  expect(chip.card).toBe(env.shelf.id);
+  env.piles.move(env.shelf, "complete");
+  chip = (await env.picker("thr-direct")).chip;
+  expect(chip.card).toBeNull();
+  expect(chip.yourTurn).toBe(0);
 });
