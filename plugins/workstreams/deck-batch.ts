@@ -77,8 +77,9 @@ export type Skipped = z.infer<typeof skippedSchema>;
 /** How Address sends: one new batch thread for every PR, or each PR's own thread. */
 export const ADDRESS_MODES = ["batch", "each"] as const;
 export type AddressMode = (typeof ADDRESS_MODES)[number];
-/** The one batch thread an Address listing starts: the project it's in, and the parent it goes under, by name, or none. */
-const threadSchema = z.object({ projectId: z.string(), parentThreadId: z.string().nullable(), under: z.string().nullable() }).strict();
+/** The Address worker's project and parent; effortId binds a parent to ensure after confirmation, never during planning. */
+const threadSchema = z.object({ projectId: z.string(), parentThreadId: z.string().nullable(), under: z.string().nullable(),
+  effortId: z.string().optional() }).strict();
 export type BatchThread = z.infer<typeof threadSchema>;
 const bodySchema = z.object({ kind: z.enum([...ACTED_KINDS, "advance"]), effortId: z.string().nullable(), items: z.array(itemSchema),
   skipped: z.array(skippedSchema), thread: threadSchema.optional() }).strict();

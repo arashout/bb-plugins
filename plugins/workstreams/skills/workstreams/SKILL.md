@@ -651,6 +651,19 @@ being edited; one saved since refuses it. A merge counts once a read sees it: th
 your open PRs, a Refresh, or a checkout scan. A merged PR stays in the effort
 whose ticket it carries.
 
+Cards and Overview keep every open PR visible with its current status and next
+or queued action. Held, Advance available, and Advance queued scopes name each
+PR by repository and number; available means eligible for a plan, not already
+running. Hold reasons remain visible, including PRs inside held efforts.
+Overview also lists repository work and loose threads. Each PR row offers its
+next action directly, plus applicable Hold/Release, Move, Dismiss, and Refresh
+controls. An Overview action carries that PR and its owning card, never the
+current selection; merges still open a preview and writes retain their existing
+confirmations and Undo. Disabled buttons explain stack gates or work already
+running, and outcomes stay on the affected row. Linked workers show
+Working, Needs you, Failed, or Idle; a pending interaction takes priority over
+an active/idle thread state. Each worker names every PR it owns on the card.
+
 ### Batch actions and Advance
 
 Every write from the deck is a batch the user confirms, and each step is only
@@ -693,7 +706,13 @@ waiting, a hold, a held or done effort, a Dismiss, an agent or open run on
 the PR or its checkout, a write just sent, or, for a batch, no local
 checkout of its repository to add a worktree from. A batch plan returns its
 `thread`: the project, and the effort parent it starts under when every PR
-shares that effort, else none. When it sends, it reads each PR again, claims
+shares that effort, else none. Project selection uses the PR's checkout or
+the repository checkout that supplies its new worktree. When the shared
+effort has no parent yet, the plan names a new effort thread and binds its
+`effortId`; confirmation creates that parent before starting its worker.
+Planning and Undo create no threads. An existing parent is reused; an
+archived or missing recorded parent requires restoration or replacement.
+When it sends, it reads each PR again, claims
 every PR still waiting in the run record (one `address-feedback` run per PR)
 with nothing awaited between the last check and the last claim, and starts one
 worker titled by its PRs ("Address feedback: quill #210, #211 · folio #301", with
@@ -759,3 +778,12 @@ once and keep the previous cache. Keys stay on the server and are never logged.
 The first scan after Linear detail arrives regroups the clusters it changed,
 which costs a one-time burst of model calls, logged as `regrouping with Linear
 detail: N clusters`. Later scans return to zero calls.
+
+
+## Reading efforts and planning advancement
+
+Overview triages efforts; an effort card is a read view with exact PR states, holds, queued actions, and linked worker statuses. Open a PR from the card to focus its row in All PRs, where individual PR controls and batch selection live. Card shortcuts do not dispatch PR writes.
+
+**Plan Advance All**, on All PRs, starts one planning thread for every open PR that is not on hold, regardless of the current selection. It saves a compact cached snapshot to the planning workspace and sends an attention index grouped by Jev (board rules are the explicit fallback when Jev is unavailable). The planner prioritizes actions, groups related work, and asks for missing decisions. It has planning instructions only: it does not merge, release holds, send review messages, or start workers. Held PRs are excluded from planning and only their excluded count is sent. Full review bodies and diffs are not cached in this packet; read specific missing evidence when it is needed, and revalidate action-critical facts after the user approves execution.
+
+Idle PRs offer **Start fresh thread** in All PRs. This starts a new code-work conversation with current PR and checkout facts, reuses a live effort parent or creates a missing one, and leaves previous conversations alone. Other worker threads are context, not a reason to refuse this explicit restart; the user manages multiple workers and checkout conflicts. Holds and stopped efforts still require resuming first.

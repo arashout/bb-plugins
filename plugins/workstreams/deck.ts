@@ -115,7 +115,7 @@ export const deckCardSchema = z.object({
    * thread is here by its own evidence (deck-homes.ts), with the open PR on this card it links, if any.
    */
   threads: z.array(z.object({ id: z.string(), title: z.string(), role: z.enum(["parent", "pr", "linked"]), prUrl: z.string().nullable(), status: z.string(),
-    lastActivityAt: z.number().nullable() }).strict()),
+    lastActivityAt: z.number().nullable(), waiting: z.boolean().optional() }).strict()),
   /** Merges, reviews, and pushes in the last 7 days, newest first. */
   activity: z.array(z.object({ kind: z.enum(["merged", "approved", "changes", "pushed"]), prUrl: z.string(), ref: z.string(), who: z.string().nullable(),
     at: z.number() }).strict()),
@@ -177,7 +177,7 @@ export type DeckInput = {
   linear: ReadonlyMap<string, LinearDetail>;
   /** When each ticket in `linear` was read: a state read before Linear could move it after a merge says nothing of that merge (readSettled). */
   linearReadAt: ReadonlyMap<string, number>;
-  threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number }>;
+  threads: ReadonlyMap<string, { title: string; status: string; updatedAt: number; waiting?: boolean }>;
   /** Every visible thread, with the evidence that places it on one card. */
   homes: readonly ThreadEvidence[];
   /** The classifier's suggestions for the open PRs no effort owns, and One-offs. */
@@ -297,17 +297,18 @@ function card(effort: DeckEffortInput, rows: readonly Placed[], input: DeckInput
   const threads = new Map<string, DeckCard["threads"][number]>();
   const parent = effort.parentThreadId ? input.threads.get(effort.parentThreadId) : undefined;
   if (parent) threads.set(effort.parentThreadId!, { id: effort.parentThreadId!, title: parent.title, role: "parent", prUrl: null, status: parent.status,
-    lastActivityAt: parent.updatedAt });
+    lastActivityAt: parent.updatedAt, ...parent.waiting !== undefined ? { waiting: parent.waiting } : {} });
   for (const { input: row } of rows) for (const thread of [row.threads.executor, row.threads.origin]) if (thread && !threads.has(thread.id)) {
     const facts = input.threads.get(thread.id);
     threads.set(thread.id, { id: thread.id, title: thread.title, role: "pr", prUrl: row.prUrl, status: facts?.status ?? (thread.active ? "active" : "idle"),
-      lastActivityAt: facts?.updatedAt ?? null });
+      lastActivityAt: facts?.updatedAt ?? null, ...facts?.waiting !== undefined ? { waiting: facts.waiting } : {} });
   }
   for (const thread of homed) {
     const facts = input.threads.get(thread.id);
     if (!facts || threads.has(thread.id)) continue;
     const prUrl = thread.prs.find((pr) => rows.some(({ row }) => row.prUrl === pr.url))?.url ?? null;
-    threads.set(thread.id, { id: thread.id, title: facts.title, role: "linked", prUrl, status: facts.status, lastActivityAt: facts.updatedAt });
+    threads.set(thread.id, { id: thread.id, title: facts.title, role: "linked", prUrl, status: facts.status, lastActivityAt: facts.updatedAt,
+      ...facts.waiting !== undefined ? { waiting: facts.waiting } : {} });
   }
   const recent = (at: number | null, span = WEEK_MS) => at !== null && now - at <= span;
   const activity: DeckCard["activity"] = [

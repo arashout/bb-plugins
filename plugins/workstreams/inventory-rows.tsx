@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { sendable, type InventoryLine, type LineAction, type RowSuggestion } from "./inventory-view-model";
 import { BUTTON, CHECKBOX, GROUP_CARD, PrRef, RING, Spin, TONE, WORKING_ROW } from "./deck-screen";
 import type { LiveItems } from "./deck-flow";
@@ -8,6 +9,7 @@ import { cn } from "./lib/utils";
 export type SimpleGroup = { key: string; label: string; effortId: string | null; lines: InventoryLine[] };
 export type SimpleRowsProps = {
   groups: SimpleGroup[];
+  renderActions?(line: InventoryLine): ReactNode;
   /** Your turn rows show why, select, and dismiss; dismissed ones show why and come back; other rows their state, and select. Any row links its sent thread. */
   kind: "turn" | "dismissed" | "other";
   busyKey: string | null;
@@ -96,7 +98,7 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                 : <span aria-hidden className="size-3.5 shrink-0" /> : null}
               <PrRef repo={line.repo} number={line.number} strong={mine || !!nudge} onClick={() => props.onOpenPr(line.prUrl)} />
               <div className="min-w-0 flex-1">
-                <p className={cn("truncate", mine || nudge ? "text-foreground" : "text-foreground/80")} title={line.title}>{line.title}</p>
+                <p className={cn("whitespace-normal break-words @min-[720px]:truncate", mine || nudge ? "text-foreground" : "text-foreground/80")} title={line.title}>{line.title}</p>
                 {/* Why, then the chips and action at its right; in a narrow pane they wrap under it rather than cut it short. */}
                 <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
                   <span className="min-w-0" title={info}>{info}</span>
@@ -121,12 +123,13 @@ export function SimpleInventoryList(props: SimpleRowsProps) {
                         mine && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100")}>{mine ? "Dismiss" : "Undismiss"}</button> : null}
                     {live ? <span data-inventory-live={live.state} className={cn(CHIP, TONE[LIVE[live.state].tone].chip)}>{live.state === "sending" ? <Spin /> : null}{LIVE[live.state].text}</span>
                       : sent ? <SentChip sent={sent} quiet={!mine} onOpenThread={props.onOpenThread} onUndo={props.onUndo} />
-                      : nudge ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
+                      : nudge && !props.renderActions ? <button type="button" data-inventory-action="nudge" disabled={props.busyKey === line.prUrl} onClick={() => props.onNudge(line, nudge)}
                       title={nudge.title} className={cn(BUTTON, "h-5 border-border px-1.5 text-[11px] hover:bg-foreground/[0.06]")}>{nudge.label}</button> : null}
                   </span>
                 </div>
               </div>
             </div>
+            {props.renderActions ? <div className={cn("pb-2 pr-1.5", box ? "pl-[30px]" : "pl-2")}>{props.renderActions(line)}</div> : null}
             {/* The last action's outcome, word for word, under the line rather than truncated in it. */}
             {line.last ? <p role="status" className={cn("pb-1.5 pr-1.5 text-[11px]", box ? "pl-[30px]" : "pl-2", line.last.ok ? "text-muted-foreground" : "text-destructive")}>{line.last.text}</p> : null}
           </li>;

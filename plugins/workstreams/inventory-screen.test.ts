@@ -1,11 +1,12 @@
+import { cardScreen } from "./deck-view-model.js";
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
+import { inkwellDeck, inkwellInventory, INVENTORY_NOW as NOW } from "./inkwell-fixtures.js";
 import type { InventoryView } from "./inventory-view.js";
 import { actionCall, inventoryScreen, onYourTurn, sendable, yourTurnRows, type InventoryLine } from "./inventory-view-model.js";
-import { InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
+import { PrActionControls, InventoryPane, InventoryPending, splitInventory } from "./inventory-screen.js";
 import { COLUMN, CONTENT, GROUP_CARD } from "./deck-screen.js";
 import { MergePreviewBody, mergeTrigger, type MergePreview } from "./merge-preview-dialog.js";
 import type { Sent } from "./your-turn.js";
@@ -199,7 +200,7 @@ describe("simple All PRs list", () => {
   it("puts each group's rows, dismissed ones too, in a card directly under the group's title", () => {
     const surface = "rounded-[10px] border border-border/50 bg-foreground/[0.015]";
     expect(GROUP_CARD).toContain(surface);
-    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain('<div data-deck-panel={panel} className={cn(GROUP_CARD, "mt-1.5 px-3 py-2")}>');
+    expect(readFileSync(new URL("deck-screen.tsx", import.meta.url), "utf8")).toContain('<div data-deck-panel={panel} className="mt-2 px-1">');
     const view = patched((row) => row.number === 96 ? { yourTurn: { why: "Comment from @theo-k", since: NOW, latest: NOW }, dismissed: true } : null);
     const html = pane(view);
     const { turn, dismissed, other } = splitInventory(inventoryScreen(view, { now: NOW, filter: null }));
@@ -315,7 +316,7 @@ describe("All PRs in the deck's column", () => {
     expect(CONTENT.split(" ")).toEqual(expect.arrayContaining(COLUMN.split(" ")));
     const picked = new Set(["https://github.com/inkwell/quill/pull/210"]);
     const html = renderToStaticMarkup(createElement(InventoryPane, { screen: SCREEN, error: null, ...CALLBACKS, selected: picked, onSelect: noop, onSelectAll: noop }));
-    expect(html).toContain(`<div class="${CONTENT}"><h1`);
+    expect(html).toContain(`<div class="${CONTENT}">`);
     expect(html).toMatch(new RegExp(`<div aria-label="Selection"[^>]*><div class="${COLUMN} `, "u"));
     const pending = renderToStaticMarkup(createElement(InventoryPending, { error: null, onRetry: noop, onView: noop, onPalette: noop, onHelp: noop }));
     expect(pending).toContain(`<div class="${CONTENT}">`);
@@ -467,5 +468,26 @@ describe("All PRs while Address starts and sends", () => {
     expect([chip(live("sending", "pending"), "inkwell/quill#210"), chip(live("sending", "pending"), "inkwell/folio#301")]).toEqual([["sending", "↻ Sending…"], ["pending", "Queued"]]);
     expect([chip(live("sent", "refused"), "inkwell/quill#210"), chip(live("sent", "refused"), "inkwell/folio#301")]).toEqual([["sent", "Sent"], ["refused", "Not sent"]]);
     expect(chip(render({}), "inkwell/quill#210")).toBeNull();
+  });
+});
+
+describe("PR workbench advancement", () => {
+  it("puts eligible actions on the actual PR row and keeps stack merge gates disabled", () => {
+    const cards = inkwellDeck().active.map((c) => cardScreen(c, { rows: {} }, { now: NOW }));
+    const sources = new Map(cards.flatMap((c) => c.lines.map((l) => [l.prUrl, c] as const)));
+    const html = renderToStaticMarkup(createElement(InventoryPane, { ...CALLBACKS, screen: SCREEN, error: null,
+      renderActions: (line) => createElement(PrActionControls, { source: sources.get(line.prUrl)!, line, context: {}, onAction: noop }) }));
+    expect(rowOf(html, "inkwell/folio#340")).toContain('data-inventory-pr-action="merge"');
+    expect(rowOf(html, "inkwell/folio#341")).toMatch(/data-inventory-pr-action="merge" disabled/u);
+    expect(rowOf(html, "inkwell/quill#210")).toContain('data-inventory-pr-action="address"');
+    expect(rowOf(html, "inkwell/catalog#96")).toContain('data-inventory-pr-action="nudge"');
+  });
+  it("offers Plan Advance All regardless of selection and disables duplicate clicks while planning", () => {
+    const html = (busy: boolean, error: string | null = null) => renderToStaticMarkup(createElement(InventoryPane, { ...CALLBACKS, screen: SCREEN, error: null,
+      selected: new Set([line("quill #210").prUrl]), planner: { busy, error, onPlan: noop } }));
+    expect(html(false)).toMatch(/data-inventory-plan-all[^>]*>Plan Advance All/u);
+    expect(html(true)).toMatch(/data-inventory-plan-all="true" disabled="" aria-busy="true"/u);
+    expect(html(false, "Cannot start the planning thread")).toContain('role="alert"');
+    expect(text(html(false))).toContain("Plan Advance All");
   });
 });

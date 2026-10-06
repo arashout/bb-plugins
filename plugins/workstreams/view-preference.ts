@@ -49,3 +49,15 @@ export function storeLastView(view: ViewId): void {
     // The view remains usable when storage is disabled.
   }
 }
+
+/** Card PR links target the existing workbench's stable row key, including encoded slashes. */
+export function inventoryPrPath(prUrl: string): string {
+  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/u.exec(prUrl);
+  return match ? `inventory/${encodeURIComponent(`${match[1]}#${match[2]}`)}` : "inventory";
+}
+export function inventoryRoute(subPath: string): string | null {
+  const [head, ...rest] = subPath.split("/").filter(Boolean);
+  if (head !== "inventory" || !rest.length) return null;
+  let key: string; try { key = decodeURIComponent(rest.join("/")); } catch { return null; }
+  return /^[^/\s#]+\/[^/\s#]+#\d+$/u.test(key) ? key : null;
+}

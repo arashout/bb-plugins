@@ -181,6 +181,132 @@ const claims = (env: Env) => createRunStore(env.bb.storage.database() as never).
   .map((run) => [run.prNumber, run.status]);
 
 describe("addressing Your turn PRs in one batch thread", () => {
+
+  it("starts a fresh context for an archived worker without restoring or messaging it", async () => {
+    const env = await setup();
+    env.threads.set("thr-42", { ...env.threads.get("thr-42")!, archivedAt: Date.now() });
+    env.scan.linked = false; env.units.push(worktree("/p/folio", REPO, "main")); await env.refresh();
+    const result = await env.rpc("inventory_restart_thread", { prUrl: url(42), headOid: env.current.get(42)!.headRefOid });
+    expect(result).toEqual({ ok: true, threadId: "thr-batch-1" });
+    expect(spawned(env)[0]).toMatchObject({ parentThreadId: "thr-coordinator", projectId: PROJECT, environment: { workspace: { path: "/synthetic/workstreams/context/batch" }, hostId: HOST } });
+    expect(spawned(env)[0]!.prompt).toContain('"worktreeFrom":"/p/folio"');
+    expect(spawned(env)[0]!.prompt).toContain("new context"); expect(env.send).not.toHaveBeenCalled();
+    expect(env.threads.get("thr-42")!.archivedAt).not.toBeNull();
+  });
+
+  it("leaves other worker conflicts to the user but still checks holds and the shown head", async () => {
+    const env = await setup(); await activate(env, "thr-42");
+    env.scan.linked = false; env.units.push(worktree("/p/folio", REPO, "main")); await env.refresh();
+    expect(await env.rpc("inventory_restart_thread", { prUrl: url(42), headOid: env.current.get(42)!.headRefOid })).toMatchObject({ ok: true });
+    await env.rpc("pr_hold_set", { prUrl: url(42), held: true, reason: "Later" });
+    expect(await env.rpc("inventory_restart_thread", { prUrl: url(42), headOid: env.current.get(42)!.headRefOid })).toMatchObject({ ok: false });
+    expect(await env.rpc("inventory_restart_thread", { prUrl: url(43), headOid: "0".repeat(40) })).toMatchObject({ ok: false, error: expect.stringContaining("New commits") });
+    expect(env.spawn).toHaveBeenCalledTimes(1);
+  });
+  it("plans a PR with no checkout or effort project from its repository source, then creates its effort parent and nests the worker", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.efforts.get(env.effort.id)!, projectId: "", coordinatorThreadId: null, coordinatorState: "none" });
+    env.threads.delete("thr-coordinator");
+    env.scan.linked = false;
+    env.units.push(worktree("/p/folio", REPO, "main"));
+    await env.refresh();
+    const plan = await env.plan([url(44)]);
+    expect(plan).toMatchObject({ ok: true, skipped: [], thread: { projectId: PROJECT, parentThreadId: null,
+      effortId: env.effort.id, under: "🔍 Manuscript review (new effort thread)" } });
+    expect(plan.items.map((item) => item.where)).toEqual(["No checkout: a new worktree from folio"]);
+    expect(env.spawn).not.toHaveBeenCalled();
+    await env.restart();
+    env.efforts = createEffortStore(env.bb.storage.database() as never);
+    await env.refresh();
+    await confirm(env, plan.batchId);
+    expect(spawned(env)).toMatchObject([
+      { projectId: PROJECT, title: "🔍 Manuscript review", pluginMetadata: { role: "coordinator", effortId: env.effort.id } },
+      { projectId: PROJECT, title: "Address feedback: folio #44", parentThreadId: "thr-batch-1", pluginMetadata: { role: "address-feedback" } },
+    ]);
+    expect(env.efforts.get(env.effort.id)).toMatchObject({ projectId: PROJECT, coordinatorThreadId: "thr-batch-1", coordinatorState: "ready" });
+    expect(claims(env)).toEqual([[44, "running"]]);
+    expect((await env.batch(plan.batchId!)).items[0]).toMatchObject({ state: "sent" });
+    const next = await env.plan([url(45)]);
+    expect(next.thread).toEqual({ projectId: PROJECT, parentThreadId: "thr-batch-1", under: "🔍 Manuscript review" });
+    await confirm(env, next.batchId);
+    expect(spawned(env)[2]).toMatchObject({ parentThreadId: "thr-batch-1", pluginMetadata: { role: "address-feedback" } });
+    expect(spawned(env).filter((args) => args.pluginMetadata.role === "coordinator")).toHaveLength(1);
+  });
+
+  it("finds the repository source for a PR with no checkout even when no effort owns it", async () => {
+    const env = await setup();
+    env.efforts.release(env.spine.id, { tickets: [], prUrls: [url(46)] });
+    const plan = await env.plan([url(46)]);
+    expect(plan).toMatchObject({ ok: true, thread: { projectId: PROJECT, parentThreadId: null, under: null } });
+    await confirm(env, plan.batchId);
+    expect(spawned(env)).toHaveLength(1);
+    expect(spawned(env)[0]).toMatchObject({ projectId: PROJECT, pluginMetadata: { role: "address-feedback" } });
+  });
+
+  it("creates no effort parent when Undo cancels a plan or no feedback remains at dispatch", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.efforts.get(env.effort.id)!, projectId: "", coordinatorThreadId: null, coordinatorState: "none" });
+    env.threads.delete("thr-coordinator");
+    const cancelled = await env.plan([url(44)]);
+    expect(await env.rpc("deck_batch_start", { batchId: cancelled.batchId })).toMatchObject({ ok: true });
+    expect(await env.rpc("deck_batch_undo", { batchId: cancelled.batchId })).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(8_100);
+    expect(env.spawn).not.toHaveBeenCalled();
+    const plan = await env.plan([url(44)]);
+    await confirm(env, plan.batchId, async () => {
+      env.current.set(44, { ...env.current.get(44)!, reviewFeedback: { openThreads: 0, comment: null, repliedAt: null }, latestReviews: [] });
+    });
+    expect([env.spawn.mock.calls.length, claims(env)]).toEqual([0, []]);
+    expect(env.efforts.get(env.effort.id)?.coordinatorState).toBe("none");
+  });
+
+  it("refuses a missing effort parent after a recorded launch instead of launching another or a detached worker", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.efforts.get(env.effort.id)!, coordinatorThreadId: null, coordinatorState: "creating" });
+    env.threads.delete("thr-coordinator");
+    const plan = await env.plan([url(44)]);
+    await confirm(env, plan.batchId);
+    expect((await env.batch(plan.batchId!)).items[0]).toMatchObject({ state: "refused" });
+    expect((await env.batch(plan.batchId!)).items[0]!.detail).toContain("A coordinator launch was already recorded");
+    expect([env.spawn.mock.calls.length, claims(env)]).toEqual([0, []]);
+  });
+
+  it("creates one effort parent for two batches dispatched together and nests both workers beneath it", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.efforts.get(env.effort.id)!, coordinatorThreadId: null, coordinatorState: "none" });
+    env.threads.delete("thr-coordinator");
+    const plans = [await env.plan([url(43)]), await env.plan([url(44)])];
+    let release = () => {};
+    env.hang.until = new Promise<void>((resolve) => { release = resolve; });
+    for (const plan of plans) expect(await env.rpc("deck_batch_start", { batchId: plan.batchId })).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(8_100);
+    expect(spawned(env)).toHaveLength(1);
+    expect(spawned(env)[0]!.pluginMetadata.role).toBe("coordinator");
+    release();
+    for (const plan of plans) await env.settled(plan.batchId!);
+    const workers = spawned(env).filter((args) => args.pluginMetadata.role === "address-feedback");
+    expect(workers).toHaveLength(2);
+    expect(workers.map((args) => args.parentThreadId)).toEqual(["thr-batch-1", "thr-batch-1"]);
+    expect(claims(env).map(([number]) => number).sort()).toEqual([43, 44]);
+  });
+
+  it("rechecks effort ownership after waiting for its new parent before claiming or starting a worker", async () => {
+    const env = await setup();
+    env.efforts.save({ ...env.efforts.get(env.effort.id)!, coordinatorThreadId: null, coordinatorState: "none" });
+    env.threads.delete("thr-coordinator");
+    const plan = await env.plan([url(44)]);
+    env.spawn.mockImplementationOnce(async (args) => {
+      env.efforts.transfer(env.spine.key, { tickets: [], prUrls: [url(44)] });
+      env.metadata.set("thr-parent-new", args.pluginMetadata ?? {});
+      return env.add("thr-parent-new", { title: args.title });
+    });
+    await confirm(env, plan.batchId);
+    expect((await env.batch(plan.batchId!)).items[0]).toMatchObject({ state: "refused",
+      detail: "Its effort changed since the listing. Review it and try again; nothing was started." });
+    expect(spawned(env).map((args) => args.pluginMetadata.role)).toEqual(["coordinator"]);
+    expect(claims(env)).toEqual([]);
+  });
+
   it("lists each PR's feedback and where it runs, then after the window starts one worker under the effort's parent that claims them all until it finishes", async () => {
     const env = await setup();
     expect(await env.turn()).toEqual([42, 43, 44, 45, 46]);

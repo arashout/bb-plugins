@@ -9,7 +9,7 @@
 // the focused row's Nudge, never a write itself. ↻ on a row, g, or Refresh on the selection reads those PRs from GitHub again, four at a
 // time; a click on Last read reads every open PR again.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { InventoryRow, InventoryView } from "./inventory-view";
 import type { rpcContract } from "./server";
 import { cn, POINTER_CURSORS } from "./lib/utils";
@@ -19,10 +19,15 @@ import { actionCall, INVENTORY_CHANGED, inventoryScreen, onYourTurn, pickRows, s
   type Outcome, type RowSuggestion } from "./inventory-view-model";
 import { ACTION, type DeckActionId } from "./deck-keys";
 import { readSeen, SEEN_KEY } from "./deck-place";
-import { availability, hintKeys, paletteItems, paletteMatch, type KeyContext, type PaletteItem } from "./deck-view-model";
+import { cardScreen, availability, hintKeys, paletteItems, paletteMatch, type CardScreen, type KeyContext, type PaletteItem } from "./deck-view-model";
 import { BUTTON, COLUMN, CONTENT, COUNT, GHOST, HelpBody, HintBar, Kbd, PaletteBody, RefreshSelected, RING, SECTION_HEAD, Spin, TONE, WorkstreamsHeader, type HeaderProps,
-  type HeaderTarget } from "./deck-screen";
+  HoldBody, type HeaderTarget } from "./deck-screen";
 import { DeckDialog, useBatchConfirm, useRefresh, useRegistryKeys, workingLabel, type LiveItems, type Undo, type Working } from "./deck-flow";
+
+import { useDeck } from "./deck-read";
+import { cardPrActions, cardPrIntent, type CardPrActionId, type CardPrContext } from "./deck-pr-actions";
+import { useNotesConfirm } from "./notes-flow";
+import { MergePreviewDialog } from "./merge-preview-dialog";
 
 const REGION = cn("flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground", POINTER_CURSORS);
 /** The scroller under the header, a container so the deck's column widens its gutters in a wide pane. */
@@ -101,6 +106,8 @@ function SelectionBar({ count, addressable, refusal, working, refresh, move, onA
 
 export function InventoryPane(props: { screen: InventoryScreen; busyKey: string | null; error: string | null;
   onView(target: HeaderTarget): void; onPalette(): void; onHelp(): void; onOpenPr(url: string): void; onOpenThread(id: string): void; onOpenEffort(effortId: string): void;
+  renderActions?(line: InventoryLine): ReactNode;
+  planner?: { busy: boolean; error: string | null; onPlan(): void };
   onNudge(line: InventoryLine, action: LineAction): void; rootRef?: RefObject<HTMLDivElement | null>;
   /** Rows selected, by PR; a row's checkbox, Your turn's box for all or none of it, Address, Move to effort…'s picker, and Clear. */
   selected?: ReadonlySet<string>; onSelect?(line: InventoryLine, shift: boolean): void; onSelectAll?(all: boolean): void; onAddress?(): void; onClear?(): void;
@@ -119,7 +126,7 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
   const { turn, dismissed, other } = split;
   const [primaryNotice, ...otherNotices] = props.screen.notices;
   const callbacks = { busyKey: props.busyKey, onOpenPr: props.onOpenPr, onOpenThread: props.onOpenThread,
-    onOpenEffort: props.onOpenEffort, onNudge: props.onNudge, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
+    onOpenEffort: props.onOpenEffort, onNudge: props.onNudge, renderActions: props.renderActions, onRefresh: props.onRefresh, reading: props.reading, onDismiss: props.onDismiss };
   // Your turn's box takes only the Your turn rows Address can; the bar counts every selected row, and Address takes them only if it can take each.
   const turnLines = turn.flatMap((group) => group.lines).filter(sendable);
   const turnPicked = turnLines.filter((line) => props.selected?.has(line.prUrl)).length;
@@ -132,7 +139,12 @@ export function InventoryPane(props: { screen: InventoryScreen; busyKey: string 
     <Header read={{ text: props.screen.read.text, title: props.screen.read.title, busy: props.screen.read.refreshing, error: null, onRefresh: props.onRefreshAll }} onView={props.onView}
       onPalette={props.onPalette} onHelp={props.onHelp} />
     <div className={SCROLLER}><div className={CONTENT}>
-      <h1 className="mb-3 pl-2 text-[16px] font-semibold">All PRs</h1>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 pl-2"><h1 className="text-[16px] font-semibold">All PRs</h1>
+        {props.planner ? <button type="button" data-inventory-plan-all disabled={props.planner.busy || !props.screen.groups.some((g) => g.lines.length)}
+          aria-busy={props.planner.busy || undefined} onClick={props.planner.onPlan} title="Start a planning thread for all open PRs except those on hold. Jev groups attention; the thread prioritizes a plan."
+          className={cn(BUTTON, "h-7 border-border px-2.5 hover:bg-foreground/[0.04]")}>{props.planner.busy ? <><Spin />Planning…</> : "Plan Advance All"}</button> : null}
+      </div>
+      {props.planner?.error ? <p role="alert" className="mb-3 px-2 text-[12px] text-destructive">{props.planner.error}</p> : null}
       {props.error || props.screen.notices.length ? <div className="grid gap-1 px-2 pb-3">
         {props.error ? <p role="alert" className="text-[12px] text-destructive">Couldn't read the inventory: {props.error}</p> : null}
         {primaryNotice ? <Notice notice={primaryNotice} /> : null}
@@ -202,10 +214,30 @@ export function useInventory() {
   return { view, error, load };
 }
 
-export function InventoryNavView({ onView }: { onView(target: HeaderTarget): void }) {
+/** PR actions live in the workbench; secondary controls stay behind More. */
+export function PrActionControls({ source, line, context, onAction, note }: { source: CardScreen; line: InventoryLine; context: CardPrContext;
+  onAction(id: CardPrActionId): void; note?: string }) {
+    const actions = cardPrActions(source, line.prUrl, line, context).filter((action) => !["move", "dismiss", "undismiss", "refresh"].includes(action.id));
+    const buttons = (secondary: boolean) => actions.filter((action) => action.secondary === secondary).map((action) => <button key={action.id} type="button"
+      data-inventory-pr-action={action.id} disabled={!action.enabled} title={action.why ?? action.title} aria-label={`${action.label.replace(/…$/u, "")} for ${line.repo} #${line.number}`}
+      onClick={() => onAction(action.id)} className={cn(secondary ? GHOST : BUTTON, secondary ? "h-5 px-1 text-[11px]" : "h-6 text-[11.5px] border-border hover:bg-foreground/[0.04]")}>{action.label}</button>);
+    return <><div className="flex flex-wrap items-center gap-1.5">{buttons(false)}{actions.some((a) => a.secondary) ? <details className="text-[11px] text-muted-foreground"><summary className={cn("cursor-pointer rounded-sm", RING)}>More</summary><div className="mt-1 flex flex-wrap gap-1">{buttons(true)}</div></details> : null}</div>
+      {note ? <p role="status" className="mt-1 text-[11px] text-muted-foreground">{note}</p> : null}</>;
+}
+
+export function InventoryNavView({ onView, openPr = null }: { onView(target: HeaderTarget): void; openPr?: string | null }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
-  const { view, error, load } = useInventory();
+  const { view, error, load: loadInventory } = useInventory();
+  const bbContext = useBbContext();
+  const deck = useDeck(() => ({}), () => [], () => undefined);
+  const load = useCallback(() => { loadInventory(); deck.load(); }, [loadInventory, deck.load]);
+  const [merging, setMerging] = useState<string | null>(null);
+  const [hold, setHold] = useState<{ prUrl: string; ref: string; reason: string; busy: boolean; error: string | null } | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const planBusy = useRef(false);
+  const planRequest = useRef<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [outcomes, setOutcomes] = useState<ReadonlyMap<string, Outcome>>(new Map());
   const now = Date.now();
@@ -264,6 +296,18 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const screen = useMemo(() => view && inventoryScreen(view, { now, filter: null, pending: new Map([...refresh.reading].map((prUrl) => [prUrl, "refresh" as const])),
     outcomes: new Map([...outcomes, ...[...refresh.outcomes].filter(([prUrl, outcome]) => (outcomes.get(prUrl)?.at ?? 0) <= outcome.at)]) }),
   [view, now, outcomes, refresh.reading, refresh.outcomes]);
+  const arrived = useRef<string | null>(null);
+  useEffect(() => {
+    if (!openPr) { arrived.current = null; return; }
+    if (!screen || arrived.current === openPr) return;
+    const row = rootRef.current?.querySelector<HTMLElement>(`[data-inventory-row="${CSS.escape(openPr)}"]`);
+    if (row) {
+      const hidden = row.closest<HTMLDetailsElement>("details"); if (hidden) hidden.open = true;
+      row.focus({ preventScroll: true }); row.scrollIntoView({ block: "center" }); setActiveRow(openPr);
+    } else say("This PR is no longer in the open inventory. Refresh to check its current state.");
+    arrived.current = openPr;
+    navigate.toPluginPanel("board", { subPath: "inventory", replace: true });
+  }, [openPr, screen, navigate, say]);
   const remember = () => { opener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : opener.current; };
   /** Back to the control that opened a dialog, or its row, never the page body. */
   const returnFocus = () => window.requestAnimationFrame(() => {
@@ -280,6 +324,56 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
     root.addEventListener("focusin", onIn);
     return () => root.removeEventListener("focusin", onIn);
   });
+  const notesConfirm = useNotesConfirm({ say, load, onOpen: remember, onReturn: returnFocus, ask: (prUrl, effortId) => void batch.plan("ask", effortId, [prUrl]) });
+  const sources = useMemo(() => {
+    const cards = [...(deck.view?.active ?? []), ...(deck.view?.held ?? [])].map((card) => cardScreen(card, { rows: {} }, { now }));
+    return new Map(cards.flatMap((card) => card.lines.flatMap((line) => line.row ? [[line.prUrl, card] as const] : [])));
+  }, [deck.view, now]);
+  const prContext = { live: batch.live, working: batch.working?.prUrls, reading: refresh.reading };
+  const runPrAction = (line: InventoryLine, id: CardPrActionId) => {
+    const source = sources.get(line.prUrl);
+    const intent = source ? cardPrIntent(source, line.prUrl, id, line, prContext) : null;
+    if (!intent) { say("This action is no longer available. Refresh the PR to check its current state."); return; }
+    remember();
+    switch (intent.kind) {
+      case "restart": { const headOid = rows.get(intent.prUrl)?.head; if (!headOid) { say("Refresh to read the PR head first."); return; } void rpc.call("inventory_restart_thread", { prUrl: intent.prUrl, headOid, ...(bbContext.projectId ? { projectId: bbContext.projectId } : {}) }).then((result) => {
+        if (!result.ok) { say(result.error); return; } load(); navigate.toThread(result.threadId);
+      }, (cause: unknown) => say(String(cause))); return; }
+      case "batch": void batch.plan(intent.action, intent.effortId, intent.prUrls); return;
+      case "address": void batch.address(intent.effortId, intent.prUrls); return;
+      case "merge": setMerging(intent.prUrl); return;
+      case "notes": notesConfirm.show(intent.prUrl, intent.ref, intent.effortId); return;
+      case "hold": setHold({ prUrl: intent.prUrl, ref: intent.ref, reason: "", busy: false, error: null }); return;
+      case "move": setPicked(new Set(intent.prUrls)); setMoving(true); return;
+      case "refresh": void refresh.read(intent.prUrls); return;
+      case "revoke": void rpc.call("inventory_confirm_revoke", { prUrl: intent.prUrl }).then((result) => { say(result.ok ? result.detail : result.error); load(); }, (cause: unknown) => say(String(cause))); return;
+      case "dismiss": dismiss(line, intent.dismiss); return;
+    }
+  };
+  const renderActions = (line: InventoryLine) => {
+    const source = sources.get(line.prUrl);
+    if (!source) return <p className="text-[11px] text-muted-foreground">{deck.error ? "Couldn't read action context. Refresh to retry." : deck.view ? "This effort is completed or archived. Reopen it in Efforts to act on this PR." : "Reading action context…"}</p>;
+    return <PrActionControls source={source} line={line} context={prContext} onAction={(id) => runPrAction(line, id)} note={batch.details.get(line.prUrl)} />;
+  };
+  const holdNow = async () => {
+    if (!hold || hold.busy) return;
+    setHold({ ...hold, busy: true, error: null });
+    try {
+      const result = await rpc.call("pr_hold_set", { prUrl: hold.prUrl, held: true, reason: hold.reason.trim() || undefined });
+      setHold(null); load(); returnFocus();
+    } catch (cause) { setHold({ ...hold, busy: false, error: String(cause) }); }
+  };
+  const planAll = async () => {
+    if (planBusy.current) return;
+    planBusy.current = true; setPlanning(true); setPlanError(null);
+    planRequest.current ??= crypto.randomUUID();
+    try {
+      const result = await rpc.call("inventory_plan_advance", { requestId: planRequest.current, ...(bbContext.projectId ? { projectId: bbContext.projectId } : {}) });
+      if (result.ok) { planRequest.current = null; navigate.toThread(result.threadId); }
+      else setPlanError(result.error);
+    } catch (cause) { setPlanError(String(cause)); }
+    finally { planBusy.current = false; setPlanning(false); }
+  };
   // The focused row, in either list: a PR shows in only one.
   const focused = activeRow ? screen?.groups.flatMap((group) => group.lines).find((line) => `${line.slug}#${line.number}` === activeRow) ?? null : null;
   // Nudge is due exactly where its row shows the button; so is Refresh.
@@ -302,7 +396,8 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
   const loose = new Set(screen?.groups.find((group) => group.effort === null)?.lines.map((line) => line.prUrl));
   const suggestions = new Map([...routing.suggestions].filter(([prUrl]) => loose.has(prUrl)));
   const context: KeyContext = { view: "prs", cur: null, focused: null, selected: [], seenAvailable: false, undo: !!undo?.live(), held: 0, done: 0,
-    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...due ? ["nudge" as const] : [], ...readable ? ["refresh" as const] : []]),
+    prs: { row: !!focused, thread: !!thread, moves: new Set<DeckActionId>([...readable ? ["refresh" as const] : [], ...focused && sources.get(focused.prUrl) ? cardPrActions(sources.get(focused.prUrl)!, focused.prUrl, focused, prContext)
+      .filter((a) => a.enabled).flatMap((a): DeckActionId[] => a.id === "dismiss" || a.id === "undismiss" || a.id === "restart" ? [] : [a.id === "hold" ? "hold-pr" : a.id]) : []]),
       selectable: !!focused && order.includes(focused), turn: turnLines.length, picked: chosen.length, addressable: !!selected.length,
       suggested: !!focused && suggestions.has(focused.prUrl) } };
   /** Move the selection where the picker says: on success the picker closes, the selection clears, and focus follows the focused row. */
@@ -343,7 +438,9 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
         return;
       }
       // The key opens the deck's listing confirm, which waits out its Undo window; only the row's own Nudge button is one click.
-      case "nudge": if (focused && due) void batch.plan("nudge", null, [focused.prUrl]); return;
+      case "nudge": case "merge": case "confirm": case "request": case "ready": case "release": case "fix": case "revoke":
+        if (focused) runPrAction(focused, id); return;
+      case "hold-pr": if (focused) runPrAction(focused, "hold"); return;
       // The key starts it, as the bar's button does; nothing starts before its Undo window ends.
       case "address": address(); return;
       case "refresh": reread(); return;
@@ -368,6 +465,7 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
 
   return <>
     {screen ? <InventoryPane screen={screen} busyKey={busyKey} error={error} rootRef={rootRef}
+      renderActions={renderActions} planner={{ busy: planning, error: planError, onPlan: () => void planAll() }}
       onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onOpenPr={(url) => navigate.openUrl(url)} onOpenThread={(id) => navigate.toThread(id)}
       onOpenEffort={(effortId) => navigate.toPluginPanel("board", { subPath: `deck/${encodeURIComponent(effortId)}` })}
       onNudge={(line, action) => { void nudge(line, action); }}
@@ -380,6 +478,11 @@ export function InventoryNavView({ onView }: { onView(target: HeaderTarget): voi
       footer={<HintBar hints={hintKeys(context, on)} flash={flash ?? (refresh.progress ? { text: refresh.progress, undo: false, busy: true } : batch.sending ? { text: batch.sending, undo: false, busy: true } : null)} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} onUndo={() => runKey("undo")} />} />
       : <InventoryPending error={error} onRetry={load} onView={onView} onPalette={() => runKey("palette")} onHelp={() => runKey("help")} />}
     {batch.element}
+    {notesConfirm.element}
+    <MergePreviewDialog targets={merging ? [{ target: merging, n: null }] : null} rows={screen?.groups.flatMap((g) => g.lines.map((l) => ({ target: l.prUrl, repo: l.slug, number: l.number, title: l.title }))) ?? []} onClose={() => setMerging(null)} onMerged={load} onOpenUrl={(url) => navigate.openUrl(url)} onClosed={returnFocus} />
+    <DeckDialog open={!!hold} title={hold ? `Hold ${hold.ref}` : ""} onClose={() => { if (!hold?.busy) setHold(null); }} onReturn={returnFocus} onConfirmKey={() => void holdNow()}>
+      {hold ? <HoldBody reason={hold.reason} onReason={(reason) => setHold({ ...hold, reason })} busy={hold.busy} error={hold.error} onHold={() => void holdNow()} onCancel={() => setHold(null)} /> : null}
+    </DeckDialog>
     <DeckDialog open={dialog?.kind === "palette"} title="All actions" bare onClose={() => setDialog(null)} onReturn={returnFocus}>
       {dialog?.kind === "palette" ? <div onKeyDown={(event) => {
         const live = matches.filter((entry) => entry.on);

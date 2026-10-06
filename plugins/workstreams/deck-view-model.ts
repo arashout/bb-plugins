@@ -13,7 +13,7 @@ import type { DeckCard, DeckRow, DeckView } from "./deck";
 import { cardTier, counted, DECK_SECTIONS, LOOSE_ID, SERVICE_PREFIX, serviceGoal, serviceName, yours, type DeckPile, type DeckSection, type DeckWrite }
   from "./deck-shared";
 import { settleRows, type SettledRow, type Shown } from "./deck-place";
-import { ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
+import { PR_VIEW_ACTIONS, ACTION, DECK_ACTIONS, type DeckAction, type DeckActionId } from "./deck-keys";
 import type { SuggestionGroup } from "./effort-classify";
 import { age, clock } from "./inventory-view-model";
 import { evidenceText, handled, linkedText, type ConfirmRead } from "./approval-evidence";
@@ -344,7 +344,7 @@ export type CardScreen = {
   next: string | null;
   blocked: { prUrl: string; ref: string; on: string; what: string; age: string | null; dot: boolean }[];
   stats: { open: number; mergedWeek: number; bar: { key: string; label: string; count: number; tone: Tone }[] };
-  threads: { id: string; title: string; ref: string; status: string; age: string | null; dot: boolean }[];
+  threads: { id: string; title: string; ref: string; status: string; waiting?: boolean; age: string | null; dot: boolean }[];
   /**
    * Chips for its projects (▣), initiatives (◇), and labels (#), a bar of its tickets' states, and its top project's target, all on one line;
    * then one [label, value] line per field Linear gave.
@@ -359,6 +359,8 @@ export type CardScreen = {
 
 export type OverviewScreen = {
   cards: CardScreen[];
+  held?: CardScreen[];
+  other?: CardScreen[];
   blockers: { effortId: string; effort: string; ref: string; age: string | null; on: string; cause: string; since: number | null }[];
 };
 
@@ -402,7 +404,8 @@ export function cardScreen(card: DeckCard, seen: { rows: Readonly<Record<string,
     const thread = card.threads.find((candidate) => candidate.id === item.prUrl)!;
     const pr = thread.prUrl ? current.find((row) => row.prUrl === thread.prUrl) : undefined;
     return { id: thread.id, title: thread.title, ref: thread.role === "parent" ? "parent" : pr ? refOf(pr) : "", status: thread.status,
-      age: thread.lastActivityAt === null ? null : age(thread.lastActivityAt, now), dot: item.change !== null || item.arrived };
+      age: thread.lastActivityAt === null ? null : age(thread.lastActivityAt, now), dot: item.change !== null || item.arrived,
+      ...thread.waiting !== undefined ? { waiting: thread.waiting } : {} };
   });
   const { linear } = card;
   const tallies = (list: readonly { name: string; count: number }[]) => list.map((item) => `${item.name}${item.count > 1 ? ` ${item.count}` : ""}`).join(" · ");
@@ -611,7 +614,7 @@ export function availability(context: KeyContext): Availability {
   // In All PRs, a row holds or refreshes only when its list offers it. Refresh takes the selection there when there is one.
   set("hold-pr", deck ? row : !!prs?.moves.has("hold-pr"), deck || !row ? "focus a row first" : "the row has no such move");
   // Your confirmation of a PR's review notes clears its merge gate; taking it back makes the notes yours again. Only the deck offers it.
-  set("revoke", deck && !!focused?.row?.confirmation, !deck ? "Efforts only" : row ? "you haven't confirmed its notes" : "focus a row first");
+  set("revoke", deck ? !!focused?.row?.confirmation : !!prs?.moves.has("revoke"), !deck ? "Efforts only" : row ? "you haven't confirmed its notes" : "focus a row first");
   set("refresh", deck ? row : !!prs?.picked || !!prs?.moves.has("refresh"), deck || !row ? "focus a row first" : "the row has no such move");
   set("row-next", !deck || context.cur !== "overview", "no rows on Overview"); set("row-prev", !deck || context.cur !== "overview", "no rows on Overview");
   const turnRow = !!focused && !focused.dim && focused.row?.turn.list === "turn";
@@ -631,6 +634,7 @@ export function availability(context: KeyContext): Availability {
   set("rule", deck, "Efforts only");
   set("seed", deck, "Efforts only");
   set("palette", true); set("help", true);
+  if (deck) for (const id of PR_VIEW_ACTIONS) set(id, false, "Open the PR in All PRs to act");
   return out;
 }
 
@@ -648,7 +652,8 @@ export function hintKeys(context: KeyContext, on: Availability): [string, string
     return context.prs?.picked ? pick(["select", "toggle"], ["address", "address selected"], ["move", "move"], ["refresh", "refresh"], ["clear", "clear"])
       : pick(["row-next", "rows"], moveHint, ["accept", "accept"], ["select", "select"], ["open-thread", "open thread"], ["refresh", "refresh"], ["view", "Efforts"]);
   }
-  // The card's moves, each by its key, in rank order; then its chores and its finish line.
+  if (context.view === "deck") return pick(["row-next", "rows"], ["view", "All PRs"], ["open-thread", "open thread"], ["progress", "progress"], ["next", "flip"], ["seen", "mark seen"]);
+  // Legacy move hints below remain shared with ranked move data.
   const moves = (card?.moves ?? []).flatMap((item) => item.kind === "reconcile" ? [] : [[item.kind, HINT[item.kind]] as [DeckActionId, string]]);
   if (focused) return pick(["row-next", "rows"], ...moves, ["select", "tick"], ["open-thread", "open thread"], ["refresh", "refresh"], ["expand", "fold"]);
   return pick(["row-next", "rows"], ...moves, ["advance", "advance"], ["progress", "progress"], ["next", "flip"], ["seen", "mark seen"]);
@@ -660,7 +665,7 @@ export type PaletteItem = { key: string; group: string; title: string; keys: rea
 /** Every action with its key, then each effort to go to, resume, or reopen; grayed with why when it can't run here. */
 export function paletteItems(on: Availability, chips: readonly Chip[], piles: { held: readonly { id: string; name: string }[];
   done: readonly { id: string; name: string; archived: boolean }[] }, cur: string | null, deck: boolean): PaletteItem[] {
-  const items: PaletteItem[] = DECK_ACTIONS.filter((action) => action.id !== "jump").map((action) => ({ key: action.id, group: action.group, title: action.title,
+  const items: PaletteItem[] = DECK_ACTIONS.filter((action) => action.id !== "jump" && (!deck || !PR_VIEW_ACTIONS.has(action.id))).map((action) => ({ key: action.id, group: action.group, title: action.title,
     keys: action.keys, on: on[action.id].on, why: on[action.id].why, action }));
   items.push(...chips.map((chip) => ({ key: `go:${chip.id}`, group: "Deck", title: `Go to ${chip.name}`, keys: chip.n ? [String(chip.n)] : [],
     on: !deck || chip.id !== cur, why: "you're here", action: null, target: { kind: "go" as const, id: chip.id } })));

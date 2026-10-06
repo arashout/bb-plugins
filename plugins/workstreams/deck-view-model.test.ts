@@ -1,3 +1,4 @@
+import { PR_VIEW_ACTIONS } from "./deck-keys.js";
 import { describe, expect, it } from "vitest";
 import type { ConfirmRead } from "./approval-evidence.js";
 import type { DeckCard, DeckRow, DeckView } from "./deck.js";
@@ -181,7 +182,7 @@ describe("a card's moves", () => {
     const merged = rankMoves([], "active", NOW, { done: [], prUrls: [], merged: [{ id: "ABC-365", url: null }] });
     expect(merged.moves.map((move) => [move.kind, move.meta, move.prUrls])).toEqual([["reconcile", "1 open with every PR merged", []]]);
     expect(rankMoves(rowsOf(inkwellDeck(), SHELF), "active", NOW, { done: [], prUrls: [], merged: [] }).moves.map((move) => move.kind)).toEqual(["merge", "fix"]);
-    expect(hintKeys(context(shelf), availability(context(shelf))).map(([, what]) => what)).toEqual(["rows", "merge", "fix", "progress", "flip"]);
+    expect(hintKeys(context(shelf), availability(context(shelf))).map(([, what]) => what)).toEqual(["rows", "All PRs", "progress", "flip"]);
     // A held effort reconciles nothing until you resume it, as it moves nothing else. Every PR held is still a mismatch to see: Release
     // leads only with nothing else to move, and waits under Held.
     expect(rankMoves(rowsOf(inkwellDeck(), SHELF), "held", NOW, reconcile).moves).toEqual([]);
@@ -374,7 +375,7 @@ describe("held PRs on a card", () => {
     // A held effort's card writes nothing to GitHub, and a release writes nothing there either, so it still offers Release, and nothing else.
     const paused = cardScreen({ ...cardOf(held(), PICKUP), pile: "held" }, none, { now: NOW });
     const on = availability(context(paused));
-    expect([on.release.on, on.advance.on, on.nudge.on, on.fix.on, paused.moves]).toEqual([true, false, false, false, []]);
+    expect([on.release.on, on.advance.on, on.nudge.on, on.fix.on, paused.moves]).toEqual([false, false, false, false, []]);
   });
 });
 
@@ -479,72 +480,29 @@ describe("what the keys act on", () => {
     expect(targets("fix", { cur: card(inkwellDeck(), PICKUP), focused: null }).map((item) => item.ref)).toEqual(["quill #210", "quill #211", "spine #155"]);
   });
 
-  it("offers each action only where it can run, and says why it can't", () => {
-    const shelf = card(inkwellDeck(), SHELF);
-    const on = availability(context(shelf));
-    expect([on.merge.on, on.fix.on, on.advance.on, on.advance.why, on.nudge.on, on.nudge.why, on.accept.on, on.hold.on]).toEqual([true, true, false, "no chores here", false,
-      "no nudge is due", false, true]);
-    const oneOffs = availability(context(card(inkwellDeck(), ONE_OFFS)));
-    expect([oneOffs.hold.on, oneOffs.hold.why, oneOffs.complete.on, oneOffs.promote.on, oneOffs.accept.on]).toEqual([false, "One-offs stays active", false, false, false]);
-    // A service card sorts its focused row into an effort, and promotes, but never holds or completes: it isn't an effort yet.
-    const folio = card(inkwellDeck(), FOLIO);
-    const focused = folio.lines[0]!;
-    const sorting = availability(context(folio, { focused }));
-    expect([sorting.accept.on, sorting.move.on, sorting["one-off"].on, sorting["new-effort"].on, sorting.request.on, sorting.advance.on, sorting.promote.on, sorting.hold.on,
-      sorting.hold.why]).toEqual([true, true, true, true, true, true, true, false, "this card stays active"]);
-    expect([availability(context(folio))["new-effort"].why, availability(context(folio)).move.why]).toEqual(["focus a row first", "focus a row first"]);
-    // Loose threads holds only threads: nothing on it sorts, advances, promotes, or leaves the active pile.
-    const loose = availability(context(card(inkwellDeck(inkwellThreads()), "loose")));
-    expect([loose.advance.on, loose.promote.on, loose.promote.why, loose.hold.on, loose.hold.why, loose.accept.on]).toEqual([false, false,
-      "only a service card promotes", false, "this card stays active", false]);
-    // u goes to the first service card, while one exists.
-    expect([sorting.services.on, availability(context(folio, { service: null })).services.why]).toEqual([true, "every PR is in an effort"]);
-    // In All PRs, the deck's flips are the deck's; the row's own moves and thread come from its inventory row.
-    const prs = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["nudge"]) } });
-    expect([prs.next.on, prs.next.why, prs.nudge.on, prs.confirm.on, prs["open-thread"].on, prs.seen.on]).toEqual([false, "Efforts only", true, false, true, false]);
-    // All PRs lists Start and Nudge alone, so no palette entry offers a hold or a refresh its rows don't.
-    expect([prs["hold-pr"].on, prs["hold-pr"].why, prs.refresh.on]).toEqual([false, "the row has no such move", false]);
-    const refreshable = availability({ ...context(shelf), view: "prs", cur: null, prs: { row: true, thread: false, moves: new Set(["refresh"]) } });
-    expect([refreshable.refresh.on, refreshable["hold-pr"].on]).toEqual([true, false]);
+  it("keeps PR actions off cards and available only from eligible PR rows", () => {
+    for (const id of [SHELF, PICKUP, ONE_OFFS, FOLIO]) {
+      const c = card(inkwellDeck(), id); const on = availability(context(c, { focused: c.lines[0]!, selected: c.lines }));
+      for (const action of PR_VIEW_ACTIONS) expect(on[action]).toEqual({ on: false, why: "Open the PR in All PRs to act" });
+    }
+    const prs = availability({ ...context("overview"), view: "prs", cur: null, prs: { row: true, thread: true, moves: new Set(["merge", "ready", "nudge", "refresh"]) } });
+    expect([prs.merge.on, prs.ready.on, prs.nudge.on, prs.refresh.on, prs.fix.on, prs.next.on]).toEqual([true, true, true, true, false, false]);
   });
 
   // Advance clears chores, and only those: a merge, review notes, and a thread's work each keep their own move and key.
-  it("points a at the card's chores alone, never a merge, notes, or a thread's work, and at none while their write waits", () => {
-    expect([card(inkwellDeck(), SHELF).chores.prUrls, card(inkwellDeck(), ONE_OFFS).chores.prUrls, card(inkwellDeck(), PICKUP).chores.prUrls])
-      .toEqual([[], [url("catalog", 96)], []]);
+  it("retains exact Advance scopes as data while disabling dispatch from the read card", () => {
     const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    expect(availability(context(oneOffs)).advance.on).toBe(true);
-    expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).toContainEqual(["a", "advance"]);
-    const queued = card(inkwellDeck({}, (row) => row.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
-    expect([queued.chores.prUrls, availability(context(queued)).advance.why]).toEqual([[], "no chores here"]);
-    const paused = cardScreen({ ...cardOf(inkwellDeck(), ONE_OFFS), pile: "held" }, none, { now: NOW });
-    expect(availability(context(paused)).advance.why).toBe("this card is paused");
+    expect(oneOffs.chores.prUrls).toEqual([url("catalog", 96)]);
+    expect(availability(context(oneOffs)).advance.on).toBe(false);
+    expect(hintKeys(context(oneOffs), availability(context(oneOffs)))).not.toContainEqual(["a", "advance"]);
+    const queued = card(inkwellDeck({}, (r) => r.number === 96 ? { acted: { kind: "nudge", state: "queued", at: NOW, batchId: "b1" } } : {}), ONE_OFFS);
+    expect(queued.chores.prUrls).toEqual([]);
   });
 
   // Address takes the rows ticked under its move and nothing by focus alone: the key, the hint bar, and ⌘K offer it only with Your turn
   // rows ticked, on a live card, or in All PRs' selection.
   it("offers Address, and b, only while Your turn rows are ticked", () => {
     const pickup = card(inkwellDeck(), PICKUP);
-    const turn = pickup.lines.filter((item) => item.row?.turn.list === "turn");
-    const other = pickup.lines.filter((item) => item.row && item.row.turn.list !== "turn");
-    expect(turn.length && other.length).toBeTruthy();
-    const on = (patch: Partial<KeyContext>, screen: CardScreen = pickup) => availability(context(screen, patch)).address;
-    expect(on({ selected: turn })).toEqual({ on: true, why: "" });
-    expect(on({ focused: turn[0]! })).toEqual({ on: false, why: "no Your turn row is ticked" });
-    expect(on({ selected: other })).toEqual({ on: false, why: "no Your turn row is ticked" });
-    expect(hintKeys(context(pickup, { selected: turn }), availability(context(pickup, { selected: turn })))).toContainEqual(["b", "address"]);
-    // x ticks the focused Your turn row; ⇧X ticks them all again.
-    const ticks = availability(context(pickup, { focused: turn[0]! }));
-    expect([ticks.select.on, ticks["select-section"].on, availability(context(pickup, { focused: other[0]! })).select.on]).toEqual([true, true, false]);
-    // A held card's rows wait with it.
-    expect(on({ selected: turn }, { ...pickup, card: { ...pickup.card, pile: "held" } })).toEqual({ on: false, why: "this card is paused" });
-    // A row you dismissed, or one its own thread is at work on, isn't on Your turn: All PRs lists neither, so Address takes neither here.
-    const off = card(inkwellDeck({}, (row) => row.number === 211 ? { dismissed: true }
-      : row.number === 155 ? { threads: { origin: null, executor: { id: "thr-own", title: "Fix spine #155", active: true } } } : {}), PICKUP);
-    const left = off.lines.filter((item) => item.ref === "quill #211" || item.ref === "spine #155");
-    expect([left.length, on({ selected: left }, off), off.moves[0]!.prUrls]).toEqual([2, { on: false, why: "no Your turn row is ticked" }, [url("quill", 210)]]);
-    const items = paletteItems(availability(context(pickup, { selected: turn })), [], { held: [], done: [] }, PICKUP, true);
-    expect(items.find((item) => item.key === "address")).toMatchObject({ title: "Address selected", keys: ["b"], on: true });
     // All PRs: x selects the focused Your turn row, ⇧X all of Your turn, and b addresses the selection.
     const prs = (patch: NonNullable<KeyContext["prs"]>) => ({ ...context(pickup), view: "prs" as const, cur: null, prs: patch });
     const nothing = prs({ row: true, thread: false, moves: new Set(), selectable: true, turn: 5, picked: 0 });
@@ -576,28 +534,21 @@ describe("what the keys act on", () => {
   });
 
   // A PR filed in an effort by mistake is a one-off: you move it out from the effort's own card, one focused row at a time.
-  it("moves a focused row of an effort's card to One-offs, but never One-offs' own rows", () => {
+  it("requires opening All PRs to move a PR out of an effort", () => {
     const shelf = card(inkwellDeck(), SHELF);
-    expect(availability(context(shelf, { focused: shelf.lines[0]! }))["one-off"].on).toBe(true);
-    expect(availability(context(shelf))["one-off"]).toEqual({ on: false, why: "focus a row first" });
-    const oneOffs = card(inkwellDeck(), ONE_OFFS);
-    expect(availability(context(oneOffs, { focused: oneOffs.lines[0]! }))["one-off"]).toEqual({ on: false, why: "they're in One-offs" });
+    expect(availability(context(shelf, { focused: shelf.lines[0]! }))["one-off"].on).toBe(false);
   });
 
   // Your confirmation of a PR's notes clears its merge gate on your word; taking it back is ⌘K's, from the focused row, and only where you gave one.
-  it("offers Revoke from ⌘K on a focused row carrying your confirmation, and nowhere else", () => {
-    const confirmed = card(inkwellDeck({}, (row) => row.number === 340 ? { confirmation: { at: NOW, evidence: false, current: true } } as never : {}), SHELF);
-    expect(availability(context(confirmed, { focused: line(confirmed, url("folio", 340)) })).revoke.on).toBe(true);
-    expect(availability(context(confirmed, { focused: line(confirmed, url("folio", 341)) })).revoke).toEqual({ on: false, why: "you haven't confirmed its notes" });
-    expect(availability(context(confirmed)).revoke).toEqual({ on: false, why: "focus a row first" });
+  it("offers Revoke in the PR view when its row supplies that action", () => {
+    const c = context(card(inkwellDeck(), SHELF));
+    expect(availability(c).revoke.on).toBe(false);
+    expect(availability({ ...c, view: "prs", cur: null, prs: { row: true, thread: false, moves: new Set(["revoke"]) } }).revoke.on).toBe(true);
   });
 
-  it("keeps the hint bar to the card's moves and the few keys that apply now", () => {
+  it("keeps read-card hints to navigation, progress, and worker links", () => {
     const shelf = card(inkwellDeck(), SHELF);
-    expect(hintKeys(context(shelf), availability(context(shelf)))).toEqual([["j ↓", "rows"], ["m", "merge"], ["f", "fix"], ["p", "progress"], ["] →", "flip"]]);
-    const focused = shelf.lines[0]!;
-    expect(hintKeys(context(shelf, { focused }), availability(context(shelf, { focused })))).toEqual([["j ↓", "rows"], ["m", "merge"], ["f", "fix"], ["g", "refresh"],
-      ["↵", "fold"]]);
+    expect(hintKeys(context(shelf), availability(context(shelf)))).toEqual([["j ↓", "rows"], ["v", "All PRs"], ["p", "progress"], ["] →", "flip"]]);
   });
 
   it("lists every action in the palette with its key, and each effort to go to, resume, or reopen", () => {
@@ -606,7 +557,7 @@ describe("what the keys act on", () => {
     const chips = stripChips(view.active.map((item) => item.id), cards, SHELF);
     const items = paletteItems(availability(context(cards.get(SHELF)!)), chips, { held: [{ id: "effort-gift-cards", name: "Gift cards" }],
       done: [{ id: "effort-store-hours", name: "Store hours", archived: false }, { id: "effort-old", name: "Old", archived: true }] }, SHELF, true);
-    expect(items.filter((item) => item.action).map((item) => item.key)).toEqual(DECK_ACTIONS.filter((action) => action.id !== "jump").map((action) => action.id));
+    expect(items.filter((item) => item.action).map((item) => item.key)).toEqual(DECK_ACTIONS.filter((action) => action.id !== "jump" && !PR_VIEW_ACTIONS.has(action.id)).map((action) => action.id));
     expect(items.filter((item) => item.target).map((item) => [item.title, item.keys.join(""), item.on])).toEqual([["Go to Overview", "", true],
       ["Go to Store pickup", "1", true],
       ["Go to Shelf order", "2", false], ["Go to One-offs", "3", true], ["Go to folio · service", "4", true], ["Go to atlas · service", "5", true],

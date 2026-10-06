@@ -13,7 +13,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import type { DeckRow, DeckView } from "./deck";
-import { DECK_CHANGED, type DeckSection } from "./deck-shared";
+import type { DeckSection } from "./deck-shared";
 import type { DeckActionId } from "./deck-keys";
 import { anchorScroll, deckRing, EMPTY_VIEW, focusFallback, keepOrder, landAfter, meltSlack, numberedEffort, PLACE_KEY, readPlace, readSeen, SEEN_KEY, withArrivals, type Anchor,
   type FocusKey, type Place, type Seen, type ViewPlace } from "./deck-place";
@@ -23,6 +23,8 @@ import { acceptLabel, addressPicks, availability, cardScreen, cardSnapshot, hint
 import { CompleteBody, DeckPane, HelpBody, HoldBody, MoveBody, NewEffortBody, PaletteBody, RULE_WORDS, RuleBody, SeedBody, WeakBody, type DeckCommand, type HeaderTarget,
   type NotesEdit, type Panel, type RuleDraft, type RuleItem } from "./deck-screen";
 import { DeckDialog, message, useBatchConfirm, useRefresh, useRegistryKeys, type Undo } from "./deck-flow";
+import { useDeck } from "./deck-read";
+import { inventoryPrPath } from "./view-preference";
 import { inventoryScreen } from "./inventory-view-model";
 import { useInventory } from "./inventory-screen";
 import { useNotesConfirm } from "./notes-flow";
@@ -37,7 +39,7 @@ const ROW = "[data-inventory-row]";
 const rowAt = (key: string) => `[data-inventory-row="${CSS.escape(key)}"]`;
 const keyOf = (row: Pick<DeckRow, "repo" | "number">) => `${row.repo}#${row.number}`;
 /** The last deck read, so coming back to the deck draws it at once instead of "Reading…" (PLACE-LOSS #1). */
-let cachedDeck: DeckView | null = null;
+
 
 function readStore<T>(storage: "sessionStorage" | "localStorage", key: string, parse: (raw: string | null) => T): T {
   try { return parse(window[storage].getItem(key)); } catch { return parse(null); }
@@ -55,41 +57,6 @@ function useNow(ms: number): number {
  * deck_get, read on mount, on deck-changed, and when the page shows again; a signal during a read reads once more after it. `drawn`: the
  * PRs the view drew as it last saw them, which the read says the fate of when they leave.
  */
-function useDeck(seenAt: () => Record<string, number>, drawn: () => string[], beforeUpdate: () => void) {
-  const rpc = useRpc<typeof rpcContract>();
-  const [view, setView] = useState<DeckView | null>(cachedDeck);
-  /** Reads landed on this visit, so a link can wait for one after it: the cached deck can predate a card just made. */
-  const [reads, setReads] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const reading = useRef(false);
-  const again = useRef(false);
-  const before = useRef(beforeUpdate);
-  before.current = beforeUpdate;
-  const seen = useRef(seenAt);
-  seen.current = seenAt;
-  const asked = useRef(drawn);
-  asked.current = drawn;
-  const load = useCallback(function read(): void {
-    if (reading.current) { again.current = true; return; }
-    reading.current = true;
-    rpc.call("deck_get", { seen: seen.current(), ghosts: asked.current() }).then((next) => { before.current(); cachedDeck = next; setView(next); setReads((count) => count + 1); setError(null); },
-      (cause: unknown) => setError(message(cause))).finally(() => {
-      reading.current = false;
-      if (again.current) { again.current = false; read(); }
-    });
-  }, [rpc]);
-  useEffect(load, [load]);
-  useRealtime(DECK_CHANGED, () => load());
-  useEffect(() => {
-    const onVisible = () => { if (document.visibilityState === "visible") load(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [load]);
-  /** A read is running now, so the next one to land may predate a change made during it. */
-  const busy = useCallback(() => reading.current, []);
-  return { rpc, view, reads, error, load, busy };
-}
-
 type Dialogs =
   | { kind: "hold"; id: string; effortKey: string; name: string; reason: string } | { kind: "complete"; id: string }
   | { kind: "hold-pr"; prUrl: string; ref: string; reason: string }
@@ -230,7 +197,9 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
   const cur = landAfter(place.order, place.cur, ring);
   if (cur) place.cur = cur;
   const card = cur && cur !== "overview" ? cards.get(cur) ?? null : null;
-  const overview = useMemo(() => overviewScreen(order, cards), [order, cards]);
+  const overview = useMemo(() => ({ ...overviewScreen(order, cards),
+    held: (view?.held ?? []).map((item) => cardScreen(item, seen, { now })),
+    other: order.flatMap((id) => { const item = cards.get(id); return item && item.card.kind !== "effort" ? [item] : []; }) }), [order, cards, view?.held, seen, now]);
   const viewPlace = (key: string | null): ViewPlace => (place.views[key ?? ""] ??= { ...EMPTY_VIEW, unpicked: [], open: [] });
   const here = viewPlace(cur);
   // Focus and scroll events can fire between a flip's render and its effects; they read the card shown now.
@@ -614,6 +583,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
 
   // ---- the one action runner: keys, buttons, the palette ---------------------
   function runAction(id: DeckActionId, line?: DeckLine, n?: number) {
+    if (!on[id].on) return;
     const row = line ?? focused;
     switch (id) {
       case "next": case "prev": go({ step: id === "next" ? 1 : -1 }); return;
@@ -752,7 +722,7 @@ export function DeckNavView({ onView, openCard = null }: { onView(target: Header
       case "undo-batch": void rpc.call("deck_batch_undo", { batchId: command.batchId }).then((result) => { say(result.ok ? "Undone. Nothing was sent." : result.error); load(); },
         (cause: unknown) => say(message(cause))); return;
       case "thread": navigate.toThread(command.id); return;
-      case "jump": showRow(command.prUrl); return;
+      case "jump": navigate.toPluginPanel("board", { subPath: inventoryPrPath(command.prUrl) }); return;
       case "resume": { const item = view?.held.find((entry) => entry.id === command.id); if (item) void movePile("resume", item); return; }
       case "reopen": { const item = view?.done.find((entry) => entry.id === command.id); if (item) void movePile("reopen", item); return; }
       case "rule-remove": void rpc.call("classify_rule_remove", { ruleId: command.id }).then((result) => { if (!result.ok) say(result.error); loadRules(); }); return;

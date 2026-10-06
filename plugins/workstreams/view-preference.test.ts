@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deckLinkStep, deckRoute, readLastView, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
+import { inventoryPrPath, inventoryRoute, deckLinkStep, deckRoute, readLastView, storeLastView, viewFromSubPath, VIEW_STORAGE_KEY } from "./view-preference.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -79,5 +79,17 @@ describe("Workstreams view preference", () => {
     });
     expect(readLastView()).toBe("deck");
     expect(() => storeLastView("map")).not.toThrow();
+  });
+});
+
+describe("card to PR workbench links", () => {
+  it("roundtrips exact PR keys, including BB-decoded slashes, and rejects unrelated paths", () => {
+    const path = inventoryPrPath("https://github.com/inkwell/folio/pull/340");
+    expect(inventoryRoute(path)).toBe("inkwell/folio#340");
+    expect(inventoryRoute(path.replace(/%2F/gu, "/"))).toBe("inkwell/folio#340");
+    expect(inventoryRoute("inventory/inkwell/folio#340")).toBe("inkwell/folio#340");
+    expect(inventoryRoute("deck/inkwell/folio#340")).toBeNull();
+    expect(inventoryRoute("inventory/%ZZ")).toBeNull();
+    expect(inventoryPrPath("https://example.test/inkwell/folio/pull/340")).toBe("inventory");
   });
 });

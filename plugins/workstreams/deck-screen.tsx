@@ -15,6 +15,8 @@ import { ACTION, KEY_GROUPS, type DeckActionId } from "./deck-keys";
 import type { Availability, CardScreen, Chip, DeckLine, Finish, Mismatch, Move, NotesScreen, OverviewScreen, PaletteItem, Strength, SuggestGroup, TicketChip, Tone }
   from "./deck-view-model";
 import { SEND_DELAY_MS } from "./deck-shared";
+import { effortReadSummary, prReadState, prStatuses, threadRefs, threadStatus, type PrStatus, type StatusLabel } from "./deck-status";
+import { inventoryPrPath, inventoryRoute } from "./view-preference";
 import { NOTES_MAX } from "./effort-notes";
 import { behind as cardsBehind, LAYERS, layerTransform } from "./deck-flip";
 import { SimpleInventoryList } from "./inventory-rows";
@@ -306,13 +308,40 @@ function FinishLine({ finish, open, run }: { finish: Finish; open: boolean; run:
   </div>;
 }
 
-function ThreadList({ threads, run }: { threads: CardScreen["threads"]; run: Run }) {
+function ThreadList({ threads, run, screen }: { threads: CardScreen["threads"]; run: Run; screen?: CardScreen }) {
   return threads.length ? <div className="grid">{threads.map((thread) => <button key={thread.id} type="button" onClick={() => run({ kind: "thread", id: thread.id })}
-    title={`Open "${thread.title}"`} className={cn("grid min-h-6 grid-cols-[10px_minmax(0,1fr)_auto_28px] items-center gap-2 rounded px-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
-    <span aria-hidden className={cn("size-2 rounded-full", thread.status === "active" ? "bg-sky-500/70 motion-safe:animate-pulse" : "bg-muted-foreground/40")} />
-    <span className="truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}<small className="ml-1.5 text-[11px] text-muted-foreground">{thread.ref}</small></span>
-    <span className="text-[11px] text-muted-foreground">{thread.status}</span><span className="text-right text-[11px] text-muted-foreground">{thread.age ?? ""}</span>
+    data-deck-thread={thread.id} title={`Open "${thread.title}"`}
+    className={cn("grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 rounded px-1.5 py-1 text-left text-[12px] hover:bg-foreground/[0.04]", RING)}>
+    <span className="min-w-0"><span className="block truncate">{thread.dot ? <><Changed title="Changed since you looked" /> </> : null}{thread.title}</span>
+      <small className="block truncate text-[11px] text-muted-foreground" title={screen ? threadRefs(screen, thread) : thread.ref}>
+        {(screen ? threadRefs(screen, thread) : thread.ref) || "Linked thread"}{thread.age ? ` · ${thread.age} ago` : ""}</small></span>
+    <span className={cn("text-[11.5px]", TONE[threadStatus(thread).tone].text)}>{threadStatus(thread).text}</span>
   </button>)}</div> : <p className="text-[12px] text-muted-foreground">No threads yet.</p>;
+}
+
+function StatusBadge({ status }: { status: StatusLabel }) {
+  return <span className={cn("inline-flex max-w-full items-center rounded px-1.5 py-0.5 text-[11px] font-medium leading-4", TONE[status.tone].chip)}>{status.text}</span>;
+}
+
+/** One roster, one state per PR. Links open the PR workbench, never dispatch a write. */
+function PrStatusList({ prs, run, kit }: { prs: readonly PrStatus[]; run: Run; screen?: CardScreen; kit?: RowKit }) {
+  return <ul data-deck-pr-statuses className="grid list-none divide-y divide-border/40">
+    {prs.map((pr) => { const state = prReadState(pr); const note = kit?.left?.get(pr.prUrl) ?? kit?.lines.get(pr.prUrl)?.last?.text;
+      return <li key={pr.prUrl} data-deck-pr-status={pr.prUrl} data-inventory-row={inventoryRoute(inventoryPrPath(pr.prUrl)) ?? pr.ref} tabIndex={-1}
+        className={cn("grid min-w-0 gap-x-4 gap-y-1 px-1 py-3 @min-[480px]:grid-cols-[minmax(0,1fr)_auto]", RING)}>
+        <button type="button" data-deck-pr-link={pr.prUrl} onClick={() => run({ kind: "jump", prUrl: pr.prUrl })}
+          className={cn("grid min-w-0 gap-0.5 rounded-sm text-left hover:underline", RING)} title={`Open ${pr.ref} in All PRs`}>
+          <span className="text-[11px] text-muted-foreground">{pr.ref}</span><span className="truncate text-[13px]">{pr.title}</span>
+        </button>
+        <span data-deck-pr-state className={cn("self-center text-[11.5px] @min-[480px]:max-w-[260px] @min-[480px]:text-right", state.tone === "amber" || state.tone === "red" ? TONE[state.tone].text : "text-muted-foreground")}>{state.text}</span>
+        {pr.detail ? <p className="break-words text-[11.5px] text-muted-foreground @min-[480px]:col-span-2">{pr.detail}</p> : null}
+        {pr.thread ? <button type="button" data-deck-thread={pr.thread.id} onClick={() => run({ kind: "thread", id: pr.thread!.id })}
+          title={`Open ${pr.thread.title}`} className={cn("flex min-w-0 items-center gap-1.5 justify-self-start rounded-sm text-[11.5px] text-muted-foreground hover:text-foreground @min-[480px]:col-span-2", RING)}>
+          <span aria-hidden>↗</span><span className="truncate">{pr.thread.title}</span><span className={cn("shrink-0", TONE[pr.thread.status.tone].text)}>{pr.thread.status.text}</span>
+        </button> : null}
+        {note ? <p role="status" className="break-words text-[11px] text-muted-foreground @min-[480px]:col-span-2">{note}</p> : null}
+      </li>; })}
+  </ul>;
 }
 
 /** The Notes panel's editor while it's open: what you typed, and a save that's running or was refused. */
@@ -380,73 +409,43 @@ function PanelBody({ panel, screen, kit, on, run, notes, markdown }: { panel: Pa
 }
 
 /**
- * An effort's card: its name, Your turn, and goal; its finish line; up to three moves, each over the rows it touches; any further move
- * on one line; its chores on one Advance line, which never turns amber; and one row of toggles, each opening one panel. A card with only
- * threads shows them. `notes` is the Notes editor while it's open here, and `markdown` renders notes; without it they show as plain text.
+ * An effort's read card: goal and summary, one PR roster with worker links, and unlinked threads.
+ * Notes, Linear, progress, and effort management stay behind their controls. `notes` is the Notes editor while it's open here, and `markdown` renders notes; without it they show as plain text.
  */
 export function Card({ screen, kit, open, panel, run, on, notes, markdown }: { screen: CardScreen; kit: RowKit; open: ReadonlySet<string>; panel: Panel | null;
   run: Run; on: Availability; notes?: NotesEdit | null; markdown?: (body: string) => ReactNode }) {
   const { card } = screen;
-  const held = card.pile === "held";
-  const service = card.kind === "service";
-  // A service card with only threads, and Loose threads, have nothing but their threads to show.
-  const bare = card.kind !== "effort" && card.stats.open === 0;
-  const live = screen.lines.filter((line) => line.row).length;
-  const top = screen.moves.slice(0, 3), over = screen.moves.slice(3);
-  const reconcile = over.find((item) => item.kind === "reconcile");
-  const chores = screen.chores.prUrls;
-  const rows: RowKit = { ...kit, tickets: screen.tickets };
-  const toggles = ([["notes", screen.notes ? "Notes" : null], ["threads", screen.threads.length ? `Threads ${screen.threads.length}` : null],
-    ["linear", card.linear.known ? `Linear ${card.linear.known}` : null], ["held", screen.held ? `Held ${screen.held}` : null],
-    ["all", live ? `All ${live} PRs` : null]] as [Panel, string | null][]).filter(([, label]) => label);
-  return <section data-deck-card={card.id} aria-label={card.name} className="@container relative rounded-[14px] border border-border/70 bg-foreground/[0.012] p-3"
-    style={{ backgroundImage: `linear-gradient(180deg, color-mix(in srgb, ${screen.color} 6%, transparent) 0, transparent 110px)` }}>
-    <span aria-hidden className="absolute -top-px left-4 right-4 h-0.5 rounded-full" style={{ background: `color-mix(in srgb, ${screen.color} 50%, transparent)` }} />
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-0.5">
-      <div className="min-w-0 flex-[1_1_300px]">
-        <div className="flex min-w-0 items-center gap-2">
-          <h1 tabIndex={-1} data-deck-focus="heading" className="flex min-w-0 items-center gap-2 rounded text-[17px] font-semibold leading-6 tracking-tight outline-none">
-            <Dot color={screen.color} hollow={card.kind !== "effort"} /><span className="truncate">{card.name}</span>
-          </h1>
-          {screen.yourTurn ? <span data-deck-turn title="A person's feedback waits on you" className={cn("shrink-0 rounded-full px-1.5 text-[11.5px] font-medium", TONE.amber.chip)}>
-            {screen.yourTurn} your turn</span> : null}
+  const statuses = prStatuses(screen, kit.live);
+  const linked = new Set(statuses.flatMap((pr) => pr.thread ? [pr.thread.id] : []));
+  const unlinked = screen.threads.filter((thread) => !linked.has(thread.id));
+  const toggles = ([["notes", screen.notes ? "Notes" : null], ["linear", card.linear.known ? "Linear details" : null]] as [Panel, string | null][]).filter(([, label]) => label);
+  return <section data-deck-card={card.id} aria-label={card.name} className="@container min-w-0 rounded-[10px] border border-border/60 bg-background p-4">
+    <div className="flex min-w-0 items-start justify-between gap-3">
+      <div className="min-w-0"><h1 tabIndex={-1} data-deck-focus="heading" className="truncate rounded text-[20px] font-semibold tracking-tight outline-none">{card.name}</h1>
+        {card.goal ? <p className="mt-1 break-words text-[12.5px] text-muted-foreground">{card.goal}</p> : null}</div>
+      <details className="shrink-0 text-[11.5px] text-muted-foreground"><summary className={cn("cursor-pointer rounded-sm", RING)}>Manage effort</summary>
+        <div className="mt-2 grid gap-1">
+          {card.pile === "held" ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={GHOST}>Resume</button>
+            : card.kind === "service" ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
+            : card.kind === "effort" && !card.oneOff ? <><ActionButton id="hold" on={on} run={run} label="Hold effort…" /><ActionButton id="complete" on={on} run={run} label="Complete effort…" /></> : <span>No effort changes</span>}
         </div>
-        <p className="truncate text-[12px] text-muted-foreground" title={card.goal}>{card.goal || "No goal written yet."}{held && card.reason ? ` · held: ${card.reason}` : ""}</p>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {held ? <button type="button" onClick={() => run({ kind: "resume", id: card.id })} className={cn(BUTTON, PRIMARY)}>Resume</button>
-          : bare ? null : service ? <ActionButton id="promote" on={on} run={run} label="Promote to effort…" />
-          : card.oneOff ? null : <><ActionButton id="hold" on={on} run={run} label="Hold" /><ActionButton id="complete" on={on} run={run} label="Complete" /></>}
-      </div>
+      </details>
     </div>
-    {screen.finish ? <FinishLine finish={screen.finish} open={open.has("progress")} run={run} /> : null}
-    {bare ? <div className="mt-2.5"><ThreadList threads={screen.threads} run={run} /></div> : <>
-      {/* The first move's rows show until you fold them; the others', and Reconcile's always, when you open them. */}
-      {top.length ? <ol data-deck-moves className="mt-2 grid list-none gap-1">{top.map((item, index) => <MoveBlock key={item.kind} move={item} lead={index === 0}
-        shown={item.kind !== "reconcile" && index === 0 ? !open.has(item.kind) : open.has(item.kind)} kit={rows} on={on} run={run} />)}</ol>
-        : chores.length ? null : <p data-deck-empty className="px-2 py-3 text-[12px] text-muted-foreground">{held ? "On hold: nothing here acts until you resume it." : "Nothing to move."}</p>}
-      {over.length ? <div data-deck-also className="flex flex-wrap items-center gap-1.5 px-3 py-1 text-[12px]"><span className="w-12 text-[11px] text-muted-foreground">Also</span>
-        {over.map((item) => <span key={item.kind} title={item.meta} className="inline-flex min-w-0 items-center gap-1.5">
-          {item.kind === "reconcile" ? item.lines?.map((line) => <MismatchButton key={line.kind} line={line} shown={open.has(item.kind)} run={run}
-            className={cn(BUTTON, "border-border hover:bg-foreground/[0.06]")} />) : <ActionButton id={item.kind} on={on} run={run} label={item.verb} />}
-          <span className="truncate text-[11.5px] text-muted-foreground">{item.title}</span></span>)}</div> : null}
-      {reconcile && open.has(reconcile.kind) ? <Rows prUrls={reconcile.prUrls} kit={rows} run={run} /> : null}
-      {chores.length ? <div data-deck-advance className="grid">
-        <div className="flex min-h-9 items-center gap-2 px-3 text-[12px]">
-          <button type="button" data-deck-focus="chores" aria-expanded={open.has("chores")} onClick={() => run({ kind: "fold", key: "chores" })}
-            title="Nudges under 4 days, requests, and ready marks" className={cn("flex min-w-0 flex-1 items-center gap-2 rounded text-left", RING)}>
-            <span className="w-12 shrink-0 text-[11px] text-muted-foreground">Chores</span><span className="truncate text-muted-foreground">{screen.chores.text}</span></button>
-          <ActionButton id="advance" on={on} run={run} label={`Advance ${chores.length}`} />
-        </div>
-        {open.has("chores") ? <Rows prUrls={chores} kit={rows} run={run} /> : null}
-      </div> : null}
-      {toggles.length ? <div data-deck-toggles className="mt-1.5 flex flex-wrap gap-1 border-t border-border/50 pt-1.5">
-        {toggles.map(([key, label]) => <button key={key} type="button" data-deck-focus={`panel-${key}`} aria-pressed={panel === key} onClick={() => run({ kind: "panel", key })}
-          className={cn(GHOST, panel === key && "bg-foreground/[0.08] text-foreground")}>{label}</button>)}
-      </div> : null}
-      {panel && toggles.some(([key]) => key === panel) ? <div data-deck-panel={panel} className={cn(GROUP_CARD, "mt-1.5 px-3 py-2")}>
-        <PanelBody panel={panel} screen={screen} kit={rows} on={on} run={run} notes={notes ?? null} markdown={markdown} /></div> : null}
-    </>}
+    <p data-deck-summary className="mb-1 mt-5 text-[12.5px] text-muted-foreground">{effortReadSummary(screen, statuses)}</p>
+    {statuses.length ? <section aria-label="Pull request status" className="mt-3 border-t border-border/50">
+      <PrStatusList prs={statuses} run={run} kit={kit} />
+      <p className="mt-2 text-[11px] text-muted-foreground">{plural(statuses.length, "open PR")} · Open a PR to advance it in All PRs.</p>
+    </section> : <p data-deck-empty className="py-3 text-[12px] text-muted-foreground">No open PRs.</p>}
+    {unlinked.length ? <section aria-label="Thread status" className="mt-3 border-t border-border/50 pt-2">
+      <h2 className="mb-1 text-[12px] font-medium">Threads</h2><ThreadList threads={unlinked} screen={screen} run={run} />
+    </section> : null}
+    {screen.finish || toggles.length ? <div data-deck-toggles className="mt-4 border-t border-border/50 pt-2">
+      {screen.finish ? <FinishLine finish={screen.finish} open={open.has("progress")} run={run} /> : null}
+      <div className="flex flex-wrap gap-1">{toggles.map(([key, label]) => <button key={key} type="button" data-deck-focus={`panel-${key}`} aria-pressed={panel === key}
+        onClick={() => run({ kind: "panel", key })} className={cn(GHOST, panel === key && "bg-foreground/[0.04] text-foreground")}>{label}</button>)}</div>
+      {panel && toggles.some(([key]) => key === panel) ? <div data-deck-panel={panel} className="mt-2 px-1">
+        <PanelBody panel={panel} screen={screen} kit={kit} on={on} run={run} notes={notes ?? null} markdown={markdown} /></div> : null}
+    </div> : null}
   </section>;
 }
 
@@ -888,11 +887,8 @@ export function HelpBody({ items }: { items: readonly PaletteItem[] }) {
       </div> : null; })}
     </div>
     <div className="grid gap-1.5 border-t border-border/60 pt-3">
-      <h3 className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">How moves rank</h3>
-      <ol data-deck-rank className="grid list-decimal gap-0.5 pl-5">{RANK.map(([rule, keys, tone]) => <li key={rule}>
-        <span className={cn("rounded px-1.5 text-[11px] leading-[19px]", TONE[tone].chip)}>{rule}</span> <Keys keys={keys} /></li>)}</ol>
-      <p className="text-muted-foreground">A card shows its first three moves over the rows each touches; first match wins. Chores (nudges under 4 days, requests,
-        and ready marks) wait on one Advance line, a, and never turn amber. Your turn counts a PR where a person&apos;s feedback waits on you; a held one doesn&apos;t count.</p>
+      <h3 className="text-[11px] font-medium">Reading and advancing</h3>
+      <p className="text-muted-foreground">Overview triages efforts. Cards show exact PR and worker states. Open a PR in All PRs to advance it, or open its linked thread to answer it.</p>
       <p className="text-muted-foreground">Address starts one thread for the rows you leave ticked, with {Math.round(SEND_DELAY_MS / 1_000)} s to Undo. Every other GitHub
         write lists each PR first, then waits the same with Undo. Merges run only from the fresh preview, on a click or ⌘↵.</p>
     </div>
@@ -906,48 +902,37 @@ const RANK: readonly [string, string, Tone][] = [["Someone waits on you", "b", "
 // The whole deck.
 // ---------------------------------------------------------------------------
 
-export function Overview({ screen, run }: { screen: OverviewScreen; run: Run }) {
-  const panel = "min-w-0 rounded-[10px] border border-border/50 bg-foreground/[0.015] px-3 py-2.5";
-  const priorities = [...screen.cards].sort((a, b) => b.yourTurn - a.yourTurn || b.blocked.length - a.blocked.length).slice(0, 5);
-  const maxPrs = Math.max(1, ...priorities.map((item) => item.stats.bar.reduce((sum, segment) => sum + segment.count, 0)));
+export function Overview({ screen, run, live }: { screen: OverviewScreen; run: Run; live?: LiveItems; kit?: RowKit }) {
+  const needs = (item: CardScreen) => item.yourTurn + item.threads.filter((thread) => ["Needs you", "Failed"].includes(threadStatus(thread).text)).length;
+  const active = [...screen.cards].sort((a, b) => needs(b) - needs(a));
+  const tile = (item: CardScreen, held = false) => {
+    const prs = prStatuses(item, live);
+    const needingResponse = new Set(item.lines.filter((l) => l.row?.turn.list === "turn" || l.row?.section === "merge" && !l.dim && !l.row.waitsOn).map((l) => l.prUrl));
+    const attention = prs.filter((pr) => needingResponse.has(pr.prUrl) || pr.held || pr.advance || pr.thread && ["Needs you", "Failed"].includes(pr.thread.status.text));
+    const threads = item.threads.filter((thread) => ["Needs you", "Failed"].includes(threadStatus(thread).text));
+    const linked = new Set(attention.flatMap((pr) => pr.thread ? [pr.thread.id] : []));
+    return <section key={item.card.id} data-deck-overview-effort={item.card.id} aria-label={item.card.name}
+      className="min-w-0 rounded-[10px] border border-border/60 bg-background p-4">
+      <button type="button" data-deck-focus={`overview-effort-${item.card.id}`} onClick={() => run(held ? { kind: "pile", pile: "hold" } : { kind: "go", id: item.card.id })}
+        className={cn("flex w-full min-w-0 items-center justify-between gap-3 rounded-sm text-left hover:underline", RING)}>
+        <strong className="truncate text-[15px] font-semibold">{item.card.name}</strong><span aria-hidden className="text-muted-foreground">→</span>
+      </button>
+      <p data-deck-summary className="mb-3 mt-2 text-[12.5px] leading-relaxed text-muted-foreground">{effortReadSummary(item, prs)}</p>
+      {attention.length ? <div className="border-t border-border/40"><PrStatusList prs={attention} run={run} /></div> : null}
+      {threads.filter((thread) => !linked.has(thread.id)).length ? <ThreadList threads={threads.filter((thread) => !linked.has(thread.id))} screen={item} run={run} /> : null}
+      <p className="mt-2 text-[11px] text-muted-foreground">{plural(prs.length, "open PR")}{item.stats.mergedWeek ? ` · ${item.stats.mergedWeek} merged this week` : ""}</p>
+    </section>;
+  };
   return <section data-deck-overview aria-label="Overview">
-    <h1 data-deck-focus="heading" tabIndex={-1} className="mb-3 text-[16px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Overview</h1>
-    <div className="grid gap-3 @min-[680px]:grid-cols-12">
-      <section className={cn(panel, "@min-[680px]:col-span-7")} aria-labelledby="overview-matrix"><div className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><h2 id="overview-matrix" className="text-[12px] font-semibold">Action matrix</h2>
-        <span className="text-[10px] tabular-nums text-muted-foreground">{maxPrs > 1 || priorities.some((item) => item.stats.bar.some((part) => part.count)) ? `0–${maxPrs} PRs` : "No open PRs"}</span>
-        <div aria-label="PR state colors" className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
-          {([["green", "Merge"], ["blue", "Your other moves"], ["amber", "Fix"], ["gray", "Waiting"]] as const).map(([tone, label]) => <span key={tone} className="inline-flex items-center gap-1"><i aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", TONE[tone].bar)} />{label}</span>)}
-        </div></div>
-        {screen.cards.length ? <div className="grid gap-0.5">{priorities.map((item) => {
-          return <button key={item.card.id} type="button" data-deck-focus={`overview-matrix-${item.card.id}`} onClick={() => run({ kind: "go", id: item.card.id })}
-            className={cn("grid min-w-0 grid-cols-1 items-center gap-x-2 rounded px-1 py-1 text-left hover:bg-foreground/[0.05] @min-[480px]:grid-cols-[minmax(0,1fr)_auto]", RING)}>
-            <span className="flex min-w-0 items-center gap-1.5 text-[12px]"><Dot color={item.color} /><span className="truncate font-medium">{item.card.name}</span>
-              {item.changed ? <Changed title="Changed since you looked" /> : null}</span>
-            <span className="min-w-0 truncate text-[11px] text-muted-foreground">{item.yourTurn} your turn · {item.blocked.length} blocked · {item.stats.bar.find((part) => part.key === "flight")?.count ?? 0} in flight</span>
-            <span role="img" aria-label={item.stats.bar.map((part) => `${part.count} ${part.label}`).join(", ") || "No open PRs"}
-              className="mt-1 flex h-1 overflow-hidden rounded-full bg-foreground/[0.06] @min-[480px]:col-span-2">
-              {item.stats.bar.map((part) => <i key={part.key} className={cn("h-full shrink-0", TONE[part.tone].bar)} style={{ width: `${part.count / maxPrs * 100}%` }} />)}</span>
-          </button>;
-        })}{screen.cards.length > priorities.length ? <p className="px-1 pt-1 text-[11px] text-muted-foreground">
-          {screen.cards.length - priorities.length} more {screen.cards.length - priorities.length === 1 ? "effort" : "efforts"} below</p> : null}</div>
-          : <p className="text-[12px] text-muted-foreground">No active efforts yet.</p>}
-      </section>
-      <section className={cn(panel, "@min-[680px]:col-span-5")} aria-labelledby="overview-blockers"><h2 id="overview-blockers" className="mb-2 text-[12px] font-semibold">Aging blockers</h2>
-        {screen.blockers.length ? <ol className="grid gap-0.5">{screen.blockers.slice(0, 5).map((item, index) => <li key={`${item.effortId}-${item.ref}-${index}`}>
-          <button type="button" onClick={() => run({ kind: "go", id: item.effortId })}
-            className={cn("grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 rounded px-1 py-1 text-left text-[12px] hover:bg-foreground/[0.05]", RING)}>
-            <span className="truncate font-medium" title={`${item.effort} · ${item.ref}`}>{item.effort} · {item.ref}</span><span className="text-[11px] tabular-nums text-muted-foreground">{item.age ?? "—"}</span>
-            <span className="col-span-2 truncate text-[11px] text-muted-foreground" title={`${item.on}: ${item.cause}`}>{item.on} · {item.cause}</span>
-          </button></li>)}</ol> : <p className="text-[12px] text-muted-foreground">Nothing waits on others.</p>}
-      </section>
-      {screen.cards.map((item, index) => <button key={item.card.id} type="button" data-deck-focus={`overview-effort-${item.card.id}`} onClick={() => run({ kind: "go", id: item.card.id })}
-        className={cn(panel, "grid gap-2 text-left hover:bg-foreground/[0.05]", index === 0 ? "@min-[680px]:col-span-7" : index === 1 ? "@min-[680px]:col-span-5" : "@min-[680px]:col-span-6 @min-[900px]:col-span-4", RING)}>
-        <span className="flex min-w-0 items-center gap-2"><Dot color={item.color} /><strong className="min-w-0 flex-1 truncate text-[13px]">{item.card.name}</strong>
-          {item.changed ? <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Changed title="Changed since you looked" />Changed</span> : null}</span>
-        <span className="line-clamp-2 text-[12px]">{item.next ?? "No next action recorded."}</span>
-        <span className="text-[11px] text-muted-foreground">{item.yourTurn} your turn · {item.blocked.length} blocked · {item.stats.open} open · {item.stats.mergedWeek} merged in 7d</span>
-      </button>)}
-    </div>
+    <h1 data-deck-focus="heading" tabIndex={-1} className={cn("mb-1 text-[20px] font-semibold tracking-tight", RING)}>Your workstreams</h1>
+    <p className="mb-5 text-[12.5px] text-muted-foreground">{active.some((item) => needs(item)) ? "Efforts needing your attention come first." : "Open an effort to see its PRs and threads."}</p>
+    {active.length ? <div className="grid items-start gap-3 @min-[680px]:grid-cols-2">{active.map((item) => tile(item))}</div> : <p className="text-[12px] text-muted-foreground">No active efforts yet.</p>}
+    {screen.held?.length ? <section data-deck-overview-held aria-label="Held efforts" className="mt-5">
+      <h2 className="mb-2 text-[13px] font-medium">Efforts on hold</h2><div className="grid items-start gap-3 @min-[680px]:grid-cols-2">{screen.held.map((item) => tile(item, true))}</div>
+    </section> : null}
+    {screen.other?.length ? <section aria-label="Repository and loose work" className="mt-5">
+      <h2 className="mb-2 text-[13px] font-medium">Repository & loose work</h2><div className="grid items-start gap-3 @min-[680px]:grid-cols-2">{screen.other.map((item) => tile(item))}</div>
+    </section> : null}
   </section>;
 }
 
@@ -982,10 +967,10 @@ export function DeckPane(props: DeckPaneProps) {
     <div ref={props.scrollerRef} data-deck-scroller className="@container relative min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]">
       <div ref={props.slackRef} aria-hidden data-deck-slack />
       <div ref={props.viewRef} className={CONTENT}>
-        {props.cur === "overview" && props.overview ? <Overview screen={props.overview} run={props.run} />
+        {props.cur === "overview" && props.overview ? <Overview screen={props.overview} run={props.run} live={props.kit?.live} kit={props.kit} />
           : card ? <><Stack behind={behind} run={props.run}><Card screen={card} kit={props.kit} open={props.open} panel={props.panel} run={props.run} on={props.on}
             notes={props.notes} markdown={props.markdown} /></Stack>
-            {card.suggest.length ? <Suggestions screen={card} rules={props.rules} run={props.run} /> : null}</>
+            {card.suggest.length ? <details className="mt-3 text-[12px] text-muted-foreground"><summary className={cn("cursor-pointer rounded-sm", RING)}>Grouping suggestions</summary><Suggestions screen={card} rules={props.rules} run={props.run} /></details> : null}</>
           : <p role="status" className="py-8 text-center text-[12px] text-muted-foreground">{props.read.error ? "Couldn't read the deck." : "Reading your efforts…"}</p>}
       </div>
     </div>

@@ -64,154 +64,87 @@ const shelfLinear = () => {
 };
 
 describe("the effort deck's markup", () => {
-  it("draws the strip in session order with each card's number, color dot, and Your turn, the service cards last and dashed, and both piles", () => {
-    const html = pane(inkwellDeck(), SHELF);
-    const chips = [...html.matchAll(/data-deck-chip="([^"]+)"[^>]*>(.*?)<\/button>/gu)].map((match) => text(match[2]!).trim());
-    expect(chips).toEqual(["Overview", "1 Store pickup 3", "2 Shelf order 0", "3 One-offs 2", "4 folio · service 0", "5 atlas · service 0", "6 catalog · service 0"]);
-    expect(html).toMatch(/data-deck-chip="service:inkwell\/folio" title="folio · service: 0 your turn \(4\)" class="[^"]*border-dashed/u);
-    // Only a chip where a person waits on you turns amber.
-    expect(html).toMatch(/data-deck-chip="effort-store-pickup"[^>]*>.*?<span class="[^"]*bg-amber-500\/10[^"]*">3<\/span>/u);
-    expect(html).toMatch(/data-deck-chip="effort-shelf-order" aria-current="true"/u);
-    expect(text(html)).toContain("Hold 1");
-    expect(text(html)).toContain("Done 1");
-  });
-
-  it("shows peer summary panels and one navigable button per active effort", () => {
-    const html = pane(inkwellDeck(), "overview");
-    expect(html).toContain('data-deck-focus="heading"');
-    expect(text(html)).toContain("Action matrix");
-    expect(text(html)).toContain("Aging blockers");
-    expect(text(html)).toContain("Store pickup · quill #212");
-    expect(text(html)).toContain("Store pickup 3 your turn · 2 blocked · 0 in flight");
-    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(3);
-    expect(html).not.toContain("data-deck-card");
-    expect(html).not.toContain('data-deck-focus="seen"');
-  });
-
-  it("uses one PR-count scale across Action matrix efforts and names the scale and colors", () => {
-    const view = inkwellDeck();
-    const cards = view.active.slice(0, 2).map((item, index) => ({ ...cardScreen(item, none, { now: NOW }), yourTurn: 0, blocked: [],
-      stats: { ...cardScreen(item, none, { now: NOW }).stats, bar: [{ key: "fix", label: "Fix", count: index ? 4 : 2, tone: "amber" as const }] } }));
-    const html = pane(view, "overview", { overview: { cards, blockers: [] } });
-    expect(text(html)).toContain("0–4 PRs");
-    expect(text(html)).toContain("Your other moves");
-    expect(text(html)).toContain("Waiting");
-    expect(html).toMatch(/aria-label="2 Fix"/u);
-    expect(html).toMatch(/aria-label="4 Fix"/u);
-    const widths = [...html.matchAll(/class="h-full shrink-0 bg-amber-500\/60" style="width:([^"]+)"/gu)].map((match) => match[1]);
-    expect(widths).toEqual(["50%", "100%"]);
-  });
-
-  it("keeps the action matrix compact while every active effort still has a card", () => {
-    const view = inkwellDeck();
-    const first = view.active[0]!;
-    const active = [...view.active, ...[1, 2, 3].map((number) => ({ ...first, id: `extra-${number}`, name: `Extra effort ${number}` }))];
-    const html = pane({ ...view, active }, "overview");
-    expect(html.match(/data-deck-focus="overview-matrix-/gu)).toHaveLength(5);
-    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(6);
-    expect(text(html)).toContain("1 more effort below");
-  });
-
-  it("shows an empty Overview without presenting a service card's content", () => {
-    const html = pane({ ...inkwellDeck(), active: [] }, "overview");
-    expect(text(html)).toContain("No active efforts yet.");
-    expect(text(html)).toContain("Nothing waits on others.");
-    // Service cards alone are no efforts: Overview stays empty and draws none of their rows or suggestions.
-    const services = pane({ ...inkwellDeck(), active: inkwellDeck().active.filter((item) => item.kind !== "effort") }, "overview");
-    expect(text(services)).toContain("No active efforts yet.");
-    expect(services).not.toContain("data-deck-suggest");
-    expect(services).not.toContain("data-inventory-row=");
-  });
-
-  it("keeps the loading message until the first deck read supplies Overview", () => {
-    const html = pane({ ...inkwellDeck(), active: [] }, "overview", { overview: null });
-    expect(text(html)).toContain("Reading your efforts…");
-    expect(html).not.toContain("No active efforts yet.");
-  });
-
-  // The card answers what to do next before anything else: how far along it is, then its few moves, each over the rows it touches.
-  it("opens an effort's card on its finish line, then up to three moves, each an outcome, one verb, and its key, the first leading", () => {
+  it("shows each PR once on a read card, with hold reasons, worker status, and a link to All PRs", () => {
     const html = pane(shelfLinear(), SHELF);
-    expect(text(part(html, "data-deck-finish", "true"))).toContain("2 of 5 done · Target Oct 14 · 14d left · ETA Oct 18 at 2/wk");
-    expect(html).toMatch(/<span class="text-amber-700 dark:text-amber-300">ETA Oct 18 at 2\/wk<\/span>/u);
-    // ABC-361 and ABC-364 are Done in Linear while folio #341 and #330 are open, so Reconcile ranks after them.
-    expect([...html.matchAll(/data-deck-move="(\w+)"/gu)].map((match) => match[1])).toEqual(["merge", "fix", "reconcile"]);
-    expect(text(move(html, "merge"))).toContain("3 ready to merge Ready to merge 1 · stacked 2 Merge 3… m");
-    expect(move(html, "merge")).toMatch(/data-deck-focus="act-merge"[^>]*class="[^"]*border-foreground bg-foreground/u);
-    expect(button(html, "act-fix")).toEqual({ text: "Fix 1… f", disabled: false });
-    // The first move shows its rows, All PRs' own two-line rows; the others fold until you open them.
-    expect([rows(move(html, "merge")), rows(move(html, "fix"))]).toEqual([["inkwell/folio#340", "inkwell/folio#341", "inkwell/folio#342"], []]);
-    expect(move(html, "merge")).toContain("Ready to merge · Merge · 2d");
-    const flipped = pane(shelfLinear(), SHELF, { open: new Set(["merge", "fix"]) });
-    expect([rows(move(flipped, "merge")), rows(move(flipped, "fix"))]).toEqual([[], ["inkwell/folio#330"]]);
-    // A repository name truncates before a PR's number does.
-    for (const repo of [...html.matchAll(/<span class="min-w-0 truncate">([^<]*)<\/span>/gu)].map((match) => match[1]!)) expect(repo).not.toMatch(/#\d/u);
+    expect([...html.matchAll(/data-deck-pr-status="([^"]+)"/gu)].map((m) => m[1])).toEqual([url("folio", 340), url("folio", 341), url("folio", 342), url("folio", 330), url("folio", 343)]);
+    expect(text(html)).toContain("Wait for the store launch");
+    expect(text(html)).toContain("Work on folio #330");
+    expect(text(html)).toContain("Idle");
+    expect(html.match(/data-deck-thread="thr_folio_330"/gu)).toHaveLength(1);
+    expect(html.match(/data-deck-pr-link=/gu)).toHaveLength(5);
+    expect(html).not.toMatch(/data-deck-pr-action|data-deck-moves|data-deck-advance|type="checkbox"/u);
   });
 
-  // effort-card-v2 removed what read as noise on live data: tiles that were empty or repeated the rows, sections with a button each,
-  // counts that mixed chores in with people waiting on you, four of Advance's five entry points, and rows that waited for Mark seen.
-  it("draws no tiles, sections, need-you counts, row Advance, or settling rows, and Advance only on its line", () => {
-    for (const id of [SHELF, PICKUP, ONE_OFFS, FOLIO]) {
-      const html = pane(inkwellDeck(), id);
-      expect(html).not.toMatch(/data-deck-(tile|row|counts|inline|to|arrive|filter)=/u);
-      // Only a service card's suggestions still group rows, under the card.
-      const groups = html.indexOf("data-deck-sec=");
-      expect(id === FOLIO ? groups > html.indexOf("data-deck-suggest") : groups === -1).toBe(true);
-      expect(text(html)).not.toMatch(/need you|Next steps|People|Recent|Stats|lands here|moved to|Ask threads to fix/u);
-      expect(html).not.toContain('aria-label="Selection"');
-      expect((html.match(/data-deck-focus="act-advance"/gu) ?? []).length).toBe(id === ONE_OFFS || id === FOLIO ? 1 : 0);
+  it("names available Advance separately from queued work without adding action controls", () => {
+    const prUrl = url("catalog", 96);
+    expect(text(part(pane(inkwellDeck(), ONE_OFFS), "data-deck-pr-status", prUrl))).toContain("Nudge @mira-l, @theo-k · Available");
+    const live = new Map([[prUrl, { kind: "nudge" as const, state: "pending" as const }]]);
+    for (const cur of [ONE_OFFS, "overview"]) {
+      const html = pane(inkwellDeck(), cur, { kit: { lines: LINES, picked: new Set(), live } });
+      expect(text(part(html, "data-deck-pr-status", prUrl))).toContain("Nudge · Queued");
+      expect(html).not.toContain("data-deck-pr-action");
     }
   });
 
-  // Matt approved Address alone starting at once, with 8 s to Undo; its rows start ticked, as its listing, and you untick any to leave out.
-  it("leads with Address when someone waits on you: who, how long, and its rows ticked, which it starts at once", () => {
-    const html = pane(inkwellDeck(), PICKUP);
-    expect(text(html)).toContain("Store pickup 3 your turn Store pickup for every reader.");
-    expect(text(move(html, "address"))).toContain("@otto-v, @ines-v wait on you 3 PRs · 1d Address 3 b");
-    expect(move(html, "address")).toMatch(/data-deck-focus="act-address" title="Starts one thread for the ticked PRs now, with 8 s to Undo\. Nothing merges\. \(b\)"/u);
-    expect(move(html, "address").match(/type="checkbox"[^>]*checked=""/gu)).toHaveLength(3);
-    expect(text(move(html, "address"))).toContain("Changes requested by @otto-v · 1d");
-    const two = pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set([url("quill", 210), url("quill", 211)]) } });
-    expect(button(two, "act-address")).toEqual({ text: "Address 2 b", disabled: false });
-    const nothing = pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set() } });
-    expect(button(nothing, "act-address")).toEqual({ text: "Address 0 b", disabled: true });
-    expect(nothing).toMatch(/title="Address: no Your turn row is ticked"/u);
-    // Why the last Address started nothing stays under it, in the server's words.
-    const refused = pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set([url("quill", 210)]), refusal: "Nothing started. quill #210: On hold. Release it first." } });
-    expect(move(refused, "address")).toMatch(/role="alert" data-deck-refusal="true"[^>]*>Nothing started\. quill #210: On hold\. Release it first\.</u);
+  it("triages efforts in Overview without repeating full inventories or dashboard panels", () => {
+    const html = pane(shelfLinear(), "overview");
+    expect(text(html)).toContain("Your workstreams");
+    expect(text(html)).toContain("3 PRs need your feedback response");
+    expect(html).toContain("data-deck-pr-link=\"https://github.com/inkwell/quill/pull/210\"");
+    expect(text(html)).toContain("1 ready to merge");
+    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(3);
+    expect(text(html)).not.toMatch(/Action matrix|Aging blockers/u);
+    expect(html).not.toContain(`data-deck-pr-status="${url("folio", 340)}"`);
+    expect(html).toContain(`data-deck-pr-status="${url("folio", 343)}"`);
+    expect(text(html)).toContain("Wait for the store launch");
+    expect(html).not.toMatch(/data-deck-card|data-deck-pr-action|data-deck-moves/u);
   });
 
-  it("folds chores into one Advance line that never turns amber, its rows folded until you open them", () => {
-    const html = pane(inkwellDeck(), ONE_OFFS);
-    const line = part(html, "data-deck-advance", "true");
-    expect(text(line)).toContain("Chores nudge 1 Advance 1 a");
-    expect(line).not.toMatch(/amber/u);
-    expect(rows(line)).toEqual([]);
-    // Opened, a chore's row keeps All PRs' Nudge button, which opens the deck's listing confirm.
-    const open = part(pane(inkwellDeck(), ONE_OFFS, { open: new Set(["chores"]) }), "data-deck-advance", "true");
-    expect([rows(open), /data-inventory-action="nudge"/u.test(open)]).toEqual([["inkwell/catalog#96"], true]);
+  it("keeps every held identity and reason in Overview, including a held effort", () => {
+    const view = inkwellDeck();
+    const held = cardScreen({ ...view.active.find((c) => c.id === SHELF)!, pile: "held", reason: "Waiting for vendor" }, none, { now: NOW });
+    const html = pane(view, "overview", { overview: { cards: [], blockers: [], held: [held] } });
+    expect(html).toContain('aria-label="Held efforts"');
+    expect(html.match(/data-deck-pr-status=/gu)).toHaveLength(5);
+    expect(text(html)).toContain("On hold: Waiting for vendor");
+    expect(html).not.toContain("data-deck-pr-action");
   });
 
-  it("keeps Notes, Threads, Linear, Held, and All PRs as toggles, closed until you open one, each a panel of its own", () => {
+  it("keeps repository and loose work accessible without expanding background work on Overview", () => {
+    const view = inkwellDeck(inkwellThreads());
+    const other = view.active.filter((c) => c.kind !== "effort").map((c) => cardScreen(c, none, { now: NOW }));
+    const html = pane(view, "overview", { overview: { cards: [], blockers: [], other } });
+    expect(html).toContain('aria-label="Repository and loose work"');
+    expect(text(html)).toContain("Loose threads");
+    expect(html.match(/data-deck-focus="overview-effort-/gu)).toHaveLength(other.length);
+  });
+
+  it("does not cap effort navigation at five, and handles an empty or loading Overview", () => {
+    const view = inkwellDeck(); const first = view.active[0]!;
+    const active = [...view.active, ...[1, 2, 3].map((n) => ({ ...first, id: `extra-${n}`, name: `Extra effort ${n}` }))];
+    expect(pane({ ...view, active }, "overview").match(/data-deck-focus="overview-effort-/gu)).toHaveLength(6);
+    expect(text(pane({ ...view, active: [] }, "overview"))).toContain("No active efforts yet.");
+    expect(text(pane({ ...view, active: [] }, "overview", { overview: null }))).toContain("Reading your efforts…");
+  });
+
+  it("keeps Notes and Linear behind metadata toggles; persisted old action folds cannot restore PR controls", () => {
     const view = shelfLinear();
-    const html = pane(view, SHELF);
-    expect([...html.matchAll(/data-deck-focus="panel-(\w+)" aria-pressed="false"[^>]*>(.*?)<\/button>/gu)].map((match) => text(match[2]!).trim()))
-      .toEqual(["Notes", "Threads 1", "Linear 5", "Held 1", "All 5 PRs"]);
-    expect(html).not.toContain("data-deck-panel");
-    const all = pane(view, SHELF, { panel: "all" });
-    expect(rows(part(all, "data-deck-panel", "all"))).toEqual(["inkwell/folio#340", "inkwell/folio#341", "inkwell/folio#342", "inkwell/folio#330", "inkwell/folio#343"]);
-    expect(all).toMatch(/data-deck-focus="panel-all" aria-pressed="true"/u);
-    const held = part(pane(view, SHELF, { panel: "held" }), "data-deck-panel", "held");
-    expect([text(held).includes("Release 1… l"), rows(held)]).toEqual([true, ["inkwell/folio#343"]]);
-    expect(text(part(pane(view, SHELF, { panel: "linear" }), "data-deck-panel", "linear"))).toContain("▣ Shelf redesign");
-    // Notes render with the Markdown they're given, and edit in place.
-    const noted = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, notes: { body: "## Flags\n- shelf_v2", revision: 2, updatedAt: NOW } } : item) };
-    const notes = pane(noted, SHELF, { panel: "notes", markdown: (body) => createElement("div", { "data-md": "true" }, body) });
-    expect(notes).toMatch(/data-deck-notes-body="true"[^>]*><div data-md="true">## Flags\n- shelf_v2<\/div>/u);
-    expect(button(notes, "notes-edit")).toEqual({ text: "Edit ⇧N", disabled: false });
+    const html = pane(view, SHELF, { panel: "all", open: new Set(["merge", "address", "chores", "fix"]) });
+    expect(html).not.toMatch(/data-deck-pr-action|data-deck-panel|data-deck-moves|act-advance/u);
+    expect([...html.matchAll(/data-deck-focus="panel-(\w+)"/gu)].map((m) => m[1])).toEqual(["notes", "linear"]);
+    const noted = { ...view, active: view.active.map((c) => c.id === SHELF ? { ...c, notes: { body: "## Flags\n- shelf_v2", revision: 2, updatedAt: NOW } } : c) };
+    expect(pane(noted, SHELF, { panel: "notes" })).toContain("data-deck-notes-body");
     const editing = pane(noted, SHELF, { panel: "notes", notes: { draft: "## Flags", busy: false, error: null } });
-    expect(editing).toContain("data-deck-notes-editor");
-    expect(text(editing)).toContain("Cancel esc Save ⌘↵");
+    expect(editing).toContain("data-deck-notes-editor"); expect(text(editing)).toContain("Cancel esc Save ⌘↵");
+  });
+
+  it("keeps effort lifecycle controls separate from PR advancement", () => {
+    const html = pane(inkwellDeck(), SHELF);
+    expect(text(html)).toContain("Manage effort");
+    expect(button(html, "act-hold").disabled).toBe(false); expect(button(html, "act-complete").disabled).toBe(false);
+    expect(pane(inkwellDeck(), ONE_OFFS)).not.toMatch(/act-(hold|complete)/u);
+    const view = inkwellDeck(); const held = cardScreen({ ...view.active.find((c) => c.id === SHELF)!, pile: "held", reason: "Wait for vendor" }, none, { now: NOW });
+    expect(text(pane(view, SHELF, { card: held }))).toContain("On hold: Wait for vendor");
   });
 
   it("opens the finish line, with p, to say whether it's on track, what's left, who holds it, whether it's moving, and what stands before Done", () => {
@@ -222,48 +155,6 @@ describe("the effort deck's markup", () => {
     expect(text(part(html, "data-deck-answers", "true"))).toContain("Behind: ETA Oct 18, 4d after the target");
     // One-offs merge on their own, so they draw no finish line.
     expect(pane(inkwellDeck(), ONE_OFFS)).not.toContain("data-deck-finish");
-  });
-
-  // Reconcile writes nothing: Show unfolds the open PRs of tickets Linear calls done, and the other line opens Linear to move a ticket.
-  it("draws Reconcile as a line per mismatch with its tickets and one button, Show unfolding its open PRs, and Open in Linear", () => {
-    const view = shelfLinear();
-    const merged = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, linear: { ...item.linear,
-      reconcile: { ...item.linear.reconcile, merged: [{ id: "ABC-365", url: "https://linear.app/inkwell/issue/ABC-365" }] } } } : item) };
-    const html = move(pane(merged, SHELF), "reconcile");
-    expect([...html.matchAll(/data-deck-mismatch="\w+"[^>]*>(.*?)<\/button><\/div>/gu)].map((match) => text(match[1]!).trim()))
-      .toEqual(["2 Done in Linear · 2 PRs open ABC-361, ABC-364 Show 2", "1 open with every PR merged ABC-365 Open in Linear ↗"]);
-    expect(html).toMatch(/title="Open ABC-365 in Linear"/u);
-    // Its rows fold until you show them, even as the card's only move; they're never ticked for Address.
-    expect(rows(html)).toEqual([]);
-    const shown = move(pane(merged, SHELF, { open: new Set(["reconcile"]) }), "reconcile");
-    expect([rows(shown), /type="checkbox"/u.test(shown), /aria-expanded="true"[^>]*>Show 2/u.test(shown)]).toEqual([["inkwell/folio#341", "inkwell/folio#330"], false, true]);
-  });
-
-  it("puts each row's ticket on a chip, with its Linear priority as a glyph", () => {
-    const view = shelfLinear();
-    const high = { ...view, active: view.active.map((item) => item.id === SHELF ? { ...item, linear: { ...item.linear,
-      issues: item.linear.issues.map((issue) => issue.id === "ABC-360" ? { ...issue, priority: 2, label: "High" } : issue) } } : item) };
-    const merge = move(pane(high, SHELF), "merge");
-    // The glyph's bars are set apart by hair spaces, which text() would fold, so only the tags come out here.
-    expect([...merge.matchAll(/data-inventory-ticket="[^"]*"[^>]*title="([^"]*)"[^>]*>(.*?)<\/span><\/span>/gu)]
-      .map((match) => [match[1], match[2]!.replace(/<[^>]+>/gu, " ").replace(/ +/gu, " ").trim()]))
-      .toEqual([["ABC-360 · High priority", `${priorityOf({ priority: 2, label: null })!.glyph} ABC-360`], ["ABC-361", "ABC-361"], ["ABC-362", "ABC-362"]]);
-  });
-
-  it("gives an effort Hold and Complete, One-offs neither, and a held effort Resume with nothing to move", () => {
-    expect([button(pane(inkwellDeck(), SHELF), "act-hold"), button(pane(inkwellDeck(), SHELF), "act-complete")]).toEqual([{ text: "Hold h", disabled: false },
-      { text: "Complete", disabled: false }]);
-    expect(pane(inkwellDeck(), ONE_OFFS)).not.toMatch(/act-(hold|complete)/u);
-    const view = inkwellDeck();
-    const held = cardScreen({ ...view.active.find((item) => item.id === SHELF)!, pile: "held", reason: "Waiting on the design review" }, none, { now: NOW });
-    const html = pane(view, SHELF, { card: held });
-    expect(text(html)).toContain("Resume");
-    expect(text(html)).toContain("held: Waiting on the design review");
-    expect(text(html)).toContain("On hold: nothing here acts until you resume it.");
-    expect(html).not.toContain("data-deck-move");
-    // Nothing to move on a live card says so: Store pickup's Your turn rows dismissed, its rest stacked.
-    const quiet = pane(inkwellDeck({}, (row) => [210, 211, 155].includes(row.number) ? { dismissed: true } : {}), PICKUP);
-    expect(text(quiet)).toContain("Nothing to move.");
   });
 
   it("stacks the next efforts behind the card, each further right and smaller, with the next one's name up its edge", () => {
@@ -305,22 +196,12 @@ describe("the effort deck's markup", () => {
     expect(html).toMatch(/data-deck-pile-cards="empty"[^>]*><i class="[^"]*border-dashed/u);
   });
 
-  it("draws a service card as an effort's with a hollow dot, Promote in place of Hold and Complete, its chores, and its suggestions and rules under it", () => {
+  it("keeps repository grouping suggestions behind a disclosure and PR actions in All PRs", () => {
     const html = pane(inkwellDeck(), FOLIO);
-    expect(html).toMatch(/data-deck-card="service:inkwell\/folio"/u);
-    expect(text(html)).toContain("folio · service Work in folio that no effort has yet.");
-    expect(button(html, "act-promote")).toEqual({ text: "Promote to effort…", disabled: false });
-    expect(html).not.toContain("act-hold");
-    expect(html).not.toContain("act-complete");
-    expect(text(part(html, "data-deck-advance", "true"))).toContain("Chores request 2 Advance 2 a");
-    expect(html.indexOf("data-deck-card")).toBeLessThan(html.indexOf("data-deck-suggest"));
-    expect(text(html)).toContain("Suggestions Nothing moves until you press it. Seed from Linear… + Standing rule Branch shelf/* → Shelf order · 2 this week");
-    const group = text(section(html, `${FOLIO} effort:${SHELF}:high`));
-    expect(group).toContain("→ Shelf order strong ticket ABC-355 · prefix ABC folio #325 Put 1 in Shelf order ⇧A");
-    expect(group.match(/ticket ABC-355 · prefix ABC/gu)).toHaveLength(1);
-    expect(text(section(html, `${FOLIO} none`))).toContain("No clear signal Pick an effort for each PR. folio #305 Pick per PR e");
-    expect(button(html, "seed")).toEqual({ text: "Seed from Linear…", disabled: false });
-    // An effort's card has no suggestions to draw.
+    expect(html).toContain('data-deck-card="service:inkwell/folio"');
+    expect(button(html, "act-promote").disabled).toBe(false);
+    expect(text(html)).toContain("Grouping suggestions");
+    expect(html).not.toMatch(/act-advance|data-deck-pr-action/u);
     expect(pane(inkwellDeck(), SHELF)).not.toContain("data-deck-suggest");
   });
 
@@ -369,7 +250,7 @@ describe("the effort deck's markup", () => {
     expect(text(loose)).toContain("Loose threads Threads with no effort or repository yet.");
     expect(text(loose)).toContain("Look at a flaky test");
     const quill = pane(view, "service:inkwell/quill");
-    expect(quill).not.toContain("act-promote");
+    expect(button(quill, "act-promote").disabled).toBe(true);
     expect(quill).not.toContain("data-deck-suggest");
     expect(text(quill)).toContain("Try a quieter quill layout");
   });
@@ -443,15 +324,15 @@ describe("the deck's dialogs", () => {
     const on = availability({ view: "deck", cur: card, focused: null, selected: [], seenAvailable: false, undo: false, held: 1, done: 1 });
     const items = paletteItems(on, [], { held: [], done: [] }, SHELF, true);
     const palette = text(renderToStaticMarkup(createElement(PaletteBody, { query: "", items, highlight: 0, onQuery: noop, onRun: noop, onHighlight: noop })));
-    expect(palette).toContain("Preview merge… m");
-    expect(palette).toContain("Nudge reviewers… · no nudge is due n");
+    expect(palette).not.toContain("Preview merge… m");
+    expect(palette).not.toContain("Nudge reviewers…");
     expect(palette).toContain("Seed efforts from Linear…");
     expect(palette).toContain(`${items.filter((item) => item.on).length} of ${items.length} available here`);
     const help = text(renderToStaticMarkup(createElement(HelpBody, { items })));
-    for (const group of ["Deck", "Card", "Act", "Rows", "Sort", "Anywhere"]) expect(help).toContain(group);
+    for (const group of ["Deck", "Card", "Act", "Rows", "Anywhere"]) expect(help).toContain(group);
     expect(help).toContain("Merges run only from the fresh preview, on a click or ⌘↵.");
     // ? says how moves rank, in the order a card shows them, each with its keys.
-    expect(help).toContain("How moves rank Someone waits on you b One step from merged m c Your blockers f A reviewer holds it 4+ days n Linear and GitHub disagree");
+    expect(help).toContain("Reading and advancing Overview triages efforts");
   });
 });
 
@@ -511,27 +392,13 @@ describe("the review notes confirm's markup", () => {
 
 // Matt: "it takes a while to advance any checked PRs and there's zero UI feedback." From the click until the plan answers, the rows it
 // takes pulse; while it sends, each Address row says where it is, and the hint bar counts the items.
-describe("a batch while it plans and sends", () => {
-  const picked = [url("quill", 210), url("quill", 211)];
-
-  it("marks the rows the plan takes as pending, and only those, until it answers", () => {
-    const working = (html: string) => [...html.matchAll(/data-inventory-row="([^"]+)"[^>]*?data-inventory-working="true"/gu)].map((match) => match[1]);
-    expect(working(pane(inkwellDeck(), PICKUP))).toEqual([]);
-    const pending = pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set(picked), working: new Set(picked) } });
-    expect(working(pending)).toEqual(["inkwell/quill#210", "inkwell/quill#211"]);
-    expect(pending).toMatch(/data-inventory-working="true" aria-busy="true" class="[^"]*motion-safe:animate-pulse motion-reduce:opacity-60/u);
-  });
-
-  it("shows each Address row's item as dispatch moves it, queued, sending, then sent or not, and Sending 3 of 7… in the status line", () => {
-    const live = (a: string, b: string) => new Map([[picked[0]!, { kind: "address" as const, state: a as "pending" }], [picked[1]!, { kind: "address" as const, state: b as "pending" }]]);
-    const chips = (a: string, b: string) => { const html = move(pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set(picked), live: live(a, b) } }), "address");
-      return [[...html.matchAll(/data-inventory-live="(\w+)"/gu)].map((match) => match[1]), text(html)]; };
-    const [sending, words] = chips("sending", "pending");
-    expect([sending, words.includes("↻ Sending…"), words.includes("Queued")]).toEqual([["sending", "pending"], true, true]);
-    expect(chips("sent", "refused")[0]).toEqual(["sent", "refused"]);
-    expect(chips("sent", "refused")[1]).toContain("Not sent");
-    const status = renderToStaticMarkup(createElement(HintBar, { hints: [], flash: { text: "Sending 3 of 7…", undo: false, busy: true }, onPalette: noop, onHelp: noop, onUndo: noop }));
-    expect(status).toMatch(/role="status"[^>]*><span[^>]*><span aria-hidden="true" data-spin="true"[^>]*>↻<\/span><span class="truncate">Sending 3 of 7…<\/span>/u);
-    expect(renderToStaticMarkup(createElement(HintBar, { hints: [], flash: { text: "2 sent", undo: false }, onPalette: noop, onHelp: noop, onUndo: noop }))).not.toContain("data-spin");
+describe("queued work on read cards", () => {
+  it("projects each PR's queued/sending/result state without exposing dispatch controls", () => {
+    const urls = [url("quill", 210), url("quill", 211)];
+    const live = new Map([[urls[0]!, { kind: "address" as const, state: "sending" as const }], [urls[1]!, { kind: "address" as const, state: "refused" as const }]]);
+    const html = pane(inkwellDeck(), PICKUP, { kit: { lines: LINES, picked: new Set(), live } });
+    expect(text(part(html, "data-deck-pr-status", urls[0]!))).toContain("Address feedback · Sending");
+    expect(text(part(html, "data-deck-pr-status", urls[1]!))).toContain("Address feedback · Not sent");
+    expect(html).not.toMatch(/data-deck-pr-action|data-inventory-action|type="checkbox"/u);
   });
 });

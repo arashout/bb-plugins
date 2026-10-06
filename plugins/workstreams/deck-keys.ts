@@ -125,3 +125,6 @@ export function pickerActionForKey(event: { key: string; metaKey?: boolean; ctrl
   const action = token ? PICKER_ACTIONS.find((candidate) => candidate.keys.includes(token)) : undefined;
   return action && (!event.repeat || action.id === "pick-next" || action.id === "pick-prev") ? action.id : null;
 }
+
+/** PR mutations and selection live in All PRs; cards expose states and navigation. */
+export const PR_VIEW_ACTIONS = new Set<DeckActionId>(["advance", "merge", "confirm", "nudge", "request", "ready", "release", "fix", "address", "hold-pr", "revoke", "refresh", "select", "select-section", "expand", "accept", "move", "one-off", "new-effort"]);

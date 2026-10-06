@@ -25,7 +25,7 @@ import { Icon } from "@/components/ui/icon";
 import { Tip } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { POINTER_CURSORS, cn } from "@/lib/utils";
-import { deckRoute, readLastView, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
+import { inventoryRoute, deckRoute, readLastView, storeLastView, viewFromSubPath, type ViewId } from "./view-preference";
 import { ThreadEffortControl } from "./thread-effort-control";
 import { InventoryNavView, useInventory } from "./inventory-screen";
 import { yourTurnRows } from "./inventory-view-model";
@@ -432,7 +432,7 @@ function WorkstreamsPage({ subPath }: { subPath: string }) {
     id === "deck" ? (
       <DeckNavView openCard={deckRoute(subPath)} onView={go} />
     ) : id === "inventory" ? (
-      <InventoryNavView onView={go} />
+      <InventoryNavView onView={go} openPr={inventoryRoute(subPath)} />
     ) : id === "efforts" ? (
       <>{header("efforts")}<EffortsView board={board} /></>
     ) : (

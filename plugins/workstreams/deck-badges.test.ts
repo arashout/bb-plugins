@@ -139,8 +139,8 @@ describe("key badges", () => {
     expect(weak).toEqual([]);
     // It covers the badges that sit on a primary button: the leading move's, Address's and Merge's here, and every ⌘↵.
     const inverted = all.filter(({ badge }) => badge.chain.some((classes) => classes.includes("bg-foreground")));
-    expect(new Set(inverted.map(({ badge }) => badge.key))).toEqual(new Set(["b", "m", "⌘↵"]));
-    expect([...new Set(inverted.map(({ where }) => where))]).toEqual(expect.arrayContaining(["Shelf order card", "One-offs card", "the confirm", "a dialog's buttons"]));
+    expect(new Set(inverted.map(({ badge }) => badge.key))).toEqual(new Set(["⌘↵"]));
+    expect([...new Set(inverted.map(({ where }) => where))]).toEqual(expect.arrayContaining(["the confirm", "a dialog's buttons"]));
     expect(all.length).toBeGreaterThan(100);
   });
 

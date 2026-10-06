@@ -272,9 +272,19 @@ describe("deployed Workstreams database upgrade", () => {
   it("appends batch thread links after effort notes", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
     await plugin(bb);
-    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id >= 68 ORDER BY id").all())
+    expect(bb.storage.database().prepare("SELECT id, statement_hash AS hash FROM _bb_migrations WHERE id = 68 ORDER BY id").all())
       .toEqual([{ id: 68, hash: statementHash("CREATE TABLE IF NOT EXISTS pr_threads (pr_url TEXT NOT NULL, thread_id TEXT NOT NULL, batch_id TEXT, linked_at INTEGER NOT NULL, PRIMARY KEY (pr_url, thread_id))") }]);
     await harness.lifecycle.dispose();
+  });
+  it("appends planning request and cluster caches without changing the deployed prefix", async () => {
+    const { bb, harness } = createFakePluginHost(hostOptions); await plugin(bb);
+    const db = bb.storage.database();
+    expect(db.prepare("SELECT id FROM _bb_migrations WHERE id > 68 ORDER BY id").all()).toEqual([{ id: 69 }, { id: 70 }]);
+    db.prepare("INSERT INTO advance_plan_requests (request_id, snapshot, created_at) VALUES (?, ?, ?)").run("request", "{}", 1);
+    db.prepare("INSERT INTO advance_plan_clusters (hash, clusters, created_at) VALUES (?, ?, ?)").run("hash", "[]", 1);
+    const next = await harness.lifecycle.reload(plugin);
+    expect(next.bb.storage.database().prepare("SELECT snapshot FROM advance_plan_requests WHERE request_id = ?").get("request")).toEqual({ snapshot: "{}" });
+    await next.harness.lifecycle.dispose();
   });
   it("reloads the pinned prefix without losing established efforts", async () => {
     const { bb, harness } = createFakePluginHost(hostOptions);
